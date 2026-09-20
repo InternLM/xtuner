@@ -32,7 +32,9 @@ from xtuner.v1.rl.agent_loop_manager import (
     ProduceBatchStatus,
 )
 from xtuner.v1.rl.agent_loop_manager.produce_utils import default_should_continue_fn
+from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter
 from xtuner.v1.rl.evaluator import EvaluatorConfig
+from xtuner.v1.rl.health_manager import RLHealthManager, _NoOpRLHealthManager
 from xtuner.v1.rl.replay_buffer import (
     AsyncReplayBufferConfig,
     SyncReplayBufferConfig,
@@ -41,6 +43,7 @@ from xtuner.v1.rl.replay_buffer import (
 )
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.rollout.worker_registry import WorkerLifecycleState
 from xtuner.v1.rl.trace import TraceConfig, close_trace, configure_trace
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
@@ -53,7 +56,6 @@ from xtuner.v1.rl.utils import (
     set_cpu_resource_manager,
     sort_rollout_state_for_deterministic,
 )
-from xtuner.v1.rl.weight_update.data import WeightTransportType
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
@@ -105,6 +107,60 @@ def _agent_loop_manager_uses_trace_store(
     return _agent_loop_manager_requires_rollout_proxy(cfg)
 
 
+def _migrate_manager_is_valid_sample_fn(
+    manager_cfg: AgentLoopManagerConfig | DisaggAgentLoopManagerConfig | None,
+    logger,
+) -> AgentLoopManagerConfig | DisaggAgentLoopManagerConfig | None:
+    """Move the legacy produce-strategy validity check to its task config."""
+    if manager_cfg is None:
+        return None
+
+    tasks = manager_cfg.tasks if isinstance(manager_cfg.tasks, list) else [manager_cfg.tasks]
+    migrated_tasks = []
+    changed = False
+    for task in tasks:
+        strategy_cfg = task.produce_strategy_config
+        legacy_fn = strategy_cfg.is_valid_sample_fn
+        if legacy_fn is None:
+            migrated_tasks.append(task)
+            continue
+        if task.is_valid_sample_fn is not None and task.is_valid_sample_fn is not legacy_fn:
+            raise ValueError(
+                f"Task {task.task_name!r} configures is_valid_sample_fn in both the task and its "
+                "produce strategy. Remove the deprecated produce-strategy value."
+            )
+
+        logger.warning(
+            f"Task {task.task_name!r} uses deprecated produce_strategy_config.is_valid_sample_fn; "
+            "move it to TaskSpecConfig.is_valid_sample_fn."
+        )
+        migrated_tasks.append(
+            task.model_copy(
+                update={
+                    "is_valid_sample_fn": legacy_fn,
+                    "produce_strategy_config": strategy_cfg.model_copy(update={"is_valid_sample_fn": None}),
+                }
+            )
+        )
+        changed = True
+
+    if not changed:
+        return manager_cfg
+    migrated_value = migrated_tasks if isinstance(manager_cfg.tasks, list) else migrated_tasks[0]
+    return manager_cfg.model_copy(update={"tasks": migrated_value})
+
+
+def _migrate_legacy_is_valid_sample_fn(cfg: "BaseRLTrainerConfig", logger) -> None:
+    cfg.agent_loop_manager_cfg = cast(
+        AgentLoopManagerConfig | DisaggAgentLoopManagerConfig,
+        _migrate_manager_is_valid_sample_fn(cfg.agent_loop_manager_cfg, logger),
+    )
+    cfg.eval_agent_loop_manager_cfg = cast(
+        AgentLoopManagerConfig | None,
+        _migrate_manager_is_valid_sample_fn(cfg.eval_agent_loop_manager_cfg, logger),
+    )
+
+
 def _trace_session_ids(rollout_batches: list[list[RolloutState]]) -> list[str]:
     """Return stable, unique trace session ids owned by rollout batches."""
     return list(
@@ -133,21 +189,24 @@ def bind_train_rollout(
     train_controller: TrainingController,
     rollout_controller: RolloutControllerProxy,
     rollout_config: RolloutConfig,
-    weight_transport_type: WeightTransportType | str,
-    weight_update_host: str | None = None,
-    weight_update_port: int | None = None,
 ) -> None:
     """Bind the training and rollout workers for update weights."""
+    # Promote pending workers to active before the regular weight update so
+    # subsequent lifecycle operations can handle them together.
+    ray.get(
+        rollout_controller.mark_worker_groups_lifecycle_state.remote(
+            source_state=WorkerLifecycleState.PENDING_WEIGHTS,
+            target_state=WorkerLifecycleState.ACTIVE,
+        ),
+        timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+    )
     targets = ray.get(
-        rollout_controller.get_weight_update_targets.remote(),  # type: ignore[attr-defined]
+        rollout_controller.get_weight_update_targets.remote(target_state=WorkerLifecycleState.ACTIVE),
         timeout=RL_TRAINER_RAY_GET_TIMEOUT,
     )
     train_controller.bind_rollout_weight_update(
         targets=targets,
         rollout_config=rollout_config,
-        weight_transport_type=weight_transport_type,
-        weight_update_host=weight_update_host,
-        weight_update_port=weight_update_port,
     )
     return
 
@@ -225,10 +284,22 @@ def get_train_seq_ctx(
     seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
     position_ids = _to_cpu_tensor(position_ids, dtype=torch.long)
     if position_ids is not None and len(position_ids.shape) == 3:
-        # VLM 位置编码需要补 response 段。
-        max_value = position_ids.max(dim=-1).values  # (3,1)
-        response_position_ids = max_value.unsqueeze(-1).expand(-1, -1, len_response_ids) + torch.arange(
-            1, len_response_ids + 1, device=max_value.device
+        # Match get_rope_index_3: response text continues from a single global
+        # max(T, H, W), not per-axis maxima. Per-axis max diverges when the
+        # prompt ends on image tokens (T≈0 while H/W are large).
+        max_value = position_ids.amax()
+        response_position_ids = (
+            (
+                torch.arange(
+                    1,
+                    len_response_ids + 1,
+                    device=position_ids.device,
+                    dtype=position_ids.dtype,
+                )
+                + max_value
+            )
+            .view(1, 1, -1)
+            .expand(3, 1, -1)
         )
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
         seq_ctx.position_ids = position_ids  # type: ignore[assignment]
@@ -354,6 +425,7 @@ class BaseRLTrainerConfig(BaseModel):
     total_epochs: int | None = None
     train_batch_size: int
     advantage_estimator_config: BaseAdvantageConfig = Field(default_factory=GRPOAdvantageConfig)
+    distillation_config: DistillationConfig | None = None
     sync_weights_interval: int = 1
 
     enable_evaluate: bool = True
@@ -391,6 +463,8 @@ class BaseRLTrainerConfig(BaseModel):
             raise ValueError(f"total_train_steps must be positive, got {self.total_train_steps}.")
         if self.total_epochs is not None and self.total_epochs <= 0:
             raise ValueError(f"total_epochs must be positive, got {self.total_epochs}.")
+        if self.distillation_config is not None:
+            self.distillation_config.validate_trainer(self)
         _validate_sync_intervals(
             sync_weights_interval=self.sync_weights_interval,
             checkpoint_interval=self.checkpoint_interval,
@@ -592,13 +666,22 @@ class BaseRLTrainer:
     agent_loop_manager: AgentLoopManager | DisaggAgentLoopManager
     eval_agent_loop_manager: AgentLoopManager
     _debug_train_files: dict[int, Path]
+    _distillation: DistillationTrainerAdapter
 
     def _init_common(self, cfg: BaseRLTrainerConfig, *, meta_path: str, logger_tag: str) -> None:
+        distillation_config = cfg.distillation_config
+        if distillation_config is not None and distillation_config.rollout_teachers:
+            endpoint_map = json.loads(os.environ.get("XTUNER_OPD_TEACHER_ENDPOINTS_JSON", "{}"))
+            distillation_config = distillation_config.resolve_teacher_endpoints(endpoint_map)
+
+        self._distillation = DistillationTrainerAdapter(distillation_config)
+
         check_fa3()
         self._init_work_dir_and_meta(cfg, meta_path)
         self._init_load_source(cfg)
         self._init_save_config(cfg)
         log_dir = self._init_logger(cfg, logger_tag)
+        _migrate_legacy_is_valid_sample_fn(cfg, self.logger)
         self._init_trace(cfg)
         self._save_runtime_environment(log_dir)
         self._init_train_state(cfg)
@@ -662,6 +745,15 @@ class BaseRLTrainer:
 
         env_path = log_dir / "env.json"
         environment_variables = dict(os.environ)
+        xtuner_environment = {
+            key: value for key, value in sorted(environment_variables.items()) if key.startswith("XTUNER")
+        }
+        log_str = "\n============XTuner RL Training Environment============\n"
+        for key, value in xtuner_environment.items():
+            log_str += f"{key}: {value}\n"
+        log_str += "======================================================"
+        self.logger.info(log_str)
+
         infer_engine_version = get_rollout_engine_version()
         environment_variables.update(infer_engine_version)
         with env_path.open("w") as f:
@@ -687,6 +779,7 @@ class BaseRLTrainer:
             cfg.train_worker_cfg.free_rollout_routed_experts_in_worker = False
         cfg.train_worker_cfg.load_from = cfg.load_from
         cfg.train_worker_cfg.log_dir = log_dir
+        cfg.train_worker_cfg.train_teacher_manager_config = self._distillation.train_teacher_manager_config
         self._train_worker_cfg = cfg.train_worker_cfg
 
     def _init_rollout_config(self, cfg: BaseRLTrainerConfig, log_dir: Path) -> None:
@@ -720,6 +813,7 @@ class BaseRLTrainer:
             replay_buffer=replay_buffer,
             logger=self.logger,
             sync_weights_interval=cfg.sync_weights_interval,
+            rollout_teacher_scorer_config=self._distillation.rollout_teacher_scorer_config,
         )
         self.agent_loop_manager = cast(AgentLoopManager | DisaggAgentLoopManager, agent_loop_manager)
 
@@ -734,6 +828,7 @@ class BaseRLTrainer:
                     replay_buffer=replay_buffer,
                     logger=self.logger,
                     sync_weights_interval=cfg.sync_weights_interval,
+                    rollout_teacher_scorer_config=None,
                 ),
             )
 
@@ -954,10 +1049,6 @@ class BaseRLTrainer:
 
         # 共卡训练前切换资源：检查 rollout -> offload rollout -> onload train。
         if offload_rollout_before_train:
-            ray.get(
-                self.rollout_controller.check_and_shutdown_inactive_workers.remote(),
-                timeout=RL_TRAINER_RAY_GET_TIMEOUT,
-            )
             ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
         if onload_train_before_train:
             if getattr(self, "_train_nccl_suspended", False):
@@ -1054,16 +1145,25 @@ class BaseRLTrainer:
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
     ):
-        rewards_list = []
+        has_agentic_data = any(state.input_ids is not None for group in data_groups for state in group)
+        has_3d_reasoning_data = any(
+            state.input_ids is None and state.position_ids is not None and state.position_ids.ndim == 3
+            for group in data_groups
+            for state in group
+        )
+        use_3d_agentic_position_ids = has_agentic_data and has_3d_reasoning_data
+
         # Per-session rewards for distribution metrics. Agentic sessions may split into several
         # trainable segments that share one reward; counting that reward once per session keeps
-        # rewards/* from being weighted by segment count. rewards_list stays per-segment for counts.
+        # rewards/* from being weighted by segment count.
         cluster_rewards_list: list[float] = []
-        advantages_list = []
+        distillation_reward_observations: list[tuple[RolloutState, float]] = []
+        advantages_list: list[float] = []
         prompt_len_list = []
         response_len_list = []
         tool_turns_list: list[int] = []
         training_tokens = 0
+        training_samples = 0
 
         data_batches = []
 
@@ -1071,7 +1171,9 @@ class BaseRLTrainer:
             if not is_valid_for_training(group, self.logger):
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
+            training_samples += len(group)
 
+            task_adv_weight = self._distillation.task_adv_weight
             prompt_ids = None
             if any(data.input_ids is None for data in group):
                 is_vlm_model = "train_prompt_ids" in group[0].extra_fields
@@ -1083,19 +1185,26 @@ class BaseRLTrainer:
                 assert prompt_ids is not None and len(prompt_ids) > 0, (
                     f"Prompt ids cannot be None or empty in data: {group[0]}"
                 )
-            rewards = []
-            # Agentic rollouts may split one model session into multiple trainable segments.
-            # Compute the group advantage once per session, then broadcast it back to each segment.
+            # Collect rewards independently from task-advantage computation. Pure OPD may omit
+            # rewards entirely; when rewards are present they remain useful observability signals.
             cluster_index_by_key: dict[Any, int] = {}
             cluster_rewards: list[float] = []
             cluster_representatives: list[RolloutState] = []
             sample_cluster_indices: list[int] = []
             for data in group:
-                assert data.reward is not None and "score" in data.reward, (
-                    f"Reward is missing or does not contain 'score' key in data: {data}"
-                )
+                # 有可能有重复，但是没有其他更好办法
+                turns = data.extra_fields.get("agent_tool_turns")
+                if isinstance(turns, int):
+                    tool_turns_list.append(turns)
+                if data.reward is None or "score" not in data.reward:
+                    if task_adv_weight > 0:
+                        raise ValueError(
+                            f"Reward is missing or does not contain 'score' key in data: {data}, "
+                            f"but task_adv_weight={task_adv_weight} > 0"
+                        )
+                    else:
+                        continue
                 reward = float(data.reward["score"])
-                rewards.append(reward)
                 # session_id is only set by agentic loops / XTUNER_DETERMINISTIC; plain RL falls back
                 # to rollout_id, which the sampler always assigns. Segments of one session share a key.
                 cluster_key = data.session_id if data.session_id is not None else data.rollout_id
@@ -1106,16 +1215,18 @@ class BaseRLTrainer:
                     cluster_rewards.append(reward)
                     cluster_representatives.append(data)
                 sample_cluster_indices.append(cluster_index)
-                # 有可能有重复，但是没有其他更好办法
-                turns = data.extra_fields.get("agent_tool_turns")
-                if isinstance(turns, int):
-                    tool_turns_list.append(turns)
 
-            rewards_list.extend(rewards)
             cluster_rewards_list.extend(cluster_rewards)
-            rewards_tensor = torch.tensor(cluster_rewards, dtype=torch.float32)
-            cluster_advantages = self._advantage_estimator.compute(rewards_tensor, cluster_representatives)
-            sample_advantages = [cluster_advantages[cluster_index].item() for cluster_index in sample_cluster_indices]
+            distillation_reward_observations.extend(zip(cluster_representatives, cluster_rewards))
+
+            if task_adv_weight == 0:
+                sample_advantages = [0.0] * len(group)
+            else:
+                rewards_tensor = torch.tensor(cluster_rewards, dtype=torch.float32)
+                cluster_advantages = self._advantage_estimator.compute(rewards_tensor, cluster_representatives)
+                sample_advantages = [
+                    cluster_advantages[cluster_index].item() for cluster_index in sample_cluster_indices
+                ]
 
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
@@ -1140,6 +1251,10 @@ class BaseRLTrainer:
 
                     input_ids = raw_input_ids[:-1]
                     shifted_labels = labels[1:]
+                    teacher_fields = self._distillation.rollout_teacher_targets(
+                        group[i],
+                        shifted_labels=shifted_labels,
+                    )
                     prompt_len = sum(label == -100 for label in shifted_labels)
                     response_len = len(shifted_labels) - prompt_len
                     prompt_len_list.append(prompt_len)
@@ -1147,7 +1262,7 @@ class BaseRLTrainer:
 
                     advatnages_val = sample_advantages[i]
                     actual_advantages = [0.0 if label == -100 else advatnages_val for label in shifted_labels]
-                    advantages_list.extend(actual_advantages)
+                    advantages_list.extend(advatnages_val for label in shifted_labels if label != -100)
 
                     assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
                     training_tokens += len(input_ids)
@@ -1160,6 +1275,13 @@ class BaseRLTrainer:
                         )
 
                     position_ids = group[i].position_ids
+                    if use_3d_agentic_position_ids:
+                        seq_len = input_ids_t.size(-1)
+                        text_position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, 1, -1)
+                        # Mixed agentic/VLM batches use three-axis MRoPE position IDs. Repeat the
+                        # normal text positions on every axis so agentic samples have the same rank
+                        # as the VLM samples when their sequence contexts are packed together.
+                        position_ids = np.broadcast_to(text_position_ids, (3, 1, seq_len)).copy()
                     multimodal_train_info = group[i].mm_info
                     multi_info_cast = cast(dict | None, multimodal_train_info)
                     seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, multi_info_cast)
@@ -1170,6 +1292,7 @@ class BaseRLTrainer:
                         "advantage": actual_advantages,
                         "rollout_logprobs": rollout_logprobs,
                     }
+                    data_dict.update(teacher_fields)
 
                     seq_ctx.rollout_routed_experts = group[i].routed_experts
                     data_batches.append(data_dict)
@@ -1220,12 +1343,14 @@ class BaseRLTrainer:
                 shifted_labels = [-100] * (len(prompt_ids) - 1) + response_labels
                 shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
-                # 根据 response_mask 计算新的 advantages
+                # Keep the advantage layout aligned with input_ids (response excludes EOS).
+                # Prompt positions predict prompt tokens whose shifted labels are -100, so their
+                # advantage is 0; the last entry of response_ids (EOS) is only a label, never an input.
                 advatnages_val = sample_advantages[i]
-                actual_advantages = [advatnages_val] * len(prompt_ids) + [
+                actual_advantages = [0.0] * (len(prompt_ids) - 1) + [
                     0.0 if mask == 0 else advatnages_val for mask in response_mask
                 ]
-                advantages_list.extend(actual_advantages[:-1])
+                advantages_list.extend(advatnages_val for mask in response_mask if mask != 0)
 
                 assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
                 training_tokens += len(input_ids)
@@ -1250,6 +1375,11 @@ class BaseRLTrainer:
                     "advantage": actual_advantages,
                     "rollout_logprobs": rollout_logprobs,
                 }
+                teacher_fields = self._distillation.rollout_teacher_targets(
+                    group[i],
+                    shifted_labels=shifted_labels,
+                )
+                data_dict.update(teacher_fields)
 
                 seq_ctx.rollout_routed_experts = group[i].routed_experts  # n,layer*expert
 
@@ -1257,8 +1387,8 @@ class BaseRLTrainer:
         if not XTUNER_DETERMINISTIC:
             random.shuffle(data_batches)
 
-        # rewards/* report the per-session reward distribution; batch_size/training_samples below
-        # still use rewards_list (per-segment) so counts reflect the actual training samples.
+        # rewards/* report the per-session reward distribution; batch_size/training_samples
+        # count the valid rollout segments included in training.
         rewards_t = torch.tensor(cluster_rewards_list).float() if cluster_rewards_list else torch.tensor([0.0]).float()
         advantages_t = torch.tensor(advantages_list).float() if advantages_list else torch.tensor([0.0]).float()
         prompt_len_t = torch.tensor(prompt_len_list).float() if prompt_len_list else torch.tensor([0.0]).float()
@@ -1266,8 +1396,8 @@ class BaseRLTrainer:
 
         raw_rewards_mean = raw_rewards_sum / raw_rewards_count if raw_rewards_count > 0 else rewards_t.mean().item()
         info_dict = {
-            "batch_size": len(rewards_list),
-            "training_samples": len(rewards_list),
+            "batch_size": training_samples,
+            "training_samples": training_samples,
             "training_tokens": training_tokens,
             "rewards/mean": rewards_t.mean().item(),
             "rewards/min": rewards_t.min().item(),
@@ -1284,6 +1414,7 @@ class BaseRLTrainer:
             "prompt_len/min": prompt_len_t.min().item(),
             "prompt_len/max": prompt_len_t.max().item(),
         }
+        info_dict.update(self._distillation.reward_scalars(distillation_reward_observations))
         if tool_turns_list:
             tool_turns_t = torch.tensor(tool_turns_list, dtype=torch.float32)
             info_dict["tool_turns/mean"] = tool_turns_t.mean().item()
@@ -1398,7 +1529,8 @@ class BaseRLTrainer:
                 )
             trajectory_str = f"\nTrain step {train_step} data statistics:\n"
             trajectory_str += "\n".join([f"- {k:<25}: {v:.4f}" for k, v in response_data_info.items()])
-            rank0_log_item = train_info["workers_log_item"][0]
+            worker_log_items = train_info["workers_log_item"]
+            rank0_log_item = worker_log_items[0]
             rank0_rollout_is_metrics = rank0_log_item.get("rollout_is_metrics", {})
             rank0_mismatch_metrics = rank0_log_item.get("mismatch_metrics", {})
             rank0_rollout_entropy = rank0_log_item.get("rollout_entropy", 0.0)
@@ -1406,7 +1538,9 @@ class BaseRLTrainer:
             all_scalars.update({f"{k}": v for k, v in rank0_mismatch_metrics.items()})
             all_scalars.update({"entropy/rollout": rank0_rollout_entropy})
             all_scalars.update({"entropy/train": rank0_log_item["train_entropy"]})
-            for worker_idx, log_item in enumerate(train_info["workers_log_item"]):
+
+            all_scalars.update(self._distillation.timing_scalars(worker_log_items))
+            for worker_idx, log_item in enumerate(worker_log_items):
                 if not self._display_all_workers_log and worker_idx > 0:
                     break
                 mini_batch_metrics: dict[str, List[float]] = {}
@@ -1421,6 +1555,8 @@ class BaseRLTrainer:
                 rank_sft_log = log_item["sft_train_metrics"]
                 for k, v in rank_sft_log.items():
                     all_scalars.update({f"sft_train_metrics/worker_{worker_idx}/{k}": v})
+
+            all_scalars.update(self._distillation.metric_scalars(rank0_log_item["train_metrics"]))
 
             self._log_mini_batch_metrics(train_info["workers_log_item"])
 
@@ -1437,54 +1573,21 @@ class BaseRLTrainer:
 
     def _save_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
         rewards = []
-        trajectory_items = []
+        response_len_list = []
+        valid_groups = []
 
         for group in data_groups:
             if not is_valid_for_training(group, self.logger):
                 continue
+            valid_groups.append(group)
             for data in group:
-                assert data.reward is not None
-                rewards.append(data.reward["score"])
+                reward = data.reward.get("score") if data.reward is not None else None
+                if reward is not None:
+                    rewards.append(reward)
                 response_ids = self._get_trajectory_response_ids(data)
-                response = data.response
-                if response is None and response_ids:
-                    response = self.tokenizer.decode(response_ids)
-                ground_truth = None
-                if data.reward_model is not None:
-                    ground_truth = data.reward_model.get("ground_truth")
-                response_len = len(response_ids)
-                trajectory_items.append(
-                    {
-                        "rollout_id": data.rollout_id,
-                        "group_id": data.group_id,
-                        "task_name": data.task_name,
-                        "data_source": data.data_source,
-                        "status": data.status.value if hasattr(data.status, "value") else str(data.status),
-                        "finish_reason": data.finish_reason,
-                        "error_msg": data.error_msg,
-                        "prompt": data.message,
-                        "label": ground_truth,
-                        "response": response,
-                        "reward": data.reward["score"],
-                        "prompt_len": data.num_tokens,
-                        "response_len": response_len,
-                        "reward_payload": data.reward,
-                        "agent": {
-                            "name": data.extra_fields.get("agent_name"),
-                            "selected": data.extra_fields.get("agent_selected"),
-                            "status": data.extra_fields.get("agent_status", None),
-                            "judgers": data.extra_fields.get("agent_judgers", None),
-                            "finish_info": data.extra_fields.get("agent_finish_info", None),
-                            "tool_turns": data.extra_fields.get("agent_tool_turns", None),
-                            "artifacts": data.extra_fields.get("agent_artifacts"),
-                            "messages": data.extra_fields.get("agent_messages"),
-                            "tools": data.extra_fields.get("agent_tools"),
-                        },
-                    }
-                )
+                response_len_list.append(len(response_ids))
 
         rewards_tensor = torch.tensor(rewards).float() if rewards else torch.tensor([0.0]).float()
-        response_len_list = [item["response_len"] for item in trajectory_items]
         response_lens = torch.tensor(response_len_list).float() if response_len_list else torch.tensor([0.0]).float()
 
         with open(save_path, "w", encoding="utf-8") as f:
@@ -1501,40 +1604,32 @@ class BaseRLTrainer:
             }
             json.dump(summary, f, ensure_ascii=False, separators=(",", ":"))
             f.write("\n")
-            for item in trajectory_items:
-                json.dump(item, f, ensure_ascii=False, separators=(",", ":"))
-                f.write("\n")
+            for group in valid_groups:
+                for data in group:
+                    reward = data.reward.get("score") if data.reward is not None else None
+                    response_ids = self._get_trajectory_response_ids(data)
+                    response = data.response
+                    if response is None and response_ids:
+                        response = self.tokenizer.decode(response_ids)
+                    ground_truth = None
+                    if data.reward_model is not None:
+                        ground_truth = data.reward_model.get("ground_truth")
 
-    def _save_eval_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
-        rewards = []
-        trajectory_items = []
-
-        for group in data_groups:
-            for data in group:
-                reward = data.reward["score"] if data.reward is not None and "score" in data.reward else 0.0
-                response = data.response or ""
-                response_ids = self._get_trajectory_response_ids(data)
-                response_len = len(response_ids)
-                rewards.append(reward)
-                ground_truth = None
-                if data.reward_model is not None:
-                    ground_truth = data.reward_model.get("ground_truth")
-                trajectory_items.append(
-                    {
+                    item = {
                         "rollout_id": data.rollout_id,
                         "group_id": data.group_id,
                         "task_name": data.task_name,
                         "data_source": data.data_source,
                         "status": data.status.value if hasattr(data.status, "value") else str(data.status),
-                        "prompt": data.message,
-                        "response": response,
-                        "prompt_len": data.num_tokens,
-                        "response_len": response_len,
-                        "label": ground_truth,
-                        "reward": reward,
-                        "reward_payload": data.reward or {"score": reward},
                         "finish_reason": data.finish_reason,
                         "error_msg": data.error_msg,
+                        "prompt": data.message,
+                        "label": ground_truth,
+                        "response": response,
+                        "reward": reward,
+                        "prompt_len": data.num_tokens,
+                        "response_len": len(response_ids),
+                        "reward_payload": data.reward,
                         "agent": {
                             "name": data.extra_fields.get("agent_name"),
                             "selected": data.extra_fields.get("agent_selected"),
@@ -1542,15 +1637,29 @@ class BaseRLTrainer:
                             "judgers": data.extra_fields.get("agent_judgers", None),
                             "finish_info": data.extra_fields.get("agent_finish_info", None),
                             "tool_turns": data.extra_fields.get("agent_tool_turns", None),
+                            "session_id": str(data.session_id) if data.session_id is not None else None,
+                            "segment_index": data.extra_fields.get("agent_trace_segment_index"),
+                            "segment_count": data.extra_fields.get("agent_trace_segment_count"),
                             "artifacts": data.extra_fields.get("agent_artifacts"),
                             "messages": data.extra_fields.get("agent_messages"),
                             "tools": data.extra_fields.get("agent_tools"),
                         },
                     }
-                )
+                    json.dump(item, f, ensure_ascii=False, separators=(",", ":"))
+                    f.write("\n")
+
+    def _save_eval_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
+        rewards = []
+        response_len_list = []
+
+        for group in data_groups:
+            for data in group:
+                reward = data.reward["score"] if data.reward is not None and "score" in data.reward else 0.0
+                response_ids = self._get_trajectory_response_ids(data)
+                rewards.append(reward)
+                response_len_list.append(len(response_ids))
 
         rewards_tensor = torch.tensor(rewards).float() if rewards else torch.tensor([0.0]).float()
-        response_len_list = [item["response_len"] for item in trajectory_items]
         response_lens = torch.tensor(response_len_list).float() if response_len_list else torch.tensor([0.0]).float()
 
         with open(save_path, "w", encoding="utf-8") as f:
@@ -1567,9 +1676,46 @@ class BaseRLTrainer:
             }
             json.dump(summary, f, ensure_ascii=False, separators=(",", ":"))
             f.write("\n")
-            for item in trajectory_items:
-                json.dump(item, f, ensure_ascii=False, separators=(",", ":"))
-                f.write("\n")
+            for group in data_groups:
+                for data in group:
+                    reward = data.reward["score"] if data.reward is not None and "score" in data.reward else 0.0
+                    response_ids = self._get_trajectory_response_ids(data)
+                    ground_truth = None
+                    if data.reward_model is not None:
+                        ground_truth = data.reward_model.get("ground_truth")
+
+                    item = {
+                        "rollout_id": data.rollout_id,
+                        "group_id": data.group_id,
+                        "task_name": data.task_name,
+                        "data_source": data.data_source,
+                        "status": data.status.value if hasattr(data.status, "value") else str(data.status),
+                        "prompt": data.message,
+                        "response": data.response or "",
+                        "prompt_len": data.num_tokens,
+                        "response_len": len(response_ids),
+                        "label": ground_truth,
+                        "reward": reward,
+                        "reward_payload": data.reward or {"score": reward},
+                        "finish_reason": data.finish_reason,
+                        "error_msg": data.error_msg,
+                        "agent": {
+                            "name": data.extra_fields.get("agent_name"),
+                            "selected": data.extra_fields.get("agent_selected"),
+                            "status": data.extra_fields.get("agent_status", None),
+                            "judgers": data.extra_fields.get("agent_judgers", None),
+                            "finish_info": data.extra_fields.get("agent_finish_info", None),
+                            "tool_turns": data.extra_fields.get("agent_tool_turns", None),
+                            "session_id": str(data.session_id) if data.session_id is not None else None,
+                            "segment_index": data.extra_fields.get("agent_trace_segment_index"),
+                            "segment_count": data.extra_fields.get("agent_trace_segment_count"),
+                            "artifacts": data.extra_fields.get("agent_artifacts"),
+                            "messages": data.extra_fields.get("agent_messages"),
+                            "tools": data.extra_fields.get("agent_tools"),
+                        },
+                    }
+                    json.dump(item, f, ensure_ascii=False, separators=(",", ":"))
+                    f.write("\n")
 
     def _get_trajectory_response_ids(self, data: RolloutState) -> list[int]:
         if data.response_ids is not None:
@@ -1602,6 +1748,7 @@ class BaseRLTrainer:
 class RLColocateTrainer(BaseRLTrainer):
     _META_PATH = ".xtuner_rl_colocate_trainer"
     agent_loop_manager: AgentLoopManager
+    rl_health_manager: RLHealthManager | _NoOpRLHealthManager
 
     # 共卡保留资源切换和权重同步流程；通用保存、日志在 BaseRLTrainer。
     def __init__(self, cfg: RLColocateTrainerConfig):
@@ -1615,6 +1762,7 @@ class RLColocateTrainer(BaseRLTrainer):
         set_cpu_resource_manager(self._cpu_resource_manager)
 
         if self._debug_rollout:
+            self.rl_health_manager = _NoOpRLHealthManager()
             if self._rollout_config.skip_load_weights:
                 self.logger.info(
                     "debug_rollout cannot be used with rollout_config.skip_load_weights=True. force set skip_load_weights to False"
@@ -1636,6 +1784,7 @@ class RLColocateTrainer(BaseRLTrainer):
             checkpoint_path = self._resume_train_controller_and_state(checkpoint_path)
 
         if self._debug_train:
+            self.rl_health_manager = _NoOpRLHealthManager()
             assert self._debug_rollout_dir is not None
             self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_path, trust_remote_code=True)
             self._debug_train_files = self._list_debug_rollout_files(self._debug_rollout_dir)
@@ -1650,11 +1799,19 @@ class RLColocateTrainer(BaseRLTrainer):
         self.train_controller.offload(target="all")
 
         self.rollout_controller = self._rollout_config.build(self._pg)
+        if self._rollout_config.weight_transport_type is None:
+            self._rollout_config.weight_transport_type = "ipc"
+
+        self.rl_health_manager = RLHealthManager(
+            train_controller=self.train_controller,
+            rollout_controller=self.rollout_controller,
+            rollout_config=self._rollout_config,
+        )
+
         bind_train_rollout(
             train_controller=self.train_controller,
             rollout_controller=self.rollout_controller,
             rollout_config=self._rollout_config,
-            weight_transport_type="ipc",
         )
 
         replay_buffer = cfg.replay_buffer_config.build()
@@ -1668,19 +1825,32 @@ class RLColocateTrainer(BaseRLTrainer):
             self._sync_weights_from_train_workers()
 
     def _sync_weights_from_train_workers(self) -> None:
-        self.logger.info("Rollout workers skip load weights, update weights from train workers.")
-        ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
-        self.train_controller.onload(target="model")
-        ray.get(self.rollout_controller.onload_weights.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
-        self.train_controller.update_weights()
-        self.train_controller.offload(target="model")
-        ray.get(self.rollout_controller.onload_kvcache.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
-        self.logger.info("Rollout workers updated weights from train workers.")
+        if self._rollout_config.weight_transport_type == "checkpoint_engine":
+            ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
+            self.train_controller.onload(target="model")
+            self.train_controller.weight_update(need_register=True, need_update=False)
+            self.train_controller.offload(target="model")
+            ray.get(self.rollout_controller.onload_weights.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
+            self.train_controller.weight_update(need_register=False, need_update=True)
+            ray.get(self.rollout_controller.onload_kvcache.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
+            self.logger.info("Rollout workers updated weights from Checkpoint Engine.")
+            return
+        else:
+            self.logger.info("Rollout workers skip load weights, update weights from train workers.")
+            ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
+            self.train_controller.onload(target="model")
+            ray.get(self.rollout_controller.onload_weights.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
+            self.train_controller.weight_update()
+            self.train_controller.offload(target="model")
+            ray.get(self.rollout_controller.onload_kvcache.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
+            self.logger.info("Rollout workers updated weights from train workers.")
 
     def fit(self):
+        self.rl_health_manager.start()
         try:
             self._fit()
         finally:
+            self.rl_health_manager.stop()
             self._exp_tracker.close()
             close_trace()
 
@@ -1713,17 +1883,22 @@ class RLColocateTrainer(BaseRLTrainer):
             step_timer_dict = {}
             with timer("step", step_timer_dict):
                 # 共卡一次调用内完成生产和消费。
+                self.rl_health_manager.set_rollout_resources_available(True)
                 self.logger.info(
                     f"[Step {train_step}] start to generate rollout experience for train step {train_step} with model step {model_step}"
                 )
-                with timer("produce_batch", step_timer_dict):
-                    produce_result: ProduceBatchResult = asyncio_run(
-                        self.agent_loop_manager.produce_batch(
-                            self.train_batch_size,
-                            train_step=train_step,
-                            model_step=model_step,
+                try:
+                    with timer("produce_batch", step_timer_dict):
+                        produce_result: ProduceBatchResult = asyncio_run(
+                            self.agent_loop_manager.produce_batch(
+                                self.train_batch_size,
+                                train_step=train_step,
+                                model_step=model_step,
+                            )
                         )
-                    )
+                finally:
+                    self.rl_health_manager.set_rollout_resources_available(False)
+
                 if XTUNER_DETERMINISTIC:
                     produce_result.rollout_states = sort_rollout_state_for_deterministic(produce_result.rollout_states)
                 train_batch = produce_result.rollout_states
@@ -1808,23 +1983,29 @@ class RLColocateTrainer(BaseRLTrainer):
         timer_name = "sync_weight" if should_sync_weights else "switch_to_rollout"
         with timer(timer_name, step_timer_dict):
             if should_sync_weights:
-                ray.get(
-                    self.rollout_controller.restart_inactive_workers.remote(),
-                    timeout=RL_TRAINER_RAY_GET_TIMEOUT,
-                )
-                bind_train_rollout(
-                    train_controller=self.train_controller,
-                    rollout_controller=self.rollout_controller,
-                    rollout_config=self._rollout_config,
-                    weight_transport_type="ipc",
-                )
-                ray.get(
-                    self.rollout_controller.onload_weights.remote(),
-                    timeout=RL_TRAINER_RAY_GET_TIMEOUT,
-                )
-                self.train_controller.update_weights()
-                self.logger.info("Rollout workers update weights successfully in colocate mode")
-                self.train_controller.offload(target="model")
+                with self.rl_health_manager.weight_update_guard():
+                    bind_train_rollout(
+                        train_controller=self.train_controller,
+                        rollout_controller=self.rollout_controller,
+                        rollout_config=self._rollout_config,
+                    )
+                    if self._rollout_config.weight_transport_type == "checkpoint_engine":
+                        self.train_controller.weight_update(need_register=True, need_update=False)
+                        self.train_controller.offload(target="model")
+                        ray.get(
+                            self.rollout_controller.onload_weights.remote(),
+                            timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+                        )
+                        self.train_controller.weight_update(need_register=False, need_update=True)
+                    else:
+                        ray.get(
+                            self.rollout_controller.onload_weights.remote(),
+                            timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+                        )
+                        self.train_controller.weight_update()
+                        self.train_controller.offload(target="model")
+                    self.logger.info("Rollout workers update weights successfully in colocate mode")
+
                 suspend_train_nccl = (
                     os.getenv(
                         "XTUNER_SUSPEND_TRAIN_NCCL_AFTER_SYNC",
@@ -1863,6 +2044,11 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         self.train_controller = self._train_worker_cfg.build(self._train_pg)
         self.rollout_controller = self._rollout_config.build(self._rollout_pg)
 
+        if self._rollout_config.weight_transport_type != "nccl":
+            self.logger.warning(
+                "Currently, disaggregated mode only support nccl as weight update transport. It will use NCCL for weight transport."
+            )
+            self._rollout_config.weight_transport_type = "nccl"
         replay_buffer = cfg.replay_buffer_config.build()
         self._build_agent_loop_components(cfg, replay_buffer)
         # 非共卡 producer 不允许早停，否则 consumer 可能永久等不到 batch。
@@ -1872,13 +2058,11 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                     "In disaggregated mode, should_continue_fn must be default, "
                     "because it does not allow early stopping in production."
                 )
+
         bind_train_rollout(
             train_controller=self.train_controller,
             rollout_controller=self.rollout_controller,
             rollout_config=self._rollout_config,
-            weight_transport_type="nccl",
-            weight_update_host=self._rollout_config.weight_update_host,
-            weight_update_port=self._rollout_config.weight_update_port,
         )
 
         if self._load_checkpoint_cfg.checkpoint_path is not None:
@@ -1920,7 +2104,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         saved_model_step = asyncio_run(self._resume_agent_loop_manager(checkpoint_path))
         assert self._cur_step == saved_model_step
 
-        self.update_weights()
+        self.weight_update()
         asyncio_run(self.agent_loop_manager.continue_produce(model_step=saved_model_step))
 
     def fit(self):
@@ -2072,17 +2256,30 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
         # TODO: 非共卡需要额外加健康检查恢复worker的逻辑，共卡是在训练之前恢复，但是非共卡不需要在训练之前恢复,挂掉就恢复或者更新权重前恢复，需要评估一下哪种方式更合理。
         with timer("sync_weight", step_timer_dict):
+            # 1) 清 KV + 释放旧权重（sleep level=2 -> meta）
+            ray.get(
+                self.rollout_controller.offload.remote(),
+                timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+            )
+            # 2) 只 wakeup weights（empty_init），此时不要 onload_kvcache/warmup
+            ray.get(
+                self.rollout_controller.onload_weights.remote(),
+                timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+            )
             bind_train_rollout(
                 train_controller=self.train_controller,
                 rollout_controller=self.rollout_controller,
                 rollout_config=self._rollout_config,
-                weight_transport_type="nccl",
-                weight_update_host=self._rollout_config.weight_update_host,
-                weight_update_port=self._rollout_config.weight_update_port,
             )
-            self.update_weights()
+            # 3) 先把权重更新完（含 finished=True finalize）
+            self.weight_update()
+            # 4) 最后再 onload_kvcache（这里才会 warmup）
+            ray.get(
+                self.rollout_controller.onload_kvcache.remote(),
+                timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+            )
 
-    def update_weights(self):
+    def weight_update(self):
         # rollout 恢复由 AgentLoopManager 控制。
-        self.train_controller.update_weights()
+        self.train_controller.weight_update()
         self.logger.info("Rollout workers update weights successfully in disaggregated mode")

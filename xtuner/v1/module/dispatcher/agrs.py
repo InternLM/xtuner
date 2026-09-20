@@ -258,6 +258,7 @@ class MoEAGRSDispatcher(
         *,
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,  # noqa: ARG002 — kept for interface compatibility; not used here
         async_op: bool = False,
     ) -> MoEAGRSPreDispatchResult:
         if async_op:

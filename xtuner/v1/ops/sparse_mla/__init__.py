@@ -5,7 +5,7 @@ import torch
 
 from xtuner.v1.data_proto import SequenceContext
 
-from .protocol import DSATopKIndicesProtocol, SparseMLABackend, SparseMLAOutputs, SparseMLAProtocol
+from .protocol import DSAIndexerBackend, DSATopKIndicesProtocol, SparseMLABackend, SparseMLAOutputs, SparseMLAProtocol
 from .pytorch import torch_dsa_topk_indices, torch_sparse_mla
 
 
@@ -20,6 +20,10 @@ def get_sparse_mla(backend: SparseMLABackend) -> SparseMLAProtocol:
         from .cudnn_dsa import cudnn_dsa_sparse_mla
 
         return cudnn_dsa_sparse_mla
+    if backend == "flash_mla":
+        from .flash_mla import flash_mla_sparse_mla
+
+        return flash_mla_sparse_mla
     raise ValueError(f"Unsupported SparseMLA backend: {backend}")
 
 
@@ -34,15 +38,19 @@ def sparse_mla(
     return get_sparse_mla(backend)(q, kv, indices, scaling=scaling, value_dim=value_dim)
 
 
-def get_dsa_topk_indices(backend: SparseMLABackend, use_tilelang_topk: bool = False) -> DSATopKIndicesProtocol:
+def get_dsa_topk_indices(backend: DSAIndexerBackend, use_tilelang_topk: bool = False) -> DSATopKIndicesProtocol:
     if backend == "torch":
         return torch_dsa_topk_indices
-    if backend in ("tilelang", "cudnn_dsa"):
+    if backend in ("tilelang", "cudnn_dsa", "flash_mla"):
         from .tilelang import tilelang_dsa_topk_indices
 
         if use_tilelang_topk:
             return partial(tilelang_dsa_topk_indices, use_tilelang_topk=True)
         return tilelang_dsa_topk_indices
+    if backend == "deep_gemm_fp8":
+        from .lmdeploy_fp8_index import lmdeploy_fp8_dsa_topk_indices
+
+        return lmdeploy_fp8_dsa_topk_indices
     raise ValueError(f"Unsupported DSA indexer backend: {backend}")
 
 
@@ -54,7 +62,7 @@ def dsa_topk_indices(
     *,
     index_head_dim: int,
     index_topk: int,
-    backend: SparseMLABackend = "torch",
+    backend: DSAIndexerBackend = "torch",
     use_tilelang_topk: bool = False,
 ) -> torch.Tensor:
     return get_dsa_topk_indices(backend, use_tilelang_topk)(
@@ -79,6 +87,12 @@ def ensure_cudnn_dsa_runtime_available() -> None:
     return _impl()
 
 
+def ensure_flash_mla_runtime_available() -> None:
+    from .flash_mla import ensure_flash_mla_runtime_available as _impl
+
+    return _impl()
+
+
 def sparse_mla_fwd_interface(*args, **kwargs):
     from .tilelang_sparse_mla_fwd import sparse_mla_fwd_interface as _impl
 
@@ -98,12 +112,14 @@ def indexer_fwd_interface(*args, **kwargs):
 
 
 __all__ = [
+    "DSAIndexerBackend",
     "DSATopKIndicesProtocol",
     "SparseMLABackend",
     "SparseMLAOutputs",
     "SparseMLAProtocol",
     "dsa_topk_indices",
     "ensure_cudnn_dsa_runtime_available",
+    "ensure_flash_mla_runtime_available",
     "ensure_tilelang_runtime_available",
     "get_dsa_topk_indices",
     "get_sparse_mla",

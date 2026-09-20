@@ -8,7 +8,7 @@ default_config:
             gpus_per_task: 16
             cpus_per_task: 256
             memory_per_task: 1920
-            image: ccr-hw/910c:cann83rc3_pta271_fixzero
+            image: ccr-hw/910c_cann910_pta291_fixzero:v1.0.0-20260826T012241Z
             pip_package: pip install -e . --no-deps; pip install more-itertools triton
             envs: 
                 - HF_HUB_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/models/hf_hub
@@ -26,7 +26,7 @@ default_config:
                 - HF_HUB_OFFLINE=1
 
 case: 
-    npu-qwen3-sft:
+    qwen3:
         -
             type: sft
             parameters:
@@ -53,7 +53,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 10800
 
-    npu-qwen3-sft-ep8:
+    qwen3-ep8:
         -
             type: sft
             phase: first
@@ -83,7 +83,7 @@ case:
             type: sft
             phase: resume
             pre_action:
-                command: 'python ./autotest/utils/update_meta.py /mnt/hwfile/llmrazor/qa-llm-cicd/test_output npu-qwen3-sft-ep8 sft'
+                command: 'python ./autotest/utils/update_meta.py /mnt/hwfile/llmrazor/qa-llm-cicd/test_output qwen3-ep8 sft'
             parameters:
                 config: autotest/config/npu_qwen3_moe_30BA3_ep8_resume.py
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
@@ -107,7 +107,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 10800
 
-    npu-qwen3-sft-tp2:
+    qwen3-tp2:
         -
             type: sft
             parameters:
@@ -133,7 +133,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 10800
 
-    npu-qwen3-sft-recompute:
+    qwen3-recompute:
         -
             type: sft
             parameters:
@@ -148,6 +148,7 @@ case:
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_ACTIVATION_OFFLOAD=1
                     - TORCH_NPU_USE_HCCL=1
+                    - TORCH_HCCL_ZERO_COPY=1
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
@@ -161,7 +162,7 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 10800
 
-    npu-qwen3-sft-16nums:
+    qwen3-16nums:
         -
             type: sft
             parameters:
@@ -184,7 +185,7 @@ case:
                     lr: 0
             timeout: 10800
 
-    npu-qwen3-sft-celoss-vs-gpu:
+    qwen3-celoss:
         -
             type: sft
             parameters:
@@ -207,7 +208,7 @@ case:
                     lr: 0.01
             timeout: 10800
 
-    npu-qwen3-rl-vllm:
+    qwen3-vllm:
         -
             type: rl
             parameters:
@@ -216,7 +217,7 @@ case:
                 accelerator: NPU
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cic/qa-llm-cicd/test_output
             resource:
-                image: ccr-hw/910c:rl_s1_vllm
+                image: ccr-hw/910c_cann910_pta291_rl_s1_vllm:v0.1.0-20260826T114552Z
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/gsm8k/train-mini.jsonl

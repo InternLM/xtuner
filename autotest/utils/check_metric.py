@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 
 import numpy as np
 from utils.metric_report import publish_comparison_report
@@ -15,7 +16,17 @@ MEMORY_GRADIENT_MIN_SEGMENT_LEN = 8
 MEMORY_GRADIENT_POSITIVE_RATIO = 0.65
 MEMORY_GRADIENT_MIN_SLOPE_GB = 1e-4
 MEMORY_GRADIENT_MIN_REL_DRIFT = 0.00015
-MEMORY_GRADIENT_RESUME_DROP_GB = 0.005
+# Ignore sub-20MB dips when splitting; avoids treating allocator noise as resume boundaries.
+MEMORY_GRADIENT_RESUME_DROP_GB = 0.02
+# Require >=500MB swing within a segment before treating noise as a leak.
+MEMORY_GRADIENT_MIN_SEGMENT_RANGE_GB = 0.5
+# Skip gradient heuristic when per-step baseline drift is already tight vs baseline.
+MEMORY_GRADIENT_BASELINE_DRIFT_SKIP_RATIO = 0.05
+MEMORY_GRADIENT_MIN_EXTRA_RANGE_GB = 0.1
+
+# Minimum step count for percentile aggregation to be statistically meaningful.
+# Below this, fall back to stepwise max with a warning (e.g. ep2-resume ~15–18 steps).
+PERCENTILE_MIN_STEPS = 20
 
 # RL tracker lines: mini-batch logs vs per-RL-step summary (see rl_trainer._log_step).
 RL_STEP_SUMMARY_MARKER = "response/rewards/mean"
@@ -28,9 +39,25 @@ RL_PERCENTILE_METRICS: dict[str, int] = {
 #   metric: {threshold: 0.2, aggregate: 80}
 #   metric: {threshold: 5, method: absolute}
 # Without ``aggregate``, behavior stays step-by-step drift vs baseline.
+# Principles for GLM5.2 MoE SFT thresholds:
+#   - loss/reduced_llm_loss & loss/local_loss: stable next-token anchors → stepwise max
+#   - loss/reduced_mtp_loss: 5–12× noisier (fewer valid tokens, multi-depth avg) →
+#     threshold ≈ llm × 2–3, prefer p80; short runs keep stepwise max
+#   - Prefer p80 for other noisy metrics (grad_norm) on long runs
+#   - Don't use thresholds below FP32 reduce + MoE dispatch noise floor (~0.0003)
+#   - Short runs (< PERCENTILE_MIN_STEPS) keep stepwise max; p80 has no statistical meaning
+# Real MTP bugs (not threshold noise): NaN/Inf, systematic monotonic drift vs baseline,
+# or llm/local/text_tokens failing together with MTP.
 SFT_METRIC_DEFAULT_METHOD: dict[str, str] = {
     "runtime_info/text_tokens": "absolute",
 }
+
+# Loss metrics that must be finite; NaN/Inf is always a hard failure.
+SFT_FINITE_LOSS_METRICS = (
+    "loss/local_loss",
+    "loss/reduced_llm_loss",
+    "loss/reduced_mtp_loss",
+)
 
 
 def _normalize_sft_metric_cfg(metric: str, value) -> tuple[float, int | None, str]:
@@ -99,6 +126,58 @@ def _align_first_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="SF
     return cur_steps, cur_metrics
 
 
+def _resolve_first_phase_baseline_steps(resume_base_path: str) -> int | None:
+    """Return step count of companion ``tracker.jsonl`` for a resume baseline."""
+    if not resume_base_path.endswith("tracker-resume.jsonl"):
+        return None
+    first_path = resume_base_path[: -len("tracker-resume.jsonl")] + "tracker.jsonl"
+    if not os.path.isfile(first_path):
+        return None
+    with open(first_path, encoding="utf-8") as f:
+        return sum(1 for line in f if line.strip())
+
+
+def _align_resume_phase_steps(
+    phase,
+    base_steps,
+    cur_steps,
+    cur_metrics,
+    kind="SFT",
+    *,
+    first_base_steps: int | None = None,
+    resume_base_path: str | None = None,
+):
+    """Resume CI runs append into the same exp tracker as the first phase.
+
+    Compare ``cur_metrics[first_base_steps:]`` against ``tracker-resume.jsonl``,
+    not the trailing ``base_steps`` rows (which can include first-phase tail).
+    """
+    if phase != "resume" or cur_steps <= base_steps:
+        return cur_steps, cur_metrics
+
+    if first_base_steps is None and resume_base_path:
+        first_base_steps = _resolve_first_phase_baseline_steps(resume_base_path)
+
+    if first_base_steps is not None and cur_steps > first_base_steps:
+        resume_steps = cur_steps - first_base_steps
+        logger.warning(
+            f"phase=resume: current {kind} tracker has {cur_steps} steps "
+            f"(first baseline {first_base_steps} + resume {resume_steps}) vs resume baseline "
+            f"{base_steps}; using post-checkpoint suffix from index {first_base_steps}."
+        )
+        trimmed = {metric: values[first_base_steps:] for metric, values in cur_metrics.items()}
+        return resume_steps, trimmed
+
+    if cur_steps > base_steps:
+        logger.warning(
+            f"phase=resume: current {kind} tracker has {cur_steps} steps vs baseline "
+            f"{base_steps}; first-phase baseline length unknown, using trailing {base_steps} rows."
+        )
+        trimmed = {metric: values[-base_steps:] for metric, values in cur_metrics.items()}
+        return base_steps, trimmed
+    return cur_steps, cur_metrics
+
+
 def _step_errors(base_vals: list[float], cur_vals: list[float], method: str) -> list[float]:
     """Compute per-step quantities compared against ``threshold``.
 
@@ -124,6 +203,26 @@ def _step_errors(base_vals: list[float], cur_vals: list[float], method: str) -> 
         else:
             raise ValueError(f"Unknown method: {method}")
     return errors
+
+
+def _apply_rl_skip_steps(
+    base_vals: list[float],
+    cur_vals: list[float],
+    *,
+    metric: str,
+    skip_steps: int,
+) -> tuple[list[float], list[float]] | None:
+    """Drop the first ``skip_steps`` RL step summaries (cold-start warmup)."""
+    if skip_steps <= 0:
+        return base_vals, cur_vals
+    if len(base_vals) <= skip_steps or len(cur_vals) <= skip_steps:
+        logger.warning(
+            f"Skip {metric}: only {len(cur_vals)} RL step summaries after extraction, "
+            f"cannot skip first {skip_steps} steps."
+        )
+        return None
+    logger.info(f"Skip first {skip_steps} RL step summaries for {metric} (cold-start warmup).")
+    return base_vals[skip_steps:], cur_vals[skip_steps:]
 
 
 def _percentile_error_passes(
@@ -178,6 +277,21 @@ def _split_memory_segments(values: np.ndarray) -> list[np.ndarray]:
     return segments or [values]
 
 
+def _should_run_memory_gradient_check(
+    base_vals: list[float],
+    cur_vals: list[float],
+    *,
+    drift_threshold: float,
+    max_rel_drift: float,
+) -> bool:
+    """Run leak heuristic only when baseline drift is loose or current swing grew."""
+    tight_vs_baseline = max_rel_drift < drift_threshold * MEMORY_GRADIENT_BASELINE_DRIFT_SKIP_RATIO
+    base_range = float(max(base_vals) - min(base_vals))
+    cur_range = float(max(cur_vals) - min(cur_vals))
+    range_grew = (cur_range - base_range) >= MEMORY_GRADIENT_MIN_EXTRA_RANGE_GB
+    return not tight_vs_baseline or range_grew
+
+
 def detect_memory_upward_gradient(values: list[float]) -> tuple[bool, str]:
     """Detect sustained upward memory drift (possible leak) in the current
     run."""
@@ -198,6 +312,10 @@ def detect_memory_upward_gradient(values: list[float]) -> tuple[bool, str]:
         if mean_val < 1e-10:
             continue
 
+        segment_range = float(np.max(segment) - np.min(segment))
+        if segment_range < MEMORY_GRADIENT_MIN_SEGMENT_RANGE_GB:
+            continue
+
         relative_drift = float(slope * (len(segment) - 1) / mean_val)
         slope_rising = slope > MEMORY_GRADIENT_MIN_SLOPE_GB
         mostly_increasing = positive_ratio >= MEMORY_GRADIENT_POSITIVE_RATIO
@@ -211,7 +329,9 @@ def detect_memory_upward_gradient(values: list[float]) -> tuple[bool, str]:
     return False, ""
 
 
-def _format_sft_drift_failure(metric: str, idx: int, old: float, cur: float, error: float, method: str, threshold: float) -> str:
+def _format_sft_drift_failure(
+    metric: str, idx: int, old: float, cur: float, error: float, method: str, threshold: float
+) -> str:
     kind = "absolute error" if method == "absolute" else "relative error"
     return (
         f"{metric} {kind} bigger than {threshold} in {idx} steps, "
@@ -239,6 +359,44 @@ def _check_sft_step_drift(
     return True, max_error, max_error_idx, None
 
 
+def _find_nonfinite(values: list[float]) -> int | None:
+    """Return first index of NaN/Inf, or None if all finite."""
+    for idx, value in enumerate(values):
+        if not np.isfinite(value):
+            return idx
+    return None
+
+
+def _annotate_mtp_only_failure(fail_metric: dict[str, str], metric_list: list[str]) -> None:
+    """Clarify MTP-only failures when llm/local anchors still pass.
+
+    MTP CE is expected to be much noisier than next-token llm/local loss. A lone
+    MTP threshold miss with healthy llm/local is usually pack/noise, not a
+    train-infer bug — unless values are non-finite (already hard-failed above).
+    """
+    mtp_key = "loss/reduced_mtp_loss"
+    if mtp_key not in fail_metric:
+        return
+    llm_ok = "loss/reduced_llm_loss" not in fail_metric
+    local_ok = "loss/local_loss" not in fail_metric
+    # Only annotate when llm/local were part of the check and both passed.
+    if "loss/reduced_llm_loss" in metric_list and not llm_ok:
+        return
+    if "loss/local_loss" in metric_list and not local_ok:
+        return
+    if not (llm_ok and local_ok):
+        return
+    other_fails = {k for k in fail_metric if k != mtp_key}
+    if other_fails:
+        return
+    fail_metric[mtp_key] = (
+        f"{fail_metric[mtp_key]} "
+        "[note: reduced_llm_loss/local_loss passed — MTP-only drift is often "
+        "expected noise (fewer valid tokens / multi-depth avg); escalate only if "
+        "NaN/Inf or systematic monotonic drift]"
+    )
+
+
 def check_result(case_name, base_path, cur_path, check_metric, phase=None):
     fail_metric = {}
     metric_cfgs = {metric: _normalize_sft_metric_cfg(metric, value) for metric, value in check_metric.items()}
@@ -247,6 +405,14 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
     base_steps, base_metrics = extract_value(base_path, metric_list)
     cur_steps, cur_metrics = extract_value(cur_path, metric_list)
     cur_steps, cur_metrics = _align_first_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="SFT")
+    cur_steps, cur_metrics = _align_resume_phase_steps(
+        phase,
+        base_steps,
+        cur_steps,
+        cur_metrics,
+        kind="SFT",
+        resume_base_path=base_path if phase == "resume" else None,
+    )
     assert cur_steps == base_steps, (
         f"current steps is not equal to base steps, current steps: {cur_steps}, base steps: {base_steps}"
     )
@@ -257,6 +423,22 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
         max_error = 0.0
         max_error_idx = 0
         check_flag = True
+
+        # Hard-fail on NaN/Inf for loss metrics (real bug, not threshold noise).
+        if metric in SFT_FINITE_LOSS_METRICS:
+            bad_idx = _find_nonfinite(cur_metrics[metric])
+            if bad_idx is not None:
+                fail_metric[metric] = (
+                    f"{metric} is non-finite at step {bad_idx}: {cur_metrics[metric][bad_idx]!r}"
+                )
+                continue
+            bad_idx = _find_nonfinite(base_metrics[metric])
+            if bad_idx is not None:
+                fail_metric[metric] = (
+                    f"{metric} baseline is non-finite at step {bad_idx}: {base_metrics[metric][bad_idx]!r}"
+                )
+                continue
+
         if metric == "runtime_info/tgs":
             if cur_steps > 10:
                 base_vals = np.array(base_metrics[metric][10:-1], dtype=float)
@@ -295,24 +477,56 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
                 )
 
             if check_flag:
-                has_gradient, gradient_info = detect_memory_upward_gradient(cur_metrics[metric])
-                if has_gradient:
-                    fail_metric[metric] = f"{metric} shows sustained upward gradient in current run, {gradient_info}"
-                    check_flag = False
+                run_gradient = _should_run_memory_gradient_check(
+                    base_metrics[metric],
+                    cur_metrics[metric],
+                    drift_threshold=threshold,
+                    max_rel_drift=max_error,
+                )
+                if run_gradient:
+                    has_gradient, gradient_info = detect_memory_upward_gradient(cur_metrics[metric])
+                    if has_gradient:
+                        fail_metric[metric] = (
+                            f"{metric} shows sustained upward gradient in current run, {gradient_info}"
+                        )
+                        check_flag = False
+                else:
+                    logger.info(
+                        f"✓ {metric} gradient check skipped (max rel drift {max_error:.2%} vs threshold {threshold})"
+                    )
         elif percentile is not None:
             agg_method = method if method in ("absolute", "relative") else "relative"
-            check_flag, agg_error, detail = _percentile_error_passes(
-                base_metrics[metric],
-                cur_metrics[metric],
-                method=agg_method,
-                threshold=threshold,
-                operator="<",
-                percentile=percentile,
-            )
-            if not check_flag:
-                fail_metric[metric] = f"{metric} {agg_method} error bigger than {threshold} ({detail})"
+            num_steps = len(base_metrics[metric])
+            if num_steps < PERCENTILE_MIN_STEPS:
+                logger.warning(
+                    f"⚠ {metric}: only {num_steps} steps (< {PERCENTILE_MIN_STEPS}); "
+                    f"p{percentile} has no statistical meaning, falling back to stepwise max."
+                )
+                check_flag, max_error, max_error_idx, failing_error = _check_sft_step_drift(
+                    base_metrics[metric],
+                    cur_metrics[metric],
+                    threshold=threshold,
+                    method=agg_method,
+                )
+                if not check_flag:
+                    old = base_metrics[metric][max_error_idx]
+                    cur = cur_metrics[metric][max_error_idx]
+                    fail_metric[metric] = _format_sft_drift_failure(
+                        metric, max_error_idx, old, cur, failing_error, agg_method, threshold
+                    )
             else:
-                logger.info(f"✓ {metric} check pass，{detail}, threshold={threshold}")
+                check_flag, agg_error, detail = _percentile_error_passes(
+                    base_metrics[metric],
+                    cur_metrics[metric],
+                    method=agg_method,
+                    threshold=threshold,
+                    operator="<",
+                    percentile=percentile,
+                )
+                if not check_flag:
+                    fail_metric[metric] = f"{metric} {agg_method} error bigger than {threshold} ({detail})"
+                else:
+                    logger.info(f"✓ {metric} check pass，{detail}, threshold={threshold}")
             continue
         else:
             check_flag, max_error, max_error_idx, failing_error = _check_sft_step_drift(
@@ -333,7 +547,11 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
                     f"✓ {metric} check pass，the most absolute error is {max_error:.6f} in {max_error_idx} step."
                 )
             else:
-                logger.info(f"✓ {metric} check pass，the most relative error is {max_error:.2%} in {max_error_idx} step.")
+                logger.info(
+                    f"✓ {metric} check pass，the most relative error is {max_error:.2%} in {max_error_idx} step."
+                )
+
+    _annotate_mtp_only_failure(fail_metric, metric_list)
     result = not fail_metric
     if result:
         return result, "All metrics check passed."
@@ -349,6 +567,20 @@ def check_rl_result(case_name, base_path, cur_path, assert_info, phase=None):
     base_steps, base_metrics = extract_rl_value(base_path, metric_list)
     cur_steps, cur_metrics = extract_rl_value(cur_path, metric_list)
     cur_steps, cur_metrics = _align_first_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="RL")
+    first_base_steps = None
+    if phase == "resume":
+        first_path = base_path.replace("tracker-resume.jsonl", "tracker.jsonl")
+        if os.path.isfile(first_path):
+            first_base_steps, _ = extract_rl_value(first_path, metric_list[:1])
+    cur_steps, cur_metrics = _align_resume_phase_steps(
+        phase,
+        base_steps,
+        cur_steps,
+        cur_metrics,
+        kind="RL",
+        first_base_steps=first_base_steps,
+        resume_base_path=base_path if phase == "resume" else None,
+    )
 
     assert cur_steps == base_steps, (
         f"current RL steps is not equal to base RL steps, current steps: {cur_steps}, base steps: {base_steps}"
@@ -379,6 +611,12 @@ def check_rl_result(case_name, base_path, cur_path, assert_info, phase=None):
                 f"baseline={len(base_vals)}, current={len(cur_vals)}"
             )
             continue
+
+        skip_steps = int(config.get("skip_steps") or 0)
+        sliced = _apply_rl_skip_steps(base_vals, cur_vals, metric=metric, skip_steps=skip_steps)
+        if sliced is None:
+            continue
+        base_vals, cur_vals = sliced
 
         max_error = 0.0
         max_error_idx = 0
@@ -411,10 +649,11 @@ def check_rl_result(case_name, base_path, cur_path, assert_info, phase=None):
         for idx, (base_val, cur_val) in enumerate(zip(base_vals, cur_vals)):
             errors = _step_errors([base_val], [cur_val], method)
             error = round(errors[0], 5)
+            report_idx = idx + skip_steps
 
             if error > max_error:
                 max_error = error
-                max_error_idx = idx
+                max_error_idx = report_idx
 
             if operator == "<":
                 passed = error < threshold
@@ -426,12 +665,13 @@ def check_rl_result(case_name, base_path, cur_path, assert_info, phase=None):
             if not passed:
                 if method == "value":
                     fail_metric[metric] = (
-                        f"{metric} value {cur_val:.6f} does not satisfy {operator} {threshold} at step {idx}"
+                        f"{metric} value {cur_val:.6f} does not satisfy {operator} {threshold} "
+                        f"at step {report_idx}"
                     )
                 else:
                     fail_metric[metric] = (
                         f"{metric} error {error:.6f} not less than threshold {threshold} "
-                        f"(method: {method}, operator: {operator}) at step {idx}, "
+                        f"(method: {method}, operator: {operator}) at step {report_idx}, "
                         f"baseline: {base_val:.6f}, current: {cur_val:.6f}"
                     )
                 check_flag = False

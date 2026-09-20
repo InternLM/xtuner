@@ -15,7 +15,7 @@ jobs:
     env:
       # Leave external turn headroom for the analysis handoff and the StructuredOutput summary handoff.
       CLAUDE_REVIEW_ANALYSIS_MAX_TURNS: 34
-      CLAUDE_REVIEW_SUMMARY_MAX_TURNS: 2
+      CLAUDE_REVIEW_SUMMARY_MAX_TURNS: 10
       CLAUDE_REVIEW_INLINE_MAX_TURNS: 10
       # Trusted maintainers trigger reviews, but PR content can still be untrusted. Keep credential scrubbing and
       # Linux PID-namespace isolation enabled for Claude subprocesses.

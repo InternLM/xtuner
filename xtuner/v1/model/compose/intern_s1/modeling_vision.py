@@ -34,8 +34,7 @@ from torch.distributed.fsdp import (
     fully_shard,
 )
 from xtuner.v1.ops.attn_imp import attn_impl_mapping, AttnOpOutputs
-from xtuner.v1.model.utils.checkpointing import checkpoint_wrapper
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
+from xtuner.v1.model.utils.checkpointing import apply_activation_checkpointing
 from xtuner.v1.module import RMSNorm
 from xtuner.v1.ops.others import Dropout
 from xtuner.v1.ops.act_fn import get_act_fn
@@ -408,11 +407,15 @@ class InternS1VisionModel(BaseModel):
             layer = self.encoder.layer[layer_idx]
 
             if layer_idx < num_recompute_layers:
-                layer = checkpoint_wrapper(layer,
-                                           preserve_rng_state=checkpoint_preserve_rng_state,
-                                           checkpoint_impl=CheckpointImpl.REENTRANT)
+                layer = apply_activation_checkpointing(
+                    layer,
+                    preserve_rng_state=checkpoint_preserve_rng_state,
+                )
                 if self.config.drop_path_rate == 0.0 and self.compile_cfg:
-                    layer.forward = torch.compile(layer.forward, fullgraph=True)
+                    # The PyTree checkpoint adapter is an intentional graph break; model compute
+                    # inside it keeps the independently configured full-graph compilation.
+                    compiled_forward = torch.compile(type(layer).forward, fullgraph=False)
+                    layer.forward = compiled_forward.__get__(layer, type(layer))
 
             self.encoder.layer[layer_idx] = layer
 

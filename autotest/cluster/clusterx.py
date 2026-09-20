@@ -7,10 +7,13 @@ from typing import Any, Dict, Optional
 from clusterx.config import CLUSTER
 from clusterx.launcher import CLUSTER_MAPPING
 from clusterx.launcher.base import JobSchema, JobStatus
+from pydantic import ValidationError
 
 
 JOB_LOOKUP_RETRY_INTERVAL_S = 5
 JOB_LOOKUP_RETRY_TIMES = 6
+STATUS_POLL_INTERVAL_S = 10
+MAX_UNRECOGNIZED_STATUS_POLLS = 30
 # rjob appends a suffix such as "-7b6a1" (6 chars); keep the final name <= 50.
 MAX_RJOB_FINAL_NAME_LEN = 50
 RJOB_GENERATED_SUFFIX_LEN = 6
@@ -23,7 +26,8 @@ def build_rjob_name(
     run_id: str,
     max_len: int = MAX_RJOB_SUBMITTED_NAME_LEN,
 ) -> str:
-    """Build a submitted rjob name while reserving room for its generated suffix.
+    """Build a submitted rjob name while reserving room for its generated
+    suffix.
 
     Format: ``{type}-{case}-{run_id}``. When too long, truncate ``case`` and append a
     short hash so different long case names do not collide after truncation. By
@@ -46,6 +50,30 @@ def build_rjob_name(
     if keep < 1:
         return f"{prefix}{digest}{suffix}"[:max_len]
     return f"{prefix}{case_name[:keep]}-{digest}{suffix}"
+
+
+def _clusterx_submit_kwargs(task_config: Dict[str, Any]) -> dict[str, str]:
+    """Extract clusterx partition/project_name for job submission."""
+    clusterx_cfg = task_config.get("clusterx") or {}
+    submit_kwargs: dict[str, str] = {}
+    partition = clusterx_cfg.get("partition")
+    project_name = clusterx_cfg.get("project_name")
+    if partition:
+        submit_kwargs["partition"] = str(partition)
+    if project_name:
+        submit_kwargs["project_name"] = str(project_name)
+    return submit_kwargs
+
+
+def _validate_submitted_job(job_name: str, job_schema: JobSchema) -> None:
+    """Fail fast when clusterx/brainpp did not actually create an rjob."""
+    if not job_schema.job_id:
+        raise RuntimeError(f"clusterx job {job_name} submit returned empty job_id (status={job_schema.status})")
+    if job_schema.status in (JobStatus.FAILED, JobStatus.STOPPED):
+        raise RuntimeError(
+            f"clusterx job {job_name} submit failed immediately "
+            f"(job_id={job_schema.job_id!r}, status={job_schema.status})"
+        )
 
 
 class ClusterTaskExecutor:
@@ -78,7 +106,10 @@ class ClusterTaskExecutor:
         all_command.append(command)
         run_command = "; ".join(all_command)
         job_name = build_rjob_name(task_config["type"], task_config["case_name"], task_config["run_id"])
+        clusterx_submit = _clusterx_submit_kwargs(task_config)
         print(f"rjob name ({len(job_name)} chars): {job_name}")
+        if clusterx_submit:
+            print(f"clusterx submit target: {clusterx_submit}")
 
         try:
             params = self.params_cls(
@@ -93,17 +124,30 @@ class ClusterTaskExecutor:
                 image=resource.get("image", None),
                 no_env=resource.get("no_env", True),
                 image_pull_policy=resource.get("image_pull_policy", "Always"),
+                **clusterx_submit,
             )
 
             job_schema = self.cluster.run(params)
+            _validate_submitted_job(job_name, job_schema)
+            print(
+                f"clusterx job submitted: job_id={job_schema.job_id}, "
+                f"status={job_schema.status}, target={clusterx_submit or 'clusterx.yaml default'}"
+            )
+        except ValidationError:
+            raise
         except Exception as e:
             traceback.print_exc()
             job_schema = self._lookup_job_schema(job_name)
-            if job_schema is None:
-                raise RuntimeError(
-                    f"clusterx job {job_name} start fail and lookup found no matching job, "
-                    f"task config is {task_config}, exception is: {e}"
+            if job_schema is None or job_schema.status not in (JobStatus.QUEUING, JobStatus.RUNNING):
+                detail = (
+                    f"status={job_schema.status}, job_id={getattr(job_schema, 'job_id', None)!r}"
+                    if job_schema is not None
+                    else "no matching in-flight job"
                 )
+                raise RuntimeError(
+                    f"clusterx job {job_name} submit failed and lookup found no active job ({detail}), "
+                    f"task config is {task_config}, exception is: {e}"
+                ) from e
             print(
                 f"clusterx job {job_name} submit error recovered via lookup: "
                 f"job_id={job_schema.job_id}, status={job_schema.status}, original exception: {e}"
@@ -111,9 +155,20 @@ class ClusterTaskExecutor:
 
         poll_start_time = time.time()
         run_start_time = None
+        unrecognized_polls = 0
 
         while True:
             status = self.get_task_status(job_schema.job_id)
+            if status == JobStatus.UNRECORGNIZED:
+                unrecognized_polls += 1
+                if unrecognized_polls >= MAX_UNRECOGNIZED_STATUS_POLLS:
+                    raise RuntimeError(
+                        f"clusterx job {job_name} ({job_schema.job_id}) status unreadable for "
+                        f"{unrecognized_polls * STATUS_POLL_INTERVAL_S}s; submit likely failed"
+                    )
+            else:
+                unrecognized_polls = 0
+
             if status in [JobStatus.RUNNING] and run_start_time is None:
                 run_start_time = time.time()
             if status in [JobStatus.SUCCEEDED]:
@@ -142,7 +197,7 @@ class ClusterTaskExecutor:
                     f"Execution timeout: jobname {job_name}, {timeout} seconds, "
                     f"task {job_schema.job_id} status is {status}"
                 )
-            time.sleep(10)
+            time.sleep(STATUS_POLL_INTERVAL_S)
 
     @staticmethod
     def _job_name_matches(candidate: str | None, job_name: str) -> bool:

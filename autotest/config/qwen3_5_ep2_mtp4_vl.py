@@ -27,7 +27,7 @@ moe_cfg.text_config.mtp_config = MTPConfig(
     loss_scaling_factor=1.0,
 )
 
-optim_cfg = MuonConfig(lr=2e-5, weight_decay=0.05)
+optim_cfg = MuonConfig(lr=2e-5, weight_decay=0.05, clip_grad_mode="all")
 lr_cfg = LRConfig(lr_type="cosine", warmup_ratio=0.1, lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
     recompute_ratio=1.0,

@@ -21,6 +21,8 @@ class RolloutServerProcess:
     placement_group_bundle_idxs: tuple[int, ...]
     # Rollout ranks updated through this server process.
     weight_update_ranks: tuple[int, ...]
+    # All rollout ranks belonging to this server process's inference engine.
+    inference_engine_ranks: tuple[int, ...] = ()
     # Whether this server process can receive rollout generation requests.
     accepts_rollout_requests: bool = True
     # Node index used by backends that launch one server process per node.
