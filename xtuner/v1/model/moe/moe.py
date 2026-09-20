@@ -9,7 +9,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from cyclopts import Parameter
-from pydantic import ConfigDict
+from pydantic import ConfigDict, model_validator
 from torch import nn
 from torch.distributed._functional_collectives import all_reduce
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
@@ -53,7 +53,6 @@ from xtuner.v1.model.utils import (
 from xtuner.v1.module import (
     GatedDeltaNetConfig,
     GreedyRouterConfig,
-    LMHead,
     MHAConfig,
     MLAConfig,
     NoAuxRouter,
@@ -178,6 +177,13 @@ class MoEConfig(TransformerConfig):
     # keeping it unsharded after forward to avoid repeated all-gathers.
     embed_reshard_after_forward: bool = True
 
+    @model_validator(mode="after")
+    def _validate_critic_head(self) -> Self:
+        """Reject MTP on value-head (critic) models."""
+        if self.head_type == "value_head" and self.mtp_config is not None:
+            raise ValueError("head_type='value_head' does not support MTP; set mtp_config=None")
+        return self
+
     def build(self) -> "MoE":
         from xtuner.v1.model.moe.moe import MoE
 
@@ -255,7 +261,7 @@ class MoE(BaseModel):
             self.ep_tp_mesh = None
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, type=config.rms_norm_type)
-        self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = config.build_head()
 
         self.layers = self.build_layers(config)
         self.rotary_emb = self.build_rotary_embedding(config)
@@ -1269,10 +1275,10 @@ class MoE(BaseModel):
         self.mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
-        if self.fsdp_config.fp32_lm_head:
-            lm_head_mp_policy = MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32)
+        if self.fsdp_config.fp32_head:
+            head_mp_policy = MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32)
         else:
-            lm_head_mp_policy = self.mp_policy
+            head_mp_policy = self.mp_policy
         self._init_device_mesh(fsdp_config)
 
         if self.config.float8_cfg is not None:
@@ -1360,7 +1366,7 @@ class MoE(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=lm_head_mp_policy,
+            mp_policy=head_mp_policy,
             reshard_after_forward=False,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.lm_head,
