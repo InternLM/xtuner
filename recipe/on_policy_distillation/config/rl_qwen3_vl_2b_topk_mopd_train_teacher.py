@@ -4,6 +4,16 @@ Same models / data / training shape as the sampled-token mopd e2e, but Teacher
 targets come from frozen FSDP Teachers inside each TrainingWorker
 (TrainTeacherConfig + DistillationLossConfig loss_mode=forward_kl_topk).
 
+Step-1/2 metric baselines of the reference run (full precision in
+``tests/rl/test_opd_two_step_accuracy.py::TOPK_GOLDEN``):
+
+  distillation/reduced_topk_opd_kl                    step1=0.3049  step2=0.3286
+  distillation/reduced_topk_opd_loss                  step1=0.3049  step2=0.3286
+  distillation/reduced_topk_opd_overlap_fraction      step1=0.6677  step2=0.6546
+  distillation/reduced_topk_opd_student_selected_mass step1=0.9961  step2=0.9966
+  distillation/reduced_topk_opd_teacher_selected_mass step1=0.9986  step2=0.9990
+  response/rewards/mean                               step1=0.3828  step2=0.3633
+
 This path does NOT launch Rollout Teacher HTTP servers. Student rollout still
 uses LMDeploy/SGLang via the normal RL launcher.
 """
