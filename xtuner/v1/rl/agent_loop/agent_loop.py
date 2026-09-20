@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeAlias, cast, overload
 
 import ray
+import torch
 from pydantic import BaseModel, ConfigDict
 from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
@@ -274,13 +275,80 @@ class AgentLoop(ABC):
             state = await self._teacher_scorer.on_sample_ready(state)
             return state
 
+        for state in rollout_state:
+            state.agent_loop_type = type(self).__name__
         group = list(await asyncio.gather(*(create_task(generate_one(state)) for state in rollout_state)))
         if self.judger is not None and self.enable_batch_judge:
             if all(sample.status == Status.COMPLETED for sample in group):
                 group = await self.run_judger(group)
 
         group = maybe_filter_invalid_sample(group, self.is_valid_sample_fn, self.logger)
-        return await self._teacher_scorer.on_group_ready(group)
+        group = await self._teacher_scorer.on_group_ready(group)
+        return self.canonicalize_train_fields(group)
+
+    def canonicalize_train_fields(self, group: list[RolloutState]) -> list[RolloutState]:
+        """Canonicalize the training token fields of one rollout group.
+
+        Prompt+response samples without ``input_ids`` are assembled in place into the
+        unified full-sequence convention: ``input_ids``/``labels``/``logprobs`` share one
+        length, where ``labels[j]`` is the prediction target of the token at position
+        ``j`` and the train controller applies the one-position shift at conversion time.
+        Samples that already carry ``input_ids`` satisfy the convention and are left
+        untouched. Non-completed samples are skipped. Failures mark the single sample as
+        ``Status.FAILED`` instead of raising into the producer. Loops that assemble their
+        own full sequences (e.g. the agentic localhost/sandbox loops) override this
+        method with their own loop-specific implementation instead of relying on this
+        default.
+
+        Args:
+            group (list[RolloutState]): One group of rollout states after generation,
+                judging, and filtering.
+
+        Returns:
+            list[RolloutState]: The same group with canonical training fields.
+        """
+        for state in group:
+            if state.status != Status.COMPLETED or state.input_ids is not None:
+                continue
+            try:
+                is_vlm_model = "train_prompt_ids" in state.extra_fields
+                if is_vlm_model:
+                    # TODO(hha): VLM, 不好的设计，后续要去掉
+                    prompt_ids = state.extra_fields["train_prompt_ids"]
+                else:
+                    prompt_ids = state.prompt_ids
+                assert prompt_ids is not None and len(prompt_ids) > 0, (
+                    f"Prompt ids cannot be None or empty in data: {state}"
+                )
+
+                response_ids: list[int]
+                if state.response_ids is not None:
+                    resp_ids_raw = state.response_ids
+                    if isinstance(resp_ids_raw, torch.Tensor):
+                        response_ids = resp_ids_raw.flatten().tolist()
+                    else:
+                        response_ids = cast(list[int], resp_ids_raw)
+                else:
+                    assert state.response is not None, "response item cannot be None"
+                    response_ids = self.tokenizer(state.response, return_tensors="pt")["input_ids"].flatten().tolist()
+                # 归一化写回：Tensor 展平为 list、tokenizer 兜底结果也落到 response_ids，后续消费者零分支。
+                state.response_ids = response_ids
+
+                if state.logprobs is not None:
+                    assert len(state.logprobs) == len(response_ids), (
+                        f"{len(state.logprobs)} vs {len(response_ids)}, data: {state}"
+                    )
+                    # 只有 response 部分有 logprobs, 前面补 0 对齐全序列
+                    state.logprobs = [0.0] * len(prompt_ids) + list(state.logprobs)
+
+                # 返回的 routed_experts 不包括 eos 的值，实际上也不需要，训练输入会去掉最后一位
+                state.input_ids = list(prompt_ids) + response_ids
+                state.labels = [-100] * len(prompt_ids) + list(response_ids)
+            except Exception as exc:
+                self.logger.error(f"Canonicalize train fields failed for rollout_id={state.rollout_id}: {exc}")
+                state.status = Status.FAILED
+                state.error_msg = f"canonicalize_train_fields failed: {exc}"
+        return group
 
     @overload
     async def run_judger(self, rollout_state: RolloutState) -> RolloutState: ...

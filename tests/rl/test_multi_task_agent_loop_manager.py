@@ -312,13 +312,15 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             _migrate_legacy_is_valid_sample_fn(cfg, MagicMock())
 
     async def test_take_train_batch_applies_token_staleness_mask(self):
-        # 启用 token staleness 时，公开 produce_batch 路径应返回最终 effective mask。
+        # 启用 token staleness 时，公开 produce_batch 路径应把过期 token 的监督清出 labels（只清零不恢复）。
         state = RolloutState(
             rollout_id=1,
             group_id=1,
             message=[{"role": "user", "content": "prompt"}],
             prompt_ids=[1, 2],
             response_ids=[3, 4],
+            input_ids=[1, 2, 3, 4],
+            labels=[-100, -100, 3, 4],
             response_model_steps=[0, 4],
             status=Status.COMPLETED,
         )
@@ -344,7 +346,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
         result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
 
-        self.assertEqual(result.rollout_states[0][0].response_mask, [0, 1])
+        self.assertEqual(result.rollout_states[0][0].labels, [-100, -100, -100, 4])
         self.assertEqual(replay_buffer.task_token_stale_threshold_calls, [{"task": 4}])
 
     async def test_take_train_batch_skips_agentic_token_staleness_mask(self):
@@ -354,7 +356,8 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             message=[{"role": "user", "content": "prompt"}],
             input_ids=[1, 2],
             labels=[-100, 2],
-            response_mask=[1],
+            logprobs=[0.0, -0.1],
+            agent_loop_type="AgentInLocalhostLoop",
             status=Status.COMPLETED,
         )
         strategy = _FakeProduceStrategy(token_stale_threshold=4)
@@ -378,7 +381,41 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
         result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
 
-        self.assertEqual(result.rollout_states[0][0].response_mask, [1])
+        self.assertEqual(result.rollout_states[0][0].labels, [-100, 2])
+
+    async def test_take_train_batch_sync_path_leaves_labels_untouched(self):
+        # 同步路径（无 token staleness）零操作：labels 在生成期已是最终态（语义洞已烙入）。
+        state = RolloutState(
+            rollout_id=1,
+            group_id=1,
+            message=[{"role": "user", "content": "prompt"}],
+            prompt_ids=[1, 2],
+            response_ids=[3, 4, 5],
+            input_ids=[1, 2, 3, 4, 5],
+            labels=[-100, -100, 4, 5, -100],
+            status=Status.COMPLETED,
+        )
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=_FakeProduceStrategy(),
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                )
+            ],
+            replay_buffer=_FakeReplayBuffer(
+                rollout_states_by_task={"task": [[state]]},
+                leftover_counts={},
+            ),
+            rollout_controller=_fake_rollout_controller(),
+        )
+
+        result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
+
+        self.assertEqual(result.rollout_states[0][0].labels, [-100, -100, 4, 5, -100])
 
     async def test_produce_batch_allocates_by_weight_and_returns_task_sorted_results(self):
         # 共卡 produce_batch 按 task 权重分配 batch，并按 task 名稳定返回训练数据和 leftover 统计。
