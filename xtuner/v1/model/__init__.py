@@ -13,6 +13,7 @@ from .compose.internvl import (
 )
 from .compose.qwen3_5 import Qwen3_5_VLDense4BConfig, Qwen3_5_VLMoE35BA3Config
 from .compose.qwen3_vl import (
+    Qwen3VLDense2BConfig,
     Qwen3VLDense4BConfig,
     Qwen3VLDense8BConfig,
     Qwen3VLMoE30BA3Config,
@@ -100,6 +101,7 @@ __all__ = [
     "GreedyRouterConfig",
     "Dense",
     "Qwen3VLMoE30BA3Config",
+    "Qwen3VLDense2BConfig",
     "Qwen3VLDense4BConfig",
     "Qwen3VLDense8BConfig",
     "Qwen3VLMoE235BA22Config",
