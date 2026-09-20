@@ -4,15 +4,29 @@ Same models / data / training shape as the sampled-token mopd e2e, but Teacher
 targets come from frozen FSDP Teachers inside each TrainingWorker
 (TrainTeacherConfig + DistillationLossConfig loss_mode=forward_kl_topk).
 
-Step-1/2 metric baselines of the reference run (full precision in
-``tests/rl/test_opd_two_step_accuracy.py::TOPK_GOLDEN``):
+Baseline metrics of the reference 50-step run, recorded every 5 steps
+(aligned with the eval cadence; step 0 is the eval-only point before
+training). Column names map to TB tags: ``topk_opd_kl`` =
+``distillation/reduced_topk_opd_kl`` (``distillation/reduced_topk_opd_loss``
+is identical at every step), ``overlap`` =
+``distillation/reduced_topk_opd_overlap_fraction``, ``student_mass`` /
+``teacher_mass`` = ``..._student_selected_mass`` / ``..._teacher_selected_mass``,
+``rewards`` = ``response/rewards/mean``. Step-1/2 smoke golden values live in
+``tests/rl/test_opd_two_step_accuracy.py::TOPK_GOLDEN``.
 
-  distillation/reduced_topk_opd_kl                    step1=0.3049  step2=0.3286
-  distillation/reduced_topk_opd_loss                  step1=0.3049  step2=0.3286
-  distillation/reduced_topk_opd_overlap_fraction      step1=0.6677  step2=0.6546
-  distillation/reduced_topk_opd_student_selected_mass step1=0.9961  step2=0.9966
-  distillation/reduced_topk_opd_teacher_selected_mass step1=0.9986  step2=0.9990
-  response/rewards/mean                               step1=0.3828  step2=0.3633
+| step | topk_opd_kl | overlap | student_mass | teacher_mass | rewards | gsm8k_acc | geo3k_acc |
+|------|-------------|---------|--------------|--------------|---------|-----------|-----------|
+|    0 |           - |       - |            - |            - |       - |    0.4382 |    0.2785 |
+|    5 |      0.2708 |  0.6670 |       0.9971 |       0.9992 |  0.5172 |    0.5451 |    0.2651 |
+|   10 |      0.2707 |  0.6573 |       0.9921 |       0.9962 |  0.6031 |    0.6732 |    0.2471 |
+|   15 |      0.2610 |  0.6731 |       0.9924 |       0.9975 |  0.5813 |    0.6778 |    0.2456 |
+|   20 |      0.2624 |  0.6608 |       0.9878 |       0.9967 |  0.6602 |    0.6793 |    0.2141 |
+|   25 |      0.2688 |  0.6691 |       0.9889 |       0.9970 |  0.5813 |    0.6808 |    0.2201 |
+|   30 |      0.2520 |  0.6650 |       0.9887 |       0.9968 |  0.6320 |    0.6785 |    0.2351 |
+|   35 |      0.2451 |  0.6571 |       0.9918 |       0.9983 |  0.6172 |    0.6922 |    0.2097 |
+|   40 |      0.2304 |  0.6603 |       0.9916 |       0.9977 |  0.6258 |    0.6839 |    0.2201 |
+|   45 |      0.2161 |  0.6478 |       0.9931 |       0.9983 |  0.5906 |    0.6611 |    0.1872 |
+|   50 |      0.2444 |  0.6361 |       0.9928 |       0.9987 |  0.7453 |    0.6839 |    0.2037 |
 
 This path does NOT launch Rollout Teacher HTTP servers. Student rollout still
 uses LMDeploy/SGLang via the normal RL launcher.
