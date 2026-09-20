@@ -27,10 +27,8 @@ from xtuner.v1.rl.agent_loop_manager import (
     TaskSpecConfig,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.data_proto.rl_data import SampleParams
-from xtuner.v1.data_proto.sequence_context import SequenceContext
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from transformers import AutoTokenizer
-import torch
 
 QWEN3_PATH = os.environ["QWEN3_PATH"]
 ALPACA_PATH = os.environ["ALPACA_PATH"]
@@ -236,7 +234,7 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
         trainer = trainer_cfg.build()
         train_controller = trainer.train_controller
 
-        # Prepare synthetic data batches
+        # Prepare synthetic rollout groups
         tokenizer = AutoTokenizer.from_pretrained(QWEN3_PATH, trust_remote_code=True)
 
         # Create simple prompts and responses
@@ -245,46 +243,46 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
             ["4", "Four", "2+2=4", "The answer is 4"],
             ["Paris", "The capital is Paris", "Paris, France", "It's Paris"]
         ]
+        group_rewards = [1.0, 0.8, 0.9, 0.7]
 
-        data_batches = []
-        for prompt, response_list in zip(prompts, responses):
+        rollout_groups = []
+        for group_idx, (prompt, response_list) in enumerate(zip(prompts, responses)):
             prompt_ids = tokenizer(prompt, return_tensors='pt')['input_ids'].flatten().tolist()
-            rewards = torch.tensor([1.0, 0.8, 0.9, 0.7], dtype=torch.float32)
-            advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
-
+            group = []
             for i, response in enumerate(response_list):
                 response_ids = tokenizer(response, return_tensors='pt')['input_ids'].flatten().tolist()
-                # Align with RLColocateTrainer._prepare_train_data():
-                # - input_ids excludes last token (usually eos) of response_ids
-                # - shifted_labels aligns to input_ids length
-                input_ids = prompt_ids + response_ids[:-1]
-                shifted_labels = [-100] * (len(prompt_ids) - 1) + response_ids
-                input_ids_tensor = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
-                shifted_labels_tensor = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
-
-                adv_val = advantages[i].item()
-                # Controller._packing expects `advantage` as a list and will flatten it.
-                # Keep the length consistent with shifted_labels/input_ids.
-                advantage_list = [adv_val] * (len(prompt_ids) - 1) + [adv_val] * len(response_ids)
-
-                data_batches.append(dict(
-                    seq_ctx=SequenceContext.from_input_ids((input_ids_tensor,), device="cpu"),
-                    shifted_labels=shifted_labels_tensor,
-                    advantage=advantage_list,
+                # Canonical full-sequence convention (AgentLoop.canonicalize_train_fields):
+                # - input_ids keeps the whole prompt+response sequence
+                # - labels supervise the full response; TrainingController applies the
+                #   one-position shift at conversion time
+                # - agent_loop_type records the producing loop's class name
+                group.append(RolloutState(
+                    rollout_id=group_idx * len(response_list) + i,
+                    group_id=group_idx,
+                    message=[{"role": "user", "content": prompt}],
+                    prompt_ids=prompt_ids,
+                    response=response,
+                    response_ids=response_ids,
+                    agent_loop_type="SingleTurnAgentLoop",
+                    reward={"score": group_rewards[i]},
+                    status=Status.COMPLETED,
+                    input_ids=prompt_ids + response_ids,
+                    labels=[-100] * len(prompt_ids) + response_ids,
                 ))
+            rollout_groups.append(group)
 
         # RLColocateTrainer initializes by offloading train workers to CPU.
         # Align with RLColocateTrainer.fit() which onloads before training.
         train_controller.onload(target="all")
 
         # First fit and save
-        train_controller.fit(data_batches, pack_max_length=1024, rollout_idx=0)
+        train_controller.fit(rollout_groups, pack_max_length=1024, rollout_idx=0)
         checkpoint_path = str(work_dir / "save_test")
         train_controller.save(checkpoint_path, no_save_optimizer=True)
 
         # Second fit and collect metrics
         train_controller.onload(target="all")
-        log_infos = train_controller.fit(data_batches, pack_max_length=1024, rollout_idx=1)
+        log_infos, _ = train_controller.fit(rollout_groups, pack_max_length=1024, rollout_idx=1)
         efficient_attn_ratio_list = []
         for log_info in log_infos:
             efficient_attn_ratio_list.append(log_info['sft_train_metrics']['efficient_attn_ratio'])
@@ -314,7 +312,7 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
         train_controller.resume(load_checkpoint_cfg)
 
         train_controller.onload(target="all")
-        log_infos = train_controller.fit(data_batches, pack_max_length=1024, rollout_idx=1)
+        log_infos, _ = train_controller.fit(rollout_groups, pack_max_length=1024, rollout_idx=1)
         new_efficient_attn_ratio_list = []
         for log_info in log_infos:
             new_efficient_attn_ratio_list.append(log_info['sft_train_metrics']['efficient_attn_ratio'])

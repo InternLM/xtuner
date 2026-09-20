@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import contextlib
 import json
 import math
@@ -8,7 +10,6 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Iterable,
-    List,
     Sequence,
     TypedDict,
     cast,
@@ -17,6 +18,8 @@ from typing import (
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
+
+    from xtuner.v1.rl.advantage.base import AdvantageEstimator
 
 import numpy as np
 import ray
@@ -43,6 +46,7 @@ from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.rl.distillation import (
+    DistillationTrainerAdapter,
     TrainTeacherManager,
     TrainTeacherManagerConfig,
     TrainTeacherTimings,
@@ -198,7 +202,12 @@ class WorkerConfig(BaseModel):
     rollout_steps_per_sft: int = 1
     sft_loss_cfg: CELossConfig = CELossConfig()
 
-    def build(self, placement_group: "PlacementGroup"):
+    def build(
+        self,
+        placement_group: PlacementGroup,
+        advantage_estimator: AdvantageEstimator | None = None,
+        distillation: DistillationTrainerAdapter | None = None,
+    ):
         """Build training workers and controller from this config and placement
         group."""
         # import here to avoid circular import
@@ -216,7 +225,11 @@ class WorkerConfig(BaseModel):
         )(TrainingWorker)
         train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorkerCls, self, placement_group)
         ray.wait([w.ready.remote() for w in train_workers])
-        return TrainingController(workers=train_workers)
+        return TrainingController(
+            workers=train_workers,
+            advantage_estimator=advantage_estimator,
+            distillation=distillation,
+        )
 
 
 class WorkerInputItem(TypedDict):
@@ -244,7 +257,7 @@ class WorkerLogItem(TypedDict):
     rollout_entropy: NotRequired[float]
     mismatch_metrics: NotRequired[dict[str, float]]
     rollout_is_metrics: NotRequired[dict[str, float]]
-    train_metrics: List[WorkerTrainLogItem]
+    train_metrics: list[WorkerTrainLogItem]
     sft_train_metrics: NotRequired[dict[str, float]]
 
 

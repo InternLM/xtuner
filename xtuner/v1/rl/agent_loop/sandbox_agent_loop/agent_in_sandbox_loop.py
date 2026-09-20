@@ -240,6 +240,7 @@ class AgentInSandboxLoop(AgentLoop):
 
         pending_tasks = []
         for state in rollout_state:
+            state.agent_loop_type = type(self).__name__
             state.sample_params = self.sample_params
             task = create_task(generate_one(state))
             pending_tasks.append(task)
@@ -248,7 +249,43 @@ class AgentInSandboxLoop(AgentLoop):
         samples = [sample for sample_group in sample_groups for sample in sample_group]
         samples = _drop_failed_train_samples(samples, self.mode)
         samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
-        return await self._teacher_scorer.on_group_ready(samples)
+        samples = await self._teacher_scorer.on_group_ready(samples)
+        return self.canonicalize_train_fields(samples)
+
+    def canonicalize_train_fields(self, group: list[RolloutState]) -> list[RolloutState]:
+        """Validate the canonical training fields of one sandbox agentic
+        rollout group.
+
+        Each segment state carries ``input_ids``/``labels``/``logprobs`` exported from
+        the trace store as one unshifted full sequence, so there is nothing left to
+        assemble. Canonicalization only re-checks the unified convention (``labels``
+        present and of equal length, ``logprobs`` either ``None`` or of equal length)
+        per segment state and marks a violating sample ``Status.FAILED`` instead of
+        raising into the producer. States without ``input_ids`` (eval-mode states) carry
+        no training fields and are skipped.
+
+        Args:
+            group (list[RolloutState]): One flattened group of segment rollout states
+                after generation, judging, and filtering.
+
+        Returns:
+            list[RolloutState]: The same group with validated training fields.
+        """
+        for state in group:
+            if state.status != Status.COMPLETED or state.input_ids is None:
+                continue
+            try:
+                labels = state.labels
+                if labels is None or len(labels) != len(state.input_ids):
+                    expected = 0 if labels is None else len(labels)
+                    raise ValueError(f"labels length mismatch: {expected} vs {len(state.input_ids)}")
+                if state.logprobs is not None and len(state.logprobs) != len(state.input_ids):
+                    raise ValueError(f"logprobs length mismatch: {len(state.logprobs)} vs {len(state.input_ids)}")
+            except Exception as exc:
+                self.logger.error(f"Canonicalize train fields failed for rollout_id={state.rollout_id}: {exc}")
+                state.status = Status.FAILED
+                state.error_msg = f"canonicalize_train_fields failed: {exc}"
+        return group
 
     # NOTE: A single sandbox session may yield multiple trainable segments, so this returns a list
     # rather than the base class's single RolloutState. The base contract is never exercised for
@@ -370,7 +407,6 @@ class AgentInSandboxLoop(AgentLoop):
         rollout_state.response_ids = None
         rollout_state.logprobs = None
         rollout_state.routed_experts = None
-        rollout_state.response_mask = None
         rollout_state.response_model_steps = None
         rollout_state.extra_fields["origin_data_source"] = item.data_source
         rollout_state.extra_fields["agent_status"] = item.status.value
