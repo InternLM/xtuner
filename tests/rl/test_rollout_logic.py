@@ -1250,12 +1250,8 @@ class TestRolloutHealthManager(unittest.TestCase):
             rollout_controller=MagicMock(),
             rollout_config=SimpleNamespace(weight_transport_type="checkpoint_engine"),
         )
-        manager._pending_rollout_weight_update_stop_event = SimpleNamespace(
-            wait=MagicMock(side_effect=(False, True))
-        )
-        manager._rollout_resources_available = SimpleNamespace(
-            is_set=MagicMock(side_effect=(True, False))
-        )
+        manager._pending_rollout_weight_update_stop_event = SimpleNamespace(wait=MagicMock(side_effect=(False, True)))
+        manager._rollout_resources_available = SimpleNamespace(is_set=MagicMock(side_effect=(True, False)))
         manager._rollout_weight_update_lock = SimpleNamespace(
             acquire=MagicMock(return_value=True),
             release=MagicMock(),
@@ -1639,6 +1635,7 @@ class TestRolloutHealthManager(unittest.TestCase):
         self.assertEqual(actor.offload.calls, [()])
         self.assertEqual(actor.restore_skip_load_weights.calls, [()])
 
+
 class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
     async def test_preprocess_and_postprocess_preserve_response_prefix(self):
         # partial rollout 续写时应复用 prompt+历史 response，并把新 response token 追加到历史后面。
@@ -1723,8 +1720,9 @@ class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rollout_state.response_ids, [101, 102, 201, 202, 301])
         self.assertLessEqual(len(rollout_state.response_ids), max_tokens)
 
-    async def test_postprocess_frees_old_routed_expert_refs_after_concat(self):
-        # direct rollout caller 显式要求 partial handler 释放历史和当前 ObjectRef。
+    async def test_postprocess_frees_input_refs_owned_by_rollout_after_concat(self):
+        # concat 之后 history/current 两个输入 ref 都被 direct rollout 路径释放。
+
         class FakeObjectRef:
             def __init__(self, value):
                 self.value = value
@@ -1763,18 +1761,17 @@ class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
                 status=Status.ABORTED,
                 prompt_tokens=3,
                 completion_tokens=1,
-                release_input_routed_experts=True,
             )
 
         self.assertIs(out.routed_experts, concat_ref)
         self.assertEqual(ray_put.call_args.args[0].tolist(), [[1], [2], [3]])
-        free_object_refs.assert_any_call([history_ref])
-        free_object_refs.assert_any_call([cur_ref])
+        free_object_refs.assert_any_call(cur_ref)
+        free_object_refs.assert_any_call(history_ref)
         self.assertEqual(free_object_refs.call_count, 2)
 
-    async def test_postprocess_does_not_free_input_refs_by_default(self):
-        """PartialRolloutHandler must leave input refs to its caller by
-        default."""
+    async def test_postprocess_does_not_free_trace_store_history_ref(self):
+        """History refs borrowed from the TraceStore must stay valid for
+        sibling segments; only the current ref is released."""
 
         class FakeObjectRef:
             def __init__(self, value):
@@ -1817,5 +1814,5 @@ class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertIs(out.routed_experts, concat_ref)
-        free_object_refs.assert_not_called()
+        free_object_refs.assert_called_once_with(cur_ref)
         self.assertEqual(out.routed_experts_owner, "rollout")

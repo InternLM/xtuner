@@ -216,52 +216,17 @@ def free_rollout_state_refs(rollout_state: RolloutState) -> None:
         free_object_refs(refs)
 
 
-def release_owned_routed_experts(rollout_state: RolloutState) -> None:
-    """Release routed-expert refs owned by the direct rollout path.
+def discard_rollout_state(rollout_state: RolloutState) -> RolloutState:
+    """Release owned references and clear fields before dropping a rollout.
 
-    ``RolloutState`` can also contain refs borrowed from ``TraceStore``.  This
-    helper refuses to free those refs; the TraceStore session is their owner
-    and must release them through its own lifecycle.  Refs with no owner tag
-    (e.g. restored from a legacy checkpoint via ``ray.put``) have no other
-    borrower and are safe to release here.
+    Routed experts borrowed from the TraceStore are only detached: the
+    TraceStore session owns them and releases them through its own lifecycle.
     """
-
-    routed_experts = rollout_state.routed_experts
-    if routed_experts is None:
-        rollout_state.routed_experts_owner = None
-        return
 
     if rollout_state.routed_experts_owner == "trace_store":
-        # Expected on retryable stale segments: the borrowed ref stays valid
-        # until the TraceStore session is released.
-        logger.debug(
-            f"Detaching TraceStore-owned routed_experts without freeing (session_id={rollout_state.session_id!r})."
-        )
-        return
-
-    from ray import ObjectRef
-
-    from xtuner.v1.rl.utils.ray_utils import free_object_refs
-
-    if isinstance(routed_experts, (ObjectRef, list)):
-        free_object_refs(routed_experts)
-    rollout_state.routed_experts = None
-    rollout_state.routed_experts_owner = None
-
-
-def discard_rollout_state(rollout_state: RolloutState, *, release_refs: bool = False) -> RolloutState:
-    """Clear a rollout before dropping it.
-
-    Resource release is opt-in so the caller has to make the ownership
-    decision.  TraceStore-owned routed experts are detached before generic
-    cleanup so ``free_rollout_state_refs`` cannot free them a second time.
-    """
-
-    if release_refs:
-        if rollout_state.routed_experts_owner == "trace_store":
-            rollout_state.routed_experts = None
-            rollout_state.routed_experts_owner = None
-        free_rollout_state_refs(rollout_state)
+        rollout_state.routed_experts = None
+        rollout_state.routed_experts_owner = None
+    free_rollout_state_refs(rollout_state)
 
     for field_name, field in type(rollout_state).model_fields.items():
         if field.is_required():
@@ -308,7 +273,38 @@ def update_status_from_finish_reason(finish_reason: str | None) -> Status:
         return Status.FAILED
 
 
+def _release_owned_routed_experts(rollout_state: RolloutState) -> None:
+    """Release routed-expert refs owned by this rollout state.
+
+    ``RolloutState`` can also contain refs borrowed from ``TraceStore``.  This
+    helper refuses to free those refs; the TraceStore session is their owner
+    and must release them through its own lifecycle.  Refs with no owner tag
+    (e.g. restored from a legacy checkpoint via ``ray.put``) have no other
+    borrower and are safe to release here.
+    """
+
+    routed_experts = rollout_state.routed_experts
+    if routed_experts is None:
+        return
+
+    if rollout_state.routed_experts_owner == "trace_store":
+        # Expected on retryable stale segments: the borrowed ref stays valid
+        # until the TraceStore session is released.
+        logger.debug(
+            f"Detaching TraceStore-owned routed_experts without freeing (session_id={rollout_state.session_id!r})."
+        )
+        return
+
+    from ray import ObjectRef
+
+    from xtuner.v1.rl.utils.ray_utils import free_object_refs
+
+    if isinstance(routed_experts, (ObjectRef, list)):
+        free_object_refs(routed_experts)
+
+
 def reset_rollout_response(rollout_state: RolloutState) -> RolloutState:
+    _release_owned_routed_experts(rollout_state)
     prompt_ids = getattr(rollout_state, "prompt_ids", None)
     rollout_state.tokens = list(prompt_ids) if prompt_ids is not None else None
     rollout_state.response = ""

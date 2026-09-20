@@ -118,22 +118,10 @@ class TestTokenStalenessMask(unittest.TestCase):
         self.assertIsNone(state.response_mask)
         self.assertEqual(masks, [[1, 1]])
 
-    def test_reset_rollout_response_only_clears_fields(self):
-        """Reset must not implicitly release an ObjectRef owned by its
-        caller."""
-        state = self._state(response_model_steps=[0, 4])
-        state.routed_experts = object()
-        state.routed_experts_owner = "rollout"
-
-        with patch("xtuner.v1.rl.utils.ray_utils.free_object_refs") as free_refs:
-            reset_rollout_response(state)
-
-        free_refs.assert_not_called()
-        self.assertIsNone(state.routed_experts)
-        self.assertIsNone(state.routed_experts_owner)
-
-    def test_release_owned_routed_experts_only_frees_direct_rollout_refs(self):
-        from xtuner.v1.data_proto.rl_data import release_owned_routed_experts
+    def test_reset_rollout_response_releases_owned_and_detaches_borrowed_refs(self):
+        """Reset releases rollout-owned refs and only detaches TraceStore
+        borrows."""
+        from xtuner.v1.data_proto.rl_data import _release_owned_routed_experts
 
         class FakeObjectRef:
             pass
@@ -150,14 +138,37 @@ class TestTokenStalenessMask(unittest.TestCase):
             patch.object(ray, "ObjectRef", FakeObjectRef),
             patch("xtuner.v1.rl.utils.ray_utils.free_object_refs") as free_refs,
         ):
-            release_owned_routed_experts(direct)
-            release_owned_routed_experts(borrowed)
+            reset_rollout_response(direct)
+            _release_owned_routed_experts(borrowed)
+            reset_rollout_response(borrowed)
 
         free_refs.assert_called_once_with(direct_ref)
         self.assertIsNone(direct.routed_experts)
         self.assertIsNone(direct.routed_experts_owner)
-        self.assertIsNotNone(borrowed.routed_experts)
-        self.assertEqual(borrowed.routed_experts_owner, "trace_store")
+        self.assertIsNone(borrowed.routed_experts)
+        self.assertIsNone(borrowed.routed_experts_owner)
+
+    def test_reset_rollout_response_releases_unowned_refs(self):
+        """Refs without an owner tag (legacy-checkpoint restores) must not
+        leak when the state is reset."""
+
+        class FakeObjectRef:
+            pass
+
+        state = self._state(response_model_steps=[0])
+        unowned_ref = FakeObjectRef()
+        state.routed_experts = unowned_ref
+        state.routed_experts_owner = None
+
+        with (
+            patch.object(ray, "ObjectRef", FakeObjectRef),
+            patch("xtuner.v1.rl.utils.ray_utils.free_object_refs") as free_refs,
+        ):
+            reset_rollout_response(state)
+
+        free_refs.assert_called_once_with(unowned_ref)
+        self.assertIsNone(state.routed_experts)
+        self.assertIsNone(state.routed_experts_owner)
 
     def test_discard_trace_store_state_detaches_without_freeing_trace_ref(self):
         state = self._state(response_model_steps=[0])
@@ -165,7 +176,7 @@ class TestTokenStalenessMask(unittest.TestCase):
         state.routed_experts_owner = "trace_store"
 
         with patch("xtuner.v1.rl.utils.ray_utils.free_object_refs") as free_refs:
-            discarded = discard_rollout_state(state, release_refs=True)
+            discarded = discard_rollout_state(state)
 
         free_refs.assert_not_called()
         self.assertIsNone(discarded.routed_experts)

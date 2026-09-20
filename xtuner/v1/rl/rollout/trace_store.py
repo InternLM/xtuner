@@ -548,7 +548,7 @@ async def release_and_discard_rollout_groups(groups: list[list[RolloutState]]) -
             if item.session_id is not None and str(item.session_id) in released_session_ids:
                 item.routed_experts = None
                 item.routed_experts_owner = None
-            discard_rollout_state(item, release_refs=True)
+            discard_rollout_state(item)
 
 
 if __name__ == "__main__":

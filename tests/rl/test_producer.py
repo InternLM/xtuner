@@ -325,7 +325,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         item.routed_experts_owner = "rollout"
         item.extra_fields = {"large": [1, 2, 3]}
 
-        discarded = discard_rollout_state(item, release_refs=True)
+        discarded = discard_rollout_state(item)
 
         self.assertEqual(discarded.message, [{"role": "user", "content": "prompt 42"}])
         self.assertEqual(discarded.status, Status.INIT)

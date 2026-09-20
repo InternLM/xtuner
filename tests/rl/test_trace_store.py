@@ -26,11 +26,9 @@ class TestRolloutTraceCleanup(unittest.TestCase):
             session_id="rollout-owned", routed_experts=rollout_owned_ref, routed_experts_owner="rollout"
         )
         routed_experts_seen_by_discard = {}
-        release_flags = {}
 
-        def record_discard(item, **kwargs):
+        def record_discard(item):
             routed_experts_seen_by_discard[item.session_id] = item.routed_experts
-            release_flags[item.session_id] = kwargs["release_refs"]
 
         with (
             patch(
@@ -47,8 +45,6 @@ class TestRolloutTraceCleanup(unittest.TestCase):
         release_sessions.assert_awaited_once_with(["trace-owned", "rollout-owned"])
         self.assertIsNone(routed_experts_seen_by_discard["trace-owned"])
         self.assertIs(routed_experts_seen_by_discard["rollout-owned"], rollout_owned_ref)
-        self.assertTrue(release_flags["trace-owned"])
-        self.assertTrue(release_flags["rollout-owned"])
         self.assertEqual(discard.call_count, 2)
 
     def test_get_existing_store_returns_none_when_ray_is_uninitialized(self):
