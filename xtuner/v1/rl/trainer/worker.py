@@ -50,6 +50,7 @@ from xtuner.v1.rl.distillation import (
 from xtuner.v1.rl.loss import (
     BaseRLLossConfig,
     BaseRLLossContext,
+    CriticLossConfig,
     kl_penalty,
 )
 from xtuner.v1.rl.model_utils import build_frozen_model
@@ -129,7 +130,9 @@ class WorkerConfig(BaseModel):
     Args:
         model_cfg (TransformerConfig): Model architecture configuration.
         optim_cfg (OptimConfig): Optimizer configuration for training.
-        loss_cfg (BaseRLLossConfig): Loss function configuration for RL training.
+        loss_cfg (BaseRLLossConfig | CriticLossConfig): Policy RL loss or critic
+            value-loss configuration. TrainingWorker.fit still follows the actor
+            (advantages / logprobs) path; critic training is not wired yet.
         lr_cfg (LRConfig): Learning rate scheduler configuration.
         fsdp_cfg (FSDPConfig): Fully Sharded Data Parallel configuration.
         load_from (str | Path): Path to load the main model from.
@@ -172,7 +175,7 @@ class WorkerConfig(BaseModel):
     model_config = ConfigDict(title="Worker config", extra="forbid", arbitrary_types_allowed=True)
     model_cfg: TransformerConfig | BaseComposeConfig
     optim_cfg: OptimConfig
-    loss_cfg: BaseRLLossConfig
+    loss_cfg: BaseRLLossConfig | CriticLossConfig
     lr_cfg: LRConfig
     fsdp_cfg: FSDPConfig
     load_from: str | Path  # TODO: 把 actor 和 ref 配置分离
@@ -289,7 +292,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._engine = self._build_engine(worker_cfg)
 
         self._has_ref = False
-        if worker_cfg.loss_cfg.use_kl_loss:
+        if isinstance(worker_cfg.loss_cfg, BaseRLLossConfig) and worker_cfg.loss_cfg.use_kl_loss:
             self._has_ref = True
             if worker_cfg.ref_load_from is None:
                 worker_cfg.ref_load_from = worker_cfg.load_from
@@ -660,7 +663,9 @@ class TrainingWorker(SingleAcceleratorWorker):
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int) -> WorkerLogItem:
         # NOTE: sglang会清除logger handle, 重新创建
         self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
-        loss_cfg: BaseRLLossConfig = self.config.loss_cfg
+        loss_cfg = self.config.loss_cfg
+        if not isinstance(loss_cfg, BaseRLLossConfig):
+            raise TypeError("TrainingWorker.fit only supports BaseRLLossConfig; critic training is not wired yet.")
         num_batches = len(data_batches)
         iters_per_step = math.ceil(num_batches / self._optimizer_steps)
         if num_batches < self._optimizer_steps:
@@ -951,7 +956,8 @@ class TrainingWorker(SingleAcceleratorWorker):
                 for k, v in extra_info_dict.items()
                 if isinstance(v, (torch.Tensor, int, float))
             }
-            extra_info_dict = loss_cfg.finalize_metrics(extra_info_dict, DEVICE)
+            if isinstance(loss_cfg, BaseRLLossConfig):
+                extra_info_dict = loss_cfg.finalize_metrics(extra_info_dict, DEVICE)
             train_step_info.pop("total_loss")  # type: ignore[misc]
             max_memory = DEVICE_MODULE.max_memory_allocated() / (1024**3)  # type: ignore[attr-defined]
             reserved_memory = DEVICE_MODULE.max_memory_reserved() / (1024**3)  # type: ignore[attr-defined]

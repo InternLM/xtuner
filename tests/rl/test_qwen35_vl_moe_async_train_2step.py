@@ -230,7 +230,7 @@ class TestQwen35VLMoEAsyncTrain2Step(unittest.TestCase):
             ),
         )
         lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
-        fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=2, fp32_lm_head=True)
+        fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=2, fp32_head=True)
         train_worker_cfg = WorkerConfig(
             model_cfg=model_cfg,
             load_from=str(MODEL_PATH),
