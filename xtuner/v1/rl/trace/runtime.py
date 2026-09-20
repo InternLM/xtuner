@@ -80,6 +80,20 @@ _OTELCOL_OTLP_GRPC_EXPORTER_YAML_TEMPLATE = """
 """.rstrip()
 
 
+def _local_advertised_host() -> str:
+    """Return a host that other nodes can use to reach this driver node.
+
+    The driver advertises its OTLP endpoint to Ray child processes, which may
+    run on other hosts, so a loopback address would point them at themselves.
+    """
+    try:
+        import ray
+
+        return ray.util.get_node_ip_address()
+    except Exception:
+        return socket.gethostbyname(socket.gethostname())
+
+
 def _configure_tracer_provider(
     *,
     service_name: str,
@@ -490,7 +504,7 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
             port = find_free_ports(nums=1, host="127.0.0.1", start_port=4317, end_port=4318)[0]
         except RuntimeError:
             port = find_free_ports(nums=1, host="127.0.0.1")[0]
-        endpoint = f"http://127.0.0.1:{port}"
+        endpoint = f"http://{_local_advertised_host()}:{port}"
         start_local_collector = True
     protocol = "grpc"
 

@@ -62,7 +62,10 @@ class TestTrace(unittest.TestCase):
         from xtuner.v1.rl.trace import runtime as trace_runtime
 
         with TemporaryDirectory() as temp_dir:
-            with mock.patch.object(trace_runtime, "find_free_ports", return_value=[4317]):
+            with (
+                mock.patch.object(trace_runtime, "find_free_ports", return_value=[4317]),
+                mock.patch.object(trace_runtime, "_local_advertised_host", return_value="10.0.0.1"),
+            ):
                 handle = trace_runtime._build_trace_runtime_handle(
                     trace_runtime.TraceConfig(enabled=True, output_dir=temp_dir)
                 )
@@ -71,7 +74,7 @@ class TestTrace(unittest.TestCase):
             self.assertIsNotNone(handle.collector_port)
             self.assertIsNotNone(handle.runtime.trace_jsonl_path)
             self.assertTrue(handle.runtime.trace_jsonl_path.is_file())
-            self.assertTrue(handle.endpoint.startswith("http://127.0.0.1:"))
+            self.assertEqual(handle.endpoint, "http://10.0.0.1:4317")
 
     def test_external_trace_jsonl_is_owned_by_collector_and_not_propagated(self):
         from xtuner.v1.rl.trace import runtime as trace_runtime
