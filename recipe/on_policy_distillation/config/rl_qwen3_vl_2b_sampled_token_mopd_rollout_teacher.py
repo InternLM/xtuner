@@ -1,11 +1,26 @@
 """Qwen3-VL-2B multi-teacher OPD e2e config (50 steps).
 
-Step-1/2 metric baselines of the reference run (full precision in
-``tests/rl/test_opd_two_step_accuracy.py::MOPD_GOLDEN``):
+Baseline metrics of the reference 50-step run, recorded every 5 steps
+(aligned with the eval cadence; step 0 is the eval-only point before
+training). Column names map to TB tags: ``distill_kl`` =
+``distillation/reduced_distillation_kl``, ``abs_loss`` =
+``distillation/reduced_distillation_abs_loss``, ``rewards`` =
+``response/rewards/mean``. Step-1/2 smoke golden values live in
+``tests/rl/test_opd_two_step_accuracy.py::MOPD_GOLDEN``.
 
-  distillation/reduced_distillation_kl        step1=0.3442  step2=0.3924
-  distillation/reduced_distillation_abs_loss  step1=0.4967  step2=0.5339
-  response/rewards/mean                       step1=0.4477  step2=0.4703
+| step | distill_kl | abs_loss | rewards | gsm8k_acc | geo3k_acc |
+|------|------------|----------|---------|-----------|-----------|
+|    0 |          - |        - |       - |    0.4102 |    0.2651 |
+|    5 |     0.3262 |   0.4605 |  0.4852 |    0.5906 |    0.2815 |
+|   10 |     0.3157 |   0.4492 |  0.5945 |    0.6831 |    0.2546 |
+|   15 |     0.3025 |   0.4434 |  0.6062 |    0.6740 |    0.2666 |
+|   20 |     0.3163 |   0.4469 |  0.6898 |    0.6619 |    0.2965 |
+|   25 |     0.3167 |   0.4448 |  0.5938 |    0.6710 |    0.2860 |
+|   30 |     0.2937 |   0.4190 |  0.6094 |    0.6732 |    0.2890 |
+|   35 |     0.2963 |   0.4107 |  0.6242 |    0.6611 |    0.2770 |
+|   40 |     0.2773 |   0.3933 |  0.6391 |    0.6861 |    0.2965 |
+|   45 |     0.2859 |   0.3885 |  0.6195 |    0.6717 |    0.3055 |
+|   50 |     0.3253 |   0.4365 |  0.7281 |    0.6725 |    0.3100 |
 
 Training shape (batch / prompt / response / eval cadence / seed) matches that
 reference run. API is rewritten for the post-refactor distillation stack in this repo:
