@@ -28,9 +28,8 @@ def stateless_init_process_group(master_address, master_port, rank, world_size, 
     """VLLM provides `StatelessProcessGroup` to create a process group without
     considering the global process group in torch.distributed.
 
-    It is recommended to create `StatelessProcessGroup`, and then initialize
-    the data-plane communication (NCCL) between external (train processes)
-    and vLLM workers.
+    It is recommended to create `StatelessProcessGroup`, and then initialize the data-plane communication (NCCL)
+    between external (train processes) and vLLM workers.
     """
     from vllm.distributed.utils import StatelessProcessGroup
 
@@ -210,7 +209,8 @@ class vLLMWorker(RolloutWorker):
         self.tp_size = self.config.tensor_parallel_size // self.dp_size
 
     def _get_request_payload(self, rollout_state: RolloutState) -> dict:
-        """Build the chat-completions request body for one generation request."""
+        """Build the chat-completions request body for one generation
+        request."""
         sample_params = rollout_state.sample_params
         payload: dict[str, Any] = {
             "model": self.config.model_path,
