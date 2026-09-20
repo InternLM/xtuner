@@ -150,9 +150,6 @@ class TestRLColocateTrainer(unittest.TestCase):
             side_effect=lambda train_step, step_timer_dict: train_step % trainer._sync_weights_interval == 0
         )
         trainer._log_step = MagicMock()
-        trainer._prepare_train_data = MagicMock(
-            return_value=([{"seq_ctx": "fake"}], {"batch_size": 1, "rewards/mean": 1.0})
-        )
 
         trainer.rollout_controller = SimpleNamespace(
             shutdown_inactive_workers=SimpleNamespace(
@@ -169,16 +166,19 @@ class TestRLColocateTrainer(unittest.TestCase):
             offload=MagicMock(return_value="train_offloaded"),
             weight_update=MagicMock(return_value="weights_updated"),
             fit=MagicMock(
-                return_value=[
-                    {
-                        "rollout_is_metrics": {},
-                        "mismatch_metrics": {},
-                        "rollout_entropy": 0.0,
-                        "train_entropy": 0.0,
-                        "train_metrics": [],
-                        "sft_train_metrics": {},
-                    }
-                ]
+                return_value=(
+                    [
+                        {
+                            "rollout_is_metrics": {},
+                            "mismatch_metrics": {},
+                            "rollout_entropy": 0.0,
+                            "train_entropy": 0.0,
+                            "train_metrics": [],
+                            "sft_train_metrics": {},
+                        }
+                    ],
+                    {"batch_size": 1, "rewards/mean": 1.0},
+                )
             ),
         )
         trainer.rl_health_manager = RLHealthManager(

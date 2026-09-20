@@ -140,8 +140,6 @@ class RolloutState(BaseModel):
     teacher_targets: TeacherTargets | None = None
     routed_experts: np.ndarray | RayObjectRef | list[RayObjectRef] | None = None
     finish_reason: str | None = None
-    # response_mask: 记录response_ids中哪个token算loss, 与response_ids长度相同，每轮rollout在 agent_loop.generate 中覆盖写
-    response_mask: list[int] | None = None
     # response_model_steps：记录 response_ids 中每个 token 来自哪个 model_step，与 response_ids 长度相同。
     response_model_steps: list[int] | None = None
     # 记录该样本过期程度，即最早生成 token 的模型版本与当前训练步数的差值，数值越大表示越过期。
@@ -149,6 +147,10 @@ class RolloutState(BaseModel):
 
     input_ids: list[int] | None = None
     labels: list[int] | None = None
+    # 产出该样本的 AgentLoop 子类类名（generate_group 写入 type(self).__name__）。
+    # 结合 AGENTIC_AGENT_LOOP_TYPES 可区分 agentic 全序列样本与 prompt+response（reasoning）样本；
+    # None（未记录，如手工构造的样本）按 prompt+response 处理。
+    agent_loop_type: str | None = None
 
     #  --- Judger 输出 ---
     reward: dict[str, Any] | None = None
@@ -272,15 +274,75 @@ def reset_rollout_response(rollout_state: RolloutState) -> RolloutState:
     rollout_state.tokens = list(prompt_ids) if prompt_ids is not None else None
     rollout_state.response = ""
     rollout_state.response_ids = []
+    # input_ids/labels 也是上一轮 canonicalize 的产物，必须一并清掉，
+    # 否则重生成后基类 canonicalize 见 input_ids 非空会跳过重建，留下跨轮错位的训练字段。
+    rollout_state.input_ids = None
+    rollout_state.labels = None
     rollout_state.logprobs = []
     rollout_state.teacher_targets = None
     rollout_state.routed_experts = None
     rollout_state.finish_reason = None
-    rollout_state.response_mask = None
     rollout_state.response_model_steps = []
     rollout_state.reward = None
     rollout_state.error_msg = None
     return rollout_state
+
+
+def is_valid_for_training(group_data_items: list[RolloutState], logger) -> bool:
+    """Checks if a group of rollout states is valid for a training step.
+
+    Args:
+        group_data_items (list[RolloutState]): A list of RolloutState objects.
+        logger (logging.Logger): Logger used to report the invalid reason.
+
+    Returns:
+        bool: True if the group is valid, False otherwise.
+
+    NOTE: Why this check is needed:
+    - For system fault tolerance, this check is performed at rollout / dataflow
+      time, but we still do it here to ensure training data integrity.
+    - 'filtered'/'failed': These items are fundamentally broken or incomplete and
+      should not be used for training.
+    - 'aborted': These items represent rollouts that were stopped
+      prematurely. Using such partial data could lead the model to learn
+      undesirable behaviors (e.g., stopping generation too early).
+    - Empty response/response_ids: The model's generated response is the core
+      of the training data for RL algorithms like PPO. If the response is
+      missing, there is nothing to compute rewards on or to train the model with.
+    """
+    is_abort = any(item.status == Status.ABORTED for item in group_data_items)
+    is_filtered = any(item.status == Status.FILTERED for item in group_data_items)
+    is_failed = any(item.status == Status.FAILED for item in group_data_items)
+    if is_filtered or is_failed or is_abort:
+        logger.warning(
+            f"Invalid dataflow group found during training, rollout state filtered: {is_filtered}, failed: {is_failed}, aborted: {is_abort}."
+        )
+        return False
+    for item in group_data_items:
+        if item.input_ids is not None:
+            input_ids_valid = len(item.input_ids) > 1
+            labels_valid = item.labels is not None and len(item.labels) == len(item.input_ids)
+            logprobs_valid = item.logprobs is None or len(item.logprobs) == len(item.input_ids)
+            if not input_ids_valid or not labels_valid or not logprobs_valid:
+                logger.warning(
+                    "Invalid dataflow item found during training: input_ids, labels, and logprobs lengths mismatch."
+                )
+                return False
+            continue
+
+        response_valid = item.response is not None and len(item.response) > 0
+        ids_valid = item.response_ids is not None and len(item.response_ids) > 0
+        if not ids_valid:
+            # NOTE: `response_ids` is the critical field for token-in-token-out mode, so we ensure it's not empty.
+            logger.warning(
+                "Invalid dataflow item found during training: no response or response_ids and skip this item."
+            )
+            return False
+        if not response_valid:
+            # NOTE: check valid response string for judger inputs
+            logger.warning("Invalid dataflow item found during training: empty response string and skip this item.")
+            return False
+    return True
 
 
 def get_group_status(rollout_states: list[RolloutState]) -> Status:
@@ -351,6 +413,11 @@ def refresh_seq_staleness(group: list[RolloutState], current_train_step: int) ->
     return group
 
 
+# 产自这些 AgentLoop 子类（类名记录在 RolloutState.agent_loop_type）的样本是 agentic 全序列样本：
+# labels 无 prompt 段偏移语义，不参与 token 级 staleness。自定义 agentic loop 需把类名加入此集合。
+AGENTIC_AGENT_LOOP_TYPES: frozenset[str] = frozenset({"AgentInLocalhostLoop", "AgentInSandboxLoop"})
+
+
 def _calculate_effective_response_mask(
     rollout_state: RolloutState,
     *,
@@ -358,6 +425,9 @@ def _calculate_effective_response_mask(
     token_stale_threshold: int,
 ) -> list[int]:
     """Calculate the response mask after applying token staleness.
+
+    The semantic mask is recovered from the labels tail (response segment): supervised
+    tokens carry their target id, masked-out tokens are ``-100``.
 
     Args:
         rollout_state (RolloutState): Rollout sample whose response token provenance is evaluated.
@@ -367,13 +437,14 @@ def _calculate_effective_response_mask(
     Returns:
         list[int]: The semantic response mask intersected with the token-staleness mask.
     """
+    labels = cast(list[int], rollout_state.labels)
     response_ids = cast(list[int], rollout_state.response_ids)
     response_model_steps = cast(list[int], rollout_state.response_model_steps)
 
-    # semantic mask: 在 agent_loop 中根据是否是 LLM 产生的 token 来 mask 的结果
-    semantic_mask = rollout_state.response_mask
-    if semantic_mask is None:
-        semantic_mask = [1] * len(response_ids)
+    # semantic mask: 从 labels 的 response 段恢复（-100 即语义上不参与 loss 的 token）。
+    # response 段偏移 = len(labels) - len(response_ids)，即 prompt 段长度。
+    offset = len(labels) - len(response_ids)
+    semantic_mask = [int(label != -100) for label in labels[offset:]]
 
     # token_staleness_mask: 根据 token 的新鲜程度来 mask
     token_staleness_mask = [
@@ -393,25 +464,46 @@ def calculate_group_effective_response_masks(
     current_train_step: int,
     token_stale_threshold: int | None,
 ) -> list[list[int] | None]:
-    """Calculate token-staleness masks for the applicable states in a group.
+    """Calculate a group's effective masks and bake token staleness into its
+    labels.
 
-    Each ``None`` means that token staleness is disabled or does not apply to
-    that state. Agentic groups currently return one ``None`` per state.
+    For each eligible state, response labels whose token staleness reaches the threshold
+    are cleared to ``-100`` in place. Clearing only ever extends: staleness grows
+    monotonically with the trainer step, so repeated calls (e.g. replay-buffer expiry
+    checks followed by the train-batch bake) converge to the same labels. Each returned
+    mask is the semantic response mask intersected with the token-staleness mask.
+    ``None`` means token staleness is disabled or does not apply to that state. Agentic
+    full-sequence states (``agent_loop_type`` in ``AGENTIC_AGENT_LOOP_TYPES``) receive
+    ``None``.
+
+    Args:
+        group (list[RolloutState]): Rollout group updated in place.
+        current_train_step (int): Trainer step that will consume the group.
+        token_stale_threshold (int | None): Maximum token staleness, measured in trainer
+            steps, allowed for training. ``None`` disables token staleness.
+
+    Returns:
+        list[list[int] | None]: Per-state effective masks.
     """
     if token_stale_threshold is None:
         return [None] * len(group)
-    if any(item.input_ids is not None or item.labels is not None for item in group):
+    if any(item.agent_loop_type in AGENTIC_AGENT_LOOP_TYPES for item in group):
         return [None] * len(group)
 
-    return [
-        (
-            None
-            if not item.response_ids or (item.response_mask is not None and not any(item.response_mask))
-            else _calculate_effective_response_mask(
-                item,
-                current_train_step=current_train_step,
-                token_stale_threshold=token_stale_threshold,
-            )
+    masks: list[list[int] | None] = []
+    for item in group:
+        if item.labels is None or not item.response_ids or len(item.labels) <= len(item.response_ids):
+            masks.append(None)
+            continue
+        effective_mask = _calculate_effective_response_mask(
+            item,
+            current_train_step=current_train_step,
+            token_stale_threshold=token_stale_threshold,
         )
-        for item in group
-    ]
+        # prompt 段长度由 labels 与 response 段（有效掩码）长度差推导。
+        offset = len(item.labels) - len(effective_mask)
+        for i, mask_value in enumerate(effective_mask):
+            if mask_value == 0:
+                item.labels[offset + i] = -100
+        masks.append(effective_mask)
+    return masks
