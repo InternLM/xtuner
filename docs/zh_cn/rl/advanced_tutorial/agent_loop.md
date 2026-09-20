@@ -84,16 +84,17 @@ AgentLoop 输入和输出都是 `RolloutState`。如果后续使用预置 `RLTra
 AgentLoop 返回的 `RolloutState` 如果要进入训练，至少需要满足：
 
 - `status == Status.COMPLETED`。预置 trainer 会跳过 `ABORTED`、`FILTERED`、`FAILED` 的样本组。
-- `response_ids` 非空。`_prepare_train_data()` 用它构造训练 token。
+- `response_ids` 非空。`canonicalize_train_fields()` 用它构造训练 token。
 - `response` 非空。Judger 和轨迹保存依赖文本 response。
-- `reward["score"]` 存在。`_prepare_train_data()` 会直接读取它计算 advantage。
+- `reward["score"]` 存在。训练 controller 会直接读取它计算 advantage。
 
 如果提供以下字段，还需要满足长度约定：
 
 - `logprobs`：长度必须等于 `len(response_ids)`。
-- `response_mask`：长度必须等于 `len(response_ids)`。mask 为 `0` 的 token 会被转成训练 label `-100`，对应 advantage 也会置为 `0.0`。
 
-这也是自定义 AgentLoop 最容易出错的地方：工具返回、环境反馈、系统插入内容等不是模型生成的 token，应该在 `response_mask` 中置为 `0`，并给对应 `logprobs` 填 `0.0`。
+labels 是唯一的监督载体。`AgentLoop.generate_group()` 会把产出 loop 的类名写入 `agent_loop_type`，并在末尾调用 `canonicalize_train_fields()`，为 prompt+response 型样本构造全序列 `input_ids`/`labels`/`logprobs`（三者等长、未 shift）。这也是自定义 AgentLoop 最容易出错的地方：工具返回、环境反馈、系统插入内容等不是模型生成的 token，不参与训练——对应 label 直接写 `-100`，`logprobs` 填 `0.0`。prompt+response 型样本不需要手动构造这些字段（基类会兜底）；自行组装全序列的多轮 loop 则必须自己把语义洞烙进 labels。训练侧只做 shift 和 advantage 计算，不处理任何掩码。
+
+agentic 全序列 loop（如 `AgentInLocalhostLoop`、`AgentInSandboxLoop`）的类名需要登记到 `xtuner.v1.data_proto.rl_data.AGENTIC_AGENT_LOOP_TYPES`，其样本才会被 token 级 staleness 排除；未登记的自定义 loop 默认按 prompt+response（reasoning）样本处理，`agent_loop_type` 为 `None`（未记录，如手工构造的样本）时同样按 prompt+response 处理。
 
 ## SingleTurnAgentLoop
 
@@ -147,7 +148,7 @@ agent_loop_config = SingleTurnAgentLoopConfig(
 自定义 AgentLoop 通常需要做四件事：
 
 1. 继承 `AgentLoop`，实现 `generate_sample()`。
-2. 在 `generate_sample()` 中维护 `tokens`、`sample_params`、`response_ids`、`response`、`logprobs`、`response_mask`、`status`，不要在这里调用外部 Judger。
+2. 在 `generate_sample()` 中维护 `tokens`、`sample_params`、`response_ids`、`response`、`logprobs`、`status`，不要在这里调用外部 Judger。prompt+response 型样本的训练字段（`input_ids`/`labels`）由基类 `canonicalize_train_fields()` 兜底构造；自行组装全序列的 loop 需自己写 `input_ids`/`labels`，并把语义洞直接烙进 labels。
 3. 若覆盖 `generate_group()`，在其中显式编排 Teacher、Judger 和组级过滤；没有 validity check 时应让完成的样本尽早进入 Teacher，有 validity check 时应只把过滤通过的完整组发送给 Teacher。
 4. 继承 `AgentLoopConfig`，实现 `build_local()`，这样才能接入 `TaskSpecConfig.agent_loop_config`，并复用 Ray actor 构建逻辑。
 
@@ -200,7 +201,7 @@ class ToolAgentLoop(AgentLoop):
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
         final_response_ids: list[int] = []
         final_logprobs: list[float] = []
-        final_response_mask: list[int] = []
+        final_supervised: list[int] = []
 
         cur_tokens = list(rollout_state.tokens or rollout_state.prompt_ids or [])
         remaining_tokens = self.sample_params.max_tokens
@@ -221,7 +222,7 @@ class ToolAgentLoop(AgentLoop):
 
             final_response_ids.extend(response_ids)
             final_logprobs.extend(logprobs)
-            final_response_mask.extend([1] * len(response_ids))
+            final_supervised.extend([1] * len(response_ids))
             cur_tokens.extend(response_ids)
 
             tool_tokens = self._run_tool_and_encode_result(rollout_state)
@@ -230,7 +231,7 @@ class ToolAgentLoop(AgentLoop):
 
             final_response_ids.extend(tool_tokens)
             final_logprobs.extend([0.0] * len(tool_tokens))
-            final_response_mask.extend([0] * len(tool_tokens))
+            final_supervised.extend([0] * len(tool_tokens))
             cur_tokens.extend(tool_tokens)
 
             remaining_tokens = self.sample_params.max_tokens - len(final_response_ids)
@@ -239,11 +240,17 @@ class ToolAgentLoop(AgentLoop):
 
         rollout_state.response_ids = final_response_ids[: self.sample_params.max_tokens]
         rollout_state.logprobs = final_logprobs[: self.sample_params.max_tokens]
-        rollout_state.response_mask = final_response_mask[: self.sample_params.max_tokens]
+        supervised = final_supervised[: self.sample_params.max_tokens]
         rollout_state.response = self.tokenizer.decode(rollout_state.response_ids)
 
-        assert len(rollout_state.response_ids) == len(rollout_state.logprobs)
-        assert len(rollout_state.response_ids) == len(rollout_state.response_mask)
+        # 语义洞直接烙进 labels：工具/环境 token 的 label 为 -100，不参与训练。
+        prompt_ids = list(rollout_state.prompt_ids or [])
+        rollout_state.input_ids = prompt_ids + list(rollout_state.response_ids)
+        rollout_state.labels = [-100] * len(prompt_ids) + [
+            resp_id if flag else -100 for resp_id, flag in zip(rollout_state.response_ids, supervised)
+        ]
+
+        assert len(rollout_state.input_ids) == len(rollout_state.labels) == len(rollout_state.logprobs)
 
         if rollout_state.status == Status.COMPLETED and self.judger is not None and not self.enable_batch_judge:
             rollout_state = await self.run_judger(rollout_state)
@@ -252,8 +259,8 @@ class ToolAgentLoop(AgentLoop):
 
 这个例子强调两个约定：
 
-- 模型生成 token 的 `response_mask` 为 `1`。
-- 工具或环境插入 token 的 `response_mask` 为 `0`，`logprobs` 填 `0.0`。
+- 模型生成 token 的 label 保留 token id（参与训练）。
+- 工具或环境插入 token 的 label 写 `-100`，`logprobs` 填 `0.0`。
 
 ### 覆盖 generate_group
 
@@ -302,7 +309,7 @@ class CustomAgentLoop(AgentLoop):
         return rollout_state
 ```
 
-如果任务的多轮上下文、工具结果或环境状态不能用默认 handler 合并，需要自己定义续跑逻辑。核心原则是：续跑后的 `response_ids`、`response`、`logprobs`、`response_mask` 必须仍然表示完整 response，而不是只有本轮新增部分。
+如果任务的多轮上下文、工具结果或环境状态不能用默认 handler 合并，需要自己定义续跑逻辑。核心原则是：续跑后的 `response_ids`、`response`、`logprobs`（以及自组装 loop 的 `input_ids`/`labels`）必须仍然表示完整 response，而不是只有本轮新增部分。
 
 ## 在训练配置中使用
 
@@ -341,8 +348,9 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
 - `generate_sample()` 是否只处理单条 `RolloutState`。
 - 推理前是否设置了 `rollout_state.tokens`。
 - 每次调用 `rollout_ctl.generate.remote()` 前是否设置了本轮 `sample_params`。
-- 返回训练前，`response_ids`、`response`、`logprobs`、`response_mask` 是否完整且长度一致。
-- 非模型生成 token 是否在 `response_mask` 中置为 `0`。
+- 返回训练前，`response_ids`、`response`、`logprobs` 是否完整且长度一致；自组装全序列的 loop 还需保证 `input_ids`/`labels` 齐全且等长。
+- 非模型生成 token 的 label 是否已写 `-100`（prompt+response 型样本由基类 canonicalize 兜底；自组装 loop 自行烙入）。
+- 若是 agentic 全序列 loop，类名是否已登记到 `AGENTIC_AGENT_LOOP_TYPES`。
 - 需要 Judger 时，是否通过 `self.run_judger(...)` 调用打分，以复用 pause/cancel 处理。
-- 若使用 `_prepare_train_data()`，是否保证最终有 `reward["score"]`。
+- 是否保证最终有 `reward["score"]`。
 - 若使用 async partial rollout，是否正确处理 `enable_partial_rollout` 和历史 response 合并。
