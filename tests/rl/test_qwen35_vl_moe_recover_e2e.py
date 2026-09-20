@@ -403,7 +403,7 @@ class TestQwen35VLMoECheckpointEngineRecoveryE2E(unittest.TestCase):
                 ),
             ),
             lr_cfg=LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6),
-            fsdp_cfg=FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1, fp32_lm_head=False),
+            fsdp_cfg=FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1, fp32_head=False),
             sp_size=1,
             optimizer_steps=8,
             pack_max_length=PACK_MAX_LENGTH,
