@@ -1,10 +1,14 @@
 """Qwen3-VL-2B multi-teacher OPD e2e config (50 steps).
 
-Aligned with the historical baseline:
-  xtuner-opd/.../xtuner-qwen3-vl-2b-mopd-lmdeploy-20260731-094041/20260731094233/
+Step-1/2 metric baselines of the reference run (full precision in
+``tests/rl/test_opd_two_step_accuracy.py::MOPD_GOLDEN``):
 
-Training shape (batch / prompt / response / eval cadence / seed) matches that run.
-API is rewritten for the post-refactor distillation stack in this repo:
+  distillation/reduced_distillation_kl        step1=0.3442  step2=0.3924
+  distillation/reduced_distillation_abs_loss  step1=0.4967  step2=0.5339
+  response/rewards/mean                       step1=0.4477  step2=0.4703
+
+Training shape (batch / prompt / response / eval cadence / seed) matches that
+reference run. API is rewritten for the post-refactor distillation stack in this repo:
 
   legacy (xtuner-opd)              -> current (this branch)
   --------------------------------   --------------------------------
