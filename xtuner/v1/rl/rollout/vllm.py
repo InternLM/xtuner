@@ -248,12 +248,12 @@ class vLLMWorker(RolloutWorker):
                         image_index += 1
                     new_content.append(content_part)
                 message["content"] = new_content
-            assert image_index == len(image_data), (
-                f"Expected {len(image_data)} images, but processed {image_index}."
-            )
+            assert image_index == len(image_data), f"Expected {len(image_data)} images, but processed {image_index}."
 
         vllm_sample_params = self._transform_sample_params(sample_params.model_dump())
-        vllm_sample_params["return_routed_experts"] = self.enable_return_routed_experts and sample_params.return_routed_experts
+        vllm_sample_params["return_routed_experts"] = (
+            self.enable_return_routed_experts and sample_params.return_routed_experts
+        )
         payload.update(vllm_sample_params)
         return payload
 
