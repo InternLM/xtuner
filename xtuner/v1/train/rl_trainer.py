@@ -284,10 +284,22 @@ def get_train_seq_ctx(
     seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
     position_ids = _to_cpu_tensor(position_ids, dtype=torch.long)
     if position_ids is not None and len(position_ids.shape) == 3:
-        # VLM 位置编码需要补 response 段。
-        max_value = position_ids.max(dim=-1).values  # (3,1)
-        response_position_ids = max_value.unsqueeze(-1).expand(-1, -1, len_response_ids) + torch.arange(
-            1, len_response_ids + 1, device=max_value.device
+        # Match get_rope_index_3: response text continues from a single global
+        # max(T, H, W), not per-axis maxima. Per-axis max diverges when the
+        # prompt ends on image tokens (T≈0 while H/W are large).
+        max_value = position_ids.amax()
+        response_position_ids = (
+            (
+                torch.arange(
+                    1,
+                    len_response_ids + 1,
+                    device=position_ids.device,
+                    dtype=position_ids.dtype,
+                )
+                + max_value
+            )
+            .view(1, 1, -1)
+            .expand(3, 1, -1)
         )
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
         seq_ctx.position_ids = position_ids  # type: ignore[assignment]
@@ -1147,7 +1159,7 @@ class BaseRLTrainer:
         # rewards/* from being weighted by segment count.
         cluster_rewards_list: list[float] = []
         distillation_reward_observations: list[tuple[RolloutState, float]] = []
-        advantages_list = []
+        advantages_list: list[float] = []
         prompt_len_list = []
         response_len_list = []
         tool_turns_list: list[int] = []
@@ -1251,7 +1263,7 @@ class BaseRLTrainer:
 
                     advatnages_val = sample_advantages[i]
                     actual_advantages = [0.0 if label == -100 else advatnages_val for label in shifted_labels]
-                    advantages_list.extend(actual_advantages)
+                    advantages_list.extend(advatnages_val for label in shifted_labels if label != -100)
 
                     assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
                     training_tokens += len(input_ids)
@@ -1333,11 +1345,13 @@ class BaseRLTrainer:
                 shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
                 # Keep the advantage layout aligned with input_ids (response excludes EOS).
+                # Prompt positions predict prompt tokens whose shifted labels are -100, so their
+                # advantage is 0; the last entry of response_ids (EOS) is only a label, never an input.
                 advatnages_val = sample_advantages[i]
-                actual_advantages = [advatnages_val] * len(prompt_ids) + [
+                actual_advantages = [0.0] * (len(prompt_ids) - 1) + [
                     0.0 if mask == 0 else advatnages_val for mask in response_mask
                 ]
-                advantages_list.extend(actual_advantages[:-1])
+                advantages_list.extend(advatnages_val for mask in response_mask if mask != 0)
 
                 assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
                 training_tokens += len(input_ids)
@@ -2243,8 +2257,14 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
         # TODO: 非共卡需要额外加健康检查恢复worker的逻辑，共卡是在训练之前恢复，但是非共卡不需要在训练之前恢复,挂掉就恢复或者更新权重前恢复，需要评估一下哪种方式更合理。
         with timer("sync_weight", step_timer_dict):
+            # 1) 清 KV + 释放旧权重（sleep level=2 -> meta）
             ray.get(
-                self.rollout_controller.flush_cache.remote(),
+                self.rollout_controller.offload.remote(),
+                timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+            )
+            # 2) 只 wakeup weights（empty_init），此时不要 onload_kvcache/warmup
+            ray.get(
+                self.rollout_controller.onload_weights.remote(),
                 timeout=RL_TRAINER_RAY_GET_TIMEOUT,
             )
             bind_train_rollout(
@@ -2252,7 +2272,13 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 rollout_controller=self.rollout_controller,
                 rollout_config=self._rollout_config,
             )
+            # 3) 先把权重更新完（含 finished=True finalize）
             self.weight_update()
+            # 4) 最后再 onload_kvcache（这里才会 warmup）
+            ray.get(
+                self.rollout_controller.onload_kvcache.remote(),
+                timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+            )
 
     def weight_update(self):
         # rollout 恢复由 AgentLoopManager 控制。

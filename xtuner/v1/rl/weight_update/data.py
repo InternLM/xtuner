@@ -105,13 +105,15 @@ class RolloutWeightUpdateInfo:
     checkpoint_engine_timeout: float | None = None
     # Whether to explicitly synchronize after registering checkpoint-engine tensors.
     checkpoint_engine_sync_after_register: bool = True
-    _local_update_target: RolloutWeightUpdateTarget = field(init=False, repr=False)
-    _ipc_update_target: RolloutWeightUpdateTarget = field(init=False, repr=False)
+    _ipc_update_target: RolloutWeightUpdateTarget | None = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        local_target = next(target for target in self.weight_update_targets if self.train_rank == target.endpoint_rank)
-        ipc_target = next(target for target in self.weight_update_targets if self.train_rank in target.update_ranks)
-        object.__setattr__(self, "_local_update_target", local_target)
+        # Only for IPC transport type. But need to set _ipc_update_target to None for other transport type.
+        # Checkpoint Engine 做P2P恢复时，正常运行的worker if分支永远不满足，需要给ipc_target设置默认值
+        ipc_target = next(
+            (target for target in self.weight_update_targets if self.train_rank in target.update_ranks),
+            None,
+        )
         object.__setattr__(self, "_ipc_update_target", ipc_target)
 
     @classmethod
@@ -149,26 +151,18 @@ class RolloutWeightUpdateInfo:
         )
 
     @property
-    def local_update_target(self) -> RolloutWeightUpdateTarget:
-        return self._local_update_target
-
-    @property
-    def rollout_url(self) -> str:
-        return self.local_update_target.server_url
-
-    @property
     def ipc_rank_mesh(self) -> tuple[tuple[int, ...], ...]:
         return tuple(target.update_ranks for target in self.weight_update_targets)
 
     @property
-    def inference_engine_parallel_rank(self) -> int:
+    def inference_engine_parallel_rank(self) -> int | None:
         target = self._ipc_update_target
         if target is None:
             return None
         return target.inference_engine_ranks.index(self.train_rank)
 
     @property
-    def inference_engine_parallel_size(self) -> int:
+    def inference_engine_parallel_size(self) -> int | None:
         target = self._ipc_update_target
         return None if target is None else target.engine_size
 

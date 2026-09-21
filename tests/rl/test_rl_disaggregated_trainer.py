@@ -156,7 +156,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             restart_inactive_workers=SimpleNamespace(remote=MagicMock(return_value="rollout_restarted")),
             pause_generation=SimpleNamespace(remote=MagicMock(return_value="pause")),
             continue_generation=SimpleNamespace(remote=MagicMock(return_value="continue")),
-            flush_cache=SimpleNamespace(remote=MagicMock(return_value="flush_cache")),
+            offload=SimpleNamespace(remote=MagicMock(return_value="offload")),
             onload_weights=SimpleNamespace(remote=MagicMock(return_value="onload_weights")),
             onload_kvcache=SimpleNamespace(remote=MagicMock(return_value="onload_kvcache")),
             validate_registered_workers_to_proxy=SimpleNamespace(remote=AsyncMock(return_value=None)),
