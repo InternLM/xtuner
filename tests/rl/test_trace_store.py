@@ -86,9 +86,9 @@ class TestRolloutTraceStore(unittest.TestCase):
         finally:
             ray.kill(store)
 
-    def test_trie_overwrite_does_not_free_refs_still_borrowed_outside(self):
-        """Overwrite must not free replaced refs: sibling RolloutStates may
-        still borrow them until the session is released."""
+    def test_trie_overwrite_drops_handle_without_freeing_borrowed_refs(self):
+        """Overwrite must not free replaced refs: sibling RolloutStates keep
+        their own handles alive via Ray's reference counting."""
         trie = trace_store_module.Trie()
         old_ref = ray.put({"value": "old"})
         new_ref = ray.put({"value": "new"})
@@ -98,21 +98,21 @@ class TestRolloutTraceStore(unittest.TestCase):
             trie.insert("turn", {"expert_key": new_ref})
 
         free.assert_not_called()
-        # The borrowed ref stays valid; the trie keeps the replacement value.
+        # The borrower keeps its own handle: dropping the trie's handle must
+        # not invalidate the object.
         self.assertEqual(ray.get(old_ref), {"value": "old"})
         _, nodes = trie.search("turn", filter_none=True)
         self.assertEqual(ray.get(nodes[-1].value["expert_key"]), {"value": "new"})
 
-    def test_trie_release_frees_overwritten_refs_together_with_session(self):
-        """Refs parked by an overwrite are freed exactly once at session
-        release, deduplicated against refs still reachable from the tree."""
+    def test_trie_release_frees_each_ref_once_across_shared_subtrees(self):
+        """Refs shared between trie values are freed exactly once at session
+        release."""
         trie = trace_store_module.Trie()
-        old_ref = ray.put({"value": "old"})
-        new_ref = ray.put({"value": "new"})
+        left_ref = ray.put({"value": "left"})
+        right_ref = ray.put({"value": "right"})
         shared_ref = ray.put({"value": "shared"})
-        trie.insert("turn", {"expert_key": old_ref, "keep": shared_ref})
-        trie.insert("other", {"expert_key": shared_ref})
-        trie.insert("turn", {"expert_key": new_ref, "keep": shared_ref})
+        trie.insert("turn-a", {"expert_key": left_ref, "keep": shared_ref})
+        trie.insert("turn-b", {"expert_key": right_ref, "keep": shared_ref})
 
         freed = []
 
@@ -125,7 +125,7 @@ class TestRolloutTraceStore(unittest.TestCase):
         self.assertEqual(len(freed), len({ref.hex() for ref in freed}))
         self.assertEqual(
             {ref.hex() for ref in freed},
-            {old_ref.hex(), new_ref.hex(), shared_ref.hex()},
+            {left_ref.hex(), right_ref.hex(), shared_ref.hex()},
         )
 
     def test_release_existing_sessions_stably_deduplicates_before_rpc(self):

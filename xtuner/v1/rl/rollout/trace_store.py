@@ -146,10 +146,6 @@ class Trie:
     def __init__(self):
         """Initialize the prefix tree (Trie)."""
         self.root = TreeNode(value=None, parent=None)
-        # Values dropped by a later insert at the same key.  Their refs may
-        # still be borrowed by RolloutStates outside the trie, so they cannot
-        # be freed at overwrite time; release them together with the session.
-        self._overwritten_values: list[Any] = []
 
     def keys(self) -> List[str]:
         """Get all keys (i.e., strings) stored in the Trie."""
@@ -187,12 +183,10 @@ class Trie:
                 node = node.children[key]
                 break
 
-        old_value = node.value
-        if old_value is not None and old_value is not value:
-            # A rerolled turn may overwrite an existing key.  The old value's
-            # refs may still be borrowed by RolloutStates, so park the value
-            # instead of freeing immediately; the session release frees it.
-            self._overwritten_values.append(old_value)
+        # A rerolled turn may overwrite an existing key.  Do not free the
+        # old value here: borrowers (sibling RolloutStates) keep their own
+        # refs alive via Ray's reference counting, and the trie dropping
+        # its handle never invalidates them.
         node.value = value
 
     def search(self, text: str, filter_none: bool = False) -> Tuple[str, List["TreeNode"]]:
@@ -249,11 +243,7 @@ class Trie:
             node.children.clear()
 
         if key is None:
-            seen: set[str] = set()
-            for value in self._overwritten_values:
-                _free_ray_refs(value, _seen=seen)
-            self._overwritten_values.clear()
-            _free_subtree(self.root, seen)
+            _free_subtree(self.root, set())
             return
 
         node = self.root

@@ -1816,3 +1816,54 @@ class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
         self.assertIs(out.routed_experts, concat_ref)
         free_object_refs.assert_called_once_with(cur_ref)
         self.assertEqual(out.routed_experts_owner, "rollout")
+
+    async def test_postprocess_frees_unowned_history_ref(self):
+        """History refs without an owner tag (legacy-checkpoint restores)
+        follow the same rule as ``rl_data``: anything not borrowed from the
+        TraceStore is released once the concatenation replaces it."""
+
+        class FakeObjectRef:
+            def __init__(self, value):
+                self.value = value
+
+            def __await__(self):
+                async def _resolve():
+                    return self.value
+
+                return _resolve().__await__()
+
+        history_ref = FakeObjectRef([[1], [2]])
+        cur_ref = FakeObjectRef([[1], [2], [3]])
+        concat_ref = FakeObjectRef(None)
+        rollout_state = RolloutState(
+            message=[],
+            response="old",
+            response_ids=[1, 2],
+            logprobs=[0.1, 0.2],
+            routed_experts=history_ref,
+            routed_experts_owner=None,
+            status=Status.ABORTED,
+        )
+
+        with (
+            patch("xtuner.v1.rl.rollout.utils.RayObjectRef", FakeObjectRef),
+            patch("xtuner.v1.rl.rollout.utils.ray.put", return_value=concat_ref),
+            patch("xtuner.v1.rl.rollout.utils.free_object_refs") as free_object_refs,
+        ):
+            out = await PartialRolloutHandler().postprocess(
+                rollout_state,
+                response="new",
+                response_ids=[3],
+                logprobs=[0.3],
+                routed_experts=cur_ref,
+                finish_reason="abort",
+                status=Status.ABORTED,
+                prompt_tokens=3,
+                completion_tokens=1,
+            )
+
+        self.assertIs(out.routed_experts, concat_ref)
+        free_object_refs.assert_any_call(cur_ref)
+        free_object_refs.assert_any_call(history_ref)
+        self.assertEqual(free_object_refs.call_count, 2)
+        self.assertEqual(out.routed_experts_owner, "rollout")
