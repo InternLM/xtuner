@@ -275,8 +275,6 @@ class AgentLoop(ABC):
             state = await self._teacher_scorer.on_sample_ready(state)
             return state
 
-        for state in rollout_state:
-            state.agent_loop_type = type(self).__name__
         group = list(await asyncio.gather(*(create_task(generate_one(state)) for state in rollout_state)))
         if self.judger is not None and self.enable_batch_judge:
             if all(sample.status == Status.COMPLETED for sample in group):
