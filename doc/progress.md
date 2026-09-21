@@ -91,7 +91,48 @@ zskj-hub/models--zai-org--GLM-5.3-Flash-BF16/`，45 层完整模型，120 shards
 
 ## F3 KDA 线性注意力
 
-**状态**：未开始。参考 `~/github/xtuner-ncp-k3` 的模块结构，但 `chunk_kda` 调用约定按设计文档 3.5.1 改写。
+**状态**：已完成，已提交。
+
+**交付**：
+- `xtuner/v1/module/attention/kda.py`：`KDAConfig` / `KimiDeltaAttention`（非 SP 与
+  `forward_for_sp` 两条路径）。
+- `TransformerConfig.linear_attention` 类型放宽为 `GatedDeltaNetConfig | KDAConfig | None`；
+  同步放宽了 `dense_decoder_layer.py` / `moe_decoder_layer.py` / `moe.py`(×2) / `dense.py`
+  里的 `attention_config` 局部类型标注（mypy strict 需要，公共栈改动仅限类型层面）。
+- `tests/model/test_glm53_kda.py`：5 个用例，覆盖设计文档 F3 的 4 类单测。
+
+**实现要点**：
+- 参考 `~/github/xtuner-ncp-k3` 的 `kda.py` 模块结构（独立 `q/k/v_conv1d`、低秩
+  `f_a_proj->f_b_proj` forget gate、fp32 `A_log`/`dt_bias`、低秩 `g_a_proj->g_b_proj` 输出门），
+  但按设计文档 3.5.1 改写了 `chunk_kda` 调用约定：门控用 `fla.ops.kda.gate.fused_kda_gate`
+  在 kernel 外算好，`beta` 显式 sigmoid；**不**向 `chunk_kda`/`fused_recurrent_kda` 传
+  `A_log`/`dt_bias`/`use_beta_sigmoid_in_kernel`（已安装 fla 0.4.2 的 `chunk_kda` 签名里
+  根本没有这些参数，会静默吞进 `**kwargs`）。加了反向护栏单测断言这三个参数不在签名里。
+- 短卷积没有直接复用 ncp-k3 的写法或本仓库 `gated_deltanet.py` 的 `nn.Conv1d`+`seq_idx`
+  写法，而是自定义了 `KDAShortConvolution(fla.modules.ShortConvolution)` 子类，加
+  `materialize_weight_bias()` + 显式 `weight`/`bias` override 的 `forward`——因为 SP 路径需要
+  用同一个 conv 入口跑"外部传入的按 channel 切片后的权重"，而 FLA 原生 `ShortConvolution.forward`
+  不接受外部 weight/bias（会导致 `causal_conv1d(..., weight=..., **kwargs)` 里 `weight` 重复传参报错）。
+- `o_norm` 用了本地定义的 `FusedRMSNormGated(fla.modules.FusedRMSNormGated)` 子类（未复用
+  `gated_deltanet.py` 里的同名类，避免 kda.py 对另一个 attention 类型模块产生不必要的横向依赖，
+  两边各自 20 行左右的 try/except 导入块可接受的重复）。
+
+**HF 数值 oracle**（用于 parity 测试）：`transformers.models.glm5_next.modeling_glm5_next.
+Glm5NextTextLinearAttention`。**发现**：HF 内部把 XTuner/checkpoint 的三个独立
+`q/k/v_conv1d.weight` 融合成一个 `self_attn.conv1d.weight`（沿 dim0 concat，顺序 q,k,v），
+把 `f_a_proj`/`f_b_proj`/`A_log`/`dt_bias` 收进 `self.forget_gate` 子模块——这正是设计文档
+3.1 说的"发布版 checkpoint 布局 vs HF 内部模块布局"两套命名，XTuner 侧按发布版布局实现是对的，
+不需要额外桥接模块。HF 的 `forget_gate.forward` 直接返回`safe_gate_lower_bound *
+sigmoid(decay_rate*(f_b(f_a(x))+dt_bias))`，与 `chunk_kimi_delta_attention` 调用处
+（`g=self.forget_gate(hidden_states)`，不传 `A_log`/`dt_bias` 给 kernel）逐字印证了设计文档
+3.5.1 的结论。另外 `Glm5NextTextLinearAttention.forward` 返回单个 tensor 而非 tuple
+（不是 `(output, ...)`），第一次写 parity 测试时按 tuple 索引 `[0]` 误取了 batch 维，已修正。
+
+**测试结果**：`tests/model/test_glm53_kda.py` 5/5 通过（单卡 GPU + `TestKDASequenceParallel`
+2 卡 SP，经 `gpu_lock.sh` 跑）。其中 packed-multi-doc 测试第一次跑全量 5 个用例时偶发一次
+NaN 失败；按最小复现原则排查：单独重跑该测试类、原始失败组合、以及完整套件各跑了 3 次，
+全部稳定通过（详见排查记录），判定为外部 `fla` Triton kernel 首次编译/autotune 的一次性
+GPU flake，不是 XTuner 侧实现问题，未做任何生产代码改动。
 
 ## F4 mHC 四流残差
 
