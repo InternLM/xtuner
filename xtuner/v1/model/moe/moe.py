@@ -53,6 +53,7 @@ from xtuner.v1.model.utils import (
 from xtuner.v1.module import (
     GatedDeltaNetConfig,
     GreedyRouterConfig,
+    KDAConfig,
     LMHead,
     MHAConfig,
     MLAConfig,
@@ -1098,7 +1099,7 @@ class MoE(BaseModel):
         # 让 layers 是一个 nn.ModuleDict 方便做 pipeline parallel 的参数切分，
         # 这样可以保证部分 layer 被切掉后，idx 保持不变
         layers = nn.ModuleDict()
-        attention_config: GatedDeltaNetConfig | MLAConfig | MHAConfig | None = None
+        attention_config: GatedDeltaNetConfig | KDAConfig | MLAConfig | MHAConfig | None = None
         for layer_idx in range(config.num_hidden_layers):
             if config.layers_type[layer_idx] in ["full_attention", "sliding_attention"]:
                 attention_config = config.attention
@@ -1181,7 +1182,7 @@ class MoE(BaseModel):
         # Get attention config for MTP layers (use last layer's config)
         last_layer_idx = config.num_hidden_layers - 1
         layers_type_list = config.layers_type
-        attention_config: MLAConfig | MHAConfig | GatedDeltaNetConfig
+        attention_config: MLAConfig | MHAConfig | GatedDeltaNetConfig | KDAConfig
         if layers_type_list[last_layer_idx] in ["full_attention", "sliding_attention"]:
             attention_config = config.attention
         elif layers_type_list[last_layer_idx] == "linear_attention":
