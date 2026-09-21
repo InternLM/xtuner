@@ -145,7 +145,6 @@ class AgentInLocalhostLoop(AgentLoop):
 
         tasks: list[asyncio.Task[RolloutState]] = []
         for state in rollout_state:
-            state.agent_loop_type = type(self).__name__
             state.sample_params = self.sample_params
             task = create_task(generate_one(state))
             tasks.append(task)
@@ -295,9 +294,11 @@ class AgentInLocalhostLoop(AgentLoop):
 
         rollout_state.input_ids = data["input_ids"]
         rollout_state.labels = data["labels"]
-        rollout_state.response_ids = [
-            token_id for token_id, label in zip(data["input_ids"][1:], data["labels"][1:]) if label != -100
-        ]
+        # Unified response_ids convention: the contiguous suffix of input_ids after the prompt
+        # (env-injected tokens included), aligned with response_model_steps for per-token
+        # staleness; also the token count used by rollout throughput logging.
+        prompt_len = len(rollout_state.prompt_ids or [])
+        rollout_state.response_ids = list(data["input_ids"][prompt_len:])
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
         content = response_message.get("content")
