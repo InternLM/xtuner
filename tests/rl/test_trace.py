@@ -114,6 +114,13 @@ class TestTrace(unittest.TestCase):
                 self.assertTrue(viewer.thread.is_alive())
                 self.assertFalse(trace_path.exists())
 
+                with urlopen(f"{viewer.url}/api/trace?train_step=all", timeout=2) as response:
+                    self.assertEqual(response.status, 200)
+                    payload = json.load(response)
+                self.assertEqual(payload["sample_count"], 0)
+                self.assertEqual(payload["samples"], [])
+                self.assertIn("unavailable", payload)
+
                 trace_path.parent.mkdir(parents=True)
                 trace_path.write_text(
                     json.dumps(

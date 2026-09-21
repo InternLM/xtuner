@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import ipaddress
 import os
 import shlex
 import shutil
@@ -89,9 +90,16 @@ def _local_advertised_host() -> str:
     try:
         import ray
 
-        return ray.util.get_node_ip_address()
+        host = ray.util.get_node_ip_address()
     except Exception:
-        return socket.gethostbyname(socket.gethostname())
+        host = socket.gethostbyname(socket.gethostname())
+    if ipaddress.ip_address(host).is_loopback:
+        logger.warning(
+            f"Driver trace host resolved to loopback address {host}; "
+            "Ray actors on other nodes will not be able to reach the local collector. "
+            "Set up host name resolution or configure an external OTLP collector instead."
+        )
+    return host
 
 
 def _configure_tracer_provider(
@@ -177,6 +185,14 @@ class TraceConfig(BaseModel):
 
 @dataclass(frozen=True)
 class TraceRuntime:
+    """Read-only description of the trace runtime in this process.
+
+    ``trace_jsonl_path`` is the per-run JSONL owned by the local collector, or the collector-owned shared JSONL given
+    via ``external_trace_jsonl_path``. It is ``None`` when tracing is disabled, when spans go to an external collector
+    without a configured JSONL path, and in every ``inherited`` (Ray child) process; consumers must treat it as
+    optional.
+    """
+
     enabled: bool
     mode: TraceRuntimeMode
     run_id: str
@@ -196,7 +212,6 @@ class _OTelCollector:
     _stdout_path: Path = field(repr=False)
     _stderr_path: Path = field(repr=False)
     _process: subprocess.Popen | None = field(repr=False)
-
     @classmethod
     def start(
         cls,
@@ -356,10 +371,10 @@ class _TraceRuntimeHandle:
             return
         try:
             if self.runtime.mode == "driver" and self.start_local_collector:
-                if self.collector_port is None:
-                    raise RuntimeError("local collector trace runtime requires a collector port")
-                if self.runtime.trace_jsonl_path is None:
-                    raise RuntimeError("local collector trace runtime requires a trace JSONL path")
+                # Invariants established by _build_trace_runtime_handle: the local-collector branch always sets both
+                # the port and the per-run JSONL path, and TraceConfig validation guarantees the viewer a JSONL path.
+                assert self.collector_port is not None
+                assert self.runtime.trace_jsonl_path is not None
                 self.collector = _OTelCollector.start(
                     port=self.collector_port,
                     output_path=self.runtime.trace_jsonl_path,
@@ -371,8 +386,7 @@ class _TraceRuntimeHandle:
                 protocol=self.env_vars["OTEL_EXPORTER_OTLP_PROTOCOL"],
             )
             if self.runtime.mode == "driver" and self.xtuner_viewer_host is not None:
-                if self.runtime.trace_jsonl_path is None:
-                    raise RuntimeError("XTuner trace viewer requires a trace JSONL path")
+                assert self.runtime.trace_jsonl_path is not None
                 if self.xtuner_viewer_port == 0:
                     self.xtuner_viewer_port = find_free_ports(nums=1, host=self.xtuner_viewer_host)[0]
                 self.xtuner_viewer_command = _build_xtuner_viewer_command(
@@ -490,7 +504,6 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
     port: int | None
     if external_endpoint is not None:
         endpoint = external_endpoint
-        start_local_collector = False
         trace_jsonl_path = (
             Path(config.external_trace_jsonl_path) if config.external_trace_jsonl_path is not None else None
         )
@@ -505,7 +518,6 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
         except RuntimeError:
             port = find_free_ports(nums=1, host="127.0.0.1")[0]
         endpoint = f"http://{_local_advertised_host()}:{port}"
-        start_local_collector = True
     protocol = "grpc"
 
     env_vars: dict[str, str] = {
@@ -520,6 +532,7 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
         "OTEL_EXPORTER_OTLP_PROTOCOL": protocol,
         "OTEL_SERVICE_NAME": config.service_name,
     }
+    viewer_host = config.xtuner_viewer_host if config.xtuner_viewer_enabled else None
     return _TraceRuntimeHandle(
         runtime=TraceRuntime(
             enabled=True,
@@ -534,8 +547,8 @@ def _build_trace_runtime_handle(config: TraceConfig) -> _TraceRuntimeHandle:
         endpoint=endpoint,
         env_vars=env_vars,
         collector_port=port,
-        start_local_collector=start_local_collector,
-        xtuner_viewer_host=config.xtuner_viewer_host if config.xtuner_viewer_enabled else None,
+        start_local_collector=external_endpoint is None,
+        xtuner_viewer_host=viewer_host,
         xtuner_viewer_port=config.xtuner_viewer_port,
         xtuner_viewer_jaeger_query_url=config.xtuner_viewer_jaeger_query_url,
     )
