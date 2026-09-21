@@ -21,6 +21,7 @@ from xtuner.v1.ops.sparse_mla import (
     SparseMLABackend,
     SparseMLAProtocol,
     ensure_cudnn_dsa_runtime_available,
+    ensure_cute_dsl_runtime_available,
     ensure_flash_mla_runtime_available,
     ensure_tilelang_runtime_available,
     get_dsa_topk_indices,
@@ -243,8 +244,10 @@ class DSAMLAConfig(MLAConfig):
             indexer_backend,
             field_name="indexer_topk_query_chunk_size",
         )
-        if self.sparse_mla_backend in ("tilelang", "cudnn_dsa", "flash_mla"):
+        if indexer_backend == "tilelang" or self.sparse_mla_backend in ("tilelang", "cudnn_dsa", "flash_mla"):
             ensure_tilelang_runtime_available()
+        if indexer_backend == "cute_dsl":
+            ensure_cute_dsl_runtime_available()
         if self.sparse_mla_backend == "cudnn_dsa":
             ensure_cudnn_dsa_runtime_available()
         if self.sparse_mla_backend == "flash_mla":
