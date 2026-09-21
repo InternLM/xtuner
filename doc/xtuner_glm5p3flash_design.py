@@ -1128,9 +1128,14 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
     cache  : 只用 metadata + 官方**纯几何** API 预测尺寸与 token 数，不解码媒体；
     runtime: 调官方 processor 产生真实 tensor。
 
-    已核实（pinned transformers 5.17.0）官方暴露了纯几何 API，不需要 import 内部 helper：
-        Glm5NextImageProcessor.get_number_of_image_patches(h, w, images_kwargs)
-        Glm5NextVideoProcessor.get_number_of_video_patches(t, h, w, videos_kwargs)
+    已核实（pinned transformers 5.17.0）：
+      图片 Glm5NextImageProcessor.get_number_of_image_patches(h, w, images_kwargs)  -> 存在
+      视频 Glm5NextVideoProcessor.get_number_of_video_patches(...)                  -> **不存在**
+    后者在整个 transformers 包里没有任何 `def`，却被 10+ 个 processor（含 glm5_next 的
+    _get_num_multimodal_tokens）调用，是上游 bug；走到视频分支会 AttributeError。
+    所以视频侧必须用视觉设计文档 §7.1 的退路：组合 Glm5NextVideoProcessor.sample_frames
+    + 模块级 smart_resize（真实预处理路径内部用的同两个公开调用），并用单测断言
+    复现出的 video_grid_thw 与真实 processor 输出逐元素一致。
     resize 由 min_image_tokens=16 / max_image_tokens=8000 动态约束，与 Qwen smart_resize
     不是同一个函数，禁止移植（§16.1）。
 
