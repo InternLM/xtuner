@@ -72,7 +72,7 @@ class TestStalenessPolicy(unittest.TestCase):
 
 
 class TestTokenStalenessMask(unittest.TestCase):
-    """Token 级 staleness mask 的阈值与语义监督（labels 尾段）行为。"""
+    """Token 级 staleness mask 的阈值与语义监督行为（labels 尾段 / agentic 全序列两种形态）。"""
 
     def test_token_staleness_threshold_can_be_relaxed(self):
         # token threshold 放宽一个同步周期后，旧周期 token 应从 masked 变为可训练。
@@ -147,21 +147,94 @@ class TestTokenStalenessMask(unittest.TestCase):
         self.assertIsNone(state.input_ids)
         self.assertIsNone(state.labels)
 
-    def test_agentic_loop_type_is_excluded(self):
-        # agentic loop 类型（localhost/sandbox）产出的全序列样本不参与 token staleness，整组排除。
-        agentic = self._state(response_model_steps=None, agentic=True)
-        agentic.input_ids = [1, 2, 3, 4]
-        agentic.labels = [-100, -100, 3, 4]
-        agentic.logprobs = [0.0, 0.0, -0.1, -0.2]
+    def test_full_sequence_agentic_stale_clears_all_supervised_labels(self):
+        # agentic 全序列形态：response_ids 是 input_ids 去掉 prompt 前缀的连续后缀（含环境
+        # token）。steps 由 replay buffer 回填为单一 model_step 时全部过期，全部监督位清零。
+        state = RolloutState(
+            rollout_id=1,
+            group_id=1,
+            message=[{"role": "user", "content": "prompt"}],
+            prompt_ids=[1, 2],
+            response_ids=[30, -1, 40, -1, 32],
+            response_model_steps=[0, 0, 0, 0, 0],
+            input_ids=[1, 2, 30, -1, 40, -1, 32],
+            labels=[-100, -100, 30, -100, 40, -100, 32],
+        )
 
         masks = calculate_group_effective_response_masks(
-            [agentic],
+            [state],
             current_train_step=5,
             token_stale_threshold=4,
         )
 
-        self.assertEqual(masks, [None])
-        self.assertEqual(agentic.labels, [-100, -100, 3, 4])
+        self.assertEqual(masks, [[0, 0, 0, 0, 0]])
+        self.assertEqual(state.labels, [-100] * 7)
+
+    def test_full_sequence_agentic_per_token_stale_clears_only_stale_tokens(self):
+        # agentic 全序列形态同样按 token 级 staleness 判定：仅过期 token 的监督位被清零，
+        # 新鲜 token 原样保留，环境 token 的洞位（semantic=0）不受 staleness 影响。
+        state = RolloutState(
+            rollout_id=1,
+            group_id=1,
+            message=[{"role": "user", "content": "prompt"}],
+            prompt_ids=[1, 2],
+            response_ids=[30, -1, 40, -1, 32],
+            response_model_steps=[0, 4, 4, 4, 4],
+            input_ids=[1, 2, 30, -1, 40, -1, 32],
+            labels=[-100, -100, 30, -100, 40, -100, 32],
+        )
+
+        masks = calculate_group_effective_response_masks(
+            [state],
+            current_train_step=5,
+            token_stale_threshold=4,
+        )
+
+        self.assertEqual(masks, [[0, 0, 1, 0, 1]])
+        self.assertEqual(state.labels, [-100, -100, -100, -100, 40, -100, 32])
+
+    def test_full_sequence_agentic_fresh_keeps_labels(self):
+        # agentic 全序列形态且 token 新鲜：labels 保持不变，掩码即语义掩码（不会触发过期）。
+        state = RolloutState(
+            rollout_id=1,
+            group_id=1,
+            message=[{"role": "user", "content": "prompt"}],
+            prompt_ids=[1, 2],
+            response_ids=[30, -1, 40, -1, 32],
+            response_model_steps=[4, 4, 4, 4, 4],
+            input_ids=[1, 2, 30, -1, 40, -1, 32],
+            labels=[-100, -100, 30, -100, 40, -100, 32],
+        )
+
+        masks = calculate_group_effective_response_masks(
+            [state],
+            current_train_step=5,
+            token_stale_threshold=4,
+        )
+
+        self.assertEqual(masks, [[1, 0, 1, 0, 1]])
+        self.assertEqual(state.labels, [-100, -100, 30, -100, 40, -100, 32])
+
+    def test_zero_prompt_suffix_state_is_eligible(self):
+        # response_ids 允许覆盖整个序列（prompt 前缀长度为 0）：len(labels) ==
+        # len(response_ids) 的后缀形态必须仍参与 staleness 烙制，不被 guard 跳过。
+        state = RolloutState(
+            rollout_id=1,
+            group_id=1,
+            message=[{"role": "user", "content": "prompt"}],
+            response_ids=[3, 4],
+            response_model_steps=[0, 4],
+            labels=[3, 4],
+        )
+
+        masks = calculate_group_effective_response_masks(
+            [state],
+            current_train_step=5,
+            token_stale_threshold=4,
+        )
+
+        self.assertEqual(masks, [[0, 1]])
+        self.assertEqual(state.labels, [-100, 4])
 
     def test_canonicalized_prompt_response_state_is_still_eligible(self):
         # canonicalize 后的 prompt+response 样本（reasoning loop 产出）仍参与 staleness。
@@ -183,7 +256,6 @@ class TestTokenStalenessMask(unittest.TestCase):
         *,
         response_model_steps: list[int] | None,
         labels: list[int] | None = None,
-        agentic: bool = False,
     ) -> RolloutState:
         state = RolloutState(
             rollout_id=1,
@@ -193,12 +265,8 @@ class TestTokenStalenessMask(unittest.TestCase):
             response_ids=[3, 4],
             response_model_steps=response_model_steps,
         )
-        if agentic:
-            state.agent_loop_type = "AgentInLocalhostLoop"
-        else:
-            # prompt+response 形态：agent_loop_type 保持 None（未记录时默认按 prompt+response 处理），
-            # labels 为全序列监督。
-            state.labels = labels if labels is not None else [-100, -100, 3, 4]
+        # prompt+response 形态：response_ids 是序列的连续尾段，labels 为全序列监督。
+        state.labels = labels if labels is not None else [-100, -100, 3, 4]
         return state
 
 

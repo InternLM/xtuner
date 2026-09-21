@@ -240,7 +240,6 @@ class AgentInSandboxLoop(AgentLoop):
 
         pending_tasks = []
         for state in rollout_state:
-            state.agent_loop_type = type(self).__name__
             state.sample_params = self.sample_params
             task = create_task(generate_one(state))
             pending_tasks.append(task)
@@ -374,11 +373,11 @@ class AgentInSandboxLoop(AgentLoop):
             data = await trace_store.export_training_trace.remote(str(rollout_state.session_id), prompt_text)
             segment_state.input_ids = data["input_ids"]
             segment_state.labels = data["labels"]
-            # Agentic training consumes input_ids/labels directly. response_ids is
-            # filled here only so rollout throughput logging can print rollout_tgs.
-            segment_state.response_ids = [
-                token_id for token_id, label in zip(data["input_ids"][1:], data["labels"][1:]) if label != -100
-            ]
+            # Unified response_ids convention: the contiguous suffix of input_ids after the prompt
+            # (env-injected tokens included), aligned with response_model_steps for per-token
+            # staleness; also the token count used by rollout throughput logging.
+            prompt_len = len(segment_state.prompt_ids or [])
+            segment_state.response_ids = list(data["input_ids"][prompt_len:])
             segment_state.logprobs = data["logprobs"]
             # ``routed_experts`` is a per-node list for a MoE trace or ``None`` for a dense one; trace_store's
             # ``_resolve_routed_experts`` already enforces the all-or-nothing invariant (a trace mixing MoE turns with
