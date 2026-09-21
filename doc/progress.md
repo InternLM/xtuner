@@ -83,7 +83,78 @@ zskj-hub/models--zai-org--GLM-5.3-Flash-BF16/`，45 层完整模型，120 shards
 
 ## F1 数据侧前处理闭环
 
-**状态**：未开始。权威来源见设计文档 F1（duanyanhui 的 VL 文档 + 本次核实的 F1.b/F1.c）。
+**状态**：已完成，已提交。权威来源：duanyanhui 的
+`xtuner_glm53_flash_vl_vision_design.md`（§7~§8）与 `xtuner_glm53_flash_vl_develop_stages.md`
+（§3，阶段 2），本文 F1.a~F1.d 记录接口与本次新核实的事实。
+
+**交付**：
+- `xtuner/v1/data_proto/messages/glm53_chat.py`：`render_glm53_chat` / `Glm53ChatMessages`，
+  在已落地的 `glm52_chat.py` 基础上按同构改写（F1.a）——`reasoning_effort` 定义域
+  `{high,max}→{low,high,max}`，媒体渲染从 `<reminder>...</reminder>` 改为两段式 placeholder
+  标记；两处改动逐字节比对 HF 真实 `chat_template.jinja`（`tokenizer.apply_chat_template`）
+  验证一致，其余结构（user/observation 边界 loss、tool 调用、多轮 reasoning）直接复用
+  GLM-5.2 已验证的实现，不重新设计。
+- `xtuner/v1/datasets/mllm_tokenize_fn/glm53_vl_tokenize_fn.py`：`Glm53VLTokenizeFunction` /
+  `Glm53VLTokenizeFnConfig`，cache（不解码媒体）/ runtime（真实 processor）双路径，image-only
+  与 video-only 分支，混合媒体显式 `NotImplementedError`。
+- `xtuner/v1/datasets/data_item.py`：新增 `Glm53VLDataItem`（`pixel_values` /
+  `image_grid_thw` / `pixel_values_videos` / `video_grid_thw` / `mm_token_type_ids`）。
+- `xtuner/v1/data_proto/sequence_context.py`：新增同名三个可选字段，`__init__`/`split`/`cat`/
+  `to`/`copy`/`data` 全部同步；`mm_token_type_ids` 走与 `input_ids` 完全相同的
+  pad/split（SP 场景），`pixel_values_videos` 与 `pixel_values` 一样刻意不在 `.to()` 里搬
+  device（同一条既有性能注释：由模型侧 SP 切分后再各自搬运）。
+- `xtuner/v1/datasets/collator.py`：`build_text_ctx_labels` 增加返回值 `kept_indices`（保留的
+  原始 instance 索引，drop-from-end 截断场景下可用）；新增 `glm53_vl_sft_collator`。
+
+**关键实现决策：placeholder 展开直接复用 HF processor 的公开方法，而不是重写协议**——
+`Glm5NextProcessor.replace_image_token` / `replace_video_token` / `create_mm_token_type_ids`
+都是公开方法且不依赖已解码的媒体张量（只需要 `image_grid_thw` / `video_grid_thw` /
+`video_metadata` 这几个几何量），cache 与 runtime 两条路径都直接调用这三个方法——cache 路径
+用几何预测出的假 grid/metadata 传入，runtime 路径用真实 processor 输出的 grid/metadata 传入，
+两条路径执行的是**同一份 HF 代码**，不是两份独立实现互相校验。这比设计文档 §8.2 要求的"cache
+与 runtime 共用同一份 XTuner 构造代码，官方 processor 输出仅作校验 golden"更进一步：既满足了
+"同一份代码"的一致性要求，又把协议正确性完全交给经过官方测试的 HF 实现，不承担自研 GLM 视频
+时间戳/tubelet 协议的实现风险。`tests/datasets/test_glm53_vl_tokenize_fn.py` 的
+`TestGlm53MmTokenTypeIdsMatchesProcessorGolden` 两个用例验证了 `input_ids`/`mm_token_type_ids`
+与真实端到端 `processor(text=..., images=...)`/`processor(text=..., videos=...)` **逐 token
+位完全相等**（不是近似），是本 feature 最强的正确性证据。
+
+**排查记录（真实根因，非推测）**：
+1. §7.1/F1.c（含 peer session 独立核实）都声称 `image_processor.get_number_of_image_patches`
+   与 `video_processor.get_number_of_video_patches` 都是官方暴露的纯几何 API，cache 阶段可以
+   直接调用两者预测 `image_grid_thw`/`video_grid_thw`。逐行检查 transformers 5.17.0 实际安装
+   包（非 main 分支源码）后发现：**image 侧确实存在，但 `Glm5NextVideoProcessor` 没有
+   `get_number_of_video_patches`**（`hasattr` 直接返回 `False`，且全量 grep 整个 transformers
+   包找不到任何模型定义过这个方法名）；`Glm5NextProcessor._get_num_multimodal_tokens` 的视频分支
+   若真被调用会直接 `AttributeError`，说明这条代码路径在当前版本从未被真正跑到过。
+   修正：cache 路径改为用已确认存在的两个更底层公开 API 自行组合——
+   `Glm5NextVideoProcessor.sample_frames(metadata)`（仅需 `total_num_frames`/`fps`，不解码）
+   得到采样帧数，再用模块级公开函数 `smart_resize`（`video_processing_glm5_next.smart_resize`，
+   `get_number_of_image_patches` 内部调用的同一个函数）算目标分辨率——这正是真实预处理路径
+   `Glm5NextVideoProcessor.resize()` 内部调用的同一对公开函数，不是重新实现。写了最小复现脚本
+   （构造真实 `AutoProcessor` + 合成 4 帧视频，对比真实 `video_grid_thw` 与我的几何预测）确认
+   两者逐位相等后才继续开发，而不是假设组合正确就往下写。
+2. 初版把 `<|begin_of_image|><|image|><|end_of_image|>` 整段作为要替换的 marker，把
+   `replace_image_token` 的返回值（256 个 `<|image|>`）整体替换掉这三个 token；跑一遍真实
+   `processor(text=..., images=...)` 端到端对比后发现 `num_tokens` 少 2（280 vs 278）。用
+   `tokenizer.convert_ids_to_tokens` 定位真实序列后确认：HF 的展开只替换**单个**
+   `<|image|>`/`<|video|>` token，`<|begin_of_image|>`/`<|end_of_image|>` wrapper 是 chat
+   template 自己渲染的，展开阶段原样保留在两侧。改成只替换裸 marker（`<|image|>`/
+   `<|video|>`）后与真实 processor 的 `input_ids`/`mm_token_type_ids` 逐位相等。
+
+**已知缺口**：
+- `xtuner/v1/datasets/config.py` 的 `DataloaderConfig.build_collator()` 尚未注册
+  `glm53_vl_sft_collator`（该函数比 `qwen3_vl_sft_collator`/`intern_s1_vl_sft_collator` 多两个
+  必填参数 `image_token_id`/`merge_unit`，需要从 tokenize_fn 实例取值）——这条端到端接线留给
+  F6（"依赖 F1~F5 全部完成"），F1 阶段该函数已可通过 `pydoc.locate` 或直接 import 使用。
+- 视频加载支持真实视频文件（`decord`，本环境 `pt29_glm2` 已装）与帧文件夹两种来源；未支持
+  gif/其他容器格式（无此需求）。这与 duanyanhui 的 `pt121_all_env`（缺 decord，故仅支持帧
+  文件夹）不同，是环境差异，不是功能缺口。
+
+**测试结果**：`tests/datasets/test_glm53_chat.py`（6/6）+ `tests/datasets/test_glm53_vl_collator.py`
+（9/9，含 `qwen3_vl_sft_collator`/`intern_s1_vl_sft_collator` 的 `build_text_ctx_labels` 共享
+改动回归）+ `tests/datasets/test_glm53_vl_tokenize_fn.py`（10/10，含两个与真实 processor 逐 token
+位比对的用例）全部通过，CPU only，无需 GPU。
 
 ## F2 视觉塔与 projector
 
