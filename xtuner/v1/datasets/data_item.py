@@ -33,6 +33,14 @@ class OmniDataItem(BaseMLLMDataItem, total=False):
     position_ids: torch.Tensor
 
 
+class Glm53VLDataItem(BaseMLLMDataItem, total=False):
+    pixel_values: torch.Tensor
+    image_grid_thw: torch.Tensor
+    pixel_values_videos: torch.Tensor
+    video_grid_thw: torch.Tensor
+    mm_token_type_ids: torch.Tensor  # 0=text, 1=image, 2=video
+
+
 class LongTextDataItem(DataItem):
     char_start: int
     char_end: int
