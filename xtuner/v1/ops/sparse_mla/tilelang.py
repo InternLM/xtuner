@@ -142,6 +142,7 @@ def tilelang_dsa_topk_indices(
     *,
     index_head_dim: int,
     index_topk: int,
+    use_tilelang_topk: bool = False,
 ) -> torch.Tensor:
     _, _, index_n_heads, _ = q.shape
 
@@ -155,7 +156,7 @@ def tilelang_dsa_topk_indices(
     weights = weights.squeeze(0) * (index_n_heads**-0.5)
     weights = (weights * (index_head_dim**-0.5)).contiguous()
     starts, ends = seq_ctx.packed_causal_query_ranges(q.shape[0], q.device)
-    return _tilelang_dsa_topk_indices_from_ranges(q, k, weights, starts, ends, index_topk)
+    return _tilelang_dsa_topk_indices_from_ranges(q, k, weights, starts, ends, index_topk, use_tilelang_topk)
 
 
 @torch.library.custom_op("sparse_mla::tilelang_dsa_topk_indices", mutates_args=(), device_types="cuda")
@@ -166,14 +167,20 @@ def _tilelang_dsa_topk_indices_from_ranges(
     starts: Tensor,
     ends: Tensor,
     index_topk: int,
+    use_tilelang_topk: bool,
 ) -> Tensor:
     from .tilelang_indexer_fwd import indexer_fwd_interface
 
     logits = indexer_fwd_interface(q, k, weights, starts, ends, clean_logits=True)
     topk = min(index_topk, k.shape[0])
-    topk_scores, topk_indices = logits.topk(topk, dim=-1)
-    topk_indices = topk_indices.masked_fill(topk_scores == -torch.inf, -1)
-    return topk_indices.to(torch.int32).unsqueeze(1)
+    if use_tilelang_topk:
+        from .tilelang_topk import tl_topk
+
+        topk_indices = tl_topk(logits, starts, ends, topk)
+    else:
+        topk_scores, topk_indices = logits.topk(topk, dim=-1)
+        topk_indices = topk_indices.masked_fill(topk_scores == -torch.inf, -1).to(torch.int32)
+    return topk_indices.unsqueeze(1)
 
 
 @_tilelang_dsa_topk_indices_from_ranges.register_fake
@@ -184,6 +191,7 @@ def _(
     starts: Tensor,
     ends: Tensor,
     index_topk: int,
+    use_tilelang_topk: bool,
 ) -> Tensor:
     topk = min(index_topk, k.shape[0])
     return torch.empty((q.shape[0], 1, topk), device=q.device, dtype=torch.int32)

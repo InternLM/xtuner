@@ -54,6 +54,7 @@ model_cfg.float8_cfg = _get_float8_config()
 model_cfg.lm_loss_cfg = loss_cfg
 if hasattr(model_cfg.attention, "sparse_mla_backend"):
     model_cfg.attention.sparse_mla_backend = os.environ.get("SPARSE_MLA_BACKEND", "tilelang")
+    model_cfg.attention.use_tilelang_topk = _get_bool_env("USE_TILELANG_TOPK", False)
     if "INDEXER_BACKEND" in os.environ:
         # ``deep_gemm_fp8`` uses DeepGEMM's FP8 MQA path to match LMDeploy's
         # Indexer scoring contract.

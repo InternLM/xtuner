@@ -1,4 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from functools import partial
+
 import torch
 
 from xtuner.v1.data_proto import SequenceContext
@@ -36,12 +38,14 @@ def sparse_mla(
     return get_sparse_mla(backend)(q, kv, indices, scaling=scaling, value_dim=value_dim)
 
 
-def get_dsa_topk_indices(backend: DSAIndexerBackend) -> DSATopKIndicesProtocol:
+def get_dsa_topk_indices(backend: DSAIndexerBackend, use_tilelang_topk: bool = False) -> DSATopKIndicesProtocol:
     if backend == "torch":
         return torch_dsa_topk_indices
     if backend in ("tilelang", "cudnn_dsa", "flash_mla"):
         from .tilelang import tilelang_dsa_topk_indices
 
+        if use_tilelang_topk:
+            return partial(tilelang_dsa_topk_indices, use_tilelang_topk=True)
         return tilelang_dsa_topk_indices
     if backend == "deep_gemm_fp8":
         from .lmdeploy_fp8_index import lmdeploy_fp8_dsa_topk_indices
@@ -59,8 +63,9 @@ def dsa_topk_indices(
     index_head_dim: int,
     index_topk: int,
     backend: DSAIndexerBackend = "torch",
+    use_tilelang_topk: bool = False,
 ) -> torch.Tensor:
-    return get_dsa_topk_indices(backend)(
+    return get_dsa_topk_indices(backend, use_tilelang_topk)(
         q,
         k,
         weights,
