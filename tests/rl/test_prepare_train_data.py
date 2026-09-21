@@ -4,10 +4,9 @@
 rollout backend：
 
 - loop 侧 ``canonicalize_train_fields``：基类为 prompt+response 型样本构造统一全序列字段
-  （``input_ids``/``labels``/``logprobs`` 等长、未 shift；``agent_loop_type`` 由 generate_group
-  写入产出 loop 的类名）；localhost/sandbox 各自覆写为
-  trace 全序列字段的校验（失败置 FAILED，不上抛）。
-- controller 侧 ``TrainingController._convert_rollout_groups``：消费已 canonicalize 且 labels 已定稿
+  （``input_ids``/``labels``/``logprobs`` 等长、未 shift）；
+  localhost/sandbox 各自覆写为 trace 全序列字段的校验（失败置 FAILED，不上抛）。
+- controller 侧 ``TrainingController._rollout_groups_to_colate_items``：消费已 canonicalize 且 labels 已定稿
   （语义洞直接烙在 labels 中）的状态，完成 shift、张量化、组级 advantage、seq_ctx 构造与
   ``data_info`` 统计。
 
@@ -319,7 +318,7 @@ class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
 
 
 class TestConvertRolloutGroups(unittest.TestCase):
-    """TrainingController._convert_rollout_groups 合同：shift、advantage、张量与统计。"""
+    """TrainingController._rollout_groups_to_colate_items 合同：shift、advantage、张量与统计。"""
 
     def _build_controller(self, advantages: list[float], task_adv_weight: float = 1.0) -> TrainingController:
         controller = TrainingController.__new__(TrainingController)
@@ -331,7 +330,7 @@ class TestConvertRolloutGroups(unittest.TestCase):
 
     def _convert(self, controller, data_groups, pack_max_length=128):
         with patch("xtuner.v1.rl.trainer.controller.XTUNER_DETERMINISTIC", True):
-            return controller._convert_rollout_groups(data_groups, pack_max_length)
+            return controller._rollout_groups_to_colate_items(data_groups, pack_max_length)
 
     def _state(
         self,
@@ -353,7 +352,6 @@ class TestConvertRolloutGroups(unittest.TestCase):
         labels: list[int] | None = None,
         teacher_tokens: list[int] | list[list[int]] | None = None,
         teacher_logprobs: list[float] | list[list[float]] | None = None,
-        agent_loop_type: str | None = None,
     ) -> RolloutState:
         resolved_prompt_ids = prompt_ids if prompt_ids is not None else [10, 11, 12]
         resolved_response_ids = response_ids if response_ids is not None else [20, 21, 22]
@@ -365,7 +363,6 @@ class TestConvertRolloutGroups(unittest.TestCase):
             response=response,
             response_ids=resolved_response_ids,
             logprobs=logprobs,
-            agent_loop_type=agent_loop_type,
             reward=reward if reward is not None else {"score": 1.0},
             status=status,
             finish_reason="stop" if status == Status.COMPLETED else "error",
@@ -441,7 +438,8 @@ class TestConvertRolloutGroups(unittest.TestCase):
         self.assertEqual(info["training_samples"], 1)
         self.assertEqual(info["training_tokens"], 5)
         self.assertEqual(info["rewards/mean"], 1.0)
-        self.assertEqual(info["response_len/mean"], 3.0)
+        # response_len 从 labels 监督位推导（labels 是唯一监督载体）：语义洞不计入。
+        self.assertEqual(info["response_len/mean"], 2.0)
         self.assertEqual(info["prompt_len/mean"], 3.0)
 
     def test_controller_consumes_labels_as_final_supervision(self):
@@ -490,7 +488,6 @@ class TestConvertRolloutGroups(unittest.TestCase):
             labels=[-100, -100, 40, -100, 42],
             logprobs=[0.0, -0.1, -0.2, -0.3, -0.4],
             reward={"score": -1.0},
-            agent_loop_type="AgentInLocalhostLoop",
         )
 
         _, info = self._convert(controller, [[plain, agentic]])
@@ -550,7 +547,6 @@ class TestConvertRolloutGroups(unittest.TestCase):
         seq_ctx = get_train_seq_ctx(
             cast(torch.LongTensor, full_ids),
             prompt_position_ids.numpy(),
-            len_response_ids=len(response_ids),
         )
         rl_position_ids = seq_ctx.position_ids
         assert rl_position_ids is not None
@@ -572,7 +568,6 @@ class TestConvertRolloutGroups(unittest.TestCase):
             input_ids=[30, 31, 40, 41, 42],
             labels=[-100, -100, 40, 41, 42],
             logprobs=[0.0, -0.1, -0.2, -0.3, -0.4],
-            agent_loop_type="AgentInLocalhostLoop",
         )
 
         data_batches, _ = self._convert(controller, [[reasoning_state], [agentic_state]])
@@ -605,7 +600,6 @@ class TestConvertRolloutGroups(unittest.TestCase):
             teacher_tokens=[[100, 101], [102, 103], [104, 105]],
             teacher_logprobs=[[-0.5, -0.6], [-0.7, -0.8], [-0.9, -1.0]],
             extra_fields={"origin_data_source": "agent_math"},
-            agent_loop_type="AgentInLocalhostLoop",
         )
 
         data_batches, _ = self._convert(controller, [[state]])
@@ -705,7 +699,6 @@ class TestConvertRolloutGroups(unittest.TestCase):
             teacher_tokens=[40, 41, 42],
             teacher_logprobs=[-1.1, -1.2, -1.3],
             extra_fields={"origin_data_source": "agent_math"},
-            agent_loop_type="AgentInLocalhostLoop",
         )
 
         data_batches, _ = self._convert(controller, [[plain_state], [agentic_state]])
@@ -763,7 +756,6 @@ class TestConvertRolloutGroups(unittest.TestCase):
             input_ids=[30, 31, 40, 41, 42],
             labels=[-100, -100, 40, 41, 42],
             logprobs=[0.0, -0.1, -0.2, -0.3],
-            agent_loop_type="AgentInLocalhostLoop",
         )
 
         data_batches, info = self._convert(controller, [[state]])
@@ -889,7 +881,7 @@ class TestConvertRolloutGroupsPackAlignment(unittest.TestCase):
 
     def _convert(self, controller, data_groups, pack_max_length: int):
         with patch("xtuner.v1.rl.trainer.controller.XTUNER_DETERMINISTIC", True):
-            return controller._convert_rollout_groups(data_groups, pack_max_length)
+            return controller._rollout_groups_to_colate_items(data_groups, pack_max_length)
 
     def _assert_real_token_alignment(
         self, samples: list[RolloutState], packed: dict, total_len: int, packed_len: int
