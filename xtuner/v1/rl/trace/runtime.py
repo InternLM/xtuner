@@ -83,8 +83,8 @@ _OTELCOL_OTLP_GRPC_EXPORTER_YAML_TEMPLATE = """
 def _local_advertised_host() -> str:
     """Return a host that other nodes can use to reach this driver node.
 
-    The driver advertises its OTLP endpoint to Ray child processes, which may
-    run on other hosts, so a loopback address would point them at themselves.
+    The driver advertises its OTLP endpoint to Ray child processes, which may run on other hosts, so a loopback address
+    would point them at themselves.
     """
     try:
         import ray

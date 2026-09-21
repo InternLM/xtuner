@@ -61,7 +61,8 @@ SFT_FINITE_LOSS_METRICS = (
 
 
 def _normalize_sft_metric_cfg(metric: str, value) -> tuple[float, int | None, str]:
-    """Accept ``metric: threshold`` or ``metric: {threshold, aggregate, method}``.
+    """Accept ``metric: threshold`` or ``metric: {threshold, aggregate,
+    method}``.
 
     Percentile aggregation is opt-in only (explicit ``aggregate`` in config).
     Comparison method defaults to ``relative``; token counts default to ``absolute``.
@@ -127,7 +128,8 @@ def _align_first_phase_steps(phase, base_steps, cur_steps, cur_metrics, kind="SF
 
 
 def _resolve_first_phase_baseline_steps(resume_base_path: str) -> int | None:
-    """Return step count of companion ``tracker.jsonl`` for a resume baseline."""
+    """Return step count of companion ``tracker.jsonl`` for a resume
+    baseline."""
     if not resume_base_path.endswith("tracker-resume.jsonl"):
         return None
     first_path = resume_base_path[: -len("tracker-resume.jsonl")] + "tracker.jsonl"
@@ -284,7 +286,8 @@ def _should_run_memory_gradient_check(
     drift_threshold: float,
     max_rel_drift: float,
 ) -> bool:
-    """Run leak heuristic only when baseline drift is loose or current swing grew."""
+    """Run leak heuristic only when baseline drift is loose or current swing
+    grew."""
     tight_vs_baseline = max_rel_drift < drift_threshold * MEMORY_GRADIENT_BASELINE_DRIFT_SKIP_RATIO
     base_range = float(max(base_vals) - min(base_vals))
     cur_range = float(max(cur_vals) - min(cur_vals))
@@ -370,9 +373,8 @@ def _find_nonfinite(values: list[float]) -> int | None:
 def _annotate_mtp_only_failure(fail_metric: dict[str, str], metric_list: list[str]) -> None:
     """Clarify MTP-only failures when llm/local anchors still pass.
 
-    MTP CE is expected to be much noisier than next-token llm/local loss. A lone
-    MTP threshold miss with healthy llm/local is usually pack/noise, not a
-    train-infer bug — unless values are non-finite (already hard-failed above).
+    MTP CE is expected to be much noisier than next-token llm/local loss. A lone MTP threshold miss with healthy
+    llm/local is usually pack/noise, not a train-infer bug — unless values are non-finite (already hard-failed above).
     """
     mtp_key = "loss/reduced_mtp_loss"
     if mtp_key not in fail_metric:
@@ -428,9 +430,7 @@ def check_result(case_name, base_path, cur_path, check_metric, phase=None):
         if metric in SFT_FINITE_LOSS_METRICS:
             bad_idx = _find_nonfinite(cur_metrics[metric])
             if bad_idx is not None:
-                fail_metric[metric] = (
-                    f"{metric} is non-finite at step {bad_idx}: {cur_metrics[metric][bad_idx]!r}"
-                )
+                fail_metric[metric] = f"{metric} is non-finite at step {bad_idx}: {cur_metrics[metric][bad_idx]!r}"
                 continue
             bad_idx = _find_nonfinite(base_metrics[metric])
             if bad_idx is not None:
@@ -665,8 +665,7 @@ def check_rl_result(case_name, base_path, cur_path, assert_info, phase=None):
             if not passed:
                 if method == "value":
                     fail_metric[metric] = (
-                        f"{metric} value {cur_val:.6f} does not satisfy {operator} {threshold} "
-                        f"at step {report_idx}"
+                        f"{metric} value {cur_val:.6f} does not satisfy {operator} {threshold} at step {report_idx}"
                     )
                 else:
                     fail_metric[metric] = (
