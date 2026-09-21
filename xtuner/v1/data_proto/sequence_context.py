@@ -47,6 +47,11 @@ class SequenceContext:
     inputs_embeds: torch.FloatTensor | None
     num_img_tokens: list[list[int]] | None
 
+    # Glm53VL
+    pixel_values_videos: torch.FloatTensor | None
+    video_grid_thw: torch.Tensor | None
+    mm_token_type_ids: torch.Tensor | None  # 0=text, 1=image, 2=video; same layout as input_ids
+
     # moe routed_experts
     rollout_routed_experts: torch.Tensor | None
     offload_rollout_routed_experts: bool
@@ -77,6 +82,10 @@ class SequenceContext:
         pixel_values: torch.FloatTensor | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         num_img_tokens: list[list[int]] | None = None,
+        # Glm53VL
+        pixel_values_videos: torch.FloatTensor | None = None,
+        video_grid_thw: torch.Tensor | None = None,
+        mm_token_type_ids: torch.Tensor | None = None,
         rollout_routed_experts: torch.Tensor | None = None,
         offload_rollout_routed_experts: bool = False,
         # SP shard metadata: private, accessed via properties below
@@ -111,6 +120,9 @@ class SequenceContext:
         self.pixel_values = pixel_values
         self.inputs_embeds = inputs_embeds
         self.num_img_tokens = num_img_tokens
+        self.pixel_values_videos = pixel_values_videos
+        self.video_grid_thw = video_grid_thw
+        self.mm_token_type_ids = mm_token_type_ids
         self.rollout_routed_experts = rollout_routed_experts
         self.offload_rollout_routed_experts = offload_rollout_routed_experts
         self._raw_input_ids = raw_input_ids
@@ -235,6 +247,15 @@ class SequenceContext:
                 )
                 self.position_ids = position_ids
 
+            if self.mm_token_type_ids is not None:
+                # Must use the same pad/split as input_ids (§8.3): modality can't be re-derived
+                # from a local shard's begin/end tokens alone.
+                pad_mm_token_type_ids = pad_to_multiple_of(self.mm_token_type_ids, 0, multiple_of, -1)
+                self.mm_token_type_ids = cast(
+                    torch.Tensor,
+                    split_for_sequence_parallel(pad_mm_token_type_ids, dim=-1, sp_mesh=sequence_parallel_mesh),
+                )
+
             if self.rollout_routed_experts is not None:
                 assert isinstance(self.rollout_routed_experts, torch.Tensor), (
                     f"rollout_routed_experts must be a tensor, but got {type(self.rollout_routed_experts)}"
@@ -261,6 +282,9 @@ class SequenceContext:
                 image_grid_thw=self.image_grid_thw,
                 inputs_embeds=self.inputs_embeds,
                 num_img_tokens=self.num_img_tokens,
+                pixel_values_videos=self.pixel_values_videos,
+                video_grid_thw=self.video_grid_thw,
+                mm_token_type_ids=self.mm_token_type_ids,
                 rollout_routed_experts=self.rollout_routed_experts,
                 offload_rollout_routed_experts=self.offload_rollout_routed_experts,
                 raw_input_ids=cast(torch.LongTensor, pad_input_ids),
@@ -291,6 +315,11 @@ class SequenceContext:
         rollout_routed_experts = []
         offload_rollout_routed_experts = False
 
+        pixel_values_videos: list | torch.Tensor | None
+        pixel_values_videos = []
+        video_grid_thw = []
+        mm_token_type_ids = []
+
         for seq_ctx in sequence_context_list:
             assert seq_ctx.sequence_parallel_mesh is None
             if seq_ctx.input_ids is not None:
@@ -317,6 +346,12 @@ class SequenceContext:
                 image_grid_thw.append(seq_ctx.image_grid_thw)
             if seq_ctx.num_img_tokens is not None:
                 num_img_tokens.extend(seq_ctx.num_img_tokens)
+            if seq_ctx.pixel_values_videos is not None:
+                pixel_values_videos.append(seq_ctx.pixel_values_videos)
+            if seq_ctx.video_grid_thw is not None:
+                video_grid_thw.append(seq_ctx.video_grid_thw)
+            if seq_ctx.mm_token_type_ids is not None:
+                mm_token_type_ids.append(seq_ctx.mm_token_type_ids)
             if seq_ctx.rollout_routed_experts is not None:
                 rollout_routed_experts.append(seq_ctx.rollout_routed_experts)
             offload_rollout_routed_experts = offload_rollout_routed_experts or seq_ctx.offload_rollout_routed_experts
@@ -328,6 +363,12 @@ class SequenceContext:
                 pixel_values = torch.cat(pixel_values, dim=0)
         else:
             pixel_values = None
+
+        if pixel_values_videos:
+            if isinstance(pixel_values_videos[0], torch.Tensor):
+                pixel_values_videos = torch.cat(pixel_values_videos, dim=0)
+        else:
+            pixel_values_videos = None
 
         return cls(
             input_ids=torch.cat(packed_input_ids, dim=1) if len(packed_input_ids) > 0 else None,  # type: ignore
@@ -341,6 +382,9 @@ class SequenceContext:
             pixel_values=pixel_values,  # type: ignore
             image_grid_thw=torch.cat(image_grid_thw, dim=0) if image_grid_thw else None,  # type: ignore
             num_img_tokens=num_img_tokens if num_img_tokens else None,
+            pixel_values_videos=pixel_values_videos,  # type: ignore
+            video_grid_thw=torch.cat(video_grid_thw, dim=0) if video_grid_thw else None,  # type: ignore
+            mm_token_type_ids=torch.cat(mm_token_type_ids, dim=-1) if mm_token_type_ids else None,  # type: ignore
             position_ids=torch.cat(position_ids, dim=-1) if position_ids else None,  # type: ignore
             rollout_routed_experts=rollout_routed_experts if len(rollout_routed_experts) > 0 else None,  # type: ignore
             offload_rollout_routed_experts=offload_rollout_routed_experts,
@@ -507,6 +551,9 @@ class SequenceContext:
             pixel_values=overrides.get("pixel_values", self.pixel_values),
             inputs_embeds=overrides.get("inputs_embeds", self.inputs_embeds),
             num_img_tokens=overrides.get("num_img_tokens", self.num_img_tokens),
+            pixel_values_videos=overrides.get("pixel_values_videos", self.pixel_values_videos),
+            video_grid_thw=overrides.get("video_grid_thw", self.video_grid_thw),
+            mm_token_type_ids=overrides.get("mm_token_type_ids", self.mm_token_type_ids),
             rollout_routed_experts=overrides.get("rollout_routed_experts", self.rollout_routed_experts),
             offload_rollout_routed_experts=overrides.get(
                 "offload_rollout_routed_experts", self.offload_rollout_routed_experts
@@ -565,6 +612,14 @@ class SequenceContext:
         if self.image_grid_thw is not None and hasattr(self.image_grid_thw, "to"):
             self.image_grid_thw = self.image_grid_thw.to(device)  # type: ignore
 
+        if self.video_grid_thw is not None and hasattr(self.video_grid_thw, "to"):
+            self.video_grid_thw = self.video_grid_thw.to(device)  # type: ignore
+
+        if self.mm_token_type_ids is not None and hasattr(self.mm_token_type_ids, "to"):
+            self.mm_token_type_ids = self.mm_token_type_ids.to(device)  # type: ignore
+
+        # pixel_values_videos intentionally stays on CPU, same rationale as pixel_values above.
+
         if (
             self.rollout_routed_experts is not None
             and not self.offload_rollout_routed_experts
@@ -600,6 +655,9 @@ class SequenceContext:
             "pixel_values": self.pixel_values,
             "inputs_embeds": self.inputs_embeds,
             "num_img_tokens": self.num_img_tokens,
+            "pixel_values_videos": self.pixel_values_videos,
+            "video_grid_thw": self.video_grid_thw,
+            "mm_token_type_ids": self.mm_token_type_ids,
             "rollout_routed_experts": self.rollout_routed_experts,
             "offload_rollout_routed_experts": self.offload_rollout_routed_experts,
         }
