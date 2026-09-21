@@ -64,8 +64,9 @@ if hasattr(model_cfg.attention, "sparse_mla_backend"):
     else:
         indexer_backend = sparse_mla_backend
     # Keep the historical one-shot path for the PyTorch selector.  TileLang
-    # (including the cuDNN DSA adapter) uses Slime's 8K query block by default;
-    # set INDEXER_TOPK_QUERY_CHUNK_SIZE=0/none to disable it for A/B tests.
+    # (including the cuDNN DSA and FlashMLA adapters) uses Slime's 8K query
+    # block by default; set INDEXER_TOPK_QUERY_CHUNK_SIZE=0/none to disable it
+    # for A/B tests.
     model_cfg.attention.indexer_topk_query_chunk_size = resolve_indexer_topk_query_chunk_size(
         os.environ.get("INDEXER_TOPK_QUERY_CHUNK_SIZE"), indexer_backend
     )

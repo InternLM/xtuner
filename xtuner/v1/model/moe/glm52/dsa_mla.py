@@ -68,7 +68,7 @@ def _validate_indexer_backend_config(
 def _validate_query_chunk_size(value: int | None, backend: str, *, field_name: str) -> None:
     if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
         raise ValueError(f"{field_name} must be a positive integer, got {value!r}")
-    if value is not None and backend not in ("tilelang", "cudnn_dsa"):
+    if value is not None and backend not in ("tilelang", "cudnn_dsa", "flash_mla"):
         raise ValueError("query-chunk Indexer selection requires a TileLang selector")
 
 

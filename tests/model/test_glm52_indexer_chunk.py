@@ -13,6 +13,7 @@ from xtuner.v1.model.moe.glm52.indexer_chunk import (
     [
         (None, "tilelang", DEFAULT_INDEXER_TOPK_QUERY_CHUNK_SIZE),
         (None, "cudnn_dsa", DEFAULT_INDEXER_TOPK_QUERY_CHUNK_SIZE),
+        (None, "flash_mla", DEFAULT_INDEXER_TOPK_QUERY_CHUNK_SIZE),
         (None, "torch", None),
         ("1024", "tilelang", 1024),
         ("0", "tilelang", None),
