@@ -34,7 +34,7 @@ case:
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:cann852-qwen35-0610
-                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork3_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
+                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork4_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
                 num_nodes: 1
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
@@ -67,7 +67,7 @@ case:
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:cann852-qwen35-0610
-                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork2_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
+                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork4_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
@@ -100,7 +100,7 @@ case:
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:cann852-qwen35-0610
-                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork2_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
+                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork4_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
                 num_nodes: 2
                 cpus_per_task: 256
                 envs:
@@ -137,7 +137,7 @@ case:
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:cann852-qwen35-0610
-                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork2_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
+                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork4_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
@@ -171,7 +171,7 @@ case:
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:cann852-qwen35-0610
-                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork2_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
+                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork4_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
                 memory_per_task: 1200
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
@@ -206,7 +206,7 @@ case:
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:cann852-qwen35-0610
-                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork2_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
+                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork4_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
                 num_nodes: 2
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
@@ -236,7 +236,7 @@ case:
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:cann852-qwen35-0610
-                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork2_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
+                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork4_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
@@ -268,7 +268,7 @@ case:
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:cann852-qwen35-0610
-                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork2_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
+                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork4_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
                 cpus_per_task: 80
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
@@ -301,7 +301,7 @@ case:
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:cann852-qwen35-0610
-                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork2_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
+                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork4_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
                 cpus_per_task: 80
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
@@ -335,7 +335,7 @@ case:
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:cann852-qwen35-0610
-                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork2_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
+                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork4_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
@@ -369,7 +369,7 @@ case:
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:cann852-qwen35-0610
-                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork2_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
+                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork4_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
                 memory_per_task: 1200
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
@@ -404,7 +404,7 @@ case:
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:cann852-qwen35-0610
-                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork2_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
+                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork4_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
@@ -436,7 +436,7 @@ case:
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:cann852-qwen35-0610
-                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork2_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
+                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork4_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
                 num_nodes: 2
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
@@ -469,7 +469,7 @@ case:
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:cann852-qwen35-0610
-                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork2_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
+                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork4_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
                 num_nodes: 1
                 cpus_per_task: 80
                 envs:
@@ -502,7 +502,7 @@ case:
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:cann852-qwen35-0610
-                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork2_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
+                pip_package: cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/fork4_xtuner/xtuner; pip install -e . --no-deps; pip install more-itertools
                 cpus_per_task: 80
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
