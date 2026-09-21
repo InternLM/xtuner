@@ -158,7 +158,80 @@ zskj-hub/models--zai-org--GLM-5.3-Flash-BF16/`，45 层完整模型，120 shards
 
 ## F2 视觉塔与 projector
 
-**状态**：未开始。
+**状态**：核心（eager 精度）已完成，已提交；FSDP2/compile/Vision SP 只完成接线，未做生产级验收
+（见下方"已知缺口"）。权威来源：duanyanhui 的 `xtuner_glm53_flash_vl_vision_design.md` §4~§6、
+§9~§13 与 `xtuner_glm53_flash_vl_develop_stages.md` §2/§4/§5/§6（阶段 1/3/4/5）；本次未逐阶段
+停下等待 review（那是 duanyanhui 自己工作流的约定），但仍按其阶段划分的优先级——"先 eager
+bitwise,再生产 kernel"——安排实现与验证顺序。
+
+**交付**：
+```
+xtuner/v1/model/compose/glm53/
+├── __init__.py
+├── glm53_config.py     # Glm53VisionConfig / Glm53ProjectorConfig
+├── modeling_vision.py  # Glm53VisionModel：patch_embed + 2D axial RoPE + 24×block + post_layernorm
+├── modeling_projector.py  # Glm53Projector：downsample(Conv2d) + merger(GELU+clamped SwiGLU)
+└── vision_utils.py     # flatten_video_grid_thw
+tests/model/test_glm53_vision.py
+```
+未新增 `modeling_glm53.py`（compose model）与 compose config，按设计文档 §16.5 留给 F6。
+
+**配置字段核对**（§3.7.4 已发现的偏差，本次逐字段对照真实 checkpoint `vision_config` 固化，
+未照抄设计文档 §5.1 的占位表）：字段名用 `num_heads`（非 `num_attention_heads`，HF 侧靠
+`attribute_map` 做别名，XTuner 无此机制故直接同名）；`rope_parameters` 给默认值
+`{"rope_theta": 10000.0, "rope_type": "axial"}`（checkpoint 原始 JSON 没有这个字段，是
+`AutoConfig` 填的默认值）；`out_hidden_size` 不叫 `text_hidden_size`。
+
+**模块边界**（§5.2）：XTuner 把 HF 单个 `Glm5NextVisionModel` 拆成两半——`vision_tower`
+（`patch_embed/rotary_pos_emb/blocks/post_layernorm`）与 `multi_modal_projector`
+（`downsample/merger`），与 checkpoint key 映射表（§6.1）完全对应，不是 HF 自己的模块边界。
+`Glm53VisionModel.forward` 只到 `post_layernorm` 为止（返回值对应 HF 的"downsample 之前"状态，
+不是 HF 的 `last_hidden_state`），downsample 挪到 `Glm53Projector.forward` 开头。
+
+**关键实现决策：cu_seqlens/position_ids 在 XTuner 内原生实现，而不是运行时 import HF**——
+transformers 5.17.0 的 `transformers.vision_utils.get_vision_position_ids` /
+`get_vision_cu_seqlens` 是公开、无状态、纯 tensor 几何的工具函数（模块自己的 docstring 说明是
+给"vision encoders"复用的），逻辑上可以直接 import 调用；但按设计文档 §3.2"训练路径必须使用
+XTuner 原生实现"的原则、以及 `qwen3_vl/modeling_vision.py` 自己也是原生重写 `rot_pos_emb`/
+cu_seqlens 而不是 import HF 的既有约定，本次把这两个函数原生移植进
+`modeling_vision.py`（`_get_vision_position_ids`/`_get_vision_cu_seqlens`），不引入训练路径对
+HF 内部工具模块的依赖。
+
+**排查记录（真实根因，非推测）**：HF 的 `Glm5NextVisionModel.forward` 里 `last_hidden_state`
+是 downsample **之后**的状态、`pooler_output` 是 merger 之后的状态，而 XTuner 的
+`vision_tower.forward` 只到 `post_layernorm`。第一次写 bitwise parity 测试时直接拿
+`xt_hidden` 比 `hf_out.last_hidden_state` 断言失败（shape 都对不上，`[16,32]` vs `[4,48]`）。
+没有去改测试容差或改实现"凑"过去，而是重新读了一遍 HF `Glm5NextVisionModel.forward` 的源码，
+确认这个 shape 差异是"HF 单模型包含两个 XTuner 模块"这个已知的、设计文档 §5.2 明确要求的边界
+切分导致的，不是数值错误；改成对比"HF 的 downsample 模块作用在 XTuner tower 输出上"的结果，
+与 HF 自己的 `last_hidden_state` bitwise 相等——验证的是"XTuner tower 输出 == HF
+post_layernorm 输出"，而不是回避这处已知的接口差异。
+
+**测试结果**（`tests/model/test_glm53_vision.py`，8/8，CPU only）：
+- `TestFlattenVideoGridThw`（2）：纯函数，离线。
+- `TestGlm53VisionMetaBuild`（1）：meta device 构造冒烟，无需 checkpoint。
+- `TestGlm53VisionWeightMapping::test_vision_weight_mapping_bitwise`（1，真实 checkpoint，
+  `GLM_5_3_FLASH_PATH` 缺失则 skip）：`vision_tower` 339 + `projector` 8 = **347** 个参数，与
+  设计文档 §2.3 独立记录的真实 checkpoint 视觉 key 总数（347）完全一致；`from_hf(strict=False)`
+  加载后 `missing`/`unloaded` 均为空，抽查 `patch_embed.proj`/`merger.gate_proj`/
+  `blocks.0.attn.qkv` 权重与 safetensors 原始 tensor `torch.equal` 逐位相等。
+- `TestGlm53VisionForwardParity`（4，小合成 config，`rtol=0,atol=0`）：单图、多 tubelet 视频
+  （grid=[2,4,4]，验证 cu_seqlens 多段与 position_ids 按 t 重复）、多图 batch（不同尺寸）、
+  forward+backward 梯度冒烟，对照对象是 HF `model.visual` 整体（tower 输出经 HF 自己的
+  downsample 模块，再与 HF `pooler_output` 比较），不是只比 `pooler_output`。
+
+**已知缺口**（设计文档自己的阶段划分——阶段 4 FSDP/compile、阶段 5 Vision SP——需要多卡协调，
+本次未做生产级验收，明确记录而非静默跳过）：
+- `fully_shard()` 已按 `qwen3_vl` 的结构模式接线（逐 block fully_shard + root fully_shard），
+  但未跑多卡 FSDP parity 测试（§5.3/§5.4 的 `test_vision_fsdp_parity`）；
+- attention 已支持 `sequence_parallel_mesh` 入参并对 q/k/v 做 Ulysses all-to-all（镜像
+  `qwen3_vl` 的写法），但设计文档 §9.3/§9.6 要求的"merge-aligned padding + local projector"
+  整套 Vision SP 机制（避免先 gather 全局特征再切）未实现，也未跑 SP=2/4 parity
+  测试（`tests/model/test_glm53_vision_sp.py` 未创建）；
+- `torch.compile` 配置（`default_compile_cfg`）未接入；
+- 生产 attention kernel（FlashAttention/FlexAttention）容差矩阵（§11.7）未验收，目前只验证了
+  `eager_attention` 路径的 bitwise 精度。
+- HF save round-trip（§6.2 后半）未验证。
 
 ## F3 KDA 线性注意力
 
