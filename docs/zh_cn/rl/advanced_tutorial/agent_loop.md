@@ -92,9 +92,9 @@ AgentLoop 返回的 `RolloutState` 如果要进入训练，至少需要满足：
 
 - `logprobs`：长度必须等于 `len(response_ids)`。
 
-labels 是唯一的监督载体。`AgentLoop.generate_group()` 会把产出 loop 的类名写入 `agent_loop_type`，并在末尾调用 `canonicalize_train_fields()`，为 prompt+response 型样本构造全序列 `input_ids`/`labels`/`logprobs`（三者等长、未 shift）。这也是自定义 AgentLoop 最容易出错的地方：工具返回、环境反馈、系统插入内容等不是模型生成的 token，不参与训练——对应 label 直接写 `-100`，`logprobs` 填 `0.0`。prompt+response 型样本不需要手动构造这些字段（基类会兜底）；自行组装全序列的多轮 loop 则必须自己把语义洞烙进 labels。训练侧只做 shift 和 advantage 计算，不处理任何掩码。
+labels 是唯一的监督载体。`AgentLoop.generate_group()` 会在末尾调用 `canonicalize_train_fields()`，为 prompt+response 型样本构造全序列 `input_ids`/`labels`/`logprobs`（三者等长、未 shift）。这也是自定义 AgentLoop 最容易出错的地方：工具返回、环境反馈、系统插入内容等不是模型生成的 token，不参与训练——对应 label 直接写 `-100`，`logprobs` 填 `0.0`。prompt+response 型样本不需要手动构造这些字段（基类会兜底）；自行组装全序列的多轮 loop 则必须自己把语义洞烙进 labels。训练侧只做 shift 和 advantage 计算，不处理任何掩码。
 
-agentic 全序列 loop（如 `AgentInLocalhostLoop`、`AgentInSandboxLoop`）的类名需要登记到 `xtuner.v1.data_proto.rl_data.AGENTIC_AGENT_LOOP_TYPES`，其样本才会被 token 级 staleness 排除；未登记的自定义 loop 默认按 prompt+response（reasoning）样本处理，`agent_loop_type` 为 `None`（未记录，如手工构造的样本）时同样按 prompt+response 处理。
+`response_ids` 统一约定为 `input_ids` 去掉 prompt 前缀的连续后缀（`len(response_ids) == len(input_ids) - len(prompt_ids)`，环境插入或工具返回的 token 也包含在内）；`response_model_steps` 与之等长，记录每位 token 的来源模型版本。token 级 staleness 据此对 prompt+response 与 agentic 全序列样本统一生效：逐 token 判定新鲜度，过期 token 的 label 烙成 `-100`，语义洞位（label 为 `-100`）不受影响。
 
 ## SingleTurnAgentLoop
 
@@ -148,7 +148,7 @@ agent_loop_config = SingleTurnAgentLoopConfig(
 自定义 AgentLoop 通常需要做四件事：
 
 1. 继承 `AgentLoop`，实现 `generate_sample()`。
-2. 在 `generate_sample()` 中维护 `tokens`、`sample_params`、`response_ids`、`response`、`logprobs`、`status`，不要在这里调用外部 Judger。prompt+response 型样本的训练字段（`input_ids`/`labels`）由基类 `canonicalize_train_fields()` 兜底构造；自行组装全序列的 loop 需自己写 `input_ids`/`labels`，并把语义洞直接烙进 labels。
+2. 在 `generate_sample()` 中维护 `tokens`、`sample_params`、`response_ids`、`response`、`logprobs`、`status`，不要在这里调用外部 Judger。prompt+response 型样本的训练字段（`input_ids`/`labels`）由基类 `canonicalize_train_fields()` 兜底构造；自行组装全序列的 loop 需自己写 `input_ids`/`labels`，并把语义洞直接烙进 labels，同时把 `response_ids` 写成 `input_ids` 去掉 prompt 前缀的连续后缀（含环境 token）。
 3. 若覆盖 `generate_group()`，在其中显式编排 Teacher、Judger 和组级过滤；没有 validity check 时应让完成的样本尽早进入 Teacher，有 validity check 时应只把过滤通过的完整组发送给 Teacher。
 4. 继承 `AgentLoopConfig`，实现 `build_local()`，这样才能接入 `TaskSpecConfig.agent_loop_config`，并复用 Ray actor 构建逻辑。
 
@@ -350,7 +350,7 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
 - 每次调用 `rollout_ctl.generate.remote()` 前是否设置了本轮 `sample_params`。
 - 返回训练前，`response_ids`、`response`、`logprobs` 是否完整且长度一致；自组装全序列的 loop 还需保证 `input_ids`/`labels` 齐全且等长。
 - 非模型生成 token 的 label 是否已写 `-100`（prompt+response 型样本由基类 canonicalize 兜底；自组装 loop 自行烙入）。
-- 若是 agentic 全序列 loop，类名是否已登记到 `AGENTIC_AGENT_LOOP_TYPES`。
+- `response_ids` 是否为 `input_ids` 去掉 prompt 前缀的连续后缀（`len(response_ids) == len(input_ids) - len(prompt_ids)`）。
 - 需要 Judger 时，是否通过 `self.run_judger(...)` 调用打分，以复用 pause/cancel 处理。
 - 是否保证最终有 `reward["score"]`。
 - 若使用 async partial rollout，是否正确处理 `enable_partial_rollout` 和历史 response 合并。

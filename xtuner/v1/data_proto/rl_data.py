@@ -141,16 +141,13 @@ class RolloutState(BaseModel):
     routed_experts: np.ndarray | RayObjectRef | list[RayObjectRef] | None = None
     finish_reason: str | None = None
     # response_model_steps：记录 response_ids 中每个 token 来自哪个 model_step，与 response_ids 长度相同。
+    # 环境/工具等非模型生成位沿用所在 rollout cycle 的 model_step 占位（勿填 0，避免污染 min() 语义）。
     response_model_steps: list[int] | None = None
     # 记录该样本过期程度，即最早生成 token 的模型版本与当前训练步数的差值，数值越大表示越过期。
     seq_staleness: int = 0
 
     input_ids: list[int] | None = None
     labels: list[int] | None = None
-    # 产出该样本的 AgentLoop 子类类名（generate_group 写入 type(self).__name__）。
-    # 结合 AGENTIC_AGENT_LOOP_TYPES 可区分 agentic 全序列样本与 prompt+response（reasoning）样本；
-    # None（未记录，如手工构造的样本）按 prompt+response 处理。
-    agent_loop_type: str | None = None
 
     #  --- Judger 输出 ---
     reward: dict[str, Any] | None = None
@@ -413,40 +410,39 @@ def refresh_seq_staleness(group: list[RolloutState], current_train_step: int) ->
     return group
 
 
-# 产自这些 AgentLoop 子类（类名记录在 RolloutState.agent_loop_type）的样本是 agentic 全序列样本：
-# labels 无 prompt 段偏移语义，不参与 token 级 staleness。自定义 agentic loop 需把类名加入此集合。
-AGENTIC_AGENT_LOOP_TYPES: frozenset[str] = frozenset({"AgentInLocalhostLoop", "AgentInSandboxLoop"})
-
-
 def _calculate_effective_response_mask(
     rollout_state: RolloutState,
     *,
     current_train_step: int,
     token_stale_threshold: int,
 ) -> list[int]:
-    """Calculate the response mask after applying token staleness.
+    """Bake token staleness into labels and return the effective response mask.
 
-    The semantic mask is recovered from the labels tail (response segment): supervised
-    tokens carry their target id, masked-out tokens are ``-100``.
+    Every loop writes ``response_ids`` under one convention: the contiguous suffix of ``input_ids`` after
+    the prompt (env-injected or tool tokens included), so response token ``j`` maps to labels position
+    ``len(labels) - len(response_ids) + j``. The effective mask follows the reasoning-RL rule
+    ``effective = semantic_mask * token_staleness_mask``: the semantic mask is recovered from
+    ``labels != -100`` on the response region (semantic holes stay supervised-out regardless of staleness),
+    staleness is evaluated per token via ``response_model_steps``, and a zero effective mask bakes ``-100``
+    into the label in place.
 
     Args:
-        rollout_state (RolloutState): Rollout sample whose response token provenance is evaluated.
+        rollout_state (RolloutState): Rollout sample whose labels are updated in place.
         current_train_step (int): Trainer step that will consume the sample.
         token_stale_threshold (int): Maximum token staleness, measured in trainer steps, allowed for training.
 
     Returns:
-        list[int]: The semantic response mask intersected with the token-staleness mask.
+        list[int]: The effective mask aligned with ``response_ids``.
     """
     labels = cast(list[int], rollout_state.labels)
     response_ids = cast(list[int], rollout_state.response_ids)
     response_model_steps = cast(list[int], rollout_state.response_model_steps)
 
-    # semantic mask: 从 labels 的 response 段恢复（-100 即语义上不参与 loss 的 token）。
-    # response 段偏移 = len(labels) - len(response_ids)，即 prompt 段长度。
+    # response_ids 是 input_ids 去掉 prompt 前缀的连续后缀，offset 即 prompt 长度。
     offset = len(labels) - len(response_ids)
+    # semantic_mask: labels 中非 -100 的监督位；token_staleness_mask: 逐 token 新鲜度
+    # （语义洞位的 staleness 值无意义，乘上 semantic_mask 后自然归零）。
     semantic_mask = [int(label != -100) for label in labels[offset:]]
-
-    # token_staleness_mask: 根据 token 的新鲜程度来 mask
     token_staleness_mask = [
         int(calculate_seq_staleness(response_model_step, current_train_step) < token_stale_threshold)
         for response_model_step in response_model_steps
@@ -455,6 +451,9 @@ def _calculate_effective_response_mask(
         semantic_mask_value * token_staleness_mask_value
         for semantic_mask_value, token_staleness_mask_value in zip(semantic_mask, token_staleness_mask)
     ]
+    for i, mask_value in enumerate(effective_mask):
+        if mask_value == 0:
+            labels[offset + i] = -100
     return effective_mask
 
 
@@ -467,14 +466,12 @@ def calculate_group_effective_response_masks(
     """Calculate a group's effective masks and bake token staleness into its
     labels.
 
-    For each eligible state, response labels whose token staleness reaches the threshold
-    are cleared to ``-100`` in place. Clearing only ever extends: staleness grows
-    monotonically with the trainer step, so repeated calls (e.g. replay-buffer expiry
-    checks followed by the train-batch bake) converge to the same labels. Each returned
-    mask is the semantic response mask intersected with the token-staleness mask.
-    ``None`` means token staleness is disabled or does not apply to that state. Agentic
-    full-sequence states (``agent_loop_type`` in ``AGENTIC_AGENT_LOOP_TYPES``) receive
-    ``None``.
+    For each eligible state, stale supervised labels are cleared to ``-100`` in place.
+    Clearing only ever extends: staleness grows monotonically with the trainer step, so
+    repeated calls (e.g. replay-buffer expiry checks followed by the train-batch bake)
+    converge to the same labels. Each returned mask is the effective response mask
+    aligned with ``response_ids``. ``None`` means token staleness is disabled or does
+    not apply to that state (no labels, or no ``response_ids`` to align with).
 
     Args:
         group (list[RolloutState]): Rollout group updated in place.
@@ -487,23 +484,17 @@ def calculate_group_effective_response_masks(
     """
     if token_stale_threshold is None:
         return [None] * len(group)
-    if any(item.agent_loop_type in AGENTIC_AGENT_LOOP_TYPES for item in group):
-        return [None] * len(group)
 
     masks: list[list[int] | None] = []
     for item in group:
-        if item.labels is None or not item.response_ids or len(item.labels) <= len(item.response_ids):
+        if item.labels is None or not item.response_ids or len(item.labels) < len(item.response_ids):
             masks.append(None)
             continue
-        effective_mask = _calculate_effective_response_mask(
-            item,
-            current_train_step=current_train_step,
-            token_stale_threshold=token_stale_threshold,
+        masks.append(
+            _calculate_effective_response_mask(
+                item,
+                current_train_step=current_train_step,
+                token_stale_threshold=token_stale_threshold,
+            )
         )
-        # prompt 段长度由 labels 与 response 段（有效掩码）长度差推导。
-        offset = len(item.labels) - len(effective_mask)
-        for i, mask_value in enumerate(effective_mask):
-            if mask_value == 0:
-                item.labels[offset + i] = -100
-        masks.append(effective_mask)
     return masks

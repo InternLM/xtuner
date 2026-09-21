@@ -255,7 +255,6 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
                 # - input_ids keeps the whole prompt+response sequence
                 # - labels supervise the full response; TrainingController applies the
                 #   one-position shift at conversion time
-                # - agent_loop_type records the producing loop's class name
                 group.append(RolloutState(
                     rollout_id=group_idx * len(response_list) + i,
                     group_id=group_idx,
@@ -263,7 +262,6 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
                     prompt_ids=prompt_ids,
                     response=response,
                     response_ids=response_ids,
-                    agent_loop_type="SingleTurnAgentLoop",
                     reward={"score": group_rewards[i]},
                     status=Status.COMPLETED,
                     input_ids=prompt_ids + response_ids,
