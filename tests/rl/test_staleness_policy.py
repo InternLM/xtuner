@@ -149,8 +149,8 @@ class TestTokenStalenessMask(unittest.TestCase):
         self.assertIsNone(borrowed.routed_experts_owner)
 
     def test_reset_rollout_response_releases_unowned_refs(self):
-        """Refs without an owner tag (legacy-checkpoint restores) must not
-        leak when the state is reset."""
+        """Refs without an owner tag (legacy-checkpoint restores) must not leak
+        when the state is reset."""
 
         class FakeObjectRef:
             pass

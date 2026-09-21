@@ -152,10 +152,9 @@ class PartialRolloutHandler:
     ) -> RolloutState:
         """Postprocess a partial rollout using the default semantics.
 
-        The handler releases the history ref only when the rollout state owns
-        it; refs borrowed from the TraceStore must never be freed here. The
-        current ref belongs to the caller, who releases it after this call if
-        it created it.
+        The handler releases the history ref only when the rollout state owns it; refs borrowed from the TraceStore
+        must never be freed here. The current ref belongs to the caller, who releases it after this call if it created
+        it.
         """
         rollout_state.finish_reason = finish_reason
         rollout_state.status = status

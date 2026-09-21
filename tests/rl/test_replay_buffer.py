@@ -167,8 +167,8 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(stale.routed_experts_owner)
 
     async def test_retryable_stale_unowned_refs_are_released(self):
-        """Refs without an owner tag (legacy-checkpoint restores) must not
-        leak when the state is reset."""
+        """Refs without an owner tag (legacy-checkpoint restores) must not leak
+        when the state is reset."""
         for config_name, replay_buffer_config_cls in REPLAY_BUFFER_CONFIGS:
             with self.subTest(replay_buffer_config=config_name):
                 replay_buffer = replay_buffer_config_cls().build()
