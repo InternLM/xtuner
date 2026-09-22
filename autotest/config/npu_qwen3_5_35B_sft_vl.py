@@ -11,9 +11,6 @@ try:
 except ImportError:
     from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
 
-from xtuner.v1.patch.fully_shard_patch import apply_fully_shard_patch
-apply_fully_shard_patch()
-
 
 MEDIA_ROOT = os.environ["MEDIA_ROOT"]
 MODEL_PATH = os.environ["MODEL_PATH"]
