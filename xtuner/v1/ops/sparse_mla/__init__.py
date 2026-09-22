@@ -1,4 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import importlib.util
+
 import torch
 
 from xtuner.v1.data_proto import SequenceContext
@@ -47,6 +49,11 @@ def get_dsa_topk_indices(backend: DSAIndexerBackend) -> DSATopKIndicesProtocol:
         from .lmdeploy_fp8_index import lmdeploy_fp8_dsa_topk_indices
 
         return lmdeploy_fp8_dsa_topk_indices
+    if backend == "cute_dsl":
+        ensure_cute_dsl_runtime_available()
+        from .cute_dsl_indexer_topk import cute_dsl_dsa_topk_indices
+
+        return cute_dsl_dsa_topk_indices
     raise ValueError(f"Unsupported DSA indexer backend: {backend}")
 
 
@@ -59,6 +66,7 @@ def dsa_topk_indices(
     index_head_dim: int,
     index_topk: int,
     backend: DSAIndexerBackend = "torch",
+    query_chunk_size: int | None = None,
 ) -> torch.Tensor:
     return get_dsa_topk_indices(backend)(
         q,
@@ -67,6 +75,7 @@ def dsa_topk_indices(
         seq_ctx,
         index_head_dim=index_head_dim,
         index_topk=index_topk,
+        query_chunk_size=query_chunk_size,
     )
 
 
@@ -84,6 +93,14 @@ def ensure_cudnn_dsa_runtime_available() -> None:
 
 def ensure_flash_mla_runtime_available() -> None:
     from .flash_mla import ensure_flash_mla_runtime_available as _impl
+
+    return _impl()
+
+
+def ensure_cute_dsl_runtime_available() -> None:
+    if importlib.util.find_spec("cutlass") is None:
+        raise RuntimeError("CuTe DSL DSA indexer requires nvidia-cutlass-dsl==4.5.2.")
+    from .cute_dsl_indexer_topk import ensure_cute_dsl_runtime_available as _impl
 
     return _impl()
 
@@ -114,6 +131,7 @@ __all__ = [
     "SparseMLAProtocol",
     "dsa_topk_indices",
     "ensure_cudnn_dsa_runtime_available",
+    "ensure_cute_dsl_runtime_available",
     "ensure_flash_mla_runtime_available",
     "ensure_tilelang_runtime_available",
     "get_dsa_topk_indices",

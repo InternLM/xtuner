@@ -315,6 +315,7 @@ def lmdeploy_fp8_dsa_topk_indices(
     *,
     index_head_dim: int,
     index_topk: int,
+    query_chunk_size: int | None = None,
 ) -> torch.Tensor:
     """Run the DeepGEMM FP8 Indexer through the common DSA seam.
 
@@ -322,6 +323,8 @@ def lmdeploy_fp8_dsa_topk_indices(
     and DeepGEMM invocation stay private to this adapter. The adapter mirrors LMDeploy's FP8 Indexer preprocessing
     contract.
     """
+    if query_chunk_size is not None:
+        raise ValueError("query-chunk Indexer selection requires a TileLang selector")
     if not q.is_cuda or not k.is_cuda or not weights.is_cuda:
         raise RuntimeError("DeepGEMM FP8 Indexer requires CUDA q, k, and weights")
     if q.ndim != 4 or q.size(0) != 1 or k.ndim != 3 or k.size(0) != 1:
