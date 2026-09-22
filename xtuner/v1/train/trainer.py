@@ -430,6 +430,8 @@ class TrainerConfig(BaseModel):
     hf_max_keep: int | None = None
     exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl"
     profile_step: list[int] | int | None = None
+    profile_time_step: list[int] | None = None
+    profile_memory_step: list[int] | None = None
     profile_time: bool = True
     profile_memory: bool = False
     intra_layer_micro_batch: int = 1
@@ -500,6 +502,8 @@ class Trainer:
         hf_interval (int | None): Interval for saving Huggingface format checkpoints.
         hf_max_keep (int | None): Maximum number of Huggingface checkpoints to keep.
         profile_step (list[int] | int | None): Step to perform profiling.
+        profile_time_step (list[int] | None): Steps to profile time, defaults to ``profile_step``.
+        profile_memory_step (list[int] | None): Steps to profile memory, defaults to ``profile_step``.
         profile_time (bool): Whether to profile training time.
         profile_memory (bool): Whether to profile memory usage.
         intra_layer_micro_batch (int): Intra-layer micro batch size.
@@ -555,6 +559,8 @@ class Trainer:
         hf_max_keep: int | None = None,
         exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl",
         profile_step: list[int] | int | None = None,
+        profile_time_step: list[int] | None = None,
+        profile_memory_step: list[int] | None = None,
         profile_time: bool = True,
         profile_memory: bool = False,
         intra_layer_micro_batch: int = 1,
@@ -599,6 +605,10 @@ class Trainer:
         if isinstance(profile_step, int):
             profile_step = [profile_step]
         self._profile_step = profile_step
+        # A memory snapshot usually belongs to an early step while the time trace belongs to a
+        # steady-state step, so each profiler may override the shared `profile_step`.
+        self._profile_time_step = profile_time_step if profile_time_step is not None else profile_step
+        self._profile_memory_step = profile_memory_step if profile_memory_step is not None else profile_step
         self._profile_time = profile_time
         self._profile_memory = profile_memory
         self._load_from = Path(load_from) if isinstance(load_from, str) else load_from
@@ -825,6 +835,8 @@ class Trainer:
             hf_max_keep=config.hf_max_keep,
             exp_tracker=config.exp_tracker,
             profile_step=config.profile_step,
+            profile_time_step=config.profile_time_step,
+            profile_memory_step=config.profile_memory_step,
             profile_time=config.profile_time,
             profile_memory=config.profile_memory,
             intra_layer_micro_batch=config.intra_layer_micro_batch,
@@ -1639,17 +1651,14 @@ class Trainer:
     @contextmanager
     def _maybe_profiling(self):
         """Check if profiling is enabled and perform profiling if necessary."""
-        if self._profile_step is not None and self._cur_step in self._profile_step:
-            with contextlib.ExitStack() as stack:
-                if self._profile_time:
-                    time_dir = self.exp_dir / self._PROFILE_TIME_PATH / f"step-{self._cur_step}"
-                    stack.enter_context(profiling_time(time_dir))
+        with contextlib.ExitStack() as stack:
+            if self._profile_time and self._profile_time_step and self._cur_step in self._profile_time_step:
+                time_dir = self.exp_dir / self._PROFILE_TIME_PATH / f"step-{self._cur_step}"
+                stack.enter_context(profiling_time(time_dir))
 
-                if self._profile_memory:
-                    memory_dir = self.exp_dir / self._PROFILE_MEMORY_PATH / f"step-{self._cur_step}"
-                    stack.enter_context(profiling_memory(memory_dir))
-                yield
-        else:
+            if self._profile_memory and self._profile_memory_step and self._cur_step in self._profile_memory_step:
+                memory_dir = self.exp_dir / self._PROFILE_MEMORY_PATH / f"step-{self._cur_step}"
+                stack.enter_context(profiling_memory(memory_dir))
             yield
 
     def _compute_performance_metrics(
