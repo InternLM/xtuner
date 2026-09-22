@@ -212,6 +212,7 @@ class _OTelCollector:
     _stdout_path: Path = field(repr=False)
     _stderr_path: Path = field(repr=False)
     _process: subprocess.Popen | None = field(repr=False)
+
     @classmethod
     def start(
         cls,

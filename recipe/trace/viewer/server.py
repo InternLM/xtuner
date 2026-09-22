@@ -335,7 +335,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--output", type=Path, default=None)
-    parser.add_argument("--train-step", default="latest", help="Initial train step to render: latest, all, or a step value.")
+    parser.add_argument(
+        "--train-step", default="latest", help="Initial train step to render: latest, all, or a step value."
+    )
     return parser.parse_args(argv)
 
 
