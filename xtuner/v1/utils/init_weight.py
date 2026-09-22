@@ -12,6 +12,11 @@ from .misc import clean_param_name
 DEVICE = get_device()
 
 
+def _init_gated_delta_a_log(tensor: torch.Tensor) -> None:
+    """Initialize GatedDeltaNet ``A_log`` as ``log(Uniform(0.01, 16))``."""
+    tensor.uniform_(0.01, 16).log_()
+
+
 def init_params(param: torch.Tensor, init_fn: Callable[[torch.Tensor], torch.Tensor | None]):
     """Initialize a single model parameter tensor, supporting both regular
     tensors and DTensors.
@@ -68,6 +73,14 @@ def default_init_weights(module: nn.Module) -> set[str]:
             else:
                 init_params(weight, partial(nn.init.normal_, mean=0.0, std=0.02))
             initialized_params.add(clean_param_name(f"{name}.weight"))
+
+        # GatedDeltaNet keeps decay/time-step as named parameters, not `.weight`.
+        if hasattr(module, "dt_bias") and isinstance(module.dt_bias, nn.Parameter):
+            init_params(module.dt_bias, nn.init.ones_)
+            initialized_params.add(clean_param_name(f"{name}.dt_bias"))
+        if hasattr(module, "A_log") and isinstance(module.A_log, nn.Parameter):
+            init_params(module.A_log, _init_gated_delta_a_log)
+            initialized_params.add(clean_param_name(f"{name}.A_log"))
 
     _init_weights_recursive("", module)
     return initialized_params
