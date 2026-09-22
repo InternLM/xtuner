@@ -160,5 +160,7 @@ trainer = TrainerConfig(
     profile_memory=_get_bool_env("PROFILE_MEMORY", False),
     profile_time=_get_bool_env("PROFILE_TIME", False),
     profile_step=[int(x) for x in os.environ.get("PROFILE_STEP", "2,3").split(",") if x],
+    profile_time_step=[int(step) for step in os.environ.get("PROFILE_TIME_STEP", "").split(",") if step] or None,
+    profile_memory_step=[int(step) for step in os.environ.get("PROFILE_MEMORY_STEP", "").split(",") if step] or None,
     debug_skip_save=_get_bool_env("DEBUG_SKIP_SAVE", False),
 )
