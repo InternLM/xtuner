@@ -47,7 +47,8 @@ from xtuner.v1.rl.distillation import (
 )
 from xtuner.v1.rl.loss import DistillationLossConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
-from xtuner.v1.rl.trainer.controller import TrainingController, get_train_seq_ctx
+from xtuner.v1.rl.trainer.controller import TrainingController
+from xtuner.v1.rl.trainer.worker import get_train_seq_ctx
 
 
 # localhost/sandbox loop 模块顶层导入 lagent；测试环境不依赖其真实实现。
