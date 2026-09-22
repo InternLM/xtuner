@@ -87,6 +87,7 @@ class TestAgentLoopCanonicalizeTrainFields(unittest.TestCase):
         extra_fields: dict | None = None,
         input_ids: list[int] | None = None,
         labels: list[int] | None = None,
+        position_ids: np.ndarray | None = None,
     ) -> RolloutState:
         return RolloutState(
             rollout_id=uid,
@@ -101,6 +102,7 @@ class TestAgentLoopCanonicalizeTrainFields(unittest.TestCase):
             extra_fields=extra_fields or {},
             input_ids=input_ids,
             labels=labels,
+            position_ids=position_ids,
         )
 
     def test_builds_full_sequence_fields(self):
@@ -177,6 +179,50 @@ class TestAgentLoopCanonicalizeTrainFields(unittest.TestCase):
         self.assertIsNone(state.input_ids)
         self.assertIsNone(state.labels)
         self.assertEqual(state.status, Status.FAILED)
+
+    def test_writes_train_meta_fields(self):
+        # canonicalize 通过后写下游调度消费的轻量统计：训练长度、prompt/response 长度、
+        # 监督 token 数与 position 布局。
+        loop = self._make_loop()
+        state = self._state(response_ids=[20, 21, 22], logprobs=[0.1, 0.2, 0.3])
+
+        loop.canonicalize_train_fields([state])
+
+        self.assertEqual(state.num_tokens, 5)
+        self.assertEqual(state.extra_fields["train_prompt_length"], 3)
+        self.assertEqual(state.extra_fields["train_response_length"], 3)
+        self.assertEqual(state.extra_fields["supervised_tokens"], 3)
+        self.assertEqual(state.extra_fields["position_layout"], "1d")
+
+    def test_train_meta_uses_train_prompt_ids_and_mrope_layout(self):
+        # VLM 分支 prompt 长度取 train_prompt_ids；3D position_ids 标记 mrope_3d 布局。
+        loop = self._make_loop()
+        state = self._state(
+            prompt_ids=[1],
+            response_ids=[102, 103],
+            extra_fields={"train_prompt_ids": [100, 101]},
+            position_ids=np.array([[[0, 1, 2]], [[0, 1, 2]], [[0, 1, 2]]], dtype=np.int64),
+        )
+
+        loop.canonicalize_train_fields([state])
+
+        self.assertEqual(state.num_tokens, 3)
+        self.assertEqual(state.extra_fields["train_prompt_length"], 2)
+        self.assertEqual(state.extra_fields["position_layout"], "mrope_3d")
+
+    def test_train_meta_prompt_length_falls_back_to_unsupervised_count(self):
+        # prompt_ids 缺失时 prompt 长度退回 shifted_labels 的非监督位计数（与旧 data_info 口径一致）。
+        loop = self._make_loop()
+        state = self._state()
+        state.prompt_ids = None
+        state.input_ids = [30, 31, 40, 41]
+        state.labels = [-100, -100, 40, 41]
+
+        loop.canonicalize_train_fields([state])
+
+        self.assertEqual(state.num_tokens, 3)
+        self.assertEqual(state.extra_fields["train_prompt_length"], 1)
+        self.assertEqual(state.extra_fields["supervised_tokens"], 2)
 
     def test_missing_prompt_ids_marks_sample_failed(self):
         # 构造失败容错：单个样本置 FAILED，不上抛到 producer。
@@ -290,6 +336,39 @@ class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
 
                 self.assertEqual(state.status, Status.FAILED)
                 self.assertIn("logprobs length mismatch", state.error_msg)
+
+    def test_writes_train_meta_for_valid_states(self):
+        for loop_cls in self.AGENTIC_LOOP_CLASSES:
+            with self.subTest(loop_cls=loop_cls.__name__):
+                loop = self._make_loop(loop_cls)
+                state = self._agentic_state(
+                    input_ids=[30, 31, 40, 41, 42],
+                    labels=[-100, -100, 40, 41, 42],
+                    logprobs=[0.0, -0.1, -0.2, -0.3, -0.4],
+                )
+
+                loop.canonicalize_train_fields([state])
+
+                self.assertEqual(state.num_tokens, 4)
+                self.assertEqual(state.extra_fields["train_prompt_length"], 2)
+                self.assertEqual(state.extra_fields["train_response_length"], 2)
+                self.assertEqual(state.extra_fields["supervised_tokens"], 3)
+                self.assertEqual(state.extra_fields["position_layout"], "1d")
+
+    def test_train_meta_skipped_for_invalid_states(self):
+        # FAILED 与无 input_ids 的样本不写轻量统计。
+        for loop_cls in self.AGENTIC_LOOP_CLASSES:
+            with self.subTest(loop_cls=loop_cls.__name__):
+                loop = self._make_loop(loop_cls)
+                failed = self._agentic_state(status=Status.FAILED)
+                eval_state = self._agentic_state()
+
+                loop.canonicalize_train_fields([failed, eval_state])
+
+                self.assertIsNone(failed.num_tokens)
+                self.assertNotIn("supervised_tokens", failed.extra_fields)
+                self.assertIsNone(eval_state.num_tokens)
+                self.assertNotIn("supervised_tokens", eval_state.extra_fields)
 
     def test_state_without_input_ids_is_skipped(self):
         # eval 态样本显式置空训练字段且 COMPLETED，不能被构造或校验。

@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from lagent.utils import create_object, ctx_session_id
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, write_train_meta
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     AgentRolloutItem,
     RolloutStatus,
@@ -187,6 +187,8 @@ class AgentInLocalhostLoop(AgentLoop):
                 self.logger.error(f"Canonicalize train fields failed for rollout_id={state.rollout_id}: {exc}")
                 state.status = Status.FAILED
                 state.error_msg = f"canonicalize_train_fields failed: {exc}"
+        for state in group:
+            write_train_meta(state)
         return group
 
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
