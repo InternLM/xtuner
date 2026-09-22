@@ -18,7 +18,7 @@ from xtuner.v1.rl.utils import free_object_refs
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
-from .worker import TrainingWorker, WorkerLogItem
+from .worker import TrainingWorker, WorkerLogItem, get_train_seq_ctx
 
 
 if TYPE_CHECKING:
@@ -58,54 +58,6 @@ class _SampleObservation(TypedDict):
     prompt_len: int
     tool_turns: int | None
     training_tokens: int
-
-
-def get_train_seq_ctx(
-    input_ids: torch.LongTensor,
-    position_ids: np.ndarray | None = None,
-    multimodal_train_info: dict | None = None,
-) -> SequenceContext:
-    """Build a CPU ``SequenceContext`` for one training sample.
-
-    Args:
-        input_ids (torch.LongTensor): Model input tokens with shape ``(1, seq_len)``.
-        position_ids (np.ndarray | None): Optional position ids. A 3D array triggers
-            the VLM MRoPE layout; a prompt-only position segment is extended to cover
-            the whole input.
-        multimodal_train_info (dict | None): Optional multimodal payload with
-            ``pixel_values``, ``image_grid_thw`` and ``num_img_tokens``.
-
-    Returns:
-        SequenceContext: The CPU sequence context of the sample.
-    """
-    seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
-    position_ids = _to_cpu_tensor(position_ids, dtype=torch.long)
-    if position_ids is not None and len(position_ids.shape) == 3:
-        # Match get_rope_index_3: response text continues from a single global
-        # max(T, H, W), not per-axis maxima. Per-axis max diverges when the
-        # prompt ends on image tokens (T≈0 while H/W are large). The extension
-        # length is derived from the position deficit so samples whose positions
-        # already cover the whole input (full-sequence agentic samples) need no
-        # extra shape information.
-        num_extend = input_ids.size(-1) - position_ids.size(-1)
-        if num_extend > 0:
-            max_value = position_ids.amax()
-            response_position_ids = (
-                (torch.arange(1, num_extend + 1, device=position_ids.device, dtype=position_ids.dtype) + max_value)
-                .view(1, 1, -1)
-                .expand(3, 1, -1)
-            )
-            position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
-        seq_ctx.position_ids = position_ids  # type: ignore[assignment]
-        assert position_ids.size(-1) == input_ids.size(-1)
-
-    if multimodal_train_info:
-        seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
-        seq_ctx.image_grid_thw = _to_cpu_tensor(multimodal_train_info.get("image_grid_thw"), dtype=torch.long)
-        num_img_tokens = multimodal_train_info.get("num_img_tokens")
-        if num_img_tokens is not None:
-            seq_ctx.num_img_tokens = [num_img_tokens]
-    return seq_ctx
 
 
 def _stat_tensor(values: list[float]) -> torch.Tensor:
@@ -868,10 +820,3 @@ class TrainingController:
         handles = [worker.save.remote(dcp_dir, no_save_optimizer) for worker in self.workers]  # type: ignore
         ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         return
-
-
-def _to_cpu_tensor(value: np.ndarray | None, *, dtype: torch.dtype | None = None) -> torch.Tensor | None:
-    if value is None:
-        return None
-    assert isinstance(value, np.ndarray), f"Expected np.ndarray, got {type(value)}"
-    return torch.as_tensor(value, dtype=dtype, device="cpu")
