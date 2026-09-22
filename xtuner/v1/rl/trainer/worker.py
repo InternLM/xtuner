@@ -300,16 +300,6 @@ class WorkerConfig(BaseModel):
         )
 
 
-class WorkerInputItem(TypedDict):
-    seq_ctx: SequenceContext
-    shifted_labels: torch.LongTensor
-    advantages: torch.Tensor
-    rollout_logprobs: torch.Tensor | None
-    teacher_logprobs: NotRequired[torch.Tensor | None]
-    target_token_ids: NotRequired[torch.Tensor | None]
-    teacher_indices: NotRequired[torch.Tensor | None]
-
-
 class WorkerTrainLogItem(TypedDict, total=False):
     step_consumed_tokens: int
     efficient_attn_ratio: float
