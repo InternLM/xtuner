@@ -3,51 +3,25 @@ from __future__ import annotations
 import os
 import random
 import time
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
-import numpy as np
 import ray
 import torch
-from typing_extensions import NotRequired
 
 from xtuner.v1.data_proto.rl_data import RolloutState, is_valid_for_training
-from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.rl.distillation import DistillationTrainerAdapter
 from xtuner.v1.rl.utils import free_object_refs
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
 from .pack import DPRankPackIndices, PackedDataIndices, RLDataPacker
-from .worker import TrainingWorker, WorkerConfig, WorkerLogItem, get_train_seq_ctx
+from .worker import TrainingWorker, WorkerConfig, WorkerLogItem
 
 
 if TYPE_CHECKING:
     from xtuner.v1.rl.advantage.base import AdvantageEstimator
 
 TRAIN_RAY_GET_TIMEOUT = os.getenv("XTUNER_TRAIN_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
-
-
-class ColateItem(TypedDict):
-    seq_ctx: SequenceContext
-    shifted_labels: torch.Tensor
-    advantage: list[float]
-    rollout_logprobs: torch.Tensor | None
-    teacher_logprobs: NotRequired[torch.Tensor | None]
-    target_token_ids: NotRequired[torch.Tensor | None]
-    teacher_indices: NotRequired[torch.Tensor | None]
-
-
-class PackedBatch(TypedDict):
-    """Output of ``TrainingController._packing``: samples concatenated into one
-    sequence."""
-
-    seq_ctx: SequenceContext
-    shifted_labels: torch.Tensor
-    advantages: torch.Tensor
-    rollout_logprobs: torch.Tensor | None
-    teacher_logprobs: torch.Tensor | None
-    target_token_ids: torch.Tensor | None
-    teacher_indices: torch.Tensor | None
 
 
 class _SampleObservation(TypedDict):
@@ -87,25 +61,6 @@ def _summarize_process_group_results(results: list[dict[str, Any]]) -> str:
     return summary
 
 
-def _verify_packed_alignment(packed_batch: PackedBatch) -> None:
-    # Position-wise fields must stay aligned with input_ids; a mismatch would silently shift
-    # the element-wise policy loss or crash on shape mismatch in the loss function.
-    assert packed_batch["seq_ctx"].input_ids is not None
-    seq_len = packed_batch["seq_ctx"].input_ids.shape[1]
-    shifted_labels = packed_batch["shifted_labels"]
-    advantages = packed_batch["advantages"]
-    assert shifted_labels.shape[1] == seq_len, f"{shifted_labels.shape[1]} vs {seq_len}"
-    assert advantages.shape[1] == seq_len, f"{advantages.shape[1]} vs {seq_len}"
-    for field_name, optional_field in (
-        ("rollout_logprobs", packed_batch["rollout_logprobs"]),
-        ("teacher_logprobs", packed_batch["teacher_logprobs"]),
-        ("target_token_ids", packed_batch["target_token_ids"]),
-        ("teacher_indices", packed_batch["teacher_indices"]),
-    ):
-        if optional_field is not None:
-            assert optional_field.shape[1] == seq_len, f"{field_name}: {optional_field.shape[1]} vs {seq_len}"
-
-
 def _state_uses_3d_position_ids(state: RolloutState) -> bool:
     layout = state.extra_fields.get("position_layout")
     if layout is not None:
@@ -139,271 +94,6 @@ class TrainingController:
         self.distillation = distillation if distillation is not None else DistillationTrainerAdapter(None)
         self.task_adv_weight = self.distillation.task_adv_weight
         self.logger = get_logger()
-
-    # TODO(hha): 这个逻辑不够通用，应该复用 sft 函数，从而支持 expand soft pack
-    def _get_pack_infos(self, dataset, num_tokens, target, random=None):
-        inds = list(range(len(dataset)))
-        if random is not None:
-            random.shuffle(inds)
-
-        item_buffer = []
-        length_buffer = []
-        longest = 0
-
-        pack_infos = []
-        for shfl_i in inds:
-            if num_tokens[shfl_i] + sum(length_buffer) <= target:
-                item_buffer.append(shfl_i)
-                length_buffer.append(num_tokens[shfl_i])
-                longest = max(longest, num_tokens[shfl_i])
-            else:
-                if len(item_buffer) > 0:
-                    info = {
-                        "indices": item_buffer,
-                        "longest": int(longest),
-                    }
-                    pack_infos.append(info)
-
-                item_buffer = [shfl_i]
-                length_buffer = [num_tokens[shfl_i]]
-                longest = num_tokens[shfl_i]
-
-        if len(item_buffer) > 0:
-            info = {
-                "indices": item_buffer,
-                "longest": int(longest),
-            }
-
-            pack_infos.append(info)
-
-        return pack_infos
-
-    # TODO(hha): 这个逻辑不够通用，和模型绑定了
-    def _packing(self, data_batches, pack_max_length, language_cfg):
-        pack_infos = self._get_pack_infos(
-            data_batches,
-            [data["seq_ctx"].input_ids.numel() for data in data_batches],
-            pack_max_length,
-        )
-        packed_data_batches = []
-
-        is_qwen3_vl = any(data["seq_ctx"].position_ids.ndim == 3 for data in data_batches)
-
-        has_rollout_routed_experts = False
-        if data_batches[0]["seq_ctx"].rollout_routed_experts is not None:
-            assert language_cfg is not None
-            has_rollout_routed_experts = True
-            n_routed_experts = language_cfg.n_routed_experts
-
-        for pack_info in pack_infos:
-            indices = pack_info["indices"]
-            total_len = sum([data_batches[i]["seq_ctx"].input_ids.shape[1] for i in indices])
-            pad_len = pack_max_length - total_len
-            seq_ctx_list = [data_batches[i]["seq_ctx"] for i in indices]
-            label_list = [data_batches[i]["shifted_labels"] for i in indices]
-            advantage_list = [data_batches[i]["advantage"] for i in indices]
-
-            rollout_logprobs_list = None
-            if "rollout_logprobs" in data_batches[0] and data_batches[0]["rollout_logprobs"] is not None:
-                rollout_logprobs_list = [data_batches[i]["rollout_logprobs"] for i in indices]
-
-            teacher_logprobs_list = None
-            if "teacher_logprobs" in data_batches[0] and data_batches[0]["teacher_logprobs"] is not None:
-                teacher_logprobs_list = [data_batches[i]["teacher_logprobs"] for i in indices]
-
-            target_token_ids_list = None
-            if "target_token_ids" in data_batches[0] and data_batches[0]["target_token_ids"] is not None:
-                target_token_ids_list = [data_batches[i]["target_token_ids"] for i in indices]
-
-            teacher_indices_list = None
-            if "teacher_indices" in data_batches[0] and data_batches[0]["teacher_indices"] is not None:
-                teacher_indices_list = [data_batches[i]["teacher_indices"] for i in indices]
-
-            if pad_len > 0:
-                # Reduce the attn calculation time by using multiple short sequence packs
-                pad_tokens = tuple(
-                    torch.zeros(1, 1024, dtype=data_batches[0]["seq_ctx"].input_ids.dtype, device="cpu")
-                    for _ in range(pad_len // 1024)
-                )
-                if pad_len % 1024 > 0:
-                    pad_tokens = pad_tokens + (
-                        torch.zeros(1, pad_len % 1024, dtype=data_batches[0]["seq_ctx"].input_ids.dtype, device="cpu"),
-                    )
-                pad_seq_ctx = SequenceContext.from_input_ids(pad_tokens, device="cpu")
-                pad_seq_ctx.num_padding = pad_len
-                pad_labels = torch.full(
-                    (1, pad_len),
-                    -100,
-                    dtype=data_batches[0]["shifted_labels"].dtype,
-                    device=data_batches[0]["shifted_labels"].device,
-                )
-                pad_advantages = [-100] * pad_len
-                if is_qwen3_vl:
-                    _position_ids_list = []
-                    for pad_token in pad_tokens:
-                        _position_ids = torch.arange(pad_token.size(-1)).view(1, 1, -1).expand(3, 1, -1)
-                        _position_ids_list.append(_position_ids)
-                    pad_seq_ctx.position_ids = torch.cat(_position_ids_list, dim=-1)
-
-                if has_rollout_routed_experts:
-                    pad_rand_index = torch.randint(low=0, high=n_routed_experts, size=(pad_len, 1, 1))
-                    pad_seq_ctx.rollout_routed_experts = pad_rand_index
-
-                seq_ctx_list.append(pad_seq_ctx)
-                label_list.append(pad_labels)
-                advantage_list.append(pad_advantages)
-                if rollout_logprobs_list is not None:
-                    pad_rollout_logprobs = torch.zeros(
-                        1,
-                        pad_len,
-                        dtype=data_batches[0]["rollout_logprobs"].dtype,
-                        device=data_batches[0]["shifted_labels"].device,
-                    )
-                    rollout_logprobs_list.append(pad_rollout_logprobs)
-                if teacher_logprobs_list is not None:
-                    teacher_logprobs_shape = data_batches[0]["teacher_logprobs"].shape[2:]
-                    pad_teacher_logprobs = torch.zeros(
-                        (1, pad_len, *teacher_logprobs_shape),
-                        dtype=data_batches[0]["teacher_logprobs"].dtype,
-                        device=data_batches[0]["shifted_labels"].device,
-                    )
-                    teacher_logprobs_list.append(pad_teacher_logprobs)
-                if target_token_ids_list is not None:
-                    target_token_ids_shape = data_batches[0]["target_token_ids"].shape[2:]
-                    pad_target_token_ids = torch.zeros(
-                        (1, pad_len, *target_token_ids_shape),
-                        dtype=data_batches[0]["target_token_ids"].dtype,
-                        device=data_batches[0]["shifted_labels"].device,
-                    )
-                    target_token_ids_list.append(pad_target_token_ids)
-                if teacher_indices_list is not None:
-                    pad_teacher_indices = torch.full(
-                        (1, pad_len),
-                        -1,
-                        dtype=data_batches[0]["teacher_indices"].dtype,
-                        device=data_batches[0]["teacher_indices"].device,
-                    )
-                    teacher_indices_list.append(pad_teacher_indices)
-
-            seq_ctx = SequenceContext.cat(seq_ctx_list)
-            shifted_labels = torch.cat(label_list, dim=1)  # (1, max_len)
-            advantage_flat = [item for sublist in advantage_list for item in sublist]
-            advantages = torch.tensor(advantage_flat, dtype=torch.float32).unsqueeze(0)
-
-            rollout_logprobs = None
-            if rollout_logprobs_list is not None:
-                rollout_logprobs = torch.cat(rollout_logprobs_list, dim=1)  # (1, max_len)
-
-            teacher_logprobs = None
-            if teacher_logprobs_list is not None:
-                teacher_logprobs = torch.cat(teacher_logprobs_list, dim=1)  # (1, max_len)
-
-            target_token_ids = None
-            if target_token_ids_list is not None:
-                target_token_ids = torch.cat(target_token_ids_list, dim=1)
-
-            teacher_indices = None
-            if teacher_indices_list is not None:
-                teacher_indices = torch.cat(teacher_indices_list, dim=1)  # (1, max_len)
-
-            packed_batch = {
-                "seq_ctx": seq_ctx,
-                "shifted_labels": shifted_labels,
-                "advantages": advantages,
-                "rollout_logprobs": rollout_logprobs,
-                "teacher_logprobs": teacher_logprobs,
-                "target_token_ids": target_token_ids,
-                "teacher_indices": teacher_indices,
-            }
-            _verify_packed_alignment(packed_batch)
-            packed_data_batches.append(packed_batch)
-        return packed_data_batches
-
-    def _grouped_by_max_length(self, packed_data_batches):
-        # sort 过后可能第一个 batch 会有很多 pad tokens，因为最后一个 pack 可能只有少量真实数据。
-        # 比如组成了 16 个 pack，第 16 个 pack 可能只有几条真实数据，剩下的都是 pad tokens。
-        # 排序后这条 pack 会被放在最前面，导致 rank0 的第一个 step 消耗的有效 token 数往往少于其他 rank，是正常现象。
-        return sorted(packed_data_batches, key=lambda x: x["seq_ctx"].max_length_q, reverse=True)
-
-    def _rollout_groups_to_colate_items(
-        self,
-        rollout_groups: list[list[RolloutState]],
-        pack_max_length: int,
-        raw_rewards_sum: float = 0.0,
-        raw_rewards_count: int = 0,
-    ) -> tuple[list[ColateItem], dict[str, float]]:
-        """Convert rollout groups into packable training items and step
-        statistics.
-
-        Samples arrive canonicalized from the agent loop (``input_ids``/``labels``/
-        ``logprobs`` share one full-sequence length) with token staleness already baked
-        into ``labels``. The conversion runs in phases: (1) cluster group rewards by
-        session, (2) estimate group-level advantages, (3) shift and tensorize each
-        rollout state into a ``ColateItem``, and (4) summarize the ``data_info``
-        metrics.
-
-        Args:
-            rollout_groups (list[list[RolloutState]]): Rollout groups selected for training.
-            pack_max_length (int): Maximum token length per sample accepted for packing.
-            raw_rewards_sum (float): Producer-side raw reward sum used by ``raw_rewards/mean``.
-            raw_rewards_count (int): Producer-side raw reward count used by ``raw_rewards/mean``.
-
-        Returns:
-            tuple[list[ColateItem], dict[str, float]]: Packable training items and the step
-            statistics dictionary.
-        """
-        has_3d_position = any(
-            state.position_ids is not None and state.position_ids.ndim == 3
-            for group in rollout_groups
-            for state in group
-        )
-
-        cluster_rewards_list: list[float] = []
-        distillation_reward_observations: list[tuple[RolloutState, float]] = []
-        observations: list[_SampleObservation] = []
-        training_samples = 0
-
-        data_batches: list[ColateItem] = []
-        for group in rollout_groups:
-            if not is_valid_for_training(group, self.logger):
-                self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
-                continue
-            training_samples += len(group)
-
-            # Phase 1: session reward clustering. Collect rewards independently from
-            # task-advantage computation: pure OPD may omit rewards entirely; when rewards
-            # are present they remain useful observability signals.
-            cluster_rewards, session_representatives, cluster_indices = self._cluster_group_rewards(group)
-            cluster_rewards_list.extend(cluster_rewards)
-            distillation_reward_observations.extend(zip(session_representatives, cluster_rewards))
-
-            # Phase 2: group-level advantage estimation.
-            sample_advantages = self._compute_group_advantages(
-                cluster_rewards, session_representatives, cluster_indices
-            )
-
-            # Phase 3: per-sample shift, tensorization and seq_ctx construction.
-            for i, state in enumerate(group):
-                data_batch, observation = self._convert_rollout_state(state, sample_advantages[i], has_3d_position)
-                assert observation["training_tokens"] <= pack_max_length, (
-                    f"{observation['training_tokens']} vs {pack_max_length}"
-                )
-                data_batches.append(data_batch)
-                observations.append(observation)
-
-        if not XTUNER_DETERMINISTIC:
-            random.shuffle(data_batches)
-
-        # Phase 4: step statistics summarization.
-        info_dict = self._summarize_data_info(
-            observations,
-            cluster_rewards_list,
-            distillation_reward_observations,
-            training_samples,
-            raw_rewards_sum=raw_rewards_sum,
-            raw_rewards_count=raw_rewards_count,
-        )
-        return data_batches, info_dict
 
     def _cluster_group_rewards(
         self, group: list[RolloutState]
@@ -454,88 +144,6 @@ class TrainingController:
             )
             return [float(cluster_advantages[index].item()) if index is not None else 0.0 for index in cluster_indices]
         return [0.0] * len(cluster_indices)
-
-    def _convert_rollout_state(
-        self,
-        state: RolloutState,
-        advantage_val: float,
-        has_3d_position: bool,
-    ) -> tuple[ColateItem, _SampleObservation]:
-        """Shift, tensorize and build the sequence context of one rollout
-        state.
-
-        Args:
-            state (RolloutState): Canonicalized rollout state with full-sequence ``input_ids``/``labels``.
-            advantage_val (float): Group-level advantage broadcast to every supervised position.
-            has_3d_position (bool): Whether any sample in the batch carries 3D MRoPE position ids.
-
-        Returns:
-            tuple[ColateItem, _SampleObservation]: The packable training item and the per-sample
-            metrics observed during conversion.
-        """
-        input_ids = state.input_ids
-        labels = state.labels
-        assert input_ids is not None and labels is not None and len(input_ids) == len(labels), (
-            f"Rollout state is not canonicalized for training: {state}"
-        )
-        input_len = len(input_ids)
-        shifted_labels = labels[1:]
-
-        input_ids_t = cast(torch.LongTensor, torch.tensor(input_ids[:-1], dtype=torch.int64).unsqueeze(0))
-        shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
-
-        rollout_logprobs: torch.Tensor | None = None
-        if state.logprobs is not None:
-            assert len(state.logprobs) == input_len, f"{len(state.logprobs)} vs {input_len}, data: {state}"
-            rollout_logprobs = torch.tensor(state.logprobs[1:], dtype=torch.float32).unsqueeze(0)
-            assert rollout_logprobs.size() == shifted_labels_t.size(), (
-                f"{rollout_logprobs.size()} vs {shifted_labels_t.size()}"
-            )
-
-        # Keep the advantage layout aligned with input_ids (response excludes EOS).
-        # Prompt positions predict prompt tokens whose shifted labels are -100, so their
-        # advantage is 0; the last entry of response_ids (EOS) is only a label, never an input.
-        actual_advantages = [0.0 if label == -100 else advantage_val for label in shifted_labels]
-
-        # prompt_len 统计原始输入 prompt 长度（VLM 的 prompt 在 train_prompt_ids）；
-        # response_len 统计 LLM 生成的 token 数（labels 非 -100 的监督位）。环境/工具
-        # 插入的语义洞不计入两者；prompt_ids 缺失时 prompt_len 退回洞计数。
-        prompt_ids = state.extra_fields.get("train_prompt_ids") or state.prompt_ids
-        prompt_len = len(prompt_ids) if prompt_ids else sum(label == -100 for label in shifted_labels)
-        response_len = sum(label != -100 for label in shifted_labels)
-
-        position_ids = state.position_ids
-        if has_3d_position and (position_ids is None or position_ids.ndim != 3):
-            seq_len = input_ids_t.size(-1)
-            text_position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, 1, -1)
-            # Mixed batches use three-axis MRoPE position IDs. Repeat the normal text
-            # positions on every axis so text samples have the same rank as the VLM
-            # samples when their sequence contexts are packed together.
-            position_ids = np.broadcast_to(text_position_ids, (3, 1, seq_len)).copy()
-        multimodal_train_info = cast(dict | None, state.mm_info)
-        seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, multimodal_train_info)
-        seq_ctx.rollout_routed_experts = state.routed_experts  # type: ignore[assignment] # n,layer*expert
-
-        teacher_fields = self.distillation.rollout_teacher_targets(state, shifted_labels=shifted_labels)
-
-        data_dict: ColateItem = {
-            "seq_ctx": seq_ctx,
-            "shifted_labels": shifted_labels_t,
-            "advantage": actual_advantages,
-            "rollout_logprobs": rollout_logprobs,
-        }
-        data_dict.update(cast(ColateItem, teacher_fields))
-
-        # 有可能有重复，但是没有其他更好办法
-        turns = state.extra_fields.get("agent_tool_turns")
-        observation: _SampleObservation = {
-            "advantage": advantage_val,
-            "supervised_positions": response_len,
-            "prompt_len": prompt_len,
-            "tool_turns": turns if isinstance(turns, int) else None,
-            "training_tokens": input_len - 1,
-        }
-        return data_dict, observation
 
     def _summarize_data_info(
         self,
