@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Iterable,
+    Literal,
     Sequence,
     TypedDict,
     cast,
@@ -34,6 +35,7 @@ from typing_extensions import NotRequired
 from transformers import AutoTokenizer
 from xtuner.v1.config.fsdp import FSDPConfig
 from xtuner.v1.config.optim import LRConfig, OptimConfig
+from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.dataloader import Dataloader
@@ -46,6 +48,7 @@ from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.rl.distillation import (
+    DistillationConfig,
     DistillationTrainerAdapter,
     TrainTeacherManager,
     TrainTeacherManagerConfig,
@@ -73,11 +76,67 @@ from xtuner.v1.utils.fsdp import release_deferred_fsdp_all_gathers
 from xtuner.v1.utils.nccl_process_group import resume_nccl_process_groups, suspend_nccl_process_groups
 
 from ..rollout_is import merge_rollout_is_metrics
+from .data import RLTrainItem
 
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 _UINT16_CAPACITY = 1 << 16
+
+
+def get_train_seq_ctx(
+    input_ids: torch.LongTensor,
+    position_ids: np.ndarray | None = None,
+    multimodal_train_info: dict | None = None,
+) -> SequenceContext:
+    """Build a CPU ``SequenceContext`` for one training sample.
+
+    Args:
+        input_ids (torch.LongTensor): Model input tokens with shape ``(1, seq_len)``.
+        position_ids (np.ndarray | None): Optional position ids. A 3D array triggers
+            the VLM MRoPE layout; a prompt-only position segment is extended to cover
+            the whole input.
+        multimodal_train_info (dict | None): Optional multimodal payload with
+            ``pixel_values``, ``image_grid_thw`` and ``num_img_tokens``.
+
+    Returns:
+        SequenceContext: The CPU sequence context of the sample.
+    """
+    seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
+    position_ids = _to_cpu_tensor(position_ids, dtype=torch.long)
+    if position_ids is not None and len(position_ids.shape) == 3:
+        # Match get_rope_index_3: response text continues from a single global
+        # max(T, H, W), not per-axis maxima. Per-axis max diverges when the
+        # prompt ends on image tokens (T≈0 while H/W are large). The extension
+        # length is derived from the position deficit so samples whose positions
+        # already cover the whole input (full-sequence agentic samples) need no
+        # extra shape information.
+        num_extend = input_ids.size(-1) - position_ids.size(-1)
+        if num_extend > 0:
+            max_value = position_ids.amax()
+            response_position_ids = (
+                (torch.arange(1, num_extend + 1, device=position_ids.device, dtype=position_ids.dtype) + max_value)
+                .view(1, 1, -1)
+                .expand(3, 1, -1)
+            )
+            position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
+        seq_ctx.position_ids = position_ids  # type: ignore[assignment]
+        assert position_ids.size(-1) == input_ids.size(-1)
+
+    if multimodal_train_info:
+        seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
+        seq_ctx.image_grid_thw = _to_cpu_tensor(multimodal_train_info.get("image_grid_thw"), dtype=torch.long)
+        num_img_tokens = multimodal_train_info.get("num_img_tokens")
+        if num_img_tokens is not None:
+            seq_ctx.num_img_tokens = [num_img_tokens]
+    return seq_ctx
+
+
+def _to_cpu_tensor(value: np.ndarray | None, *, dtype: torch.dtype | None = None) -> torch.Tensor | None:
+    if value is None:
+        return None
+    assert isinstance(value, np.ndarray), f"Expected np.ndarray, got {type(value)}"
+    return torch.as_tensor(value, dtype=dtype, device="cpu")
 
 
 def _rollout_routed_experts_storage_dtype(n_routed_experts: int) -> torch.dtype:
@@ -149,6 +208,12 @@ class WorkerConfig(BaseModel):
             updated weights to rollout workers. Defaults to 0.5.
         seed (int | None): Training worker random seed. When None, the RL
             trainer seed is used. Defaults to None.
+        pack_strategy (Literal["legacy", "greedy", "balance", "native"]): Index-only
+            packing strategy used by the controller-side packer. ``legacy`` exactly
+            reproduces the previous greedy pack, interleaved DP allocation and
+            optimizer-step grouping. Defaults to "legacy".
+        pack_seed (int | None): Random seed for length-grouped packing strategies such
+            as "balance". Defaults to None.
         offload_rollout_routed_experts (bool): Keep rollout routed experts on
             CPU and move each layer's slice to device during forward. Defaults to False.
         offload_old_logprobs (bool): Keep actor old log probabilities on CPU between
@@ -188,6 +253,9 @@ class WorkerConfig(BaseModel):
     log_dir: str | Path | None = None
     update_weight_bucket_size_in_gb: float = 0.5  # 512MB
     seed: None | int = None  # if None, use RLTrainer seed
+    pack_strategy: Literal["legacy", "greedy", "balance", "native"] = "legacy"
+    pack_seed: int | None = None
+    distillation_config: DistillationConfig | None = None
     profile_step: list[int] | int | None = None  # 1-based global RL train_step ids to profile.
     profile_time: bool = True
     profile_memory: bool = False
@@ -315,6 +383,8 @@ class TrainingWorker(SingleAcceleratorWorker):
             self._train_teacher_manager = worker_cfg.train_teacher_manager_config.build(
                 chunk_size=worker_cfg.loss_cfg.chunk_size,
             )
+
+        self._distillation = DistillationTrainerAdapter(worker_cfg.distillation_config)
 
         self._optimizer_steps = worker_cfg.optimizer_steps
         profile_step = worker_cfg.profile_step
@@ -670,6 +740,71 @@ class TrainingWorker(SingleAcceleratorWorker):
             yield
 
     @ray_method
+    def _convert_rollout_items_to_train_items(
+        self,
+        rollout_items: list[RolloutState],
+        advantages: list[float],
+        use_3d_position_ids: bool,
+    ) -> list[RLTrainItem]:
+        return [
+            self._convert_one_rollout_state(state, advantage, use_3d_position_ids)
+            for state, advantage in zip(rollout_items, advantages)
+        ]
+
+    def _convert_one_rollout_state(
+        self,
+        state: RolloutState,
+        advantage_val: float,
+        use_3d_position_ids: bool,
+    ) -> RLTrainItem:
+        input_ids = state.input_ids
+        labels = state.labels
+        assert input_ids is not None and labels is not None and len(input_ids) == len(labels), (
+            f"Rollout state is not canonicalized for training: {state}"
+        )
+        input_len = len(input_ids)
+        shifted_labels = labels[1:]
+
+        input_ids_t = cast(torch.LongTensor, torch.tensor(input_ids[:-1], dtype=torch.int64).unsqueeze(0))
+        shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
+
+        rollout_logprobs: torch.Tensor | None = None
+        if state.logprobs is not None:
+            assert len(state.logprobs) == input_len, f"{len(state.logprobs)} vs {input_len}, data: {state}"
+            rollout_logprobs = torch.tensor(state.logprobs[1:], dtype=torch.float32).unsqueeze(0)
+            assert rollout_logprobs.size() == shifted_labels_t.size(), (
+                f"{rollout_logprobs.size()} vs {shifted_labels_t.size()}"
+            )
+
+        # Keep the advantage layout aligned with input_ids (response excludes EOS).
+        # Prompt positions predict prompt tokens whose shifted labels are -100, so their
+        # advantage is 0; the last entry of response_ids (EOS) is only a label, never an input.
+        advantages = torch.tensor(
+            [[0.0 if label == -100 else advantage_val for label in shifted_labels]],
+            dtype=torch.float32,
+        )
+
+        position_ids = state.position_ids
+        if use_3d_position_ids and (position_ids is None or position_ids.ndim != 3):
+            seq_len = input_ids_t.size(-1)
+            text_position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, 1, -1)
+            # Mixed batches use three-axis MRoPE position IDs. Repeat the normal text
+            # positions on every axis so text samples have the same rank as the VLM
+            # samples when their sequence contexts are packed together.
+            position_ids = np.broadcast_to(text_position_ids, (3, 1, seq_len)).copy()
+        multimodal_train_info = cast(dict | None, state.mm_info)
+        seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, multimodal_train_info)
+        seq_ctx.rollout_routed_experts = state.routed_experts  # type: ignore[assignment] # n,layer*expert
+
+        loss_inputs: dict[str, torch.Tensor | None] = {
+            "shifted_labels": shifted_labels_t,
+            "advantages": advantages,
+            "rollout_logprobs": rollout_logprobs,
+        }
+        loss_inputs.update(self._distillation.rollout_teacher_targets(state, shifted_labels=shifted_labels))
+
+        return {"seq_ctx": seq_ctx, "loss_inputs": loss_inputs}
+
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int) -> WorkerLogItem:
         # NOTE: sglang会清除logger handle, 重新创建
         self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")

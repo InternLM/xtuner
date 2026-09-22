@@ -37,7 +37,8 @@ from xtuner.v1.data_proto.rl_data import (
 from xtuner.v1.datasets.mllm_tokenize_fn.qwenvl_rope2d import get_rope_index_3
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter, RolloutTeacherConfig
 from xtuner.v1.rl.loss import DistillationLossConfig
-from xtuner.v1.rl.trainer.controller import TrainingController, get_train_seq_ctx
+from xtuner.v1.rl.trainer.controller import TrainingController
+from xtuner.v1.rl.trainer.worker import get_train_seq_ctx
 
 # localhost/sandbox loop 模块顶层导入 lagent；测试环境不依赖其真实实现。
 # rate_limiter 必须整路径 stub：父级 MagicMock 没有 __path__，子模块 from-import 无法透传。
