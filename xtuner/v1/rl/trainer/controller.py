@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import math
 import os
 import random
+import time
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 import numpy as np
@@ -12,13 +12,13 @@ from typing_extensions import NotRequired
 
 from xtuner.v1.data_proto.rl_data import RolloutState, is_valid_for_training
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.rl.distillation import DistillationTrainerAdapter
 from xtuner.v1.rl.utils import free_object_refs
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
-from .worker import TrainingWorker, WorkerLogItem, get_train_seq_ctx
+from .pack import DPRankPackIndices, PackedDataIndices, RLDataPacker
+from .worker import TrainingWorker, WorkerConfig, WorkerLogItem, get_train_seq_ctx
 
 
 if TYPE_CHECKING:
@@ -104,6 +104,27 @@ def _verify_packed_alignment(packed_batch: PackedBatch) -> None:
     ):
         if optional_field is not None:
             assert optional_field.shape[1] == seq_len, f"{field_name}: {optional_field.shape[1]} vs {seq_len}"
+
+
+def _state_uses_3d_position_ids(state: RolloutState) -> bool:
+    layout = state.extra_fields.get("position_layout")
+    if layout is not None:
+        return layout == "mrope_3d"
+    return state.position_ids is not None and state.position_ids.ndim == 3
+
+
+def _state_has_rollout_logprobs(state: RolloutState) -> bool:
+    flag = state.extra_fields.get("has_rollout_logprobs")
+    if flag is None:
+        return state.logprobs is not None
+    return bool(flag)
+
+
+def _state_has_routed_experts(state: RolloutState) -> bool:
+    flag = state.extra_fields.get("has_routed_experts")
+    if flag is None:
+        return state.routed_experts is not None
+    return bool(flag)
 
 
 class TrainingController:
@@ -590,6 +611,135 @@ class TrainingController:
             info_dict["tool_turns/max"] = float(tool_turns_t.max().item())
         return info_dict
 
+    def _prepare_rollout_items(
+        self,
+        rollout_groups: list[list[RolloutState]],
+        raw_rewards_sum: float = 0.0,
+        raw_rewards_count: int = 0,
+    ) -> tuple[list[RolloutState], list[float], dict[str, float], bool]:
+        """Validate groups, cluster rewards, estimate advantages and summarize
+        step statistics without building training tensors.
+
+        Args:
+            rollout_groups (list[list[RolloutState]]): Rollout groups selected for training.
+            raw_rewards_sum (float): Producer-side raw reward sum used by ``raw_rewards/mean``.
+            raw_rewards_count (int): Producer-side raw reward count used by ``raw_rewards/mean``.
+
+        Returns:
+            tuple[list[RolloutState], list[float], dict[str, float], bool]: Flat rollout
+            items in final training order, per-sample scalar advantages aligned with the
+            items, the step statistics dictionary, and whether the batch uniformly uses
+            3D MRoPE position ids.
+        """
+        use_3d_position_ids = any(_state_uses_3d_position_ids(state) for group in rollout_groups for state in group)
+
+        cluster_rewards_list: list[float] = []
+        distillation_reward_observations: list[tuple[RolloutState, float]] = []
+        observations: list[_SampleObservation] = []
+        training_samples = 0
+        rollout_items: list[RolloutState] = []
+        advantages: list[float] = []
+        for group in rollout_groups:
+            if not is_valid_for_training(group, self.logger):
+                self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
+                continue
+            training_samples += len(group)
+
+            # Phase 1: session reward clustering keeps one reward per agentic session so
+            # rewards/* and advantages are not amplified by per-session segment counts.
+            cluster_rewards, session_representatives, cluster_indices = self._cluster_group_rewards(group)
+            cluster_rewards_list.extend(cluster_rewards)
+            distillation_reward_observations.extend(zip(session_representatives, cluster_rewards))
+
+            # Phase 2: group-level advantage estimation scattered back to members.
+            sample_advantages = self._compute_group_advantages(
+                cluster_rewards, session_representatives, cluster_indices
+            )
+            for state, advantage in zip(group, sample_advantages):
+                rollout_items.append(state)
+                advantages.append(advantage)
+                observations.append(self._observe_rollout_state(state, advantage))
+
+        if not XTUNER_DETERMINISTIC:
+            paired_items = list(zip(rollout_items, advantages))
+            random.shuffle(paired_items)
+            rollout_items = [item for item, _ in paired_items]
+            advantages = [advantage for _, advantage in paired_items]
+
+        info_dict = self._summarize_data_info(
+            observations,
+            cluster_rewards_list,
+            distillation_reward_observations,
+            training_samples,
+            raw_rewards_sum=raw_rewards_sum,
+            raw_rewards_count=raw_rewards_count,
+        )
+        return rollout_items, advantages, info_dict, use_3d_position_ids
+
+    def _observe_rollout_state(self, state: RolloutState, advantage: float) -> _SampleObservation:
+        # 只读 AgentLoop 规范化时写入的轻量统计字段（write_train_meta），保证下一阶段
+        # metadata 替换 RolloutState 时本函数无需修改。
+        supervised_tokens = state.extra_fields.get("supervised_tokens")
+        prompt_length = state.extra_fields.get("train_prompt_length")
+        num_tokens = state.num_tokens
+        if supervised_tokens is None or prompt_length is None or num_tokens is None:
+            raise ValueError(
+                "Rollout state is missing the train meta fields written by write_train_meta: "
+                f"rollout_id={state.rollout_id}"
+            )
+        turns = state.extra_fields.get("agent_tool_turns")
+        return {
+            "advantage": advantage,
+            "supervised_positions": int(supervised_tokens),
+            "prompt_len": int(prompt_length),
+            "tool_turns": turns if isinstance(turns, int) else None,
+            "training_tokens": int(num_tokens),
+        }
+
+    def _build_pack_plan(
+        self,
+        rollout_items: list[RolloutState],
+        pack_max_length: int,
+        worker_cfg: WorkerConfig,
+        data_replicate_size: int,
+    ) -> tuple[PackedDataIndices, int]:
+        lengths = []
+        for state in rollout_items:
+            assert state.num_tokens is not None, (
+                f"Rollout state is missing num_tokens written by write_train_meta: rollout_id={state.rollout_id}"
+            )
+            lengths.append(state.num_tokens)
+        data_packer = RLDataPacker(
+            pack_max_length=pack_max_length,
+            world_size=len(self.workers),
+            data_replicate_size=data_replicate_size,
+            optimizer_steps=worker_cfg.optimizer_steps,
+            pack_strategy=worker_cfg.pack_strategy,
+            pack_seed=worker_cfg.pack_seed,
+        )
+        return data_packer.pack(lengths)
+
+    def _build_dp_rank_inputs(
+        self,
+        rollout_items: list[RolloutState],
+        advantages: list[float],
+        packed_indices: PackedDataIndices,
+    ) -> tuple[dict[int, list[ray.ObjectRef]], dict[int, list[float]], dict[int, DPRankPackIndices]]:
+        rollout_item_refs: dict[int, list[ray.ObjectRef]] = {}
+        local_advantages: dict[int, list[float]] = {}
+        local_pack_plans: dict[int, DPRankPackIndices] = {}
+        for dp_rank, dp_plan in enumerate(packed_indices):
+            global_indices = sorted({index for step in dp_plan for pack in step for index in pack})
+            global_to_local = {global_index: local_index for local_index, global_index in enumerate(global_indices)}
+            local_pack_plans[dp_rank] = [
+                [[global_to_local[index] for index in pack] for pack in step] for step in dp_plan
+            ]
+            local_advantages[dp_rank] = [advantages[index] for index in global_indices]
+            # Keep the ObjectRef nested in a list so Ray does not dereference it before
+            # TrainingWorker.fit explicitly fetches it; one DP rank's replicas share it.
+            rollout_item_refs[dp_rank] = [ray.put([rollout_items[index] for index in global_indices])]
+        return rollout_item_refs, local_advantages, local_pack_plans
+
     def fit(
         self,
         rollout_groups: list[list[RolloutState]],
@@ -598,143 +748,80 @@ class TrainingController:
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
     ) -> tuple[list[WorkerLogItem], dict[str, float]]:
-        data_batches, data_info = self._rollout_groups_to_colate_items(
+        rollout_items, advantages, data_info, use_3d_position_ids = self._prepare_rollout_items(
             rollout_groups,
-            pack_max_length,
             raw_rewards_sum=raw_rewards_sum,
             raw_rewards_count=raw_rewards_count,
         )
-        has_rollout_routed_experts = False
-        language_cfg = None
-        if data_batches[0]["seq_ctx"].rollout_routed_experts is not None:
-            model_cfg = ray.get(self.workers[0].get_model_cfg.remote())  # type: ignore[attr-defined]
-            has_rollout_routed_experts = True
-            language_cfg = model_cfg
-            if isinstance(model_cfg, BaseComposeConfig):
-                language_cfg = model_cfg.text_config
+        if not rollout_items:
+            raise ValueError(f"Rollout {rollout_idx} has no valid training samples")
 
-        packed_data_batches = self._packing(data_batches, pack_max_length, language_cfg)
-        # packed_data_batches = self._grouped_by_max_length(packed_data_batches)
-
-        # TODO(hha): 这个逻辑不够通用，和模型绑定了
-        is_qwen3_vl = False
-        if len(packed_data_batches[0]["seq_ctx"].position_ids.shape) == 3:
-            is_qwen3_vl = True
-
-        # todo: support round up
-        num_packed_data_batches = len(packed_data_batches)
+        worker_cfg = ray.get(self.workers[0].get_worker_cfg.remote())  # type: ignore[attr-defined]
         data_replicate_size = ray.get(self.workers[0].get_data_replicate_size.remote())  # type: ignore[attr-defined]
-        dp_size = len(self.workers) // data_replicate_size
-        pad_num = math.ceil(num_packed_data_batches / dp_size) * dp_size - num_packed_data_batches
-        if pad_num > 0:
-            # Reduce the attn calculation time by using multiple short sequence packs
-            assert data_batches[0]["seq_ctx"].input_ids is not None
-            pad_tokens = tuple(
-                torch.zeros(1, 1024, dtype=data_batches[0]["seq_ctx"].input_ids.dtype, device="cpu")
-                for _ in range(pack_max_length // 1024)
-            )
-            if pack_max_length % 1024 > 0:
-                assert data_batches[0]["seq_ctx"].input_ids is not None
-                pad_tokens = pad_tokens + (
-                    torch.zeros(
-                        1, pack_max_length % 1024, dtype=data_batches[0]["seq_ctx"].input_ids.dtype, device="cpu"
-                    ),
-                )
-            pad_seq_ctx = SequenceContext.from_input_ids(pad_tokens, device="cpu")  # type: ignore
-            pad_seq_ctx.num_padding = pack_max_length
-            if is_qwen3_vl:
-                _position_ids_list = []
-                for pad_token in pad_tokens:
-                    _position_ids = torch.arange(pad_token.size(-1)).view(1, 1, -1).expand(3, 1, -1)
-                    _position_ids_list.append(_position_ids)
-                pad_seq_ctx.position_ids = torch.cat(_position_ids_list, dim=-1)  # type: ignore
 
-            pad_shifted_labels = torch.full(
-                (1, pack_max_length),
-                -100,
-                dtype=packed_data_batches[0]["shifted_labels"].dtype,
-                device="cpu",
-            )
-            pad_advantages = torch.full(
-                (1, pack_max_length),
-                -100,
-                dtype=packed_data_batches[0]["advantages"].dtype,
-                device="cpu",
-            )
+        plan_begin = time.perf_counter()
+        packed_plan, padding_tokens = self._build_pack_plan(
+            rollout_items, pack_max_length, worker_cfg, data_replicate_size
+        )
+        data_info["packing/plan_time_s"] = time.perf_counter() - plan_begin
 
-            if has_rollout_routed_experts:
-                pad_rand_index = torch.randint(
-                    low=0,
-                    high=1,
-                    size=(1, 1, 1),  # add dummy data, true data will be initialized in train worker.fit
-                )
-                pad_seq_ctx.rollout_routed_experts = pad_rand_index
+        real_tokens = 0
+        for state in rollout_items:
+            assert state.num_tokens is not None
+            real_tokens += state.num_tokens
+        total_packs = sum(len(step) for dp_plan in packed_plan for step in dp_plan)
+        total_tokens = real_tokens + padding_tokens
+        data_info["packing/real_tokens"] = float(real_tokens)
+        data_info["packing/padding_tokens"] = float(padding_tokens)
+        data_info["packing/efficiency"] = real_tokens / total_tokens if total_tokens > 0 else 0.0
+        data_info["packing/num_packs"] = float(total_packs)
+        data_info["packing/num_optimizer_steps"] = float(len(packed_plan[0]))
 
-            pad_rollout_logprobs = None
-            if "rollout_logprobs" in packed_data_batches[0] and packed_data_batches[0]["rollout_logprobs"] is not None:
-                pad_rollout_logprobs = torch.zeros(
-                    1, pack_max_length, dtype=packed_data_batches[0]["rollout_logprobs"].dtype, device="cpu"
-                )
-            pad_teacher_logprobs = None
-            if "teacher_logprobs" in packed_data_batches[0] and packed_data_batches[0]["teacher_logprobs"] is not None:
-                teacher_logprobs_shape = packed_data_batches[0]["teacher_logprobs"].shape[2:]
-                pad_teacher_logprobs = torch.zeros(
-                    (1, pack_max_length, *teacher_logprobs_shape),
-                    dtype=packed_data_batches[0]["teacher_logprobs"].dtype,
-                    device="cpu",
-                )
-            pad_target_token_ids = None
-            if "target_token_ids" in packed_data_batches[0] and packed_data_batches[0]["target_token_ids"] is not None:
-                target_token_ids_shape = packed_data_batches[0]["target_token_ids"].shape[2:]
-                pad_target_token_ids = torch.zeros(
-                    (1, pack_max_length, *target_token_ids_shape),
-                    dtype=packed_data_batches[0]["target_token_ids"].dtype,
-                    device="cpu",
-                )
-            pad_teacher_indices = None
-            if "teacher_indices" in packed_data_batches[0] and packed_data_batches[0]["teacher_indices"] is not None:
-                pad_teacher_indices = torch.full(
-                    (1, pack_max_length),
-                    -1,
-                    dtype=packed_data_batches[0]["teacher_indices"].dtype,
-                    device="cpu",
-                )
-            pad_data = {
-                "seq_ctx": pad_seq_ctx,
-                "shifted_labels": pad_shifted_labels,
-                "advantages": pad_advantages,
-                "rollout_logprobs": pad_rollout_logprobs,
-                "teacher_logprobs": pad_teacher_logprobs,
-                "target_token_ids": pad_target_token_ids,
-                "teacher_indices": pad_teacher_indices,
-            }
-            pad_data_samples = [pad_data for _ in range(pad_num)]
-            packed_data_batches = packed_data_batches + pad_data_samples
+        # 批级 presence 位只跨 controller 边界传递模板信息；token 级字段留在 per-DP refs 里。
+        pack_loss_keys = (
+            ["rollout_logprobs"] if any(_state_has_rollout_logprobs(state) for state in rollout_items) else []
+        )
+        has_routed_experts = any(_state_has_routed_experts(state) for state in rollout_items)
+
+        rollout_item_refs, local_advantages, local_pack_plans = self._build_dp_rank_inputs(
+            rollout_items, advantages, packed_plan
+        )
+        del packed_plan, advantages
 
         handles = []
-        data_batch_refs = {}
         for worker_idx, worker in enumerate(self.workers):
-            dp_idx = worker_idx // data_replicate_size
-            if dp_idx not in data_batch_refs:
-                data_batch_refs[dp_idx] = ray.put(packed_data_batches[dp_idx::dp_size])
+            dp_rank = worker_idx // data_replicate_size
             handles.append(
                 worker.fit.remote(  # type: ignore[attr-defined]
-                    data_batches=data_batch_refs[dp_idx],
+                    rollout_item_refs=rollout_item_refs[dp_rank],
+                    advantages=local_advantages[dp_rank],
+                    pack_plan=local_pack_plans[dp_rank],
+                    use_3d_position_ids=use_3d_position_ids,
+                    pack_loss_keys=pack_loss_keys,
+                    has_routed_experts=has_routed_experts,
                     rollout_idx=rollout_idx,
                 )
             )
         try:
             log_infos = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         finally:
-            # free pixel values ref
+            # free pixel values ref（ownership 不变：controller 在所有 worker 消费完后释放）
             free_pixel_value_refs: list[ray.ObjectRef] = []
-            for data in packed_data_batches:
-                if data["seq_ctx"].pixel_values is not None:
-                    free_pixel_value_refs.extend(data["seq_ctx"].pixel_values)
+            for state in rollout_items:
+                pixel_values = state.mm_info.get("pixel_values") if state.mm_info is not None else None
+                if pixel_values is not None:
+                    free_pixel_value_refs.extend(pixel_values)
             if len(free_pixel_value_refs) > 0:
                 free_object_refs(free_pixel_value_refs)
-            del data_batch_refs
-            del packed_data_batches
+            del rollout_item_refs, local_advantages, local_pack_plans, rollout_items
+
+        for key, target_key in (
+            ("packing_conversion_time_s", "packing/conversion_time_s_max"),
+            ("packing_materialize_time_s", "packing/materialize_time_s_max"),
+        ):
+            worker_values = [log_info[key] for log_info in log_infos if key in log_info]
+            if worker_values:
+                data_info[target_key] = max(worker_values)
         return log_infos, data_info
 
     def offload(self, target: Literal["model", "optimizer", "all"] = "all"):
