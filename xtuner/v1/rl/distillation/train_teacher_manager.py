@@ -11,7 +11,7 @@ from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.loss import LogProbConfig, LogProbContext, TopKLogProbConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.rl.model_utils import FrozenModel, build_frozen_model
-from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
+from xtuner.v1.utils import get_device, get_torch_device_module
 
 from .config import TrainTeacherManagerConfig
 
@@ -22,7 +22,6 @@ if TYPE_CHECKING:
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
-logger = get_logger()
 
 
 @dataclass
@@ -230,21 +229,16 @@ class TrainTeacherManager:
     def construct_teacher_seq_ctx(seq_ctx: SequenceContext, *, is_composed: bool) -> SequenceContext:
         """Construct a Teacher context from the Student rollout context.
 
-        Rollout-only expert-routing metadata must not be reused by the Teacher. A plain language-model Teacher can only
-        score text tokens. Composed/VLM Teachers retain their visual fields and M-RoPE positions; plain-text Teachers
-        require text-only contexts with 2D packed positions.
-        """
-        has_visual_inputs = seq_ctx.pixel_values is not None
-        if not is_composed and has_visual_inputs:
-            logger.warning(
-                "A plain-text Teacher received a multimodal rollout context; "
-                "the sample cannot be scored by this Teacher."
-            )
-            raise ValueError("Plain-text Teacher cannot score a rollout context containing visual inputs")
+        Rollout-only expert-routing metadata must not be reused by the Teacher.
 
+        Composed/VLM Teachers keep visual fields and M-RoPE positions. Plain-text Teachers drop visual
+        tensors and rebuild 2D packed ``position_ids`` so they can still run an FSDP-safe forward on the
+        shared Student ``input_ids`` (image placeholder token ids stay in-vocab; only tokens routed via
+        ``teacher_indices`` are consumed as distillation targets).
+        """
         position_ids = seq_ctx.position_ids
         if not is_composed and position_ids is not None and position_ids.ndim == 3:
-            # SequenceContext rebuilds standard 2D packed positions.
+            # SequenceContext regenerates standard 2D packed positions when position_ids is None.
             position_ids = None
 
         return SequenceContext(
@@ -259,15 +253,16 @@ class TrainTeacherManager:
             device=seq_ctx.device,
             position_ids=position_ids,
             image_grid_thw=seq_ctx.image_grid_thw if is_composed else None,
-            deepstack_visual_embeds=seq_ctx.deepstack_visual_embeds if is_composed else None,
-            visual_pos_masks=seq_ctx.visual_pos_masks if is_composed else None,
+            # Always let the Teacher recompute vision features from pixel_values.
+            deepstack_visual_embeds=None,
+            visual_pos_masks=None,
             pixel_values=seq_ctx.pixel_values if is_composed else None,
-            inputs_embeds=seq_ctx.inputs_embeds if is_composed else None,
+            inputs_embeds=None,
             num_img_tokens=seq_ctx.num_img_tokens if is_composed else None,
             rollout_routed_experts=None,
             offload_rollout_routed_experts=False,
             raw_input_ids=seq_ctx._raw_input_ids,
-            raw_inputs_embeds=seq_ctx._raw_inputs_embeds,
+            raw_inputs_embeds=None,
             shard_start=seq_ctx._shard_start,
             shard_size=seq_ctx._shard_size,
         )
