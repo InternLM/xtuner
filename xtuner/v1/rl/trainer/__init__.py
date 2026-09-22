@@ -6,12 +6,11 @@ from ..rollout_is import (
     merge_rollout_is_metrics,
 )
 from .controller import TrainingController
-from .data import RLTrainItem
-from .worker import TrainingWorker, WorkerConfig, WorkerLogItem, WorkerTrainLogItem
+from .worker import TrainBatchAttr, TrainingWorker, WorkerConfig, WorkerLogItem, WorkerTrainLogItem
 
 
 __all__ = [
-    "RLTrainItem",
+    "TrainBatchAttr",
     "TrainingController",
     "RolloutImportanceSampling",
     "compute_rollout_importance_weights",
