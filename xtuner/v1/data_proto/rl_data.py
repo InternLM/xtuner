@@ -422,7 +422,8 @@ def write_train_meta(rollout_state: RolloutState) -> None:
         rollout_state (RolloutState): Rollout state updated in place: ``num_tokens``
             becomes the shifted training length (``len(input_ids) - 1``) and
             ``extra_fields`` gains ``train_prompt_length``, ``train_response_length``,
-            ``supervised_tokens`` and ``position_layout``.
+            ``supervised_tokens``, ``position_layout``, ``has_rollout_logprobs`` and
+            ``has_routed_experts``.
     """
     if rollout_state.status != Status.COMPLETED:
         return
@@ -444,6 +445,10 @@ def write_train_meta(rollout_state: RolloutState) -> None:
     rollout_state.extra_fields["position_layout"] = (
         "mrope_3d" if position_ids is not None and position_ids.ndim == 3 else "1d"
     )
+    # 批级 presence 标志：controller 只读布尔位即可判定 pack 模板（rollout logprobs 的
+    # IS 指标 collective、routed experts dummy 填充），不需要触碰 token 级字段。
+    rollout_state.extra_fields["has_rollout_logprobs"] = rollout_state.logprobs is not None
+    rollout_state.extra_fields["has_routed_experts"] = rollout_state.routed_experts is not None
 
 
 def _calculate_effective_response_mask(
