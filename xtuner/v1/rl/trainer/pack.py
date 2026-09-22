@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from xtuner.v1.datasets.sampler import get_length_grouped_indices
+from xtuner.v1.utils import XTUNER_DETERMINISTIC
 
 
 PackIndices: TypeAlias = list[int]
@@ -77,6 +78,10 @@ class RLDataPacker:
             across DP ranks before packing. Defaults to "legacy".
         pack_seed (int | None): Seed for randomized strategies such as ``balance``.
             Defaults to None.
+
+    Ordering is a per-strategy decision: ``legacy`` and ``greedy`` shuffle the visit
+    order before packing unless ``XTUNER_DETERMINISTIC`` is set, ``balance`` performs
+    its own seeded length grouping, and ``native`` keeps the input order.
     """
 
     def __init__(
@@ -137,6 +142,8 @@ class RLDataPacker:
         data_indices: list[int],
         data_lengths: Sequence[int],
     ) -> PackedDataIndices:
+        if not XTUNER_DETERMINISTIC:
+            random.shuffle(data_indices)
         total_pack_indices = get_greedy_pack_infos(data_indices, data_lengths, self.pack_max_length)
         # Interleaved DP allocation over a DP-multiple pack list, then per-rank
         # sequential optimizer-step grouping: this is the exact schedule the previous
@@ -164,6 +171,8 @@ class RLDataPacker:
         data_indices: list[int],
         data_lengths: Sequence[int],
     ) -> PackedDataIndices:
+        if not XTUNER_DETERMINISTIC:
+            random.shuffle(data_indices)
         total_pack_indices = get_greedy_pack_infos(data_indices, data_lengths, self.pack_max_length)
         pad_num = math.ceil(len(total_pack_indices) / self.dp_size) * self.dp_size - len(total_pack_indices)
         total_pack_indices.extend([[] for _ in range(pad_num)])
