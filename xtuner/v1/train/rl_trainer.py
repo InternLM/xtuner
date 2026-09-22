@@ -562,6 +562,7 @@ class BaseRLTrainer:
     eval_agent_loop_manager: AgentLoopManager
     _debug_train_files: dict[int, Path]
     _distillation: DistillationTrainerAdapter
+    _distillation_config: DistillationConfig | None
 
     def _init_common(self, cfg: BaseRLTrainerConfig, *, meta_path: str, logger_tag: str) -> None:
         distillation_config = cfg.distillation_config
@@ -570,6 +571,7 @@ class BaseRLTrainer:
             distillation_config = distillation_config.resolve_teacher_endpoints(endpoint_map)
 
         self._distillation = DistillationTrainerAdapter(distillation_config)
+        self._distillation_config = distillation_config
 
         check_fa3()
         self._init_work_dir_and_meta(cfg, meta_path)
@@ -675,6 +677,7 @@ class BaseRLTrainer:
         cfg.train_worker_cfg.load_from = cfg.load_from
         cfg.train_worker_cfg.log_dir = log_dir
         cfg.train_worker_cfg.train_teacher_manager_config = self._distillation.train_teacher_manager_config
+        cfg.train_worker_cfg.distillation_config = self._distillation_config
         self._train_worker_cfg = cfg.train_worker_cfg
 
     def _init_rollout_config(self, cfg: BaseRLTrainerConfig, log_dir: Path) -> None:
