@@ -1230,7 +1230,7 @@ class BaseRLTrainer:
                         "label": ground_truth,
                         "response": response,
                         "reward": reward,
-                        "prompt_len": data.num_tokens,
+                        "prompt_len": data.extra_fields.get("train_prompt_length", data.num_tokens),
                         "response_len": len(response_ids),
                         "reward_payload": data.reward,
                         "agent": {
@@ -1295,7 +1295,7 @@ class BaseRLTrainer:
                         "status": data.status.value if hasattr(data.status, "value") else str(data.status),
                         "prompt": data.message,
                         "response": data.response or "",
-                        "prompt_len": data.num_tokens,
+                        "prompt_len": data.extra_fields.get("train_prompt_length", data.num_tokens),
                         "response_len": len(response_ids),
                         "label": ground_truth,
                         "reward": reward,
