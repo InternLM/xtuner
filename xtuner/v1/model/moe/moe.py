@@ -73,7 +73,7 @@ from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
     MoEDecoderLayerOutput,
     MoEGate,
 )
-from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer
+from xtuner.v1.module.mtp import MTPBlock, MTPLayer
 from xtuner.v1.utils import (
     get_device,
     get_logger,
@@ -168,7 +168,6 @@ class MoEConfig(TransformerConfig):
     router_compute_dtype: Literal["float32", "native"] = "float32"
     moe_bias: bool = False
     moe_act_fn_cfg: MoEActFnConfig = MoEActFnConfig()
-    mtp_config: MTPConfig | None = None
     freeze_routers: bool = False
     router_async_offload: bool = False
     aux_loss_cfg: AuxLossConfig = AuxLossConfig()
@@ -671,6 +670,7 @@ class MoE(BaseModel):
                     micro_batch_mtp_losses += mtp_loss
 
                     if keep_router:
+                        assert "router_logits" in mtp_hidden
                         router_logits_list[micro_batch_idx][f"mtp_layer{mtp_idx}"] = mtp_hidden["router_logits"]
 
                 mtp_losses += micro_batch_mtp_losses / len(mtp_loss_ctx_list)
@@ -691,15 +691,20 @@ class MoE(BaseModel):
                 # z-loss carrier is hidden_states_list[0], the same main-loss path the per-layer aux
                 # loss already rides on, so backward traverses each MTP aux node exactly once.
                 for mtp_idx in range(self.config.mtp_config.num_layers):
-                    cat_mtp_router_weights = torch.cat(
-                        [mb_outputs[mtp_idx]["router_weights"] for mb_outputs in mtp_outputs_per_mb], dim=0
-                    )
-                    cat_mtp_router_logits = torch.cat(
-                        [mb_outputs[mtp_idx]["router_logits"] for mb_outputs in mtp_outputs_per_mb], dim=0
-                    )
-                    cat_mtp_router_topk_ids = torch.cat(
-                        [mb_outputs[mtp_idx]["router_topk_ids"] for mb_outputs in mtp_outputs_per_mb], dim=0
-                    )
+                    mtp_router_logits_list: list[torch.Tensor] = []
+                    mtp_router_weights_list: list[torch.Tensor] = []
+                    mtp_router_topk_ids_list: list[torch.Tensor] = []
+                    for mb_outputs in mtp_outputs_per_mb:
+                        depth_out = mb_outputs[mtp_idx]
+                        assert "router_logits" in depth_out
+                        assert "router_weights" in depth_out
+                        assert "router_topk_ids" in depth_out
+                        mtp_router_logits_list.append(depth_out["router_logits"])
+                        mtp_router_weights_list.append(depth_out["router_weights"])
+                        mtp_router_topk_ids_list.append(depth_out["router_topk_ids"])
+                    cat_mtp_router_logits = torch.cat(mtp_router_logits_list, dim=0)
+                    cat_mtp_router_weights = torch.cat(mtp_router_weights_list, dim=0)
+                    cat_mtp_router_topk_ids = torch.cat(mtp_router_topk_ids_list, dim=0)
                     hidden_states_list[0] = self.aux_loss.accumulate(
                         selected_router_weights=cat_mtp_router_weights.index_select(0, nonpad_indices)
                         .contiguous()
@@ -933,6 +938,9 @@ class MoE(BaseModel):
             mtp_losses = torch.tensor(0.0, device=DEVICE)
             for idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
                 mtp_hidden_states = mtp_hidden["hidden_states"]
+                assert "router_logits" in mtp_hidden
+                assert "router_weights" in mtp_hidden
+                assert "router_topk_ids" in mtp_hidden
                 mtp_router_logits = mtp_hidden["router_logits"]
                 mtp_router_weights = mtp_hidden["router_weights"]
                 mtp_router_topk_ids = mtp_hidden["router_topk_ids"]

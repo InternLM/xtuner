@@ -6,21 +6,13 @@ import torch
 import torch.nn as nn
 
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
-    MoEDecoderLayerMicroBatchOutput,
-    MoEDecoderLayerOutput,
-)
 
 from .config import MTPConfig
-from .mtp_layer import MTPLayer
+from .mtp_layer import MTPDepthMicroBatchOutput, MTPDepthOutput, MTPLayer
 from .utils import roll_sequence_context
 
 
-MTPDepthOutput = MoEDecoderLayerOutput
-"""One MTP depth produces the same keyed outputs as the decoder layer it
-wraps."""
-
-MTPInternalOutput = MoEDecoderLayerOutput | MoEDecoderLayerMicroBatchOutput
+MTPInternalOutput = MTPDepthOutput | MTPDepthMicroBatchOutput
 
 
 class MTPBlock(nn.Module):
@@ -191,7 +183,7 @@ class MTPBlock(nn.Module):
                 future_embeddings = future_embeddings.detach()
 
             layer_results = cast(
-                MoEDecoderLayerOutput,
+                MTPDepthOutput,
                 self._call_decoder_layer(
                     layer,
                     current_hidden_states,
@@ -203,14 +195,7 @@ class MTPBlock(nn.Module):
             )
             previous_layer_results = layer_results
             current_hidden_states = layer_results["hidden_states"]
-            mtp_outputs.append(
-                {
-                    "hidden_states": current_hidden_states,
-                    "router_logits": layer_results["router_logits"],
-                    "router_weights": layer_results["router_weights"],
-                    "router_topk_ids": layer_results["router_topk_ids"],
-                }
-            )
+            mtp_outputs.append(layer_results)
 
         return mtp_outputs
 
@@ -260,7 +245,7 @@ class MTPBlock(nn.Module):
             future_embeddings_list = [self._embed_future(ctx, embed_tokens_fn) for ctx in current_seq_ctx_list]
 
             layer_results = cast(
-                MoEDecoderLayerMicroBatchOutput,
+                MTPDepthMicroBatchOutput,
                 self._call_decoder_layer(
                     layer,
                     current_hidden_states_list,
@@ -273,14 +258,12 @@ class MTPBlock(nn.Module):
             previous_layer_results = layer_results
 
             for mb_idx in range(n):
-                outputs_per_mb[mb_idx].append(
-                    {
-                        "hidden_states": layer_results["hidden_states"][mb_idx],
-                        "router_logits": layer_results["router_logits"][mb_idx],
-                        "router_weights": layer_results["router_weights"][mb_idx],
-                        "router_topk_ids": layer_results["router_topk_ids"][mb_idx],
-                    }
-                )
+                output: MTPDepthOutput = {"hidden_states": layer_results["hidden_states"][mb_idx]}
+                if "router_logits" in layer_results:
+                    output["router_logits"] = layer_results["router_logits"][mb_idx]
+                    output["router_weights"] = layer_results["router_weights"][mb_idx]
+                    output["router_topk_ids"] = layer_results["router_topk_ids"][mb_idx]
+                outputs_per_mb[mb_idx].append(output)
 
             current_hidden_states_list = layer_results["hidden_states"]
 
