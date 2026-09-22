@@ -11,16 +11,7 @@ try:
 except ImportError:
     from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
 
-try:
-    from xtuner.v1.module.mtp import MTPConfig
-except ImportError:
-    try:
-        from xtuner.v1.model.moe.moe import MTPConfig
-    except ImportError:
-        MTPConfig = None
-
-from xtuner.v1.patch.fully_shard_patch import apply_fully_shard_patch
-apply_fully_shard_patch()
+from xtuner.v1.module.mtp import MTPConfig
 
 
 MEDIA_ROOT = os.environ["MEDIA_ROOT"]
@@ -50,6 +41,7 @@ dataset_config = [
         ),
         "tokenize_fn": Qwen3VLTokenizeFnConfig(
             processor_path=MODEL_PATH,
+            chat_template="qwen3.5-vl",
             max_length=16384,
             add_vision_id=True,
         ),

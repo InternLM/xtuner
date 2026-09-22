@@ -36,6 +36,7 @@ dataset_config = [
         ),
         "tokenize_fn": Qwen3VLTokenizeFnConfig(
             processor_path=MODEL_PATH,
+            chat_template="qwen3.5-vl",
             max_length=16384,
             add_vision_id=True,
         ),

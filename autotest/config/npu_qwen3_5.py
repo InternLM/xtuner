@@ -15,25 +15,12 @@ except:
     from xtuner.v1.model.moe.moe import ZLossConfig
 from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
 from xtuner.v1.model.compose.qwen3_5 import Qwen3_5_VLMoE35BA3Config
-try:
-    from xtuner.v1.model.moe.moe import MTPConfig
-except:
-    MTPConfig = None
-
-from xtuner.v1.float8.config import Float8Config, ScalingGranularity
-
-from xtuner.v1.patch.fully_shard_patch import apply_fully_shard_patch
-apply_fully_shard_patch()
+from xtuner.v1.module.mtp import MTPConfig
 
 QWEN3_MOE_PATH = "/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen/Qwen3.5-35B-A3B"
 #ALPACA_PATH = "/mnt/intern-delivery-shared/lintianyang/share/sampled_jsonls"
 ALPACA_PATH = "/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca"
 #ALPACA_PATH = "/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/tmpdata"
-
-float8_cfg = Float8Config(
-    scaling_granularity_gemm=ScalingGranularity.TILEWISE,
-    scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
-)
 
 moe_cfg = Qwen3_5_VLMoE35BA3Config()
 moe_cfg.text_config.ep_size = 1
