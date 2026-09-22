@@ -24,7 +24,7 @@ import asyncio
 import sys
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import torch
@@ -410,10 +410,11 @@ class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
 
 
 class TestPrepareRolloutItems(unittest.TestCase):
-    """TrainingController._prepare_rollout_items 合同：校验、组级 advantage 与 data_info 统计。
+    """TrainingController._prepare_rollout_items 合同：组级 advantage 与 data_info 统计。
 
-    controller 只消费 write_train_meta 写入的轻量 meta 字段；shift/张量化/pack 物化在
-    training worker 侧（见 test_training_worker_rank.py），本类不构造任何训练张量。
+    controller 只消费 write_train_meta 写入的轻量 meta 字段（缺失即 fail fast；组级
+    状态/对齐校验由 replay buffer 查询与 canonicalize_train_fields 保证）；shift/张量化/
+    pack 物化在 training worker 侧（见 test_training_worker_rank.py），本类不构造任何训练张量。
     """
 
     def _build_controller(self, advantages: list[float], task_adv_weight: float = 1.0) -> TrainingController:
@@ -424,9 +425,16 @@ class TestPrepareRolloutItems(unittest.TestCase):
         controller.logger = MagicMock()
         return controller
 
-    def _prepare(self, controller, data_groups, deterministic: bool = True):
-        with patch("xtuner.v1.rl.trainer.controller.XTUNER_DETERMINISTIC", deterministic):
-            return controller._prepare_rollout_items(data_groups)
+    def _prepare(self, controller, data_groups):
+        prepared = controller._prepare_rollout_items(data_groups, rollout_idx=0)
+        return (
+            prepared["rollout_items"],
+            prepared["advantages"],
+            controller._build_trainer_log_info(
+                prepared, pack_plan={"dp_dispatches": {}, "plan_log": {}}, log_infos=[]
+            ),
+            prepared["batch_attr"]["use_3d_position_ids"],
+        )
 
     def _state(
         self,
@@ -562,20 +570,6 @@ class TestPrepareRolloutItems(unittest.TestCase):
         self.assertEqual(info["advantages/mean"], 0.5)
         self.assertEqual(info["advantages/min"], -1.0)
         self.assertEqual(info["advantages/max"], 2.0)
-
-    def test_invalid_group_is_skipped(self):
-        # FAILED/FILTERED/ABORTED group 不能进入训练 batch，也不能贡献训练样本数。
-        controller = self._build_controller([1.0])
-        valid = self._state(uid=1, response_ids=[20, 21], reward={"score": 2.0})
-        failed = self._state(uid=2, status=Status.FAILED, response_ids=[30, 31], reward={"score": 4.0})
-
-        items, advantages, info, _ = self._prepare(controller, [[valid], [failed]])
-
-        self.assertEqual(len(items), 1)
-        self.assertIs(items[0], valid)
-        self.assertEqual(advantages, [1.0])
-        self.assertEqual(info["training_samples"], 1)
-        controller.logger.error.assert_called_once()
 
     def test_missing_reward_score_fails_fast(self):
         # reward 必须包含 score，否则 advantage 计算前后语义都不明确。
@@ -714,19 +708,6 @@ class TestPrepareRolloutItems(unittest.TestCase):
 
         _, _, _, mixed = self._prepare(controller, [[text], [vlm]])
         self.assertTrue(mixed)
-
-    def test_shuffle_keeps_items_paired_with_advantages(self):
-        # XTUNER_DETERMINISTIC 关闭时 items 顺序会被打乱，但 advantage 必须与 item 保持配对。
-        controller = self._build_controller([1.0, 2.0, 3.0, 4.0])
-        states = [self._state(uid=index, response_ids=[20, 21], reward={"score": float(index)}) for index in range(4)]
-
-        items, advantages, _, _ = self._prepare(controller, [states], deterministic=False)
-
-        expected_advantage_by_uid = {0: 1.0, 1: 2.0, 2: 3.0, 3: 4.0}
-        self.assertEqual(len(items), 4)
-        self.assertEqual({item.rollout_id for item in items}, {0, 1, 2, 3})
-        for item, advantage in zip(items, advantages):
-            self.assertEqual(advantage, expected_advantage_by_uid[item.rollout_id])
 
 
 if __name__ == "__main__":
