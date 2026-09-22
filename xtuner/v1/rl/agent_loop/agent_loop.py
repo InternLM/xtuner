@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict
 from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, get_group_status
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, get_group_status, write_train_meta
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.rollout.constants import AGENT_LOOP_RAY_GENERATE_MAX_CONCURRENCY
@@ -346,6 +346,8 @@ class AgentLoop(ABC):
                 self.logger.error(f"Canonicalize train fields failed for rollout_id={state.rollout_id}: {exc}")
                 state.status = Status.FAILED
                 state.error_msg = f"canonicalize_train_fields failed: {exc}"
+        for state in group:
+            write_train_meta(state)
         return group
 
     @overload
