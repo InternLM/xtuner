@@ -237,7 +237,9 @@ class RolloutState(BaseModel):
             if not keep:
                 labels[start + index] = -100
         self.labels = labels
-        self.train_meta = replace(self.train_meta, supervised_tokens=sum(label != -100 for label in labels[1:]))
+        supervised_tokens = sum(label != -100 for label in labels[1:])
+        self.train_meta = replace(self.train_meta, supervised_tokens=supervised_tokens)
+        self.extra_fields["supervised_tokens"] = supervised_tokens
         # 不重新推导 prompt_length：缺失显式 prompt 时，mask 后的非监督位计数会变大。
 
     def reset_response(self) -> None:
