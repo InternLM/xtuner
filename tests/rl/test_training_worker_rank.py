@@ -1,13 +1,16 @@
-"""TrainingWorker 侧训练数据构造的 contract 测试（RolloutState → RLTrainItem → pack 物化）。
+"""TrainingWorker 侧训练数据构造的 contract 测试（RolloutState → (seq_ctx, loss_ctx) → pack）。
 
 重构后 token 级张量构造从 controller 移到 training worker，本文件只测两段公开纯逻辑，
 不启动 Ray、模型或 rollout backend：
 
-- ``_convert_rollout_items_to_train_items``：shift、advantage 张量化、seq_ctx 构造与
-  distillation teacher targets 附加（use_3d_position_ids 时给文本样本补 3D 轴）。
-- ``_materialize_packs`` / ``_materialize_one_pack``：按 controller 的 index-only 打包计划把
-  RLTrainItem 拼成 ``pack_max_length`` 定长的 pack；模板键（rollout_logprobs / teacher 字段）
-  在空 pack 上以固定 padding 值填充，保证跨 rank collective 形状一致。
+- ``_convert_rollout_items_to_train_items``：shift、advantage 张量化、seq_ctx 构造、
+  distillation teacher targets 附加，并在 CPU 上构建 per-item loss_ctx
+  （use_3d_position_ids 时给文本样本补 3D 轴）。
+- ``_pack_train_items`` / ``_pack_one_batch``：按 controller 的 index-only 打包计划把
+  (seq_ctx, loss_ctx) 拼成 ``pack_max_length`` 定长的 pack：loss_kwargs 张量沿序列维 cat、
+  模板键（rollout_logprobs / teacher 字段）在空 pack 上以固定 padding 值填充，最后重建
+  pack 级 loss_ctx（仍在 CPU，设备迁移与 sp 切分留给 ``_fit``），保证跨 rank collective
+  形状一致。
 
 当前测试点：
 - shift 布局、advantage 与 shifted_labels 逐位置对齐（regression: advantage 曾比 input_ids
@@ -31,9 +34,8 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status, TeacherTargets, w
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.mllm_tokenize_fn.qwenvl_rope2d import get_rope_index_3
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter, RolloutTeacherConfig
-from xtuner.v1.rl.loss import DistillationLossConfig
-from xtuner.v1.rl.trainer.data import RLTrainItem
-from xtuner.v1.rl.trainer.worker import TrainingWorker, get_train_seq_ctx
+from xtuner.v1.rl.loss import DistillationLossConfig, GRPOLossConfig
+from xtuner.v1.rl.trainer.worker import TrainingWorker, TrainBatchAttr, get_train_seq_ctx
 
 
 def _rollout_distillation_config(loss_config: DistillationLossConfig) -> DistillationConfig:
@@ -45,9 +47,16 @@ def _rollout_distillation_config(loss_config: DistillationLossConfig) -> Distill
 
 
 def _make_worker(distillation_config=None) -> TrainingWorker:
+    # 真实配置下 rollout teacher 依赖 loss_cfg 为 DistillationLossConfig，teacher 模板键才能进入 loss_ctx。
+    loss_cfg = (
+        distillation_config.loss_config
+        if distillation_config is not None
+        else GRPOLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
+    )
     worker = TrainingWorker.__new__(TrainingWorker)
     worker.config = SimpleNamespace(
         pack_max_length=16,
+        loss_cfg=loss_cfg,
         distillation_config=distillation_config,
         model_cfg=SimpleNamespace(n_routed_experts=8),
     )
@@ -115,12 +124,25 @@ def _make_state(
     return state
 
 
+def _batch_attr(
+    use_3d: bool = False,
+    pack_loss_keys: list[str] | None = None,
+    has_routed_experts: bool = False,
+) -> TrainBatchAttr:
+    return {
+        "rollout_idx": 0,
+        "use_3d_position_ids": use_3d,
+        "pack_loss_keys": pack_loss_keys or [],
+        "has_routed_experts": has_routed_experts,
+    }
+
+
 def _convert(worker: TrainingWorker, states: list[RolloutState], advantages: list[float], use_3d: bool = False):
-    return worker._convert_rollout_items_to_train_items(states, advantages, use_3d)
+    return worker._convert_rollout_items_to_train_items(states, advantages, _batch_attr(use_3d=use_3d))
 
 
 class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
-    """RolloutState → RLTrainItem：shift、advantage 张量化、seq_ctx 与 teacher targets。"""
+    """RolloutState → (seq_ctx, loss_ctx)：shift、advantage 张量化、seq_ctx、teacher targets 与 CPU loss_ctx。"""
 
     def test_text_path_shifts_and_aligns_loss_inputs(self):
         # 文本主路径固定 token 布局：input_ids 去掉 response 最后一个 token，label/logprob 对齐预测位置。
@@ -136,19 +158,20 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
         items = _convert(worker, [state], [1.5])
 
         self.assertEqual(len(items), 1)
-        item = cast(RLTrainItem, items[0])
-        self.assertEqual(item["seq_ctx"].input_ids.tolist(), [[10, 11, 12, 20, 21]])
-        self.assertEqual(item["loss_inputs"]["shifted_labels"].tolist(), [[-100, -100, 20, -100, 22]])
+        seq_ctx, loss_ctx = items[0]
+        loss_kwargs = loss_ctx.loss_kwargs
+        self.assertEqual(seq_ctx.input_ids.tolist(), [[10, 11, 12, 20, 21]])
+        self.assertEqual(loss_kwargs.shifted_labels.tolist(), [[-100, -100, 20, -100, 22]])
         torch.testing.assert_close(
-            item["loss_inputs"]["rollout_logprobs"],
+            loss_kwargs.rollout_logprobs,
             torch.tensor([[0.0, 0.0, 0.1, 0.2, 0.3]], dtype=torch.float32),
         )
         # advantage 与 shifted_labels 逐位置对齐: prompt 段为 0, mask=0 处为 0。
         torch.testing.assert_close(
-            item["loss_inputs"]["advantages"],
+            loss_kwargs.advantages,
             torch.tensor([[0.0, 0.0, 1.5, 0.0, 1.5]], dtype=torch.float32),
         )
-        self.assertIs(item["seq_ctx"].rollout_routed_experts, routed_experts)
+        self.assertIs(seq_ctx.rollout_routed_experts, routed_experts)
 
     def test_mixed_batch_extends_text_positions_to_3d(self):
         # use_3d_position_ids=True 时 1D 文本样本沿三轴重复 arange，与 VLM 样本 pack 在一起。
@@ -166,8 +189,8 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
 
         items = _convert(worker, [reasoning, agentic], [0.5, 0.5], use_3d=True)
 
-        self.assertEqual(tuple(items[0]["seq_ctx"].position_ids.shape), (3, 1, 5))
-        agentic_position_ids = items[1]["seq_ctx"].position_ids
+        self.assertEqual(tuple(items[0][0].position_ids.shape), (3, 1, 5))
+        agentic_position_ids = items[1][0].position_ids
         self.assertEqual(tuple(agentic_position_ids.shape), (3, 1, 4))
         torch.testing.assert_close(
             agentic_position_ids,
@@ -189,7 +212,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
 
         items = _convert(worker, [state], [0.25], use_3d=True)
 
-        seq_ctx = items[0]["seq_ctx"]
+        seq_ctx = items[0][0]
         self.assertEqual(seq_ctx.input_ids.tolist(), [[100, 101, 102]])
         self.assertEqual(tuple(seq_ctx.position_ids.shape), (3, 1, 3))
         self.assertEqual(seq_ctx.position_ids.dtype, torch.long)
@@ -251,24 +274,24 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
         items = _convert(worker, [state], [0.0])
 
         self.assertEqual(len(items), 1)
-        loss_inputs = items[0]["loss_inputs"]
-        self.assertEqual(loss_inputs["shifted_labels"].tolist(), [[-100, 20, -100, 22]])
+        loss_kwargs = items[0][1].loss_kwargs
+        self.assertEqual(loss_kwargs.shifted_labels.tolist(), [[-100, 20, -100, 22]])
         self.assertEqual(
-            loss_inputs["target_token_ids"].tolist(),
+            loss_kwargs.target_token_ids.tolist(),
             [[[0, 0], [100, 101], [102, 103], [104, 105]]],
         )
         torch.testing.assert_close(
-            loss_inputs["teacher_logprobs"],
+            loss_kwargs.teacher_logprobs,
             torch.tensor([[[0.0, 0.0], [-0.5, -0.6], [-0.7, -0.8], [-0.9, -1.0]]], dtype=torch.float32),
         )
         with patch("xtuner.v1.rl.loss.distillation_loss.DEVICE", "cpu"):
             loss_ctx = loss_config.build(
                 {
-                    "shifted_labels": loss_inputs["shifted_labels"],
-                    "advantages": loss_inputs["advantages"],
-                    "old_logprobs": torch.zeros_like(loss_inputs["shifted_labels"], dtype=torch.float32),
-                    "teacher_logprobs": loss_inputs["teacher_logprobs"],
-                    "target_token_ids": loss_inputs["target_token_ids"],
+                    "shifted_labels": loss_kwargs.shifted_labels,
+                    "advantages": loss_kwargs.advantages,
+                    "old_logprobs": torch.zeros_like(loss_kwargs.shifted_labels, dtype=torch.float32),
+                    "teacher_logprobs": loss_kwargs.teacher_logprobs,
+                    "target_token_ids": loss_kwargs.target_token_ids,
                 }
             )
         assert loss_ctx is not None
@@ -300,14 +323,14 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
 
         items = _convert(worker, [state], [0.0])
 
-        loss_inputs = items[0]["loss_inputs"]
-        self.assertEqual(loss_inputs["shifted_labels"].tolist(), [[-100, -100, -100, 21, 22]])
+        loss_kwargs = items[0][1].loss_kwargs
+        self.assertEqual(loss_kwargs.shifted_labels.tolist(), [[-100, -100, -100, 21, 22]])
         self.assertEqual(
-            loss_inputs["target_token_ids"].tolist(),
+            loss_kwargs.target_token_ids.tolist(),
             [[[0, 0], [0, 0], [0, 0], [102, 103], [104, 105]]],
         )
         torch.testing.assert_close(
-            loss_inputs["teacher_logprobs"],
+            loss_kwargs.teacher_logprobs,
             torch.tensor([[[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [-0.7, -0.8], [-0.9, -1.0]]], dtype=torch.float32),
         )
 
@@ -340,28 +363,22 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
 
         self.assertEqual(len(items), 2)
         torch.testing.assert_close(
-            items[0]["loss_inputs"]["teacher_logprobs"],
+            items[0][1].loss_kwargs.teacher_logprobs,
             torch.tensor([[0.0, 0.0, 0.0, -0.7, -0.9]], dtype=torch.float32),
         )
         torch.testing.assert_close(
-            items[1]["loss_inputs"]["teacher_logprobs"],
+            items[1][1].loss_kwargs.teacher_logprobs,
             torch.tensor([[0.0, -1.1, -1.2, -1.3]], dtype=torch.float32),
         )
-        self.assertNotIn("target_token_ids", items[0]["loss_inputs"])
-        self.assertNotIn("target_token_ids", items[1]["loss_inputs"])
+        self.assertIsNone(items[0][1].loss_kwargs.target_token_ids)
+        self.assertIsNone(items[1][1].loss_kwargs.target_token_ids)
 
 
-class TestMaterializePacks(unittest.TestCase):
-    """RLTrainItem 列表 → 定长 pack：拼接、padding 值表、模板键与空 pack 物化。"""
+class TestPackTrainItems(unittest.TestCase):
+    """(seq_ctx, loss_ctx) 列表 → 定长 pack：拼接、padding 值表、模板键与 pack 级 loss_ctx 重建。"""
 
-    def _materialize(self, worker, items, plan, use_3d=False, pack_loss_keys=None, has_routed_experts=False):
-        return worker._materialize_packs(
-            items,
-            plan,
-            use_3d_position_ids=use_3d,
-            pack_loss_keys=pack_loss_keys or [],
-            has_routed_experts=has_routed_experts,
-        )
+    def _pack(self, worker, items, plan, use_3d=False, pack_loss_keys=None, has_routed_experts=False):
+        return worker._pack_train_items(items, plan, _batch_attr(use_3d, pack_loss_keys, has_routed_experts))
 
     def test_packs_concatenate_along_sequence(self):
         # 两个样本按 plan 顺序拼进一个 pack，padding 区补满 pack_max_length。
@@ -370,24 +387,27 @@ class TestMaterializePacks(unittest.TestCase):
         second = _make_state(uid=2, prompt_ids=[30, 31], response_ids=[40], logprobs=[-0.3])
         items = _convert(worker, [first, second], [1.0, 2.0])
 
-        step_batches = self._materialize(worker, items, [[[0, 1]]])
+        step_batches = self._pack(worker, items, [[[0, 1]]])
 
         self.assertEqual(len(step_batches), 1)
-        packed = step_batches[0][0]
-        seq_len = packed["seq_ctx"].input_ids.shape[1]
+        seq_ctx, loss_ctx = step_batches[0][0]
+        seq_len = seq_ctx.input_ids.shape[1]
         self.assertEqual(seq_len, worker.config.pack_max_length)
         # first: prompt 3 + response 2 → 4 个训练位; second: 2 个训练位; padding 10。
-        self.assertEqual(packed["seq_ctx"].num_padding, 16 - 6)
+        self.assertEqual(seq_ctx.num_padding, 16 - 6)
+        loss_kwargs = loss_ctx.loss_kwargs
+        # pack 阶段产物保持 CPU，设备迁移由 _fit 统一执行。
+        self.assertEqual(loss_kwargs.shifted_labels.device.type, "cpu")
         # 真实段逐位置保序；padding 区 labels=-100、advantages=0。
-        self.assertEqual(packed["loss_inputs"]["shifted_labels"][0, :4].tolist(), [-100, -100, 20, 21])
-        self.assertEqual(packed["loss_inputs"]["shifted_labels"][0, 4:6].tolist(), [-100, 40])
+        self.assertEqual(loss_kwargs.shifted_labels[0, :4].tolist(), [-100, -100, 20, 21])
+        self.assertEqual(loss_kwargs.shifted_labels[0, 4:6].tolist(), [-100, 40])
         torch.testing.assert_close(
-            packed["loss_inputs"]["advantages"][0, :6],
+            loss_kwargs.advantages[0, :6],
             torch.tensor([0.0, 0.0, 1.0, 1.0, 0.0, 2.0]),
         )
-        pad = packed["loss_inputs"]["shifted_labels"][0, 6:]
+        pad = loss_kwargs.shifted_labels[0, 6:]
         self.assertTrue(torch.all(pad == -100))
-        self.assertTrue(torch.all(packed["loss_inputs"]["advantages"][0, 6:] == 0))
+        self.assertTrue(torch.all(loss_kwargs.advantages[0, 6:] == 0))
 
     def test_single_item_without_padding_keeps_seq_ctx(self):
         # 恰好一个样本且无 padding 时不经 cat，seq_ctx 原样保留（含 multimodal 字段）。
@@ -400,36 +420,38 @@ class TestMaterializePacks(unittest.TestCase):
         items = _convert(worker, [state], [1.0])
         self.assertEqual(items[0]["seq_ctx"].input_ids.shape[1], worker.config.pack_max_length)
 
-        step_batches = self._materialize(worker, items, [[[0]]])
+        step_batches = self._pack(worker, items, [[[0]]])
 
-        packed = step_batches[0][0]
-        self.assertIs(packed["seq_ctx"], items[0]["seq_ctx"])
-        self.assertEqual(packed["seq_ctx"].num_padding, 0)
+        seq_ctx, _ = step_batches[0][0]
+        self.assertIs(seq_ctx, items[0]["seq_ctx"])
+        self.assertEqual(seq_ctx.num_padding, 0)
 
     def test_empty_pack_materializes_all_padding(self):
         # 调度占位空 pack：整包都是 padding（全零 input_ids + labels=-100 + advantages=0）。
         worker = _make_worker()
 
-        step_batches = self._materialize(worker, [], [[]])
+        step_batches = self._pack(worker, [], [[]])
 
-        packed = step_batches[0][0]
-        seq_len = packed["seq_ctx"].input_ids.shape[1]
+        seq_ctx, loss_ctx = step_batches[0][0]
+        seq_len = seq_ctx.input_ids.shape[1]
         self.assertEqual(seq_len, worker.config.pack_max_length)
-        self.assertEqual(packed["seq_ctx"].num_padding, 16)
-        self.assertTrue(torch.all(packed["seq_ctx"].input_ids == 0))
-        self.assertTrue(torch.all(packed["loss_inputs"]["shifted_labels"] == -100))
-        self.assertTrue(torch.all(packed["loss_inputs"]["advantages"] == 0))
+        self.assertEqual(seq_ctx.num_padding, 16)
+        self.assertTrue(torch.all(seq_ctx.input_ids == 0))
+        loss_kwargs = loss_ctx.loss_kwargs
+        self.assertTrue(torch.all(loss_kwargs.shifted_labels == -100))
+        self.assertTrue(torch.all(loss_kwargs.advantages == 0))
 
     def test_rollout_logprobs_template_key_on_empty_pack(self):
         # pack_loss_keys 声明的批级模板键在空 pack 上也要物化，保证跨 rank collective 形状一致。
         worker = _make_worker()
 
-        step_batches = self._materialize(worker, [], [[]], pack_loss_keys=["rollout_logprobs"])
+        step_batches = self._pack(worker, [], [[]], pack_loss_keys=["rollout_logprobs"])
 
-        packed = step_batches[0][0]
-        self.assertIn("rollout_logprobs", packed["loss_inputs"])
+        _, loss_ctx = step_batches[0][0]
+        rollout_logprobs = loss_ctx.loss_kwargs.rollout_logprobs
+        assert rollout_logprobs is not None
         torch.testing.assert_close(
-            packed["loss_inputs"]["rollout_logprobs"],
+            rollout_logprobs,
             torch.zeros(1, worker.config.pack_max_length, dtype=torch.float32),
         )
 
@@ -443,43 +465,51 @@ class TestMaterializePacks(unittest.TestCase):
         )
         worker = _make_worker(_rollout_distillation_config(loss_config))
 
-        step_batches = self._materialize(worker, [], [[]])
+        step_batches = self._pack(worker, [], [[]])
 
-        packed = step_batches[0][0]
+        _, loss_ctx = step_batches[0][0]
+        loss_kwargs = loss_ctx.loss_kwargs
         torch.testing.assert_close(
-            packed["loss_inputs"]["teacher_logprobs"],
+            loss_kwargs.teacher_logprobs,
             torch.zeros(1, worker.config.pack_max_length, 2, dtype=torch.float32),
         )
         torch.testing.assert_close(
-            packed["loss_inputs"]["target_token_ids"],
+            loss_kwargs.target_token_ids,
             torch.zeros(1, worker.config.pack_max_length, 2, dtype=torch.long),
         )
 
     def test_mixed_presence_within_pack_raises(self):
         # 同一 pack 内可选 loss 键必须 all-present 或 all-absent，混出即 fail fast。
         worker = _make_worker()
+        loss_cfg = GRPOLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
         seq_ctx_a = SequenceContext.from_input_ids((torch.tensor([[1, 2]]),), device="cpu")
         seq_ctx_b = SequenceContext.from_input_ids((torch.tensor([[3, 4]]),), device="cpu")
         items = [
-            {
-                "seq_ctx": seq_ctx_a,
-                "loss_inputs": {
-                    "shifted_labels": torch.tensor([[-100, 2]]),
-                    "advantages": torch.zeros(1, 2),
-                    "rollout_logprobs": torch.zeros(1, 2),
-                },
-            },
-            {
-                "seq_ctx": seq_ctx_b,
-                "loss_inputs": {
-                    "shifted_labels": torch.tensor([[3, 4]]),
-                    "advantages": torch.zeros(1, 2),
-                },
-            },
+            (
+                seq_ctx_a,
+                loss_cfg.build(
+                    {
+                        "shifted_labels": torch.tensor([[-100, 2]]),
+                        "advantages": torch.zeros(1, 2),
+                        "rollout_logprobs": torch.zeros(1, 2),
+                    },
+                    device="cpu",
+                ),
+            ),
+            (
+                seq_ctx_b,
+                loss_cfg.build(
+                    {
+                        "shifted_labels": torch.tensor([[3, 4]]),
+                        "advantages": torch.zeros(1, 2),
+                    },
+                    device="cpu",
+                ),
+            ),
         ]
 
         with self.assertRaisesRegex(ValueError, "all-present or all-absent"):
-            self._materialize(worker, items, [[[0, 1]]], pack_loss_keys=["rollout_logprobs"])
+            self._pack(worker, items, [[[0, 1]]], pack_loss_keys=["rollout_logprobs"])
 
     def test_oversize_pack_raises(self):
         # pack 内真实 token 数超过 pack_max_length 时 fail fast（controller 侧 packer 同样拦截）。
@@ -494,15 +524,15 @@ class TestMaterializePacks(unittest.TestCase):
         items = _convert(worker, [state], [1.0])
 
         with self.assertRaises(AssertionError):
-            self._materialize(worker, items, [[[0]]])
+            self._pack(worker, items, [[[0]]])
 
     def test_padding_seq_ctx_uses_3d_positions_when_configured(self):
         # use_3d_position_ids=True 时 padding 区 position_ids 为三轴 arange。
         worker = _make_worker()
 
-        step_batches = self._materialize(worker, [], [[]], use_3d=True)
+        step_batches = self._pack(worker, [], [[]], use_3d=True)
 
-        position_ids = step_batches[0][0]["seq_ctx"].position_ids
+        position_ids = step_batches[0][0][0].position_ids
         self.assertEqual(tuple(position_ids.shape), (3, 1, worker.config.pack_max_length))
         torch.testing.assert_close(
             position_ids,
@@ -513,9 +543,9 @@ class TestMaterializePacks(unittest.TestCase):
         # has_routed_experts=True 时 padding 区补 dummy expert id，形状与真实 rollout_routed_experts 对齐。
         worker = _make_worker()
 
-        step_batches = self._materialize(worker, [], [[]], has_routed_experts=True)
+        step_batches = self._pack(worker, [], [[]], has_routed_experts=True)
 
-        routed_experts = step_batches[0][0]["seq_ctx"].rollout_routed_experts
+        routed_experts = step_batches[0][0][0].rollout_routed_experts
         self.assertEqual(tuple(routed_experts.shape), (worker.config.pack_max_length, 1, 1))
         self.assertTrue(torch.all(routed_experts >= 0))
         self.assertTrue(torch.all(routed_experts < worker.config.model_cfg.n_routed_experts))

@@ -8,9 +8,11 @@ worker ``iters_per_step`` 重分组的精确等价性。
 """
 
 import math
+import random
 import unittest
+from unittest.mock import patch
 
-from xtuner.v1.rl.trainer.pack import RLDataPacker
+from xtuner.v1.rl.trainer.pack import RLDataPacker, get_greedy_pack_infos
 
 
 def _legacy_reference_plan(
