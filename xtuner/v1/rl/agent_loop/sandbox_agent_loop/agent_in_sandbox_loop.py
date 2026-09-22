@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from lagent.utils import create_object
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, write_train_meta
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import create_task
@@ -257,6 +257,8 @@ class AgentInSandboxLoop(AgentLoop):
             state for state in group if state.status == Status.COMPLETED and state.input_ids is not None
         ]
         super().canonicalize_train_fields(full_sequence_states)
+        for state in group:
+            write_train_meta(state)
         return group
 
     # NOTE: A single sandbox session may yield multiple trainable segments, so this returns a list
