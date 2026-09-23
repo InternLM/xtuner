@@ -13,6 +13,7 @@ from xtuner.v1.model.utils import reuse_during_recompute
 from xtuner.v1.module.attention.attn_outputs import AttnOutputs
 from xtuner.v1.module.attention.mla import MLAConfig, MultiLatentAttention, mla_apply_rotary_pos_emb
 from xtuner.v1.module.linear import build_linear
+from xtuner.v1.module.rms_norm import LayerNorm
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm import gather_for_sequence_parallel
 from xtuner.v1.ops.sparse_mla import (
@@ -71,38 +72,6 @@ def _validate_query_chunk_size(value: int | None, backend: str, *, field_name: s
         raise ValueError(f"{field_name} must be a positive integer, got {value!r}")
     if value is not None and backend not in ("tilelang", "cudnn_dsa", "flash_mla"):
         raise ValueError("query-chunk Indexer selection requires a TileLang selector")
-
-
-class LayerNorm(nn.Module):
-    weight: torch.Tensor
-    bias: torch.Tensor
-
-    def __init__(self, hidden_size: int, eps: float = 1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.bias = nn.Parameter(torch.zeros(hidden_size))
-        self.normalized_shape = (hidden_size,)
-        self.eps = eps
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if isinstance(self.weight, DTensor):
-            weight = self.weight.to_local()
-        else:
-            weight = self.weight
-
-        if isinstance(self.bias, DTensor):
-            bias = self.bias.to_local()
-        else:
-            bias = self.bias
-
-        return torch.nn.functional.layer_norm(hidden_states, self.normalized_shape, weight, bias, self.eps)
-
-    def init_weights(self):
-        self.weight.data.fill_(1.0)
-        self.bias.data.zero_()
-
-    def extra_repr(self):
-        return f"{self.normalized_shape}, eps={self.eps}"
 
 
 class DSAIndexer(nn.Module):
