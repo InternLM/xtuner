@@ -83,7 +83,7 @@ class TestTokenStalenessMask(unittest.TestCase):
             with self.subTest(token_stale_threshold=token_stale_threshold):
                 state = self._state(response_model_steps=[0, 4])
 
-                masks = calculate_group_effective_response_masks(
+                masks = self._calc_and_bake(
                     [state],
                     current_train_step=5,
                     token_stale_threshold=token_stale_threshold,
@@ -94,14 +94,14 @@ class TestTokenStalenessMask(unittest.TestCase):
                 self.assertEqual(state.labels, expected_labels)
 
     def test_repeated_calls_converge(self):
-        # staleness 只增不减：先在旧 step 烙一次，再在新 step 重算，最终 labels
-        # 与一次性按新 step 烙制的结果完全一致（replay buffer 逐轮检查同理）。
+        # staleness 只增不减：先在旧 step 计算并烙制一次，再在新 step 重算重烙，最终
+        # labels 与一次性按新 step 计算并烙制的结果完全一致。
         incremental = self._state(response_model_steps=[0, 4])
-        calculate_group_effective_response_masks([incremental], current_train_step=5, token_stale_threshold=4)
-        calculate_group_effective_response_masks([incremental], current_train_step=9, token_stale_threshold=4)
+        self._calc_and_bake([incremental], current_train_step=5, token_stale_threshold=4)
+        self._calc_and_bake([incremental], current_train_step=9, token_stale_threshold=4)
 
         oneshot = self._state(response_model_steps=[0, 4])
-        calculate_group_effective_response_masks([oneshot], current_train_step=9, token_stale_threshold=4)
+        self._calc_and_bake([oneshot], current_train_step=9, token_stale_threshold=4)
 
         self.assertEqual(incremental.labels, oneshot.labels)
         self.assertEqual(oneshot.labels, [-100, -100, -100, -100])
@@ -110,7 +110,7 @@ class TestTokenStalenessMask(unittest.TestCase):
         # 最终有效掩码必须同时反映语义监督（labels 尾段 -100 位）与 token staleness。
         state = self._state(response_model_steps=[0, 4], labels=[-100, -100, 3, -100])
 
-        masks = calculate_group_effective_response_masks(
+        masks = self._calc_and_bake(
             [state],
             current_train_step=5,
             token_stale_threshold=4,
@@ -127,7 +127,7 @@ class TestTokenStalenessMask(unittest.TestCase):
         state.response_model_steps = [4, 4]
         state.labels = [-100, -100, 3, 4]
 
-        masks = calculate_group_effective_response_masks(
+        masks = self._calc_and_bake(
             [state],
             current_train_step=5,
             token_stale_threshold=4,
@@ -161,7 +161,7 @@ class TestTokenStalenessMask(unittest.TestCase):
             labels=[-100, -100, 30, -100, 40, -100, 32],
         )
 
-        masks = calculate_group_effective_response_masks(
+        masks = self._calc_and_bake(
             [state],
             current_train_step=5,
             token_stale_threshold=4,
@@ -184,7 +184,7 @@ class TestTokenStalenessMask(unittest.TestCase):
             labels=[-100, -100, 30, -100, 40, -100, 32],
         )
 
-        masks = calculate_group_effective_response_masks(
+        masks = self._calc_and_bake(
             [state],
             current_train_step=5,
             token_stale_threshold=4,
@@ -206,7 +206,7 @@ class TestTokenStalenessMask(unittest.TestCase):
             labels=[-100, -100, 30, -100, 40, -100, 32],
         )
 
-        masks = calculate_group_effective_response_masks(
+        masks = self._calc_and_bake(
             [state],
             current_train_step=5,
             token_stale_threshold=4,
@@ -227,7 +227,7 @@ class TestTokenStalenessMask(unittest.TestCase):
             labels=[3, 4],
         )
 
-        masks = calculate_group_effective_response_masks(
+        masks = self._calc_and_bake(
             [state],
             current_train_step=5,
             token_stale_threshold=4,
@@ -242,7 +242,7 @@ class TestTokenStalenessMask(unittest.TestCase):
         canonical.input_ids = [1, 2, 3, 4]
         canonical.logprobs = [0.0, 0.0, -0.1, -0.2]
 
-        masks = calculate_group_effective_response_masks(
+        masks = self._calc_and_bake(
             [canonical],
             current_train_step=5,
             token_stale_threshold=4,
@@ -250,6 +250,28 @@ class TestTokenStalenessMask(unittest.TestCase):
 
         self.assertEqual(masks, [[0, 0]])
         self.assertEqual(canonical.labels, [-100, -100, -100, -100])
+
+    @staticmethod
+    def _calc_and_bake(
+        group: list[RolloutState],
+        *,
+        current_train_step: int,
+        token_stale_threshold: int,
+    ) -> list[list[int] | None]:
+        masks = calculate_group_effective_response_masks(
+            group,
+            current_train_step=current_train_step,
+            token_stale_threshold=token_stale_threshold,
+        )
+        for item, mask in zip(group, masks):
+            if mask is None:
+                continue
+            offset = len(item.labels) - len(mask)
+            item.labels[offset:] = [
+                label if mask_value else -100
+                for label, mask_value in zip(item.labels[offset:], mask)
+            ]
+        return masks
 
     @staticmethod
     def _state(

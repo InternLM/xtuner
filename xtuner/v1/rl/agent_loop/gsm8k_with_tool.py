@@ -157,7 +157,7 @@ class GSM8KToolAgentLoop(AgentLoop):
             f"Prompt ids cannot be None or empty in data: {rollout_state}"
         )
         rollout_state.response_ids = final_response_ids
-        rollout_state.logprobs = final_logprobs
+        rollout_state.logprobs = [0.0] * len(prompt_ids) + final_logprobs
         rollout_state.input_ids = list(prompt_ids) + final_response_ids
         rollout_state.labels = [-100] * len(prompt_ids) + [
             resp_id if mask_value else -100 for resp_id, mask_value in zip(final_response_ids, final_response_mask)

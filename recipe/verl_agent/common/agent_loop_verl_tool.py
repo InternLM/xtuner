@@ -140,7 +140,9 @@ class VerlToolAgentLoop(AgentLoop):
         semantic_mask = output.response_mask if output.response_mask is not None else [1] * len(response_ids)
         rollout_state.prompt_ids = prompt_ids
         rollout_state.response_ids = response_ids
-        rollout_state.logprobs = output.response_logprobs
+        rollout_state.logprobs = (
+            None if output.response_logprobs is None else [0.0] * len(prompt_ids) + list(output.response_logprobs)
+        )
         rollout_state.routed_experts = output.routed_experts
         rollout_state.input_ids = prompt_ids + response_ids
         rollout_state.labels = [-100] * len(prompt_ids) + [

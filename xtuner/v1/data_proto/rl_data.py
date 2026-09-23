@@ -416,18 +416,18 @@ def _calculate_effective_response_mask(
     current_train_step: int,
     token_stale_threshold: int,
 ) -> list[int]:
-    """Bake token staleness into labels and return the effective response mask.
+    """Calculate the effective response mask of one rollout state without
+    mutating it.
 
     Every loop writes ``response_ids`` under one convention: the contiguous suffix of ``input_ids`` after
     the prompt (env-injected or tool tokens included), so response token ``j`` maps to labels position
     ``len(labels) - len(response_ids) + j``. The effective mask follows the reasoning-RL rule
     ``effective = semantic_mask * token_staleness_mask``: the semantic mask is recovered from
     ``labels != -100`` on the response region (semantic holes stay supervised-out regardless of staleness),
-    staleness is evaluated per token via ``response_model_steps``, and a zero effective mask bakes ``-100``
-    into the label in place.
+    and staleness is evaluated per token via ``response_model_steps``.
 
     Args:
-        rollout_state (RolloutState): Rollout sample whose labels are updated in place.
+        rollout_state (RolloutState): Rollout sample to inspect; left unmodified.
         current_train_step (int): Trainer step that will consume the sample.
         token_stale_threshold (int): Maximum token staleness, measured in trainer steps, allowed for training.
 
@@ -451,9 +451,6 @@ def _calculate_effective_response_mask(
         semantic_mask_value * token_staleness_mask_value
         for semantic_mask_value, token_staleness_mask_value in zip(semantic_mask, token_staleness_mask)
     ]
-    for i, mask_value in enumerate(effective_mask):
-        if mask_value == 0:
-            labels[offset + i] = -100
     return effective_mask
 
 
@@ -463,18 +460,18 @@ def calculate_group_effective_response_masks(
     current_train_step: int,
     token_stale_threshold: int | None,
 ) -> list[list[int] | None]:
-    """Calculate a group's effective masks and bake token staleness into its
-    labels.
+    """Calculate one group's effective response masks under the token-staleness
+    policy.
 
-    For each eligible state, stale supervised labels are cleared to ``-100`` in place.
-    Clearing only ever extends: staleness grows monotonically with the trainer step, so
-    repeated calls (e.g. replay-buffer expiry checks followed by the train-batch bake)
-    converge to the same labels. Each returned mask is the effective response mask
-    aligned with ``response_ids``. ``None`` means token staleness is disabled or does
-    not apply to that state (no labels, or no ``response_ids`` to align with).
+    The function is pure: ``group`` is inspected, not modified. Each returned mask is the effective
+    response mask aligned with ``response_ids``; callers bake them into ``labels`` when the train
+    batch is taken, clearing zero-mask supervised positions to ``-100``. The clearing only ever
+    extends, so masks computed at growing trainer steps converge to the same labels. ``None`` means
+    token staleness is disabled or does not apply to that state (no labels, or no ``response_ids`` to
+    align with).
 
     Args:
-        group (list[RolloutState]): Rollout group updated in place.
+        group (list[RolloutState]): Rollout group to inspect; left unmodified.
         current_train_step (int): Trainer step that will consume the group.
         token_stale_threshold (int | None): Maximum token staleness, measured in trainer
             steps, allowed for training. ``None`` disables token staleness.
