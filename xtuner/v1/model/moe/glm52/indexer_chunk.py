@@ -9,7 +9,11 @@ def resolve_indexer_topk_query_chunk_size(raw_value: str | None, backend: str) -
 
     backend = backend.strip().lower()
     if raw_value is None:
-        return DEFAULT_INDEXER_TOPK_QUERY_CHUNK_SIZE if backend in ("tilelang", "cudnn_dsa", "flash_mla") else None
+        return (
+            DEFAULT_INDEXER_TOPK_QUERY_CHUNK_SIZE
+            if backend in ("tilelang", "cudnn_dsa", "flash_mla", "tilelang_deepselect")
+            else None
+        )
 
     value = raw_value.strip().lower()
     if value in ("", "0", "none", "null"):

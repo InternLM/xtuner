@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import functools
 import importlib.util
 
 import torch
@@ -45,6 +46,10 @@ def get_dsa_topk_indices(backend: DSAIndexerBackend) -> DSATopKIndicesProtocol:
         from .tilelang import tilelang_dsa_topk_indices
 
         return tilelang_dsa_topk_indices
+    if backend == "tilelang_deepselect":
+        from .tilelang import tilelang_dsa_topk_indices
+
+        return functools.partial(tilelang_dsa_topk_indices, selector="deep_select")
     if backend == "deep_gemm_fp8":
         from .lmdeploy_fp8_index import lmdeploy_fp8_dsa_topk_indices
 
@@ -97,6 +102,13 @@ def ensure_flash_mla_runtime_available() -> None:
     return _impl()
 
 
+def ensure_deep_select_runtime_available() -> None:
+    if importlib.util.find_spec("deep_select") is None:
+        raise RuntimeError(
+            "tilelang_deepselect DSA indexer requires DeepSelect (https://github.com/deepseek-ai/DeepSelect)."
+        )
+
+
 def ensure_cute_dsl_runtime_available() -> None:
     if importlib.util.find_spec("cutlass") is None:
         raise RuntimeError("CuTe DSL DSA indexer requires nvidia-cutlass-dsl==4.5.2.")
@@ -132,6 +144,7 @@ __all__ = [
     "dsa_topk_indices",
     "ensure_cudnn_dsa_runtime_available",
     "ensure_cute_dsl_runtime_available",
+    "ensure_deep_select_runtime_available",
     "ensure_flash_mla_runtime_available",
     "ensure_tilelang_runtime_available",
     "get_dsa_topk_indices",
