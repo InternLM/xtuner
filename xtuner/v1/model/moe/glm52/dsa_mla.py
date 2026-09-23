@@ -22,6 +22,7 @@ from xtuner.v1.ops.sparse_mla import (
     SparseMLAProtocol,
     ensure_cudnn_dsa_runtime_available,
     ensure_cute_dsl_runtime_available,
+    ensure_deep_select_runtime_available,
     ensure_flash_mla_runtime_available,
     ensure_tilelang_runtime_available,
     get_dsa_topk_indices,
@@ -69,7 +70,7 @@ def _validate_indexer_backend_config(
 def _validate_query_chunk_size(value: int | None, backend: str, *, field_name: str) -> None:
     if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
         raise ValueError(f"{field_name} must be a positive integer, got {value!r}")
-    if value is not None and backend not in ("tilelang", "cudnn_dsa", "flash_mla"):
+    if value is not None and backend not in ("tilelang", "cudnn_dsa", "flash_mla", "tilelang_deepselect"):
         raise ValueError("query-chunk Indexer selection requires a TileLang selector")
 
 
@@ -244,8 +245,14 @@ class DSAMLAConfig(MLAConfig):
             indexer_backend,
             field_name="indexer_topk_query_chunk_size",
         )
-        if indexer_backend == "tilelang" or self.sparse_mla_backend in ("tilelang", "cudnn_dsa", "flash_mla"):
+        if indexer_backend in ("tilelang", "tilelang_deepselect") or self.sparse_mla_backend in (
+            "tilelang",
+            "cudnn_dsa",
+            "flash_mla",
+        ):
             ensure_tilelang_runtime_available()
+        if indexer_backend == "tilelang_deepselect":
+            ensure_deep_select_runtime_available()
         if indexer_backend == "cute_dsl":
             ensure_cute_dsl_runtime_available()
         if self.sparse_mla_backend == "cudnn_dsa":
