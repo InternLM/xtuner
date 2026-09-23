@@ -876,17 +876,17 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 10800
     
-    npu-qwen3-5-sft:
+    npu-qwen3-5-sft-pretrain:
         -
             type: sft
             parameters:
-                config: autotest/config/npu_qwen3_5.py
+                config: autotest/config/npu_qwen3_5_pretrain.py
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:cann852-qwen35-0610
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen/Qwen3.5-35B-A3B
-                    - ALPACA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca_pretrain
                     - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_ACTIVATION_OFFLOAD=1
@@ -898,7 +898,7 @@ case:
                     - RANK=0
                     - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
             assert_info:
-                base_metric: npu-qwen3-5-sft/tracker.jsonl
+                base_metric: npu-qwen3-5-sft-pretrain/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/reduced_llm_loss: 0.000001
