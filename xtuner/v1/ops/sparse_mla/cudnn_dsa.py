@@ -16,7 +16,9 @@ def cudnn_dsa_sparse_mla(
 ) -> SparseMLAOutputs:
     _validate_cudnn_dsa_sparse_mla_inputs(q, kv, indices, value_dim)
     indices = indices.to(torch.int32).contiguous()
-    raw_output, softmax_lse, _ = _cudnn_dsa_sparse_mla_forward(q, kv, indices, scaling)
+    # Resolve the default here so the forward and backward kernels use the same scale.
+    scaling = q.shape[-1] ** -0.5 if scaling is None else scaling
+    raw_output, softmax_lse = _cudnn_dsa_sparse_mla_forward(q, kv, indices, scaling)
     return SparseMLAOutputs(raw_output=raw_output, softmax_lse=softmax_lse)
 
 
@@ -29,6 +31,11 @@ def _validate_cudnn_dsa_sparse_mla_inputs(
     _validate_tilelang_sparse_mla_inputs(q, kv, indices, value_dim)
     if kv.shape[1] != 1 or indices.shape[1] != 1:
         raise RuntimeError("cuDNN DSA SparseMLA currently supports kv_group=1 only.")
+    if q.shape[1] % 64 != 0 or indices.shape[-1] % 128 != 0:
+        raise RuntimeError(
+            "cuDNN DSA SparseMLA runs the FlashMLA forward, which needs heads divisible by 64 and topk by 128, "
+            f"got heads={q.shape[1]}, topk={indices.shape[-1]}."
+        )
 
 
 @torch.library.custom_op("sparse_mla::cudnn_dsa_sparse_mla_forward", mutates_args=(), device_types="cuda")
@@ -36,15 +43,14 @@ def _cudnn_dsa_sparse_mla_forward(
     q: Tensor,
     kv: Tensor,
     indices: Tensor,
-    scaling: float | None,
-) -> tuple[Tensor, Tensor, Tensor]:
-    from .tilelang_sparse_mla_fwd import sparse_mla_fwd_interface
+    scaling: float,
+) -> tuple[Tensor, Tensor]:
+    from flash_mla import flash_mla_sparse_fwd
 
-    q = q.contiguous()
-    kv = kv.contiguous()
-    indices = indices.to(torch.int32).contiguous()
-    out, lse_log2 = sparse_mla_fwd_interface(q, kv, indices, sm_scale=scaling)
-    return out, lse_log2 * 0.6931471805599453, lse_log2
+    # FlashMLA's sparse prefill kernel is 1.6x faster than the TileLang forward at the GLM-5.2 512K shape
+    # (482 vs 305 TFLOP/s). It treats -1 indices as invalid and returns the natural-log LSE the cuDNN backward takes.
+    raw_output, _, softmax_lse = flash_mla_sparse_fwd(q.contiguous(), kv.contiguous(), indices, scaling, d_v=512)
+    return raw_output, softmax_lse
 
 
 @_cudnn_dsa_sparse_mla_forward.register_fake
@@ -52,30 +58,27 @@ def _(
     q: Tensor,
     kv: Tensor,
     indices: Tensor,
-    scaling: float | None,
-) -> tuple[Tensor, Tensor, Tensor]:
-    out = q.new_empty((*q.shape[:-1], 512))
-    softmax_lse = q.new_empty(q.shape[:-1], dtype=torch.float32)
-    lse_log2 = q.new_empty(q.shape[:-1], dtype=torch.float32)
-    return out, softmax_lse, lse_log2
+    scaling: float,
+) -> tuple[Tensor, Tensor]:
+    return q.new_empty((*q.shape[:-1], 512)), q.new_empty(q.shape[:-1], dtype=torch.float32)
 
 
 def _setup_cudnn_dsa_sparse_mla_context(ctx, inputs, output) -> None:
     q, kv, indices, scaling = inputs
-    raw_output, _, lse_log2 = output
+    raw_output, softmax_lse = output
     ctx.scaling = scaling
-    ctx.save_for_backward(q, kv, indices, raw_output, lse_log2)
+    ctx.save_for_backward(q, kv, indices, raw_output, softmax_lse)
 
 
-def _cudnn_dsa_sparse_mla_backward(ctx, grad_output: Tensor, grad_lse: Tensor, grad_lse_log2: Tensor):
-    q, kv, indices, raw_output, lse_log2 = ctx.saved_tensors
+def _cudnn_dsa_sparse_mla_backward(ctx, grad_output: Tensor, grad_lse: Tensor):
+    q, kv, indices, raw_output, softmax_lse = ctx.saved_tensors
     dq, dkv = _cudnn_dsa_sparse_mla_backward_op(
         q,
         kv,
         raw_output,
         grad_output.contiguous(),
         indices,
-        lse_log2,
+        softmax_lse,
         ctx.scaling,
     )
     return dq, dkv, None, None
@@ -93,18 +96,14 @@ def _cudnn_dsa_sparse_mla_backward_op(
     raw_output: Tensor,
     grad_output: Tensor,
     indices: Tensor,
-    lse_log2: Tensor,
-    scaling: float | None,
+    softmax_lse: Tensor,
+    scaling: float,
 ) -> tuple[Tensor, Tensor]:
     from cudnn.deepseek_sparse_attention.sparse_attention_backward import sparse_attention_backward_wrapper
 
     if kv.shape[1] != 1 or indices.shape[1] != 1:
         raise RuntimeError("cuDNN DSA SparseMLA backward currently supports kv_group=1 only.")
 
-    # The TileLang forward stores raw LSE in log2 space. Keep this conversion
-    # inside the opaque custom op so torch.compile/AOTAutograd cannot bypass it
-    # when tracing the Python autograd formula.
-    softmax_lse = lse_log2 * 0.6931471805599453
     indices_2d = indices[:, 0, :]
     # cuDNN uses a per-query valid length and expects the physical index tensor
     # to be non-negative. GLM pads invalid tail slots with -1 after top-k.
@@ -133,8 +132,8 @@ def _(
     raw_output: Tensor,
     grad_output: Tensor,
     indices: Tensor,
-    lse_log2: Tensor,
-    scaling: float | None,
+    softmax_lse: Tensor,
+    scaling: float,
 ) -> tuple[Tensor, Tensor]:
     return torch.empty_like(q), torch.empty_like(kv)
 
@@ -145,10 +144,11 @@ def ensure_cudnn_dsa_runtime_available() -> None:
         from cudnn.deepseek_sparse_attention.sparse_attention_backward import (  # noqa: F401
             sparse_attention_backward_wrapper,
         )
+        from flash_mla import flash_mla_sparse_fwd  # noqa: F401
     except Exception as exc:
         raise RuntimeError(
-            "cuDNN DSA SparseMLA requires nvidia-cudnn-frontend with "
-            "cudnn.deepseek_sparse_attention.sparse_attention_backward support."
+            "cuDNN DSA SparseMLA requires flash_mla with flash_mla_sparse_fwd for the forward and "
+            "nvidia-cudnn-frontend with cudnn.deepseek_sparse_attention.sparse_attention_backward support."
         ) from exc
 
     if torch.cuda.is_available():
