@@ -14,11 +14,15 @@ Field names/defaults are checked against the real checkpoint's ``vision_config``
 - the checkpoint field is ``out_hidden_size``, not ``text_hidden_size``.
 """
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import ConfigDict
+from typing_extensions import Self
 
 from xtuner.v1.model.base import XTunerBaseModelConfig
+from xtuner.v1.model.compose.base import BaseComposeConfig
+from xtuner.v1.model.moe.glm53.glm53 import Glm53TextMoEConfig
 
 
 class Glm53VisionConfig(XTunerBaseModelConfig):
@@ -69,4 +73,45 @@ class Glm53ProjectorConfig(XTunerBaseModelConfig):
 
     @property
     def hf_config(self):
+        return None
+
+
+class Glm53BaseConfig(BaseComposeConfig):
+    """GLM-5.3-Flash compose config, see doc/xtuner_glm5p3flash_design.md F6.
+
+    ``image_token_id``/``video_start_token_id``/``video_end_token_id`` are kept only for
+    reference/debugging; the splice itself uses the global ``mm_token_type_ids`` (produced by
+    ``Glm53VLTokenizeFunction`` via the real HF processor's own ``create_mm_token_type_ids``, see
+    F1.b) to separate image (1) from video (2) positions, never
+    ``input_ids == video_token_id`` -- that token never appears in the expanded sequence.
+    """
+
+    model_config = ConfigDict(title="GLM-5.3-Flash compose config for xtuner", extra="forbid")
+    vision_config: Glm53VisionConfig = Glm53VisionConfig()
+    projector_config: Glm53ProjectorConfig = Glm53ProjectorConfig()
+    text_config: Glm53TextMoEConfig = Glm53TextMoEConfig()
+
+    image_token_id: int = 154854
+    video_token_id: int = 154855
+    video_start_token_id: int = 154832
+    video_end_token_id: int = 154833
+    only_llm_forward: bool = False
+
+    def build(self):
+        from .modeling_glm53 import Glm53ForConditionalGeneration
+
+        return Glm53ForConditionalGeneration(self)
+
+    @classmethod
+    def from_hf(cls, hf_path: str | Path) -> Self:
+        raise NotImplementedError
+
+    @property
+    def hf_config(self):
+        from xtuner.v1.utils import log_rank0
+
+        log_rank0.warning(
+            f"{type(self)} does not support conversion to HuggingFace config format. Only the "
+            "original HuggingFace config will be retained in the saved HuggingFace format checkpoint."
+        )
         return None

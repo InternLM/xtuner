@@ -23,6 +23,7 @@ from .dense.qwen2 import Qwen2Dense7BConfig, Qwen2DenseConfig
 from .dense.qwen3 import Qwen3Dense0P6BConfig, Qwen3Dense4BConfig, Qwen3Dense8BConfig, Qwen3DenseConfig
 from .moe.deepseek_v3 import DeepSeekV3Config
 from .moe.glm52 import Glm52MoEConfig
+from .moe.glm53 import Glm53TextMoEConfig
 from .moe.gpt_oss import GptOss21BA3P6Config, GptOss117BA5P8Config, GptOssConfig
 from .moe.moe import BalancingLossConfig, MoE, MoEConfig, MoEModelOutputs, ZLossConfig
 from .moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoEConfig, Qwen3MoEFoPEConfig
@@ -67,6 +68,13 @@ def get_model_config_from_hf(model_path: Path):
         return DeepSeekV3Config.from_hf(model_path)
     elif cfg.model_type == "glm_moe_dsa":
         return Glm52MoEConfig.from_hf(model_path)
+    elif cfg.model_type == "glm5_next":
+        # `glm5_next` is the VL compose config's model_type; the pure-text config dispatched
+        # here only builds the language_model half (Glm53TextMoEConfig.from_hf reads the
+        # nested text_config directly). The vision/projector halves are F2's own classes,
+        # composed by Glm53BaseConfig for VL training -- get_model_config_from_hf only covers
+        # the text-only SFT path (design doc F6 point 2).
+        return Glm53TextMoEConfig.from_hf(model_path)
     else:
         raise ValueError(f"Unsupported model type: {cfg.model_type}")
 
@@ -80,6 +88,7 @@ __all__ = [
     "Qwen3MoEConfig",
     "Qwen3MoE30BA3Config",
     "Glm52MoEConfig",
+    "Glm53TextMoEConfig",
     "InternS1Config",
     "InternS1MiniConfig",
     "InternS1BaseConfig",
