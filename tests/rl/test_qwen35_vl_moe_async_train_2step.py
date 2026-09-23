@@ -443,7 +443,10 @@ class TestQwen35VLMoEAsyncTrain2Step(unittest.TestCase):
                     self.assertIn("image_data", sample.extra_fields)
                     self.assertTrue(sample.response_ids)
                     self.assertIsNotNone(sample.logprobs)
-                    self.assertEqual(len(sample.logprobs), len(sample.response_ids))
+                    # canonicalize 后 input_ids/labels/logprobs 全序列对齐（prompt 前缀补 0）。
+                    expected_total_len = len(sample.extra_fields["train_prompt_ids"]) + len(sample.response_ids)
+                    self.assertEqual(len(sample.input_ids), expected_total_len)
+                    self.assertEqual(len(sample.logprobs), len(sample.input_ids))
                     self.assertIsNotNone(sample.reward)
                     self.assertIn("score", sample.reward)
 
