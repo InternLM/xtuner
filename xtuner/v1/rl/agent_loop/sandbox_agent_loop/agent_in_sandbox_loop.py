@@ -322,6 +322,12 @@ class AgentInSandboxLoop(AgentLoop):
             self._fill_eval_rollout_state(rollout_state, item)
             return [rollout_state]
 
+        # prompt_ids 切片只对纯文本 trace 成立；train_prompt_ids（VLM 扩充版 prompt）一旦存在，
+        # trace input_ids 与 prompt_ids 的长度约定即失效，宁可快速失败也不静默产出错位训练字段。
+        assert "train_prompt_ids" not in rollout_state.extra_fields, (
+            f"Agentic trace rollout does not support multimodal samples, rollout_id={rollout_state.rollout_id}"
+        )
+
         response_message = _response_message(item.artifacts, required=item.status == RolloutStatus.COMPLETED)
         rollout_state.status = Status.COMPLETED if item.status == RolloutStatus.COMPLETED else Status.FAILED
         rollout_state.finish_reason = str(

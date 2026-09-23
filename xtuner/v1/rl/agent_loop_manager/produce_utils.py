@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, cast, runtime_checkable
 
 import ray
 import tqdm
@@ -593,11 +593,17 @@ async def take_train_batch(
         if task.token_stale_threshold is None:
             continue
         for group in batch_by_task.get(task.task_name, []):
-            calculate_group_effective_response_masks(
+            effective_masks = calculate_group_effective_response_masks(
                 group,
                 current_train_step=current_train_step,
                 token_stale_threshold=task.token_stale_threshold,
             )
+            for item, mask in zip(group, effective_masks):
+                if mask is None:
+                    continue
+                labels = cast(list[int], item.labels)
+                offset = len(labels) - len(mask)
+                labels[offset:] = [label if mask_value else -100 for label, mask_value in zip(labels[offset:], mask)]
 
     if hasattr(progress, "mark_consumed"):
         progress.mark_consumed(consumed_counts)
