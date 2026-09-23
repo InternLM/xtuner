@@ -493,6 +493,14 @@ class IPCWeightTransport(WeightTransport[IPCBackendAdapter]):
         assert ipc_update_target is not None, "IPC rollout target for current train rank is not resolved."
         rollout_url = ipc_update_target.server_url
 
+        # empty_cache() device-synchronizes the train process and is load-bearing here:
+        # batches reuse the same IPC staging tensor, and the rollout-side "consumed"
+        # event record is not a reliable ordering signal (it can fire before the
+        # engine's weight copies finish). Removing this sync lets the next batch
+        # overwrite the buffer while the engine is still reading it, and the engine
+        # loads torn weights (qwen3.5-VL 35B GRPO mismatch_kl 5e-4 -> 2.07, #2092).
+        DEVICE_MODULE.empty_cache()
+
         try:
             serialized_data = self._adapter.serialize(
                 batch,
