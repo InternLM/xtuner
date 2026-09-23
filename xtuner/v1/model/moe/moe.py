@@ -1376,6 +1376,7 @@ class MoE(BaseModel):
         if decoupled:
             last_layer = list(self.layers.values())[-1]
             last_layer.set_modules_to_forward_prefetch(self._expert_blocks(last_layer))  # type: ignore
+            self._set_expert_backward_prefetch(list(self.layers.values()))
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
@@ -1447,6 +1448,7 @@ class MoE(BaseModel):
                 if decoupled:
                     last_mtp_layer = list(self.mtp_block.layers)[-1]
                     last_mtp_layer.set_modules_to_forward_prefetch(self._expert_blocks(last_mtp_layer))  # type: ignore
+                    self._set_expert_backward_prefetch(list(self.mtp_block.layers))
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
@@ -1745,6 +1747,18 @@ class MoE(BaseModel):
                 module=expert_block,
             )
             expert_block.set_reshard_after_backward(False)  # type: ignore[operator]
+
+    def _set_expert_backward_prefetch(self, layers: list[nn.Module]) -> None:
+        # FSDP2 picks each unit's default backward prefetch target from the order in which units finished
+        # forward. Checkpoint replay re-runs the expert units' forward hooks during backward and appends to that
+        # order, so an expert group's default target becomes the experts of the layer above, whose backward is
+        # already done: an all-gather that is never used and stays allocated until the end of backward. Nothing
+        # prefetches the dense unit of the layer below either, so its all-gather is issued on demand behind this
+        # layer's dense reduce-scatter on the same process group. Point every expert group at the layer below;
+        # an explicit list replaces the default target.
+        for layer_prev, layer_cur in zip(layers[:-1], layers[1:]):
+            for expert_block in self._expert_blocks(layer_cur):
+                expert_block.set_modules_to_backward_prefetch([layer_prev])  # type: ignore[operator]
 
     def _reshard_expert_blocks_per_layer(self, layer: nn.Module, reshard_after_forward: bool) -> None:
         # `layer` is the outer FSDP unit, which wraps the checkpoint boundary: checkpoint replay calls the
