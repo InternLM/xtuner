@@ -8,7 +8,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.module import AttnOutputs, GatedDeltaNetConfig, KDAConfig, MHAConfig, MLAConfig, RMSNorm
 from xtuner.v1.module.rope import RopeScalingConfig
-from xtuner.v1.ops.act_fn import get_act_fn
+from xtuner.v1.ops.act_fn import get_gated_act_fn
 from xtuner.v1.utils import ForwardState
 
 from ..linear import build_linear
@@ -43,17 +43,17 @@ class DenseMLP(nn.Module):
         intermediate_size: int,
         bias: bool = False,
         hidden_act: str,
+        swiglu_limit: float | None = None,
         float8_cfg: Float8Config | None = None,
     ):
         super().__init__()
         self.gate_proj = build_linear(hidden_size, intermediate_size, bias=bias, float8_cfg=float8_cfg)
         self.up_proj = build_linear(hidden_size, intermediate_size, bias=bias, float8_cfg=float8_cfg)
         self.down_proj = build_linear(intermediate_size, hidden_size, bias=bias, float8_cfg=float8_cfg)
-        self.act_fn = get_act_fn(hidden_act)
+        self.act_fn = get_gated_act_fn(hidden_act, swiglu_limit)
 
     def forward(self, x):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        return down_proj
+        return self.down_proj(self.act_fn(self.gate_proj(x), self.up_proj(x)))
 
 
 class DenseDecoderLayer(nn.Module):
@@ -64,6 +64,7 @@ class DenseDecoderLayer(nn.Module):
         intermediate_size: int,
         mlp_bias: bool = False,
         hidden_act: str,
+        swiglu_limit: float | None = None,
         rms_norm_eps: float = 1e-6,
         rms_norm_type: Literal["default", "zero_centered"] = "default",
         attention_config: MLAConfig | MHAConfig | GatedDeltaNetConfig | KDAConfig,
@@ -88,6 +89,7 @@ class DenseDecoderLayer(nn.Module):
             intermediate_size=intermediate_size,
             bias=mlp_bias,
             hidden_act=hidden_act,
+            swiglu_limit=swiglu_limit,
             float8_cfg=float8_cfg,
         )
         self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps, type=rms_norm_type)
