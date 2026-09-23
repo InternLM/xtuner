@@ -7,6 +7,8 @@ TestDSAAttention
     test_indexer_freeze_contract: indexer 默认冻结，未实现的可训练模式在 build 时拒绝。
     test_shared_layer_consumes_explicit_topk_ids: shared layer 复用显式 top-k IDs，漏传时立即报错。
     test_checkpoint_reuses_source_topk_storage: 显式 IDs 穿过 checkpoint，source indexer 不重算。
+    test_absorbed_attention_matches_unabsorbed_mla: 吸收式 attention 与逐头上投影 K/V 的标准 MLA 输出和全部梯度一致。
+    test_compiled_attention_matches_eager: 编译后 attention 的输出和梯度与 eager 一致。
 TestAcceleratedSparseMLA
     test_tilelang_forward_backward_matches_torch: TileLang 前反向数值与 PyTorch 后端一致。
     test_cudnn_forward_backward_matches_torch: cuDNN DSA（FlashMLA 前向）在含 padding 的索引上前反向与 PyTorch 后端一致。
@@ -31,6 +33,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.model.moe.glm52 import DSAMLAConfig
 from xtuner.v1.model.moe.glm52.decoder_layer import GLM52DenseDecoderLayer
 from xtuner.v1.model.utils import apply_activation_checkpointing
+from xtuner.v1.module.attention.mla import mla_apply_rotary_pos_emb
 from xtuner.v1.ops.sparse_mla import dsa_topk_indices, sparse_mla
 from xtuner.v1.utils.test_utils import init_data_mesh
 
@@ -77,11 +80,11 @@ def _cudnn_dsa_sparse_mla_available() -> bool:
     return result.returncode == 0
 
 
-def _sparse_indices(seq_len: int, topk: int) -> torch.Tensor:
-    indices = torch.full((seq_len, 1, topk), -1, device="cuda", dtype=torch.int64)
+def _sparse_indices(seq_len: int, topk: int, device: str = "cuda") -> torch.Tensor:
+    indices = torch.full((seq_len, 1, topk), -1, device=device, dtype=torch.int64)
     for token_idx in range(seq_len):
         valid = min(token_idx + 1, topk)
-        indices[token_idx, 0, :valid] = torch.arange(token_idx + 1 - valid, token_idx + 1, device="cuda")
+        indices[token_idx, 0, :valid] = torch.arange(token_idx + 1 - valid, token_idx + 1, device=device)
     return indices
 
 
@@ -134,6 +137,40 @@ def _tiny_dsa_decoder(indexer_types: list[str], layer_idx: int) -> GLM52DenseDec
         attention_config=_tiny_dsa_config(indexer_types),
         layer_idx=layer_idx,
     )
+
+
+def _explicit_topk_inputs(device: str, dtype: torch.dtype, seq_len: int = 6, topk: int = 4):
+    hidden_states = torch.randn(1, seq_len, 4, device=device, dtype=dtype)
+    position_embeddings = (
+        torch.randn(1, seq_len, 2, device=device, dtype=dtype),
+        torch.randn(1, seq_len, 2, device=device, dtype=dtype),
+    )
+    seq_ctx = SequenceContext.from_input_ids((torch.arange(1, seq_len + 1).view(1, -1),), device=device)
+    return hidden_states, position_embeddings, seq_ctx, _sparse_indices(seq_len, topk, device).to(torch.int32)
+
+
+def _unabsorbed_mla(attention, hidden_states, position_embeddings, topk_ids) -> torch.Tensor:
+    """Standard MLA: up-project the latent to per-head K/V with kv_b_proj, then attend over the selected keys."""
+    seq_len = hidden_states.shape[1]
+    heads, nope, rope, value = (
+        attention.num_attention_heads,
+        attention.qk_nope_head_dim,
+        attention.qk_rope_head_dim,
+        attention.v_head_dim,
+    )
+    q = attention.q_b_proj(attention.q_a_layernorm(attention.q_a_proj(hidden_states)))
+    q_nope, q_pe = q.view(1, seq_len, heads, nope + rope).transpose(1, 2).split([nope, rope], dim=-1)
+    latent, k_pe = attention.kv_a_proj_with_mqa(hidden_states).split([attention.kv_lora_rank, rope], dim=-1)
+    q_pe, k_pe = mla_apply_rotary_pos_emb(q_pe, k_pe.view(1, 1, seq_len, rope), *position_embeddings)
+    kv = attention.kv_b_proj(attention.kv_a_layernorm(latent)).view(1, seq_len, heads, nope + value).transpose(1, 2)
+    k_nope, v = kv.split([nope, value], dim=-1)
+    scores = (q_nope @ k_nope.transpose(-1, -2) + q_pe @ k_pe.transpose(-1, -2)) * attention.softmax_scale
+    selected = torch.zeros(seq_len, seq_len, dtype=torch.bool, device=hidden_states.device)
+    for token_idx in range(seq_len):
+        ids = topk_ids[token_idx, 0]
+        selected[token_idx, ids[ids >= 0].long()] = True
+    probs = scores.masked_fill(~selected, float("-inf")).softmax(dim=-1)
+    return attention.o_proj((probs @ v).transpose(1, 2).reshape(1, seq_len, heads * value))
 
 
 class TestTorchSparseMLA:
@@ -337,6 +374,47 @@ class TestDSAAttention:
         assert torch.isfinite(hidden_states.grad).all()
         assert source_ids.dtype == torch.int32
         assert indexer_calls == 1
+
+    def test_absorbed_attention_matches_unabsorbed_mla(self):
+        # 验证把 W_UK/W_UV 吸收进 query/输出的 DSA attention，与逐头上投影 K/V 的标准 MLA 在同一组 top-k 上
+        # 的输出、输入梯度和全部参数梯度一致（float64，排除舍入）。
+        torch.manual_seed(0)
+        attention = _tiny_dsa_attention(indexer_types=["full"], layer_idx=0).double()
+        hidden_states, position_embeddings, seq_ctx, topk_ids = _explicit_topk_inputs("cpu", torch.float64)
+        params = [parameter for parameter in attention.parameters() if parameter.requires_grad]
+        hidden_ref = hidden_states.clone().requires_grad_()
+        hidden_states.requires_grad_()
+
+        actual = attention(hidden_states, position_embeddings, seq_ctx, dsa_topk_ids=topk_ids)["projected_output"]
+        expected = _unabsorbed_mla(attention, hidden_ref, position_embeddings, topk_ids)
+        grad_output = torch.randn_like(expected)
+
+        torch.testing.assert_close(actual, expected)
+        actual_grads = torch.autograd.grad(actual, [hidden_states, *params], grad_output)
+        expected_grads = torch.autograd.grad(expected, [hidden_ref, *params], grad_output)
+        for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+            torch.testing.assert_close(actual_grad, expected_grad)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+    def test_compiled_attention_matches_eager(self):
+        # 验证 torch.compile 下的 attention（与训练一样编译 forward）输出和全部梯度与 eager 一致。
+        torch.manual_seed(0)
+        attention = _tiny_dsa_attention(indexer_types=["full"], layer_idx=0).cuda()
+        hidden_states, position_embeddings, seq_ctx, topk_ids = _explicit_topk_inputs("cuda", torch.float32)
+        params = [parameter for parameter in attention.parameters() if parameter.requires_grad]
+        hidden_eager = hidden_states.clone().requires_grad_()
+        hidden_compiled = hidden_states.clone().requires_grad_()
+
+        expected = attention(hidden_eager, position_embeddings, seq_ctx, dsa_topk_ids=topk_ids)["projected_output"]
+        actual = torch.compile(attention)(hidden_compiled, position_embeddings, seq_ctx, dsa_topk_ids=topk_ids)
+        actual = actual["projected_output"]
+        grad_output = torch.randn_like(expected)
+
+        torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-5)
+        actual_grads = torch.autograd.grad(actual, [hidden_compiled, *params], grad_output)
+        expected_grads = torch.autograd.grad(expected, [hidden_eager, *params], grad_output)
+        for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+            torch.testing.assert_close(actual_grad, expected_grad, rtol=1e-4, atol=1e-5)
 
 
 # The multiprocess cases must run before TileLang JIT is initialized in the
