@@ -28,9 +28,8 @@ def stateless_init_process_group(master_address, master_port, rank, world_size, 
     """VLLM provides `StatelessProcessGroup` to create a process group without
     considering the global process group in torch.distributed.
 
-    It is recommended to create `StatelessProcessGroup`, and then initialize
-    the data-plane communication (NCCL) between external (train processes)
-    and vLLM workers.
+    It is recommended to create `StatelessProcessGroup`, and then initialize the data-plane communication (NCCL)
+    between external (train processes) and vLLM workers.
     """
     from vllm.distributed.utils import StatelessProcessGroup
 
@@ -210,6 +209,55 @@ class vLLMWorker(RolloutWorker):
         )
         self.tp_size = self.config.tensor_parallel_size // self.dp_size
 
+    def _get_request_payload(self, rollout_state: RolloutState) -> dict:
+        """Build the chat-completions request body for one generation
+        request."""
+        sample_params = rollout_state.sample_params
+        payload: dict[str, Any] = {
+            "model": self.config.model_path,
+            "messages": rollout_state.message,
+            "stream": sample_params.stream,
+        }
+
+        if rollout_state.tools is not None:
+            payload["tools"] = rollout_state.tools
+        if rollout_state.tool_choice is not None:
+            payload["tool_choice"] = rollout_state.tool_choice
+
+        # vLLM-Ascend (USE_TOKEN_IN=1) accepts explicit input_ids; partial-rollout
+        # replay passes the request prefix via rollout_state.tokens.
+        if rollout_state.tokens is not None:
+            payload["input_ids"] = rollout_state.tokens
+        elif "train_prompt_ids" in rollout_state.extra_fields:
+            payload["input_ids"] = rollout_state.extra_fields["train_prompt_ids"]
+
+        if "image_data" in rollout_state.extra_fields:
+            image_data = rollout_state.extra_fields["image_data"]
+            assert isinstance(payload["messages"], list), "image_data requires messages to be a list"
+            image_index = 0
+            for message in payload["messages"]:
+                if not isinstance(message, dict) or message.get("role") != "user":
+                    continue
+                new_content = []
+                for content_part in message.get("content", []):
+                    if not isinstance(content_part, dict):
+                        new_content.append(content_part)
+                        continue
+                    if content_part.get("type") == "image_url":
+                        content_part["image_url"]["url"] = f"file://{image_data[image_index]}"
+                        content_part["image_url"].pop("image_wh", None)
+                        image_index += 1
+                    new_content.append(content_part)
+                message["content"] = new_content
+            assert image_index == len(image_data), f"Expected {len(image_data)} images, but processed {image_index}."
+
+        vllm_sample_params = self._transform_sample_params(sample_params.model_dump())
+        vllm_sample_params["return_routed_experts"] = (
+            self.enable_return_routed_experts and sample_params.return_routed_experts
+        )
+        payload.update(vllm_sample_params)
+        return payload
+
     async def _create_request(
         self,
         url: str,
@@ -283,9 +331,6 @@ class vLLMWorker(RolloutWorker):
         return vllm_sample_params
 
     def get_logprobs(self, input_ids, sampling_params):
-        pass
-
-    def generate(self, input_ids, sampling_params):
         pass
 
     def sleep(self, level=1):
@@ -368,7 +413,7 @@ class vLLMWorker(RolloutWorker):
             "cudagraph_capture_sizes": [16, 12, 8, 4, 2, 1],
             "cudagraph_mode": "FULL_DECODE_ONLY",
         }
-        args["additional_config"] = {"enable_cpu_binding": True}
+        args["additional_config"] = {"enable_cpu_binding": True, "weight_nz_mode": 0}
         args["limit_mm_per_prompt"] = {"image": 10, "video": 0}
         args["enable_log_requests"] = False
         args["uvicorn_log_level"] = "error"
