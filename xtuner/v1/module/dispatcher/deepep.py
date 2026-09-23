@@ -113,10 +113,10 @@ class DeepEPDispatch(torch.autograd.Function):
             num_recv_tokens_per_expert_list,
             handle,
             event,
-        ) = dispatch_forward(x, topk_idx, topk_weights, num_experts, group, forward_previous_event)
+        ) = dispatch_forward(
+            x, topk_idx, topk_weights, num_experts, group, forward_previous_event, async_finish=is_async
+        )
         # save deep comm handle
-        if not is_async:
-            event.current_stream_wait()
         ctx.save_for_backward(*handle)
         ctx.group = group
         ctx.num_experts = num_experts
@@ -141,11 +141,15 @@ class DeepEPDispatch(torch.autograd.Function):
         # load saved comm handle
         handle = ctx.saved_tensors
         combined_grad_x, combined_grad_recv_topk_weights, event = dispatch_backward(
-            grad_recv_x, grad_recv_topk_weights, ctx.num_experts, handle, ctx.group, buffer_capture()
+            grad_recv_x,
+            grad_recv_topk_weights,
+            ctx.num_experts,
+            handle,
+            ctx.group,
+            buffer_capture(),
+            async_finish=ctx.is_async,
         )
-        if not ctx.is_async:
-            event.current_stream_wait()
-        else:
+        if ctx.is_async:
             ctx.backward_finished_event.event = event.event
         return (
             combined_grad_x,
@@ -188,10 +192,11 @@ class DeepEPCombine(torch.autograd.Function):
         if not is_async:
             forward_previous_event = buffer_capture()
 
-        combined_x, event = combine_forward(x, num_experts, handle, group, forward_previous_event)
-
-        if not is_async:
-            event.current_stream_wait()
+        # A synchronous call has DeepEP order the current stream after the communication kernels (see
+        # `dispatch_forward`), so its buffers are reusable right after they are freed.
+        combined_x, event = combine_forward(
+            x, num_experts, handle, group, forward_previous_event, async_finish=is_async
+        )
 
         # save deep comm handle
         ctx.save_for_backward(*handle)
@@ -212,11 +217,11 @@ class DeepEPCombine(torch.autograd.Function):
         else:
             previous_event = ctx.backward_previous_event
 
-        grad_x, event = combine_backward(grad_combined_x, ctx.num_experts, handle, ctx.group, previous_event)
+        grad_x, event = combine_backward(
+            grad_combined_x, ctx.num_experts, handle, ctx.group, previous_event, async_finish=ctx.is_async
+        )
 
-        if not ctx.is_async:
-            event.current_stream_wait()
-        else:
+        if ctx.is_async:
             ctx.backward_finished_event.event = event.event
         return grad_x, None, None, None, None, None, None
 
@@ -430,11 +435,8 @@ class DeepEPDispatcher(
             pre_dispatched["backward_previous_event"],
         )
 
-        if not async_op:
-            event.current_stream_wait()
-            forward_finished_event = None
-        else:
-            forward_finished_event = event
+        # A synchronous dispatch already ordered the current stream after DeepEP (`async_finish=False`).
+        forward_finished_event = event if async_op else None
 
         ret = DeepEPDispatchResult(
             hidden_states=cast(HiddenStates, dispatched_hidden_states),
@@ -571,8 +573,6 @@ class DeepEPDispatcher(
             backward_previous_event,
             pre_combined["backward_previous_event"],
         )
-        if not async_op:
-            event.current_stream_wait()
 
         if not decoding:
             return DeepEPCombineResult(
