@@ -119,6 +119,7 @@ def _tiny_dsa_config(indexer_types: list[str] | None = None) -> DSAMLAConfig:
         index_n_heads=2,
         indexer_types=indexer_types,
         sparse_mla_backend="torch",
+        indexer_backend="torch",
     )
 
 
@@ -194,6 +195,25 @@ class TestDSAAttention:
         expected = expected_indices.masked_fill(expected_scores == -torch.inf, -1)
 
         torch.testing.assert_close(actual, expected.squeeze(0).unsqueeze(1).to(torch.int32))
+
+    def test_indexer_backend_does_not_follow_sparse_mla_backend(self):
+        # 选 SparseMLA 后端不应连带改变 indexer 后端：两者词表本就不同，隐式继承会让
+        # 只属于 SparseMLA 的后端漏进 indexer。
+        config = DSAMLAConfig(
+            num_attention_heads=32,
+            head_dim=128,
+            kv_lora_rank=16,
+            q_lora_rank=16,
+            qk_nope_head_dim=64,
+            qk_rope_head_dim=64,
+            v_head_dim=64,
+            index_topk=8,
+            index_head_dim=128,
+            index_n_heads=32,
+            sparse_mla_backend="flash_mla_cudnn",
+        )
+        assert config.indexer_backend == "tilelang"
+        assert DSAMLAConfig.model_fields["sparse_mla_backend"].default == "tilelang"
 
     def test_deep_gemm_fp8_indexer_backend_is_independent(self):
         config = DSAMLAConfig(
