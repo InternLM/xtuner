@@ -56,6 +56,21 @@ def default_init_weights(module: nn.Module) -> set[str]:
         seen.add(id(module))
 
     def _default_init_atom(name: str, module: nn.Module):
+        # A module that knows how to initialize its own parameters wins: the `.weight`/`.bias`
+        # fallback below cannot reach anything named otherwise (mHC's `hc_*`, KDA's `A_log` /
+        # `dt_bias`, the KPool indexer's `index_kpool_compress_*`), and would report them as
+        # uninitialized. Only the module's *own* parameters are claimed here; children are still
+        # traversed. The traversal root is excluded because `BaseModel.init_weights` and the
+        # per-model ones implement themselves *by* calling this function -- delegating there
+        # would recurse forever.
+        own_init = getattr(module, "init_weights", None)
+        if name != "" and callable(own_init):
+            own_init()
+            initialized_params.update(
+                clean_param_name(f"{name}.{p_name}") for p_name, _ in module.named_parameters(recurse=False)
+            )
+            return
+
         if hasattr(module, "bias") and module.bias is not None:
             bias = cast(torch.Tensor, module.bias)
             init_params(bias, nn.init.zeros_)

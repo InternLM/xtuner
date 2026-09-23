@@ -59,10 +59,10 @@ if hasattr(model_cfg.attention, "sparse_mla_backend"):
     if "INDEXER_BACKEND" in os.environ:
         # ``deep_gemm_fp8`` uses DeepGEMM's FP8 MQA path to match LMDeploy's
         # Indexer scoring contract.
-        indexer_backend = os.environ["INDEXER_BACKEND"].strip().lower()
-        model_cfg.attention.indexer_backend = indexer_backend
-    else:
-        indexer_backend = sparse_mla_backend
+        model_cfg.attention.indexer_backend = os.environ["INDEXER_BACKEND"].strip().lower()
+    # Otherwise the indexer keeps the config default; it no longer follows
+    # SPARSE_MLA_BACKEND, whose vocabulary is not the indexer's.
+    indexer_backend = model_cfg.attention.indexer_backend
     # Keep the historical one-shot path for the PyTorch selector.  TileLang
     # (including the cuDNN DSA and FlashMLA adapters) uses Slime's 8K query
     # block by default; set INDEXER_TOPK_QUERY_CHUNK_SIZE=0/none to disable it
