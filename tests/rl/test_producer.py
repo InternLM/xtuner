@@ -278,6 +278,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             tokens=[1, 11],
             response="old response",
             response_ids=[11],
+            labels=[1],
             response_model_steps=[3],
             logprobs=[0.1],
             finish_reason="stop",
@@ -758,12 +759,14 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         expired = make_rollout_state(900)
         expired.response = "expired response"
         expired.response_ids = [11]
+        expired.labels = [1]
         expired.response_model_steps = [0]
         expired.reward = {"score": 0.1}
         fresh = make_rollout_state(901)
         fresh.group_id = expired.group_id
         fresh.response = "fresh response"
         fresh.response_ids = [21]
+        fresh.labels = [1]
         fresh.response_model_steps = [5]
         fresh.logprobs = [-0.2]
         fresh.reward = {"score": 0.9}
