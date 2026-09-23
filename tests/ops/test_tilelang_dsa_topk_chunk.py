@@ -73,6 +73,7 @@ def test_config_rejects_query_chunk_for_torch_selector():
         index_head_dim=4,
         index_n_heads=2,
         sparse_mla_backend="torch",
+        indexer_backend="torch",
         indexer_topk_query_chunk_size=2,
     )
 

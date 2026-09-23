@@ -6,7 +6,16 @@ import torch
 
 from xtuner.v1.data_proto import SequenceContext
 
-from .protocol import DSAIndexerBackend, DSATopKIndicesProtocol, SparseMLABackend, SparseMLAOutputs, SparseMLAProtocol
+from .kpool import kpool_topk_indices, torch_kpool_topk_indices
+from .protocol import (
+    DSAIndexerBackend,
+    DSATopKIndicesProtocol,
+    KPoolIndexerBackend,
+    KPoolTopKIndicesProtocol,
+    SparseMLABackend,
+    SparseMLAOutputs,
+    SparseMLAProtocol,
+)
 from .pytorch import torch_dsa_topk_indices, torch_sparse_mla
 
 
@@ -25,6 +34,10 @@ def get_sparse_mla(backend: SparseMLABackend) -> SparseMLAProtocol:
         from .flash_mla import flash_mla_sparse_mla
 
         return flash_mla_sparse_mla
+    if backend == "flash_mla_cudnn":
+        from .flash_mla_cudnn import flash_mla_cudnn_sparse_mla
+
+        return flash_mla_cudnn_sparse_mla
     raise ValueError(f"Unsupported SparseMLA backend: {backend}")
 
 
@@ -60,6 +73,14 @@ def get_dsa_topk_indices(backend: DSAIndexerBackend) -> DSATopKIndicesProtocol:
 
         return cute_dsl_dsa_topk_indices
     raise ValueError(f"Unsupported DSA indexer backend: {backend}")
+
+
+def get_kpool_topk_indices(backend: KPoolIndexerBackend) -> KPoolTopKIndicesProtocol:
+    if backend == "torch":
+        return torch_kpool_topk_indices
+    if backend == "tilelang":
+        return kpool_topk_indices
+    raise ValueError(f"Unsupported KPool indexer backend: {backend}")
 
 
 def dsa_topk_indices(
@@ -109,6 +130,12 @@ def ensure_deep_select_runtime_available() -> None:
         )
 
 
+def ensure_flash_mla_cudnn_runtime_available() -> None:
+    from .flash_mla_cudnn import ensure_flash_mla_cudnn_runtime_available as _impl
+
+    return _impl()
+
+
 def ensure_cute_dsl_runtime_available() -> None:
     if importlib.util.find_spec("cutlass") is None:
         raise RuntimeError("CuTe DSL DSA indexer requires nvidia-cutlass-dsl==4.5.2.")
@@ -138,6 +165,8 @@ def indexer_fwd_interface(*args, **kwargs):
 __all__ = [
     "DSAIndexerBackend",
     "DSATopKIndicesProtocol",
+    "KPoolIndexerBackend",
+    "KPoolTopKIndicesProtocol",
     "SparseMLABackend",
     "SparseMLAOutputs",
     "SparseMLAProtocol",
@@ -145,14 +174,18 @@ __all__ = [
     "ensure_cudnn_dsa_runtime_available",
     "ensure_cute_dsl_runtime_available",
     "ensure_deep_select_runtime_available",
+    "ensure_flash_mla_cudnn_runtime_available",
     "ensure_flash_mla_runtime_available",
     "ensure_tilelang_runtime_available",
     "get_dsa_topk_indices",
+    "get_kpool_topk_indices",
     "get_sparse_mla",
     "indexer_fwd_interface",
+    "kpool_topk_indices",
     "sparse_mla",
     "sparse_mla_bwd",
     "sparse_mla_fwd_interface",
     "torch_dsa_topk_indices",
+    "torch_kpool_topk_indices",
     "torch_sparse_mla",
 ]
