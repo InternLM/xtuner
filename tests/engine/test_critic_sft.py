@@ -338,6 +338,7 @@ class TestCriticSFT(DeterministicDDPTestCase):
 
             del restored
             torch.cuda.empty_cache()
+            dist.barrier()  # keep tmpdir until all ranks finish from_hf
 
         try:
             dist.destroy_process_group(pg)
