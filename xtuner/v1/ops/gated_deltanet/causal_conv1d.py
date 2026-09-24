@@ -272,7 +272,7 @@ def causal_conv1d_fn(
     activation=None,
 ):
     """
-    x: (batch, dim, seqlen)
+    x: (batch, seqlen, dim) if seq_idx is provided, otherwise (batch, dim, seqlen)
     weight: (dim, width)
     bias: (dim,)
     seq_idx: (batch, seqlen)
@@ -280,7 +280,7 @@ def causal_conv1d_fn(
     final_states_out: (batch, dim, width - 1), to be written to
     activation: either None or "silu" or "swish"
 
-    out: (batch, dim, seqlen)
+    out: same layout as x
     """
     return CausalConv1dFn.apply(
         x,

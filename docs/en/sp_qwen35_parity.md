@@ -41,6 +41,7 @@ PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
   torchrun --standalone --nproc-per-node=2 tests/model/repro_qwen35_sp.py \
   --sp 2 --steps 30 --out /tmp/qwen35-fixed-sp2
 python -m pytest -q tests/ops/test_causal_conv1d_sp.py
+python -m pytest -q tests/model/test_fsdp_ignored_grad.py
 ```
 
 Output directories must be new. Each run saves per-step loss, rank spread before
@@ -88,6 +89,7 @@ assert wa.keys() == wb.keys()
 param_diff = max((wa[k] - wb[k]).abs().max().item() for k in wa)
 print({'max_loss_abs': loss_diff, 'final_parameter_max_abs': param_diff})
 assert loss_diff < 1e-5
+assert param_diff < 1e-5
 ```
 
 ## Measured results
@@ -116,8 +118,10 @@ parameter difference in this experiment. Unfixed parameter comparisons use the
 saved full-model snapshot from rank 0; its replicated parameters also diverge
 within each run (maximum rank spread 0.009059607982635498).
 
-The 16 CUDA regression cases pass, including unequal document lengths and optional
-bias. Ruff lint/format checks, Python compilation, and `git diff --check` pass.
+The 16 CUDA convolution cases pass, including unequal document lengths and optional
+bias. Two distributed regression cases also pass on two GPUs, covering FP32 ignored
+gradient averaging, unchanged FSDP-managed gradients, unused parameters, and an SGD
+update on 1D/2D meshes. Ruff lint/format checks, Python compilation, and `git diff --check` pass.
 The entire repository test suite was not run. GitHub Actions runs the pre-commit
 checks for `xtuner/v1`.
 
@@ -130,6 +134,8 @@ motivates the document-wise reduction in addition to the synchronization fix.
 
 PJLab job for both the unfixed parent and final patch, including all repeats and
 16 CUDA tests: `xtuner-sp-upstream-20260924-97500998`.
+Follow-up job for all 18 regression cases and the documented comparison with both
+loss and parameter assertions: `xtuner-sp-review-20260924-37136298`.
 
 Initialization SHA-256: `65b3f557d2d8c67bbfd0d10d192e9f4c4c511d44e33c19ec974eb9fc641747f7`.
 Corpus SHA-256: `31e39d875fed6d6998587bf8e810b103452497c94d8ef91cd18f08dd8ea60b01`.
