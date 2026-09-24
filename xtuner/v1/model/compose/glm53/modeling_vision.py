@@ -19,6 +19,7 @@ from typing_extensions import override
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto.utils import pad_to_max_length, split_for_sequence_parallel
 from xtuner.v1.model import BaseModel, TorchCompileOption
+from xtuner.v1.model.utils.checkpointing import apply_activation_checkpointing
 from xtuner.v1.module import AttnOutputs
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.ops.attn_imp import AttnOpOutputs, get_attn_impl_fn
@@ -392,6 +393,18 @@ class Glm53VisionModel(BaseModel):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype, cast_forward_inputs=False
         )
+        # Recompute the ViT blocks, following `vision_recompute_ratio` exactly as qwen3_vl does.
+        # The tower runs over *raw* patches, and a packed VL sample carries far more of them than
+        # the LLM sequence has tokens (a 8192-token pack was measured at ~14.7k patches), so 24
+        # blocks' worth of retained activations -- attention plus a 4096-wide MLP per block --
+        # dominates the step's peak memory and OOMs long before the language tower does.
+        num_recompute_layers = int(len(self.blocks) * fsdp_config.vision_recompute_ratio)
+        for layer_idx in range(num_recompute_layers):
+            self.blocks[layer_idx] = apply_activation_checkpointing(
+                self.blocks[layer_idx],
+                preserve_rng_state=fsdp_config.checkpoint_preserve_rng_state,
+            )
+
         if self.config.fully_shard:
             for block in self.blocks:
                 self._fully_shard(
