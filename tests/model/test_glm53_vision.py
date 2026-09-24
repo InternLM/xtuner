@@ -17,6 +17,7 @@ TestGlm53VisionForwardParity
     test_unaligned_patch_count_is_rejected_under_sp  patch 数不对齐 merge 块时拒绝切分
 TestGlm53VisionProductionAttention
     test_flash_attention_matches_eager             flash kernel 与 eager 基准一致
+    test_cpu_pixel_values_are_moved_to_device      CPU 上的 pixel_values 由塔自己搬设备
 TestGlm53VisionSequenceParallel
     test_sp_tower_and_projector_match_non_sp       2 卡 Vision SP 与非 SP 逐位一致
 """
@@ -311,6 +312,21 @@ class TestGlm53VisionProductionAttention:
         eager_out = eager_vision(pixel_values, grid_thw)
         flash_out = flash_vision(pixel_values, grid_thw)
         torch.testing.assert_close(flash_out, eager_out, rtol=2e-2, atol=2e-2)
+
+    @pytest.mark.gpu
+    def test_cpu_pixel_values_are_moved_to_device(self):
+        """`SequenceContext` 有意不把 pixel_values 搬到 device（只搬本 rank 需要的那份），
+        所以塔必须自己搬；否则真实训练第一步就是 CPU/CUDA 类型不匹配。"""
+        if not torch.cuda.is_available():
+            pytest.skip("needs a GPU")
+        _, xt_vision, _ = _build_models()
+        xt_vision = xt_vision.to("cuda", torch.bfloat16)
+        patch_dim = IN_CHANNELS * TEMPORAL_PATCH_SIZE * PATCH_SIZE * PATCH_SIZE
+        cpu_pixel_values = torch.randn(16, patch_dim, dtype=torch.bfloat16)
+
+        # grid_thw 走 SequenceContext.to()，生产里已在 device 上；只有 pixel_values 留在 CPU。
+        out = xt_vision(cpu_pixel_values, torch.tensor([[1, 4, 4]], device="cuda"))
+        assert out.device.type == "cuda"
 
 
 class TestGlm53VisionSequenceParallel(DistributedTestBase):
