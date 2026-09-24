@@ -411,8 +411,11 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
 class Glm53VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     model_config = ConfigDict(title="GLM-5.3-Flash VL dataset config for xtuner", extra="forbid")
-    # No `chat_template`: GLM-5.3-Flash renders through `render_glm53_chat` rather than a
-    # `CHAT_TEMPLATE_MAP` entry, so `BaseMLLMTokenizeFunction` is constructed with None.
+    # GLM-5.3-Flash renders through `render_glm53_chat`, not a `CHAT_TEMPLATE_MAP` entry, so
+    # `build()` never reads this field and `BaseMLLMTokenizeFunction` is constructed with None.
+    # The base class declares it required, which made the documented "no chat_template needed"
+    # construction raise at validation time; defaulted here to the name the renderer implements.
+    chat_template: str = "glm5.3"
     processor_path: str
     min_pixels: int | None = None
     max_pixels: int | None = None
