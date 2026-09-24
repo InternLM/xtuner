@@ -104,7 +104,56 @@ class Glm53BaseConfig(BaseComposeConfig):
 
     @classmethod
     def from_hf(cls, hf_path: str | Path) -> Self:
-        raise NotImplementedError
+        """Build the VL compose config from a published GLM-5.3-Flash
+        checkpoint.
+
+        The checkpoint carries one ``vision_config`` that covers both XTuner modules, because
+        XTuner splits HF's single ``Glm5NextVisionModel`` into ``vision_tower`` +
+        ``multi_modal_projector`` (§5.2); the fields are therefore read once and fanned out to
+        both configs. ``rope_parameters`` is deliberately left at its default -- the published
+        ``config.json`` has no such key and HF's ``AutoConfig`` fills the same default (§3.7.4).
+
+        Args:
+            hf_path (str | Path): Local path to the checkpoint directory.
+
+        Returns:
+            Self: The compose config, with the text half delegated to
+            :meth:`Glm53TextMoEConfig.from_hf`.
+        """
+        from transformers import AutoConfig
+
+        cfg = AutoConfig.from_pretrained(hf_path)
+        vision = cfg.vision_config
+        return cls(
+            vision_config=Glm53VisionConfig(
+                in_channels=vision.in_channels,
+                depth=vision.depth,
+                hidden_size=vision.hidden_size,
+                num_heads=vision.num_heads,
+                intermediate_size=vision.intermediate_size,
+                patch_size=vision.patch_size,
+                temporal_patch_size=vision.temporal_patch_size,
+                spatial_merge_size=vision.spatial_merge_size,
+                rms_norm_eps=vision.rms_norm_eps,
+                hidden_act=vision.hidden_act,
+                swiglu_limit=vision.swiglu_limit,
+                attention_bias=vision.attention_bias,
+                attention_dropout=vision.attention_dropout,
+            ),
+            projector_config=Glm53ProjectorConfig(
+                vision_hidden_size=vision.hidden_size,
+                out_hidden_size=vision.out_hidden_size,
+                spatial_merge_size=vision.spatial_merge_size,
+                projection_intermediate_size=vision.projection_intermediate_size,
+                hidden_act=vision.hidden_act,
+                swiglu_limit=vision.swiglu_limit,
+            ),
+            text_config=Glm53TextMoEConfig.from_hf(hf_path),
+            image_token_id=cfg.image_token_id,
+            video_token_id=cfg.video_token_id,
+            video_start_token_id=cfg.video_start_token_id,
+            video_end_token_id=cfg.video_end_token_id,
+        )
 
     @property
     def hf_config(self):
