@@ -604,8 +604,9 @@ class BaseModel(nn.Module):
 
     @torch.no_grad()
     def scale_and_reduce_grad(self) -> None:
-        """Average gradients of FP32 parameters explicitly excluded from FSDP."""
-        ignored_names = getattr(self, "_fsdp_ignored_param_names", set())
+        """Average gradients of FP32 parameters explicitly excluded from
+        FSDP."""
+        ignored_names: set[str] = getattr(self, "_fsdp_ignored_param_names", set())
         for name, param in self.named_parameters():
             if self._clean_param_name(name) not in ignored_names or param.grad is None:
                 continue

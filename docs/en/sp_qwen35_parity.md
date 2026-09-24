@@ -118,7 +118,8 @@ within each run (maximum rank spread 0.009059607982635498).
 
 The 16 CUDA regression cases pass, including unequal document lengths and optional
 bias. Ruff lint/format checks, Python compilation, and `git diff --check` pass.
-The entire repository test suite and pre-commit suite were not run.
+The entire repository test suite was not run. GitHub Actions runs the pre-commit
+checks for `xtuner/v1`.
 
 In the earlier controlled diagnosis on `393a0273` (before the upstream Muon
 changes), gradient synchronization plus FP32
