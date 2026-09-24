@@ -142,6 +142,16 @@ class SequenceContext:
     def sp_rank(self):
         return self._sp_rank
 
+    @property
+    def shard_start(self) -> int:
+        """Global position of this rank's first local token.
+
+        ``split()`` keeps ``cu_seq_lens_q`` in **global** coordinates and records the local
+        shard's offset here, so anything mapping local positions onto document boundaries must
+        add it -- see :meth:`packed_causal_query_ranges`. ``0`` without sequence parallelism.
+        """
+        return self._shard_start
+
     def packed_causal_query_ranges(
         self,
         query_len: int,

@@ -4,7 +4,7 @@ import torch
 from torch import Tensor
 
 from .protocol import SparseMLAOutputs
-from .tilelang import _validate_tilelang_sparse_mla_inputs
+from .tilelang import validate_sparse_mla_inputs
 
 
 def cudnn_dsa_sparse_mla(
@@ -26,7 +26,7 @@ def _validate_cudnn_dsa_sparse_mla_inputs(
     indices: torch.Tensor,
     value_dim: int | None,
 ) -> None:
-    _validate_tilelang_sparse_mla_inputs(q, kv, indices, value_dim)
+    validate_sparse_mla_inputs(q, kv, indices, value_dim)
     if kv.shape[1] != 1 or indices.shape[1] != 1:
         raise RuntimeError("cuDNN DSA SparseMLA currently supports kv_group=1 only.")
 

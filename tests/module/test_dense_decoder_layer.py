@@ -31,6 +31,7 @@ def _build_dense_dsa_layer() -> GLM52DenseDecoderLayer:
             index_n_heads=2,
             indexer_types=["full"],
             sparse_mla_backend="torch",
+            indexer_backend="torch",
         ),
     )
 

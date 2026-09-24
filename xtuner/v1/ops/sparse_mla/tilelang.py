@@ -20,13 +20,22 @@ def tilelang_sparse_mla(
     scaling: float | None,
     value_dim: int | None = None,
 ) -> SparseMLAOutputs:
-    _validate_tilelang_sparse_mla_inputs(q, kv, indices, value_dim)
+    validate_sparse_mla_inputs(q, kv, indices, value_dim)
     indices = indices.to(torch.int32).contiguous()
     raw_output, softmax_lse, _ = _tilelang_sparse_mla_forward(q, kv, indices, scaling)
     return SparseMLAOutputs(raw_output=raw_output, softmax_lse=softmax_lse)
 
 
-def _validate_tilelang_sparse_mla_inputs(
+# (head_dim, value_dim) pairs the underlying kernels are built for. Shared by every SparseMLA
+# backend, not just TileLang -- flash_mla_cudnn validates against the same table.
+#
+#   (576, 512) -- GLM-5.2 DSA: 512 nope + 64 rope absorbed latent.
+#   (512, 512) -- GLM-5.3-Flash NoPE DSA (design doc F5.b): qk_rope_head_dim=0, so
+#     q_head_dim == kv_lora_rank == 512 and there is no rope tail to concatenate.
+_SUPPORTED_SPARSE_MLA_DIMS = {(576, 512), (512, 512)}
+
+
+def validate_sparse_mla_inputs(
     q: torch.Tensor,
     kv: torch.Tensor,
     indices: torch.Tensor,
@@ -38,10 +47,11 @@ def _validate_tilelang_sparse_mla_inputs(
         raise RuntimeError("TileLang SparseMLA requires bfloat16 q and kv tensors.")
     if q.ndim != 3 or kv.ndim != 3 or indices.ndim != 3:
         raise RuntimeError("TileLang SparseMLA expects q=(S,H,D), kv=(S,K,D), indices=(S,K,topk).")
-    if q.shape[-1] != 576 or kv.shape[-1] != 576:
-        raise RuntimeError("TileLang SparseMLA supports GLM-5.2 DSA dim_plus_tail_dim=576 only.")
-    if value_dim not in (None, 512):
-        raise RuntimeError("TileLang SparseMLA supports value_dim=512 only.")
+    if q.shape[-1] != kv.shape[-1] or (q.shape[-1], value_dim or 512) not in _SUPPORTED_SPARSE_MLA_DIMS:
+        raise RuntimeError(
+            f"SparseMLA supports (head_dim, value_dim) in {sorted(_SUPPORTED_SPARSE_MLA_DIMS)} only, "
+            f"got (q.shape[-1]={q.shape[-1]}, kv.shape[-1]={kv.shape[-1]}, value_dim={value_dim})."
+        )
     if indices.shape[-1] % 64 != 0:
         raise RuntimeError("TileLang SparseMLA requires topk to be divisible by 64.")
     if not q.is_contiguous() or not kv.is_contiguous() or not indices.is_contiguous():
@@ -183,6 +193,48 @@ def tilelang_dsa_topk_indices(
     weights = weights.squeeze(0) * (index_n_heads**-0.5)
     weights = (weights * (index_head_dim**-0.5)).contiguous()
     starts, ends = seq_ctx.packed_causal_query_ranges(q.shape[0], q.device)
+    return tilelang_indexer_topk_from_ranges(
+        q, k, weights, starts, ends, index_topk, query_chunk_size=query_chunk_size
+    )
+
+
+def tilelang_indexer_topk_from_ranges(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    weights: torch.Tensor,
+    starts: torch.Tensor,
+    ends: torch.Tensor,
+    index_topk: int,
+    *,
+    query_chunk_size: int | None = None,
+) -> torch.Tensor:
+    """Run the TileLang selector over explicit causal ranges.
+
+    Owns the two things the raw kernel primitive does not. First, the primitive has no tail
+    guard, so an unaligned final query block is padded with empty causal ranges and cropped
+    afterwards. Second, ``query_chunk_size`` bounds the transient ``[query, key]`` logits tile
+    by splitting the query rows, keeping only the final int32 IDs across chunks.
+
+    The ranges are in whatever space the caller selects over: token space for the per-token DSA
+    indexer, pool space for GLM-5.3-Flash's KPool indexer (whose keys are pooled, so ``k`` has
+    one row per pool rather than per token).
+
+    Args:
+        q (torch.Tensor): Query features shaped ``(S, H, D)``.
+        k (torch.Tensor): Key features shaped ``(S_k, D)``.
+        weights (torch.Tensor): Per-query head weights shaped ``(S, H)``, already scaled.
+        starts (torch.Tensor): Inclusive range start per query, int32.
+        ends (torch.Tensor): Exclusive range end per query, int32.
+        index_topk (int): Maximum number of IDs to select per query.
+        query_chunk_size (int | None): Maximum query rows per launch; ``None`` for one launch.
+
+    Returns:
+        torch.Tensor: Contiguous int32 IDs shaped ``(S, 1, min(index_topk, S_k))``.
+    """
+    if query_chunk_size is not None and (
+        isinstance(query_chunk_size, bool) or not isinstance(query_chunk_size, int) or query_chunk_size <= 0
+    ):
+        raise ValueError(f"query_chunk_size must be a positive integer, got {query_chunk_size!r}")
     if q.shape[1] <= 0 or 128 % q.shape[1] != 0:
         raise ValueError(
             "TileLang DSA indexer requires the number of index heads to divide the 128-thread query tile, "
@@ -191,9 +243,7 @@ def tilelang_dsa_topk_indices(
     block_q = 128 // q.shape[1]
     k_eff = min(index_topk, k.shape[0])
 
-    # Keep the historical one-shot path when chunking is disabled.  The
-    # primitive has no tail guard, so pad a non-aligned final block with empty
-    # causal ranges and crop those rows after the kernel returns.
+    # Keep the historical one-shot path when chunking is disabled.
     if query_chunk_size is None or query_chunk_size >= q.shape[0]:
         if q.shape[0] % block_q == 0:
             return _tilelang_dsa_topk_indices_from_ranges(q, k, weights, starts, ends, index_topk)

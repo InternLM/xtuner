@@ -4,7 +4,7 @@ import torch
 from torch import Tensor
 
 from .protocol import SparseMLAOutputs
-from .tilelang import _tilelang_sparse_mla_backward_op, _validate_tilelang_sparse_mla_inputs
+from .tilelang import _tilelang_sparse_mla_backward_op, validate_sparse_mla_inputs
 
 
 _FLASH_MLA_HEAD_ALIGNMENT = 64
@@ -49,7 +49,7 @@ def _validate_flash_mla_inputs(
     indices: torch.Tensor,
     value_dim: int | None,
 ) -> None:
-    _validate_tilelang_sparse_mla_inputs(q, kv, indices, value_dim)
+    validate_sparse_mla_inputs(q, kv, indices, value_dim)
     if kv.shape[1] != 1 or indices.shape[1] != 1:
         raise RuntimeError("FlashMLA SparseMLA currently supports kv_group=1 only.")
 
