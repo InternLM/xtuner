@@ -63,6 +63,39 @@ def _causal_conv1d_bwd_cpp(
         x = x.transpose(1, 2)
         dout = dout.transpose(1, 2)
         dx = dx.transpose(1, 2)
+        if torch.are_deterministic_algorithms_enabled():
+            # SP changes how documents are packed on each rank. Reduce dweight
+            # per document so the CUDA reduction boundaries do not change with SP.
+            # This runs inside the custom op: the host-side boundary scan is not
+            # traced by torch.compile. Packed sequences have no initial/final state.
+            assert initial_states is None and dfinal_states is None and dinitial_states is None
+            for batch_idx in range(x.shape[0]):
+                ids = seq_idx[batch_idx]
+                changes = (ids[1:] != ids[:-1]).nonzero().flatten().add(1).tolist()
+                boundaries = [0, *changes, x.shape[-1]]
+                for start, end in zip(boundaries, boundaries[1:]):
+                    part = (slice(batch_idx, batch_idx + 1), slice(None), slice(start, end))
+                    partial_dw = torch.zeros_like(dweight)
+                    partial_db = torch.zeros_like(dbias) if dbias is not None else None
+                    causal_conv1d_cuda.causal_conv1d_bwd(
+                        x[part],
+                        weight,
+                        bias,
+                        dout[part],
+                        seq_idx[batch_idx : batch_idx + 1, start:end].contiguous(),
+                        None,
+                        None,
+                        dx[part],
+                        partial_dw,
+                        partial_db,
+                        None,
+                        silu_activation,
+                    )
+                    dweight.add_(partial_dw)
+                    if dbias is not None:
+                        assert partial_db is not None
+                        dbias.add_(partial_db)
+            return
     causal_conv1d_cuda.causal_conv1d_bwd(
         x,
         weight,
@@ -145,10 +178,6 @@ def causal_conv1d_bwd_function(
         silu_activation=silu_activation,
     )
 
-    dweight = dweight.type_as(weight)
-    if dbias is not None:
-        assert bias is not None
-        dbias = dbias.type_as(bias)
     return dx, dweight, dbias, dinitial_states
 
 
@@ -186,6 +215,12 @@ class CausalConv1dFn(torch.autograd.Function):
                 final_states_out = torch.empty(batch, width - 1, dim, device=x.device, dtype=x.dtype).transpose(1, 2)
         else:
             final_states_out = None
+        ctx.weight_dtype = weight.dtype
+        ctx.bias_dtype = bias.dtype if bias is not None else None
+        # Preserve the input parameter's fp32 gradient without changing the bf16
+        # forward values previously supplied by FSDP's mixed-precision policy.
+        weight = weight.to(x.dtype)
+        bias = bias.to(x.dtype) if bias is not None else None
         ctx.activation = activation in ["silu", "swish"]
         out = causal_conv1d_fwd_function(x, weight, bias, seq_idx, initial_states, final_states_out, ctx.activation)
         ctx.save_for_backward(x, weight, bias, seq_idx, initial_states)
@@ -216,8 +251,8 @@ class CausalConv1dFn(torch.autograd.Function):
         )
         return (
             dx,
-            dweight,
-            dbias if bias is not None else None,
+            dweight.to(ctx.weight_dtype),
+            dbias.to(ctx.bias_dtype) if dbias is not None else None,
             None,
             dinitial_states if initial_states is not None else None,
             None,
