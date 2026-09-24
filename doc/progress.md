@@ -215,7 +215,7 @@ post_layernorm 输出"，而不是回避这处已知的接口差异。
   设计文档 §2.3 独立记录的真实 checkpoint 视觉 key 总数（347）完全一致；`from_hf(strict=False)`
   加载后 `missing`/`unloaded` 均为空，抽查 `patch_embed.proj`/`merger.gate_proj`/
   `blocks.0.attn.qkv` 权重与 safetensors 原始 tensor `torch.equal` 逐位相等。
-- `TestGlm53VisionForwardParity`（4，小合成 config，`rtol=0,atol=0`）：单图、多 tubelet 视频
+- `TestGlm53VisionForwardParity`（小合成 config，`rtol=0,atol=0`，单图覆盖 fp32 与 bf16）：单图、多 tubelet 视频
   （grid=[2,4,4]，验证 cu_seqlens 多段与 position_ids 按 t 重复）、多图 batch（不同尺寸）、
   forward+backward 梯度冒烟，对照对象是 HF `model.visual` 整体（tower 输出经 HF 自己的
   downsample 模块，再与 HF `pooler_output` 比较），不是只比 `pooler_output`。
@@ -224,13 +224,12 @@ post_layernorm 输出"，而不是回避这处已知的接口差异。
 本次未做生产级验收，明确记录而非静默跳过）：
 - `fully_shard()` 已按 `qwen3_vl` 的结构模式接线（逐 block fully_shard + root fully_shard），
   但未跑多卡 FSDP parity 测试（§5.3/§5.4 的 `test_vision_fsdp_parity`）；
-- attention 已支持 `sequence_parallel_mesh` 入参并对 q/k/v 做 Ulysses all-to-all（镜像
-  `qwen3_vl` 的写法），但设计文档 §9.3/§9.6 要求的"merge-aligned padding + local projector"
-  整套 Vision SP 机制（避免先 gather 全局特征再切）未实现，也未跑 SP=2/4 parity
-  测试（`tests/model/test_glm53_vision_sp.py` 未创建）；
+- `sequence_parallel_mesh.size()>1` 直接 `NotImplementedError`。只在 attention 里做 Ulysses、
+  forward 不切 patch 序列会算错；设计文档 §9.3/§9.6 的 merge-aligned padding + local projector
+  未实现，也未跑 SP=2/4 parity 测试（`tests/model/test_glm53_vision_sp.py` 未创建）；
 - `torch.compile` 配置（`default_compile_cfg`）未接入；
 - 生产 attention kernel（FlashAttention/FlexAttention）容差矩阵（§11.7）未验收，目前只验证了
-  `eager_attention` 路径的 bitwise 精度。
+  `eager_attention` 路径的 bitwise 精度。`attn_impl` 默认改回 `eager_attention`，flash 需显式打开。
 - HF save round-trip（§6.2 后半）未验证。
 
 ## F3 KDA 线性注意力
