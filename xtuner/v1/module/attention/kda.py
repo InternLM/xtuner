@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
-from xtuner.v1.ops.kda import get_chunk_kda_fn
+from xtuner.v1.ops.kda import get_causal_conv1d_fn, get_chunk_kda_fn, get_fused_kda_gate_fn
 from xtuner.v1.utils.dtensor import materialize_full
 from xtuner.v1.utils.init_weight import init_params
 
@@ -81,19 +81,16 @@ def _gate_param(param: torch.Tensor) -> torch.Tensor:
 # route `xtuner/v1/ops/gated_deltanet` takes for GatedDeltaNet, and it matters here because
 # GLM-5.3-Flash is KDA-dominated: disabling dynamo per call instead measured ~2.4x slower per
 # step than eager, since every KDA layer then broke the surrounding compiled region.
+# The forget gate and the short convolution take the same route, for the same reason: FLA's
+# `fused_kda_gate` is itself `@torch.compiler.disable`d, and its conv dispatcher reaches Triton
+# launch helpers dynamo cannot trace.
 #
-# The two entry points below stay untraceable. `fused_recurrent_kda` only runs at
-# `seq_len <= _CHUNK_KERNEL_MIN_SEQ_LEN`, which compiled training never reaches (the branch is
-# chosen from a Python int, so the taken branch is the only one traced), and the short
-# convolution is left for a follow-up.
+# Only `fused_recurrent_kda` stays untraceable. It runs at `seq_len <=
+# _CHUNK_KERNEL_MIN_SEQ_LEN`, which compiled training never reaches, and the branch is chosen
+# from a Python int so only the taken branch is ever traced.
 @torch._dynamo.disable
 def _run_recurrent_kda(**kwargs):
     return fused_recurrent_kda(**kwargs)
-
-
-@torch._dynamo.disable
-def _run_causal_conv1d(**kwargs):
-    return _fla_causal_conv1d(**kwargs)
 
 
 # Sequences at or below this length use the recurrent kernel (matches Automodel's dispatch).
@@ -104,10 +101,8 @@ _fla_kda_import_error: BaseException | None = None
 try:
     from fla.modules import FusedRMSNormGated as _FLAFusedRMSNormGated
     from fla.modules import ShortConvolution as _FLAShortConvolution
-    from fla.modules.conv.causal_conv1d import causal_conv1d as _fla_causal_conv1d
     from fla.modules.fused_norm_gate import rms_norm_gated as _fla_rms_norm_gated
     from fla.ops.kda import fused_recurrent_kda as _fused_recurrent_kda
-    from fla.ops.kda.gate import fused_kda_gate as _fused_kda_gate
 
     class FusedRMSNormGated(_FLAFusedRMSNormGated):
         """Overrides ``forward`` to unshard ``weight`` first.
@@ -158,7 +153,7 @@ try:
         ) -> tuple[torch.Tensor, torch.Tensor | None]:
             if weight is None:
                 weight, bias = self.materialize_weight_bias()
-            return _run_causal_conv1d(
+            return causal_conv1d(
                 x=x,
                 weight=weight,
                 bias=bias,
@@ -169,11 +164,13 @@ try:
             )
 
     chunk_kda = get_chunk_kda_fn()
+    causal_conv1d = get_causal_conv1d_fn()
     fused_recurrent_kda = _fused_recurrent_kda
-    fused_kda_gate = _fused_kda_gate
+    fused_kda_gate = get_fused_kda_gate_fn()
 except (ImportError, ModuleNotFoundError) as e:
     has_fla_kda = False
     chunk_kda = None  # type: ignore[assignment]
+    causal_conv1d = None  # type: ignore[assignment]
     fused_recurrent_kda = None  # type: ignore[assignment]
     fused_kda_gate = None  # type: ignore[assignment]
     FusedRMSNormGated = None  # type: ignore[assignment,misc]
