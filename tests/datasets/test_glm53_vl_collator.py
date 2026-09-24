@@ -24,6 +24,7 @@ from xtuner.v1.datasets.collator import (
     intern_s1_vl_sft_collator,
     qwen3_vl_sft_collator,
 )
+from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.utils import IGNORE_INDEX
 
 
@@ -132,6 +133,19 @@ class TestGlm53VlSftCollator:
         assert seq_ctx.pixel_values is None
         assert seq_ctx.image_grid_thw is None
         assert (seq_ctx.mm_token_type_ids == 0).all()
+
+    def test_glm53_collator_is_reachable_by_name_from_dataloader_config(self):
+        # 训练侧只能按名字选 collator；`glm53_vl_sft_collator` 比其它 VL collator 多两个必填
+        # 参数，要靠 `collator_kwargs` 绑定，否则 dataloader 一构建就 TypeError。
+        cfg = DataloaderConfig(
+            collator="glm53_vl_sft_collator",
+            collator_kwargs={"image_token_id": self.IMAGE_TOKEN_ID, "merge_unit": self.MERGE_UNIT},
+        )
+        collator = cfg.build_collator()
+        item = _glm53_item(text_len=10, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=4)
+        # 只补 dataloader 自己会传的那几个参数，额外参数必须已经绑好。
+        result = collator([[item]], pack_max_length=32, padding_token_idx=0)
+        assert result[0]["seq_ctx"].pixel_values.shape == (16, 8)
 
 
 @pytest.fixture
