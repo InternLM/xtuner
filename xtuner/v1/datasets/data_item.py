@@ -4,6 +4,7 @@ from typing_extensions import NotRequired, TypedDict
 
 class CacheItem(TypedDict):
     num_tokens: int
+    original_num_tokens: NotRequired[int]
     num_img_tokens: NotRequired[list[int]]
     proxy_attn_flops: NotRequired[float]
 

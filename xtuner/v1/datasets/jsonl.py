@@ -45,6 +45,11 @@ XTUNER_FILE_OPEN_CONCURRENCY = int(os.environ.get("XTUNER_FILE_OPEN_CONCURRENCY"
 XTUNER_TOKENIZE_CHUNK_SIZE = int(os.environ.get("XTUNER_TOKENIZE_CHUNK_SIZE", "10"))
 
 
+def _empty_cache_extras(_: Any) -> dict[str, Any]:
+    """Default for tokenizers without optional cache metadata callbacks."""
+    return {}
+
+
 def _concat_values(values):
     if isinstance(values[0], np.ndarray):
         return np.concatenate(values, axis=0)
@@ -627,6 +632,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         tokenized = tokenize_fn(json.loads(line))
         if isinstance(tokenized, dict):
             res = {"num_tokens": tokenized["num_tokens"], "proxy_attn_flops": tokenized["proxy_attn_flops"]}
+            res.update(getattr(tokenize_fn, "cache_extra_item", _empty_cache_extras)(tokenized))
             if "chunks" in tokenized:
                 tokenized = cast(dict[str, Any], tokenized)
                 res["chunks"] = tokenized["chunks"]
@@ -716,6 +722,9 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 "num_tokens": np.array([data["num_tokens"] for data in tokenized]),
                 "proxy_attn_flops": np.array([data["proxy_attn_flops"] for data in tokenized]),
             }
+            serialized_tokenized.update(
+                getattr(self.tokenize_fn, "cache_extra_arrays", _empty_cache_extras)(tokenized)
+            )
 
         if dist.is_initialized():
             # TODO:
