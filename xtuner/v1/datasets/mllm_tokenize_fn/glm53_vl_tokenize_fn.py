@@ -61,6 +61,27 @@ _IMAGE_MARKER = "<|image|>"
 _VIDEO_MARKER = "<|video|>"
 
 
+def _video_frame_source(video_file: str, extra: dict) -> tuple[int, float]:
+    """(frame count, fps) of the frames this video is actually read from.
+
+    A frame folder -- marked by a trailing ``/``, the VLM data convention qwen3_vl's reader also
+    keys on -- holds the video *after* resampling: ``processed_video_length`` frames at
+    ``processed_fps``. Sampling has to index into that sequence; indexing it with the original
+    video's frame count runs off the end of the folder (qwen3_vl's ``calc_frame_info`` rule 3). A
+    video file is decoded from the original stream, so it keeps ``origin_video_length`` /
+    ``origin_fps``.
+
+    Decided from the path string rather than the filesystem on purpose: the cache path never
+    touches the media, and the two paths must reach the same answer. When they disagreed, the
+    cache predicted the original-length video (truncated to ``max_length``) while the runtime read
+    overflowed the folder, and the dataset silently substituted a fake sample -- so the packer
+    budgeted ~4096 tokens for a sample that trained as 33.
+    """
+    if video_file.endswith("/") and "processed_video_length" in extra:
+        return extra["processed_video_length"], extra["processed_fps"]
+    return extra["origin_video_length"], extra["origin_fps"]
+
+
 def _read_video_frames(video_path: str, frame_indices: list[int]) -> list[Image.Image]:
     """Read specific frames from a video directory (numbered image files) or a
     real video file.
@@ -227,7 +248,7 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         input_ids, labels = _tokenize_with_loss_mask(self.tokenizer, text, loss_mask)
         input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
         num_img_tokens = [grid_h * grid_w for _, grid_h, grid_w in grids]
-        return {"num_tokens": len(input_ids), "num_img_tokens": num_img_tokens}
+        return self._cache_item(input_ids, num_img_tokens, data_item)
 
     def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> Glm53VLDataItem:
         images = []
@@ -269,6 +290,22 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             mm_token_type_ids=torch.tensor(mm_token_type_ids, dtype=torch.long).unsqueeze(0),
         )
 
+    def _cache_item(self, input_ids: list[int], num_img_tokens: list[int], data_item: dict) -> CacheItem:
+        # Truncating text is harmless, but truncating *through* a visual span leaves fewer
+        # placeholders than patches, which the runtime path then rejects and the dataset silently
+        # replaces with a fake sample. Report such a sample as damaged (`num_tokens=0`) here, so
+        # it is filtered out before packing instead of being packed at its truncated length and
+        # training as a 33-token fake -- qwen3_vl's cache path makes the same check.
+        placeholder_count = input_ids.count(self.processor.image_token_id)
+        if placeholder_count != sum(num_img_tokens) // self.merge_unit:
+            logger.warning(
+                f"GLM-5.3-Flash sample exceeds max_length={self.max_length} inside its visual span "
+                f"({placeholder_count} of {sum(num_img_tokens) // self.merge_unit} placeholders kept), "
+                f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
+            )
+            return {"num_tokens": 0, "num_img_tokens": [0]}
+        return {"num_tokens": len(input_ids), "num_img_tokens": num_img_tokens}
+
     # ---- video: geometry prediction (cache) ----
 
     def _predict_video_grid(
@@ -298,8 +335,10 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         )
         grids: list[list[int]] = []
         metadata_list = []
-        for (width, height), extra in zip(self._video_wh_list, self._video_extra_info_list):
-            num_frames, fps = extra["origin_video_length"], extra["origin_fps"]
+        for video_file, (width, height), extra in zip(
+            self._video_path, self._video_wh_list, self._video_extra_info_list
+        ):
+            num_frames, fps = _video_frame_source(video_file, extra)
             sampled, grid = self._predict_video_grid(num_frames, fps, height, width)
             metadata_list.append(VideoMetadata(total_num_frames=num_frames, fps=fps, frames_indices=sampled))
             grids.append(list(grid))
@@ -314,7 +353,7 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         num_img_tokens: list[int] = []
         for grid_t, grid_h, grid_w in grids:
             num_img_tokens.extend([grid_h * grid_w] * grid_t)
-        return {"num_tokens": len(input_ids), "num_img_tokens": num_img_tokens}
+        return self._cache_item(input_ids, num_img_tokens, data_item)
 
     def video_get_item(self, data_item: dict, media_root: str = "") -> Glm53VLDataItem:
         assert len(self._video_extra_info_list) == len(self._video_path), (
@@ -328,7 +367,7 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             self._video_path, self._video_wh_list, self._video_extra_info_list
         ):
             video_path = os.path.join(media_root, video_file)
-            num_frames, fps = extra["origin_video_length"], extra["origin_fps"]
+            num_frames, fps = _video_frame_source(video_file, extra)
             sampled, _ = self._predict_video_grid(num_frames, fps, height, width)
 
             frames = _read_video_frames(video_path, sampled)
