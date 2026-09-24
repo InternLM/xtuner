@@ -604,3 +604,118 @@ SP 的数学等价性是这轮最直接的证据：修复前 SP=2 与 SP=1 相�
 测试会为整个进程打开这些函数的编译，于是 `tests/model/test_glm53_compose.py::TestGlm53ComposeForward`
 的 3 例只在与 `test_glm53_text_moe.py` 同进程运行时失败（单独跑该文件 6/6 绿）。同样在 `1684247e`
 上复现，非本轮引入。
+
+## 多模态全功能打通与 Automodel 对照 review（2026-09-24）
+
+**目标**：以 `~/github/Automodel/doc/glm5p3_flash_sft.md`（Automodel `44cf34834` 的 GLM-5.3-Flash
+SFT 实现）与 `doc/xtuner_glm5p3flash_design.md` 为对照 review 文本/多模态实现，修掉问题，并把前面
+各节记录的「已知缺口」清到可用状态——重点是让多模态端到端训练跑通，验收矩阵与文本模态一致。
+
+### 一、与 Automodel 的契约逐条核对（结论：文本侧契约全部一致，无需改动）
+
+逐条核对 Automodel 文档第 3 节列出的模型局部契约，全部与 XTuner 现有实现吻合，均**不是**问题：
+
+| 契约 | Automodel 记录 | XTuner 现状 |
+|---|---|---|
+| KPool 物理宽度 | `index_topk + index_kpool - 1` = 2051，`-1` 填充，尾块最多 `kpool-1` | `kpool_output_width()` 同式（再按 kernel alignment 上取整），`-1` 填充，`_visible_tail_tokens` 同语义 |
+| `index_kpool` | 发布 checkpoint 为 4（HF 默认 16 只是无字段时的 fallback） | `NoPEDSAMLAConfig.index_kpool = 4` |
+| DSA score scale | `qk_nope_head_dim=256` 的 -0.5 次方，不是 latent 512 | `qk_rope_head_dim=0` 使基类自然得到 `softmax_scale = 256 ** -0.5` |
+| clamped SwiGLU 覆盖面 | dense 前 3 层 + routed/shared experts + **vision MLP**，漏 vision 是典型错误 | dense/shared 走 `swiglu_limit`，routed 走 `moe_act_fn_cfg`，vision MLP 与 merger 各自内联同一公式 |
+| KDA | `gate_lower_bound=-5.0`、kernel 内 QK L2 norm、safe gate | `KDAConfig(gate_lower_bound=-5.0)`、`use_qk_l2norm_in_kernel=True`、`safe_gate` 跟随 |
+| MoE router | sigmoid+bias、fp32、top-8、288 routed + 1 shared、route scale 2.5 | `NoAuxRouterConfig(scoring_func="sigmoid", norm_topk_prob=True, router_scaling_factor=2.5)` |
+| mHC | 每层两套（attn/ffn），`base/scale` 与 KDA `A_log/dt_bias` 走 fp32 holder | `MHCConfig(hc_mult=4, hc_sinkhorn_iters=20)` + `fp32_keys_pattern`（Review 修复轮已补） |
+
+Automodel 文档里两处与 XTuner **有意不同**、不按它改：其一它把 `layer 45`（MTP）在加载时直接丢弃、
+`num_nextn_predict_layers=0`，XTuner 是实现 MTP 的；其二它 `pixel_values_videos` 直接
+`NotImplementedError`，XTuner 的 F1 已支持视频。另外它 clamped SwiGLU 中间用 fp32 计算再 cast 回，
+HF `Glm5NextTextMLP`/`Glm5NextVisionMLP` 并没有这一步，XTuner 按 HF（数值 oracle）实现。
+
+### 二、本轮修掉的真实 bug（都是端到端跑起来才暴露的）
+
+1. **`glm53_vl_sft_collator` 无法被训练配置选中**（F1 记录的缺口）：`DataloaderConfig.build_collator()`
+   只认三个老 collator，dotted-path 兜底又没法传它多出来的两个必填参数，任何 VL 配置都会在
+   dataloader 构建阶段 `TypeError`。现在按名字注册，并加通用的 `collator_kwargs` 绑定额外参数。
+2. **`Glm53VLTokenizeFnConfig` 构造即报错**：类注释写明「不需要 chat_template」，但基类把该字段声明为
+   必填，`ValidationError: chat_template Field required`。给了默认值。
+3. **视觉塔 `attn_impl="flash_attention"` 直接跑不通**：塔是全仓唯一把 `max_seqlen` 用
+   `int(...item())` 物化的调用点，而 `flash_attn_varlen_func` v2 的 `max_seqlen_q` 声明是 Tensor，
+   直接报 `Expected a value of type 'Tensor' ... but instead found type 'int'`；顺带还多一次设备同步。
+   改为与其它所有 attention 调用点一致传 tensor。
+4. **视觉塔不搬 `pixel_values` 的设备**：`SequenceContext.to()` 有意不搬这两个媒体张量（注释写明由模型
+   侧切分后各自搬），塔却没搬，真实训练第一步就 `Input type (CPUBFloat16Type) and weight type
+   (CUDABFloat16Type) should be the same`。单测一直直接喂 device 张量，所以没暴露。现在在 SP 切分
+   **之后**搬，只搬本 rank 那一份。
+5. **`Glm53BaseConfig.from_hf` 是 `NotImplementedError`**：VL 训练没法从 checkpoint 构造模型。按
+   §5.2 的模块边界把 checkpoint 里同一份 `vision_config` 分发给 tower 与 projector 两个配置。
+
+### 三、Vision SP：从「显式拒绝」做到与非 SP 逐位一致
+
+原状态是 attention 里有半套 Ulysses、forward 不切 patch 序列（算错），上游 ShilohYu 的
+`ca8a9137` 已先把 `size()>1` 改成显式 `NotImplementedError`。本轮按设计文档 §9.3/§9.6 补齐：
+
+- `_shard_patches_for_sequence_parallel` 把全局 patch 序列补齐到 `sp_size * merge_unit` 的整数倍再
+  连续切分。**merge 对齐**是硬约束：projector 的 `downsample` 按连续 4 个 patch 组成 2×2 块，切在块
+  中间就会把两个 rank 的 patch 合成一个 token；对齐之后每个 rank 才能各自跑 projector（local
+  projector）。**等长**是 Ulysses all-to-all 的要求。
+- 补齐部分作为**额外一行 `grid_thw`** 声明，而不是静默 append，这样它在 `cu_seqlens` 里自成一段，
+  padding patch 与真实图像之间不可能互相 attend。
+- position ids 按 rank 切（RoPE 在 all-to-all 之前算），`cu_seqlens` 保持全局（all-to-all 之后
+  attention 看到的是整条序列）。
+- compose 侧 `_splice` 负责把各 rank 的特征 gather 回来：`mm_token_type_ids` 与 `input_ids` 同步被
+  切分，本地 mask 能索引本地 embedding，但说不出「全局特征里哪一段是我的」，所以先 gather mask 算出
+  本 rank 的偏移（= 前面各 rank 的同模态 placeholder 数），再切特征。gather 用 autograd 版本，反向
+  reduce-scatter，各 rank 拿回自己那份梯度。placeholder/特征数量校验改成比**全局**总数，SP 与非 SP
+  报错行为一致。
+
+### 四、视觉塔缺激活重算：多模态 OOM 的真正原因
+
+多模态端到端第一次跑就在 backward OOM（`PACK_MAX_LENGTH=16384`），把 pack 降到 8192 后 step 1
+能过（73.31 GB）但 step 2 仍然 OOM。按最小复现的思路先看日志里的实际量纲，而不是直接调小配置：
+step 1 打出的是 `seqlen_tokens: 8192` 但 `img_tokens: 14688`——**视觉塔处理的是 raw patch，数量
+远超 LLM 的 token 数**（16384 的 pack 实测 ~3 万 patch）。再查 `Glm53VisionModel.fully_shard`，
+发现它**完全没有接激活重算**，24 个 ViT block 的 attention 与 4096 宽 MLP 激活全部驻留，峰值由视觉
+侧决定，语言塔远没到极限。qwen3_vl 的视觉塔一直是按 `vision_recompute_ratio` 逐 block 包
+`apply_activation_checkpointing` 的，GLM-5.3 这边漏了。
+
+接上重算后（默认 `vision_recompute_ratio=1.0`），16384 pack、~3 万 patch 的默认 profile 峰值
+85.85 GB，OOM 消失。这条是本轮对多模态可用性影响最大的修复。
+
+### 五、多模态端到端验收矩阵（8 卡，20 step，与文本模态同口径）
+
+`sft_glm53_vl_tiny.sh` + `examples/v1/config/sft_glm53_vl.py`，真实 F0 25B 裁剪 checkpoint，
+`PACK_MAX_LENGTH=16384`，数据为 `zdev/sft_qwen35_mengke.sh` 用的 `ci_vl`（含图像与视频样本）。
+六组 profile **全部 20 step 完成、loss 下降、无 NaN/OOM**（rank0 数值，`mem` 为
+`max_memory`/`reserved_memory`，吞吐为 step 20）：
+
+| profile | step1 loss | step20 loss | grad_norm@20 | mem@20 (GB) | tgs@20 | seqlen_tgs@20 | exp_tgs@20 | 用时 | img_tokens |
+|---|---:|---:|---:|---|---:|---:|---:|---:|---:|
+| 默认（`EP4 SP1 offload=1`） | 12.34349346 | 10.23751831 | 32.69 | 86.11 / 107.45 | 3479.8 | 7083.2 | 1286.7 | 53s | 29736 |
+| `SP2 EP4` | 12.13223362 | 10.24192142 | 52.60 | 73.86 / 96.08 | 2253.5 | 4721.4 | 1708.6 | 33s | 6516 |
+| `EP8 SP1` | 12.34349346 | 10.23978424 | 39.65 | 96.77 / 117.13 | 3399.5 | 6919.8 | 1183.9 | 56s | 29736 |
+| `offload=0`（EP4 SP1） | 12.34349346 | 10.25128174 | 32.17 | 85.07 / 107.21 | 3514.9 | 7154.6 | 1264.8 | 52s | 29736 |
+| `FP8=1` | 12.34872818 | 9.99082375 | 23.11 | 84.92 / 106.38 | 3391.6 | 6903.8 | 1359.4 | 53s | 29736 |
+| `MODEL_COMPILE=1` | 12.34103584 | 10.24398804 | 32.14 | 81.74 / 104.83 | 4353.5 | 8861.7 | 668.4 | 71s | 29736 |
+
+几点读数：
+
+- **默认/`EP8`/`offload=0` 三组 step1 loss 逐位相同**（12.34349346），与文本侧同一结论——EP、激活
+  offload 只改并行/内存策略，不改数学。
+- **`SP2` 的 loss 不能与其它行逐位比**：`GLOBAL_BATCH_SIZE = world/sp`，SP2 下每 step 吃的是不同的
+  样本（`img_tokens` 6516 vs 29736）。它与默认组的可比量是 step20 收敛值，差 0.004，在 bf16 与数据
+  分片非确定性的量级内；Vision SP 本身的正确性由 2 卡逐位 parity 单测保证，不靠这条冒烟。
+- **`MODEL_COMPILE=1` 吞吐最高**（tgs 4353.5，比默认 +25%），峰值内存也最低（81.74 GB）——编译把
+  视觉塔的 clamp/激活链和 mHC 原语都融了；代价是 step1 的图编译开销（总用时 71s vs 53s）。
+- **`FP8=1` 的 loss 明显更低**（step20 9.99 vs 10.24），与文本侧 FP8 的表现同向：absorbed-MLA 路径
+  的数值确实被改变，不是 bug。
+- `EP8` 内存最高（96.77 GB），因为 `dp_size = world_size/ep_size` 从 2 变成 1，FSDP 在更少的 dp 维度
+  上切分非专家参数——与文本矩阵同一解释。
+
+### 六、本轮结束后仍然保留的缺口
+
+- `hf_config` 仍返回 `None`（四个配置类都是）。**按结论这不是缺口**：`hf_config is None` 时
+  `BaseModel._write_hf_index_and_config` 会把初始化模型用的原始 HF config/tokenizer 原样拷进导出
+  目录，对「不改结构的微调」而言导出的 checkpoint 是自洽的。只有训练中改过结构/维度才需要真正的
+  反向导出，那时再补。
+- `sparse_mla_backend="tilelang"`（NoPE）与 `indexer_backend="deep_gemm_fp8"` 仍是显式
+  `NotImplementedError`，沿用 F5 的结论（各自需要专门的 kernel 改造/核对，本期不做）。
+- 视觉侧 FSDP2 多卡 parity 仍只由端到端冒烟覆盖，没有独立的 `test_vision_fsdp_parity`。
