@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
+from xtuner.v1.ops.kda import get_chunk_kda_fn
 from xtuner.v1.utils.dtensor import materialize_full
 from xtuner.v1.utils.init_weight import init_params
 
@@ -72,19 +73,19 @@ def _gate_param(param: torch.Tensor) -> torch.Tensor:
     return materialize_full(param).float()
 
 
-# FLA's chunked kernel derives its chunk table with `prepare_chunk_indices`, which calls
-# `.tolist()` on `cu_seqlens`. Dynamo traces that as `aten._local_scalar_dense` and inductor
-# then refuses to lower it (`DataDependentOutputException`), taking down any compiled region
-# that reaches a KDA layer -- which under GLM-5.3-Flash is every dense layer's `_forward`.
-# XTuner's own GatedDeltaNet sidesteps this by owning the op behind a `torch.library.custom_op`;
-# KDA uses FLA's kernel directly, so mark the call itself as untraceable instead. The enclosing
-# compile regions are all `fullgraph=False` (see GLM53_MOE_NON_EP_COMPILE_CFG), so the graph
-# break this forces is legal, and it is the same break those entries already anticipate.
-@torch._dynamo.disable
-def _run_chunk_kda(**kwargs):
-    return chunk_kda(**kwargs)
-
-
+# The chunked kernel runs through `xtuner.v1.ops.kda`, which wraps FLA's
+# `chunk_kda_fwd`/`chunk_kda_bwd` in `torch.library.custom_op` (bitwise-identical to
+# `fla.ops.kda.chunk_kda`, verified in tests/model/test_glm53_kda.py). Dynamo traces through a
+# custom op, so the chunk-table preparation -- `prepare_chunk_indices`, whose `.tolist()` on
+# `cu_seqlens` inductor cannot lower -- stays hidden without breaking the graph. This is the same
+# route `xtuner/v1/ops/gated_deltanet` takes for GatedDeltaNet, and it matters here because
+# GLM-5.3-Flash is KDA-dominated: disabling dynamo per call instead measured ~2.4x slower per
+# step than eager, since every KDA layer then broke the surrounding compiled region.
+#
+# The two entry points below stay untraceable. `fused_recurrent_kda` only runs at
+# `seq_len <= _CHUNK_KERNEL_MIN_SEQ_LEN`, which compiled training never reaches (the branch is
+# chosen from a Python int, so the taken branch is the only one traced), and the short
+# convolution is left for a follow-up.
 @torch._dynamo.disable
 def _run_recurrent_kda(**kwargs):
     return fused_recurrent_kda(**kwargs)
@@ -105,7 +106,6 @@ try:
     from fla.modules import ShortConvolution as _FLAShortConvolution
     from fla.modules.conv.causal_conv1d import causal_conv1d as _fla_causal_conv1d
     from fla.modules.fused_norm_gate import rms_norm_gated as _fla_rms_norm_gated
-    from fla.ops.kda import chunk_kda as _chunk_kda
     from fla.ops.kda import fused_recurrent_kda as _fused_recurrent_kda
     from fla.ops.kda.gate import fused_kda_gate as _fused_kda_gate
 
@@ -168,7 +168,7 @@ try:
                 **kwargs,
             )
 
-    chunk_kda = _chunk_kda
+    chunk_kda = get_chunk_kda_fn()
     fused_recurrent_kda = _fused_recurrent_kda
     fused_kda_gate = _fused_kda_gate
 except (ImportError, ModuleNotFoundError) as e:
@@ -316,7 +316,7 @@ class KimiDeltaAttention(nn.Module):
         # Automodel's dispatch: short (unpacked) sequences use the recurrent kernel; long
         # sequences, or anything running under context parallel, use the chunked kernel.
         if cp_context is not None or seq_len > _CHUNK_KERNEL_MIN_SEQ_LEN:
-            return _run_chunk_kda
+            return chunk_kda
         return _run_recurrent_kda
 
     def _compute_gate_and_beta(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
