@@ -21,6 +21,7 @@ from xtuner.v1.utils import get_logger, log_rank0, profile_time
 from ..datasets.collator import ColateItem
 from .collator import (
     fake_collator,
+    glm53_vl_sft_collator,
     intern_s1_vl_sft_collator,
     qwen3_vl_sft_collator,
     sft_llm_collator,
@@ -280,9 +281,21 @@ class DataloaderConfig(BaseDataloaderConfig):
     dataset_config_list: DatasetConfigList | None = None
 
     collator: Annotated[
-        Literal["sft_llm_collator", "intern_s1_vl_sft_collator", "qwen3_vl_sft_collator", "fake_collator"] | str,
+        Literal[
+            "sft_llm_collator",
+            "intern_s1_vl_sft_collator",
+            "qwen3_vl_sft_collator",
+            "glm53_vl_sft_collator",
+            "fake_collator",
+        ]
+        | str,
         Parameter(help="collator func name"),
     ] = "sft_llm_collator"
+    # Extra keyword arguments bound into the collator partial, for collators that need more than
+    # the four arguments the dataloader supplies itself. `glm53_vl_sft_collator` needs
+    # `image_token_id`/`merge_unit` to re-check its placeholder<->patch-count invariant after
+    # pack-level truncation; both are processor constants the dataloader cannot derive.
+    collator_kwargs: Annotated[dict, Parameter(help="extra kwargs bound into the collator")] = {}
     pack_to_max_length: Annotated[bool, Parameter(help="whether to pack to max length")] = True
     pack_level: Annotated[
         Literal["soft", "none", "__legacy", "hard", "mllm_hybrid", "preset"],
@@ -348,19 +361,17 @@ class DataloaderConfig(BaseDataloaderConfig):
         return result
 
     def build_collator(self):
-        if self.collator == "sft_llm_collator":
-            return sft_llm_collator
-        elif self.collator == "intern_s1_vl_sft_collator":
-            return intern_s1_vl_sft_collator
-        elif self.collator == "qwen3_vl_sft_collator":
-            return qwen3_vl_sft_collator
-        elif self.collator == "fake_collator":
-            return fake_collator
-        else:
-            collator = pydoc.locate(self.collator)
-            if collator is None:
-                raise ImportError(f"Cannot locate collator: {self.collator}")
-            return collator
+        builtin = {
+            "sft_llm_collator": sft_llm_collator,
+            "intern_s1_vl_sft_collator": intern_s1_vl_sft_collator,
+            "qwen3_vl_sft_collator": qwen3_vl_sft_collator,
+            "glm53_vl_sft_collator": glm53_vl_sft_collator,
+            "fake_collator": fake_collator,
+        }
+        collator = builtin.get(self.collator) or pydoc.locate(self.collator)
+        if collator is None:
+            raise ImportError(f"Cannot locate collator: {self.collator}")
+        return partial(collator, **self.collator_kwargs) if self.collator_kwargs else collator
 
     @model_validator(mode="before")
     @classmethod
