@@ -152,12 +152,17 @@ def build_pools(
             - ``pool_complete`` ``[P]`` bool (all ``index_kpool`` slots valid).
     """
     seq_len, device = k.shape[0], k.device
-    global_len = int(seq_ctx.cu_seq_lens_q[-1].item())
-    if seq_len != global_len:
-        raise RuntimeError(
-            f"build_pools needs key features for the whole sequence ({global_len} tokens) but got "
-            f"{seq_len}; gather them across the sequence-parallel mesh before calling."
-        )
+    # Reading `cu_seq_lens_q[-1]` is a host sync, and under `torch.compile` it is also a graph
+    # break in every DSA layer. What it guards against -- a caller that forgot to gather across
+    # the SP mesh -- is a programming error, not a data condition, so eager (which every test and
+    # the first training step exercise) is where it is worth paying for.
+    if not torch.compiler.is_compiling():
+        global_len = int(seq_ctx.cu_seq_lens_q[-1].item())
+        if seq_len != global_len:
+            raise RuntimeError(
+                f"build_pools needs key features for the whole sequence ({global_len} tokens) but "
+                f"got {seq_len}; gather them across the sequence-parallel mesh before calling."
+            )
     pool_index = build_pool_index(seq_ctx, seq_len, index_kpool, device)
 
     valid = pool_index >= 0
