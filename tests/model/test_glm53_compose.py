@@ -223,15 +223,29 @@ class TestGlm53ComposeForward:
         with pytest.raises(ValueError, match="placeholder count"):
             model(seq_ctx=seq_ctx, loss_ctx=None)
 
-    def test_mixed_image_and_video_in_one_sample_is_rejected(self):
+    def test_pack_with_an_image_sample_and_a_video_sample(self):
+        # 单个样本不能混图视频（由 TokenizeFn 拦截），但一个 pack 里放一个图像样本和一个视频样本
+        # 是常态。之前 compose 模型在 pack 级别拒绝，数据修好、视频真正参与训练后第 2 步就崩。
+        # 这里要求两种模态各自落到自己的 placeholder 上：与"逐模态手工 splice 后喂语言模型"逐位一致。
         model = _build_model()
         input_ids = torch.randint(2, 200, (1, SEQ_LEN)).cuda()
-        seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cuda")
-        seq_ctx.mm_token_type_ids = torch.zeros(1, SEQ_LEN, dtype=torch.long, device="cuda")
-        seq_ctx.pixel_values = torch.randn(4, _patch_dim(model), device="cuda", dtype=torch.bfloat16)
-        seq_ctx.image_grid_thw = torch.tensor([[1, 2, 2]], device="cuda")
-        seq_ctx.pixel_values_videos = torch.randn(4, _patch_dim(model), device="cuda", dtype=torch.bfloat16)
-        seq_ctx.video_grid_thw = torch.tensor([[1, 2, 2]], device="cuda")
+        mm_type = torch.zeros(1, SEQ_LEN, dtype=torch.long, device="cuda")
+        mm_type[0, 10] = 1  # 一个图像 token：[1, 2, 2] 的 4 个 patch 合并成 1 个
+        mm_type[0, 60] = 2  # 一个视频 token
+        pixel_values = torch.randn(4, _patch_dim(model), device="cuda", dtype=torch.bfloat16)
+        pixel_values_videos = torch.randn(4, _patch_dim(model), device="cuda", dtype=torch.bfloat16)
+        grid = torch.tensor([[1, 2, 2]], device="cuda")
 
-        with pytest.raises(AssertionError, match="image-only or video-only"):
-            model(seq_ctx=seq_ctx, loss_ctx=None)
+        seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cuda")
+        seq_ctx.mm_token_type_ids = mm_type
+        seq_ctx.pixel_values, seq_ctx.image_grid_thw = pixel_values, grid
+        seq_ctx.pixel_values_videos, seq_ctx.video_grid_thw = pixel_values_videos, grid
+        logits = model(seq_ctx=seq_ctx, loss_ctx=None).logits
+
+        embeds = model.language_model.embed_tokens(input_ids)
+        embeds[mm_type == 1] = model.get_visual_features(pixel_values, grid).to(embeds.dtype)
+        embeds[mm_type == 2] = model.get_visual_features(pixel_values_videos, grid).to(embeds.dtype)
+        ref_ctx = SequenceContext.from_input_ids((input_ids,), device="cuda").copy(input_ids=None, inputs_embeds=embeds)
+        reference = model.language_model(ref_ctx, None).logits
+
+        torch.testing.assert_close(logits, reference, rtol=0, atol=0)

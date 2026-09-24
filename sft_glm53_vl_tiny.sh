@@ -33,7 +33,11 @@ export SPARSE_MLA_BACKEND="${SPARSE_MLA_BACKEND:-flash_mla_cudnn}"
 export VISION_ATTN_IMPL="${VISION_ATTN_IMPL:-flash_attention}"
 
 export DATASET_SAMPLE_RATIO="${DATASET_SAMPLE_RATIO:-1.0}"
-export SAMPLE_MAX_LENGTH="${SAMPLE_MAX_LENGTH:-4096}"
+# Unlike the text launcher's 4096, this matches PACK_MAX_LENGTH: a video sample cannot be
+# truncated (cutting a visual span corrupts it, so the tokenize fn drops it instead), and ci_vl's
+# two-video samples expand to ~14k tokens. At 4096 every video sample is filtered out and the run
+# silently becomes image-only.
+export SAMPLE_MAX_LENGTH="${SAMPLE_MAX_LENGTH:-16384}"
 export PACK_MAX_LENGTH="${PACK_MAX_LENGTH:-16384}"
 # Caps the per-image patch count so one packed sample keeps room for text; the placeholder span
 # has to fit inside PACK_MAX_LENGTH or the collator's invariant check fires.
