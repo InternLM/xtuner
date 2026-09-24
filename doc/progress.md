@@ -719,3 +719,60 @@ step 1 打出的是 `seqlen_tokens: 8192` 但 `img_tokens: 14688`——**视觉�
 - `sparse_mla_backend="tilelang"`（NoPE）与 `indexer_backend="deep_gemm_fp8"` 仍是显式
   `NotImplementedError`，沿用 F5 的结论（各自需要专门的 kernel 改造/核对，本期不做）。
 - 视觉侧 FSDP2 多卡 parity 仍只由端到端冒烟覆盖，没有独立的 `test_vision_fsdp_parity`。
+
+## torch.compile 吞吐回退的定位与修复（2026-09-24 续）
+
+**问题**：review 时发现文本矩阵里 `MODEL_COMPILE=1` 的 `tgs` 只有默认（不开 compile）的一半左右
+（5168.4 vs 12203.1）。开了 compile 反而慢一倍多，不合常理。
+
+**先排除"看起来合理"的解释**（都靠测量，不靠推断）：
+
+- 不是配置串了：两次跑记录的 env 除 `MODEL_COMPILE` 外完全一致（`EP4 SP1 16384 FP8=0 TORCH_COMPILE=1`）。
+- 不是数据不同：两次每个 step 的 `text_tokens` 逐步相同（16378/16381/16375/16028/...）。
+- 不是 warmup 没摊销（PR 里我原来就是这么写的，**是错的**）：eager 第 8 步起稳定在 1.34s±0.5%，
+  compile 到第 20 步还在 2.64~4.32s 之间跳，方差反而更大。编译好的模型 step 时间应该比 eager
+  更稳，不是更抖。
+- 不是反复重编译：`TORCH_LOGS=recompiles` 显示 200 次重编译，但都在 step 2 之前结束，dynamo cache
+  版本最多到 `/3`；guard 失败原因是 `tensor 'x' requires_grad mismatch`，即激活重算路径带来的
+  一次性双份编译，属正常。
+
+**真因**：`TORCH_LOGS=graph_breaks` 显示 32 处 graph break，位置正好是 `kda.py` 里三个
+`@torch._dynamo.disable` 包住的 FLA 入口。GLM-5.3-Flash 是 KDA 主导的（45 层里 34 层），于是**每个
+KDA 层都把外层编译区打断**，留下的编译块很碎，guard 与重入开销盖过了融合收益。
+
+这个 workaround 当初是"知情选择"——旧注释就写着："XTuner's own GatedDeltaNet sidesteps this by
+owning the op behind a `torch.library.custom_op`; KDA uses FLA's kernel directly, so mark the call
+itself as untraceable instead."。Qwen3.5 的 GatedDeltaNet 之所以能把
+`GatedDeltaNet.forward` 设成 `fullgraph=True`，正是因为它把 FLA kernel 包在了 custom_op 后面。
+
+**修法**：新增 `xtuner/v1/ops/kda/`，照搬 `xtuner/v1/ops/gated_deltanet` 的路子——直接调 FLA 的
+`chunk_kda_fwd`/`chunk_kda_bwd`（绕开 FLA 自己带 `@torch.compiler.disable` 的 `chunk_kda`），用
+`torch.library.custom_op` + `register_fake` 包起来。dynamo 把 custom op 当不透明节点直接穿过去，
+`prepare_chunk_indices`（对 `cu_seqlens` 调 `.tolist()`，inductor 无法 lower）就留在图外而不再断图。
+
+只支持本模型实际用到的调用形态（无 initial_state/output_final_state、gate 由 `fused_kda_gate` 外
+部算好、不走 FLA CP），其余显式 raise 而不是悄悄换路径。recurrent kernel 保留 `dynamo.disable`：
+它只在 `seq_len <= 64` 触发，编译训练走不到，且分支由 Python int 选择，只有被选中的分支会被 trace。
+短卷积那处 break 暂留（见下）。
+
+**数值验证**：与 `fla.ops.kda.chunk_kda` 在 packed 双文档输入上逐位比对，forward 与 q/k/v/g/beta
+五个梯度 `max|diff|` 全为 0。这一步抓到了第一版实现的真 bug：FLA 的 backward 把**已 L2-norm 的**
+q/k 喂给 `l2norm_bwd`，我最初传了原始 q/k——forward 逐位正确、只有 q/k 梯度错（max|diff| ~1.0/1.5）。
+只测 forward parity 的测试抓不到这种错。
+
+**效果**（8 卡、20 step、`PACK_MAX_LENGTH=16384`、同一批数据）：
+
+| 文本模型 | step 稳态耗时 | tgs@20 | mem@20 | step20 loss |
+|---|---:|---:|---:|---:|
+| eager（`MODEL_COMPILE=0`） | 1.34s | 12203.1 | 86.22 | 10.31408882 |
+| compile（修复前） | 2.6~4.3s，不收敛 | 5168.4 | 82.15 | 10.31412411 |
+| **compile（修复后）** | **1.21s** | **13381.1** | 82.11 | 10.31426430 |
+
+compile 从"比 eager 慢 2.4 倍"变成"比 eager 快约 10%"，step 时间也终于收敛稳定。graph break 从 32
+降到 30，`chunk_kda` 那处消失，剩下的是短卷积（`kda.py:161`）与 KPool indexer（`kpool.py:115/155`）。
+
+**多模态侧几乎没变**（tgs 4353.5 → 4090.7，在 step 间波动范围内；step1 loss 逐位相同 12.34103584）：
+VL 的 step 时间由视觉塔的 ~3 万 patch 主导，文本塔占比小，所以 KDA 这条修复对 VL 吞吐帮助有限。
+VL 的 step20 loss 从 10.24398804 变成 10.28855610——step1 逐位一致、数据逐步一致，说明前向没变；
+差异来自编译区变大后融合顺序变化的末位误差，经 MoE router / DSA indexer 的**离散 top-k 选择**放大
+（与 F5 记录的 near-tie 翻转同源），20 步累积到这个量级，不是数值错误。
