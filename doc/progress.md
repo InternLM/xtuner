@@ -528,8 +528,8 @@ hidden_states 是 4D 还是 3D）。`build_layers`/`build_mtp_block` 需要整�
 - `Glm53TextMoEConfig` / `Glm53VisionConfig` / `Glm53ProjectorConfig` / `Glm53BaseConfig` 的
   `hf_config` 均返回 `None`：`save_hf` 只能沿用原始 HF config，训练中若改过结构/维度，导出的
   checkpoint 无法自洽。本期定位是先跑通训练，明确记录而非静默跳过；
-- Vision SP 沿用 F2 记录的缺口（未实现，非仅未验证）；splice 逻辑假设
-  `sequence_parallel_mesh` 为 `None`/size=1，未做 LLM-SP 场景验证；
+- ~~Vision SP 沿用 F2 记录的缺口；splice 逻辑假设 `sequence_parallel_mesh` 为 `None`/size=1~~
+  —— 已实现并补 2 卡 parity，见 H2；
 - FSDP2/compile/FP8 训练路径在 compose 层未做单测验证（`fully_shard`/`compile_cfg` 接线
   存在，但未跑多卡）；
 - `MODEL_COMPILE=1` 端到端训练未跑通，见排查记录 4（FLA `prepare_chunk_indices`/
