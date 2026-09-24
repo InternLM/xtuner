@@ -340,6 +340,9 @@ class MoEDecoderLayer(nn.Module):
             training_dtype="fp8" if float8_cfg is not None else "bf16",
             generate_dtype=generate_config.dtype if generate_config is not None else "bf16",
         )
+        # Set by the owning model for the duration of a train step; receives this rank's grouped-GEMM row count
+        # (routed token copies landing on its local experts) after every dispatch.
+        self.recv_tokens_hook: Callable[[int], None] | None = None
 
     def forward(
         self,
@@ -466,6 +469,8 @@ class MoEDecoderLayer(nn.Module):
             pre_dispatched=pre_dispatched,
             dispatched=dispatched,
         )
+        if self.recv_tokens_hook is not None:
+            self.recv_tokens_hook(post_dispatched["hidden_states"].shape[0])
         # ProberList.after_dispatch(
         #     self.layer_idx,
         #     post_dispatched["hidden_states"],
@@ -626,6 +631,8 @@ class MoEDecoderLayer(nn.Module):
                 dispatched=dispatched,
                 async_op=True,
             )
+            if self.recv_tokens_hook is not None:
+                self.recv_tokens_hook(post_dispatched["hidden_states"].shape[0])
             if self.ep_mesh is not None:
                 # Preserve the same dynamic-token compile contract for every in-layer micro-batch.
                 torch._dynamo.mark_dynamic(post_dispatched["hidden_states"], 0)

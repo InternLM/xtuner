@@ -913,6 +913,9 @@ class TrainingWorker(SingleAcceleratorWorker):
 
             self._maybe_onload_logprob(batches_loss_ctx)
 
+            # Make max_memory/reserved_memory below this step's peak instead of the process-lifetime peak (~2us, no
+            # sync), so the memory columns line up with per-step metrics such as `ep_load_peak_ratio`.
+            DEVICE_MODULE.reset_peak_memory_stats()  # type: ignore[attr-defined]
             train_step_begin = time.perf_counter()
             with self._maybe_profiling(global_train_step, "train_step"):
                 train_step_info = self._engine.train_step(
