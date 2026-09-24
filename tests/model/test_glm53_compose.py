@@ -6,6 +6,7 @@ required: KDA's Triton kernel has no CPU backend.
 
 import pytest
 import torch
+from torch.testing._internal.common_distributed import DistributedTestBase
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.model.compose.glm53 import Glm53BaseConfig, Glm53ProjectorConfig, Glm53VisionConfig
@@ -14,6 +15,7 @@ from xtuner.v1.model.moe.glm53.nope_dsa_mla import NoPEDSAMLAConfig
 from xtuner.v1.module.attention.kda import KDAConfig
 from xtuner.v1.module.decoder_layer.mhc import MHCConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
+from xtuner.v1.utils.test_utils import init_data_mesh
 
 
 HIDDEN = 32
@@ -92,40 +94,60 @@ def _build_model():
     return model
 
 
-@pytest.fixture
-def two_rank_mesh():
-    """A real 2-rank ``DeviceMesh`` over the fake process group. The guard under test reads only
-    ``mesh.size()`` and raises before any collective, so no second process is needed -- and a
-    real mesh keeps this a behaviour test rather than a test against a mock."""
-    import torch.distributed as dist
-    from torch.distributed.device_mesh import init_device_mesh
-    from torch.testing._internal.distributed.fake_pg import FakeStore
-
-    dist.init_process_group("fake", rank=0, world_size=2, store=FakeStore())
-    try:
-        yield init_device_mesh("cpu", (2,))
-    finally:
-        dist.destroy_process_group()
-
-
 def _patch_dim(model) -> int:
     pe = model.vision_tower.patch_embed
     return pe.in_channels * pe.temporal_patch_size * pe.patch_size**2
 
 
-class TestGlm53ComposeSequenceParallelGuard:
-    """LLM 序列并行尚未支持时的显式护栏。"""
+class TestGlm53ComposeSequenceParallel(DistributedTestBase):
+    """2 卡 VL 序列并行：视觉塔按 merge 块分片，特征 gather 回来后每个 rank 只写自己分片里的
+    placeholder，logits 必须与非 SP 的对应片段一致。"""
 
     @pytest.mark.gpu
-    def test_forward_rejects_a_sequence_parallel_context(self, two_rank_mesh):
-        # splice 用全局 mm_token_type_ids 索引 inputs_embeds；SP 下 embeds 被分片而 mask 不是，
-        # 数量对不上时报的是"视觉特征数不符"，会把人指向错误方向。这里必须按名字拒绝。
+    def test_image_splice_under_sp_matches_non_sp(self, device="cuda"):
+        self.create_pg(device)
+        sp_size = self.world_size
+        torch.manual_seed(0)
         model = _build_model()
-        seq_ctx = SequenceContext.from_input_ids((torch.zeros(1, SEQ_LEN, dtype=torch.long),), device="cuda")
-        seq_ctx.sequence_parallel_mesh = two_rank_mesh
+        for param in model.parameters():
+            torch.distributed.broadcast(param.data, src=0)
 
-        with pytest.raises(AssertionError, match="sequence parallel"):
-            model(seq_ctx=seq_ctx, loss_ctx=None)
+        num_placeholders = 4  # merge_unit = MERGE**2 = 4
+        raw_patches = num_placeholders * MERGE * MERGE
+        grid_side = int(raw_patches**0.5)
+        pixel_values = torch.randn(raw_patches, _patch_dim(model), device=device, dtype=torch.bfloat16)
+        torch.distributed.broadcast(pixel_values, src=0)
+        image_grid_thw = torch.tensor([[1, grid_side, grid_side]], device=device)
+
+        input_ids = torch.randint(2, 200, (1, SEQ_LEN), device=device)
+        torch.distributed.broadcast(input_ids, src=0)
+        mm_type = torch.zeros(1, SEQ_LEN, dtype=torch.long, device=device)
+        # 两段 placeholder 分别落在 rank0 / rank1 的分片里，强制走跨 rank 的特征切片逻辑。
+        mm_type[0, 10:12] = 1
+        mm_type[0, SEQ_LEN // 2 + 10 : SEQ_LEN // 2 + 12] = 1
+
+        def _seq_ctx(sp_mesh):
+            ctx = SequenceContext.from_input_ids((input_ids,), device=device)
+            ctx.mm_token_type_ids = mm_type
+            if sp_mesh is not None:
+                ctx = ctx.split(sequence_parallel_mesh=sp_mesh)
+            # 媒体张量保持全局，直到 splice 完成（与 qwen3_vl 的 VLM CP 约定一致）。
+            ctx.pixel_values = pixel_values
+            ctx.image_grid_thw = image_grid_thw
+            return ctx
+
+        reference = model(seq_ctx=_seq_ctx(None), loss_ctx=None).logits
+        sp_mesh = init_data_mesh(device, sp_size)["sp"]
+        sp_logits = model(seq_ctx=_seq_ctx(sp_mesh), loss_ctx=None).logits
+
+        rank = sp_mesh.get_local_rank()
+        local_len = SEQ_LEN // sp_size
+        expected = reference[:, rank * local_len : (rank + 1) * local_len]
+        torch.testing.assert_close(sp_logits, expected, rtol=2e-2, atol=2e-2)
+
+    @property
+    def world_size(self) -> int:
+        return 2
 
 
 @pytest.mark.gpu
