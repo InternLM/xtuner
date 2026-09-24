@@ -358,9 +358,12 @@ GPU flake，不是 XTuner 侧实现问题，未做任何生产代码改动。
   3.5.2 的备选项）：`NoPEDSAMLAConfig` 构造期显式 `NotImplementedError`，不是静默不可用。
 - `indexer_backend="deep_gemm_fp8"` 的 KPool FP8 加速路径：`KPoolIndexer` 只实现了
   `torch`/`tilelang` 两档；FP8 版本需要专门的核对，本期不做。
-- KPool/NoPE-DSA 的 SP（sequence_parallel_mesh size>1）路径按设计文档写了（`kpool_topk_indices`
-  内的 `gather_for_sequence_parallel` + `NoPEDSAMultiLatentAttention.forward` 的 key gather），
-  但**没有像 F3 KDA 那样跑 2 卡 SP GPU 测试**验证；留给 F6 端到端训练阶段或后续补测。
+- ~~KPool/NoPE-DSA 的 SP 路径未做 2 卡验证~~ —— 已修复并补测。原实现忽略
+  `SequenceContext._shard_start`，rank>0 按本地 token 号建池并按本地 pool 号算可见窗口，选到的是
+  错误的 token（20 step 冒烟的 loss 曲线对此不敏感，所以此前没暴露）。现在 pool 构建改为在**全局
+  序列**上做（`k`/`gate_scores` 先 gather，再 `build_pools`，并有构造期守卫），query 侧用
+  `shard_start` 映射到全局网格；覆盖 `TestKpoolSequenceParallelCoordinates`（CPU）与
+  `TestKpoolSequenceParallelParity`（2 卡 GPU）。
 
 **HF 数值 oracle**：`transformers.models.glm5_next.modeling_glm5_next.Glm5NextTextIndexer`
 （`get_pooled_states` / `get_visible_tokens` / `append_visible_tail`）与
@@ -397,4 +400,417 @@ GPU flake，不是 XTuner 侧实现问题，未做任何生产代码改动。
 
 ## F6 端到端训练与 MTP
 
-**状态**：未开始。依赖 F1~F5 全部完成。
+**状态**：核心（文本模型 + MTP + compose model 构造/前向/反向/真实权重覆盖）已完成，已提交；
+验收 1（`test_fsdp_accuracy`，F0 25B 裁剪 checkpoint 与真实 transformers 对比）与验收 2
+（单机 8 卡端到端训练冒烟，`sft_glm53_tiny.sh`）均已跑通——默认 profile 及
+`SP_SIZE=2 EP_SIZE=4`/`EP_SIZE=8 SP_SIZE=1`/`XTUNER_ACTIVATION_OFFLOAD=0` 三组冒烟组合全部
+20 step loss 单调下降、无 NaN/OOM（`MODEL_COMPILE=0`，理由见下方排查记录 4）。
+
+**交付**：
+- `xtuner/v1/model/moe/glm53/glm53.py`：`Glm53TextMoE(MoE)` / `Glm53TextMoEConfig(MoEConfig)`——
+  45 层 KDA/NoPE-DSA 混排文本塔，mHC 四流残差贯穿整个 decoder stack。
+- `xtuner/v1/model/compose/glm53/modeling_glm53.py` + `glm53_config.py` 追加的
+  `Glm53BaseConfig`：`Glm53ForConditionalGeneration(BaseComposeModel)`，image/video 分两次视觉
+  forward，用全局 `mm_token_type_ids` 做 splice。
+- 未新建 `xtuner/v1/model/moe/glm53/mtp.py`——见下方"与设计文档的偏差"。
+
+**关键架构决策：mHC 四流残差在 `_decoder_stack`/`_micro_batch_decoder_stack` 边界展开/收敛，
+不在每层内部**——`embed_tokens` 输出 `[B,S,D]` 在进入第一层前 `unsqueeze(-2).expand(...,hc_mult,
+D).contiguous()` 成 `[B,S,4,D]`；`build_layers` 构造的每一层（`Glm53DenseDecoderLayer`/
+`Glm53MoEDecoderLayer`，F4 已实现）内部自己做 `hc_pre`（4→1 collapse 计算）→ 子模块 → `hc_post`
+（1→4 re-expand 合并残差），层间流转的 hidden_states 全程是 `[B,S,4,D]`；跑完最后一层后
+`mean(dim=-2)` 收敛回 `[B,S,D]` 才进 `self.norm`/`lm_head`/MTP。`_decoder_stack` 只需在
+调用 `super()._decoder_stack(...)` 前后各包一层 expand/collapse，中间的 aux_loss/router
+bookkeeping 逻辑完全复用不用动（`aux_loss.accumulate` 是形状无关的直通张量 + 反向 hook，不关心
+hidden_states 是 4D 还是 3D）。`build_layers`/`build_mtp_block` 需要整体覆写（而不是像 GLM-5.2
+那样只在 `_call_decoder_layer` 打补丁），因为基类的这两个方法不支持往每层构造函数里多传一个
+`mhc_cfg` 关键字参数。
+
+**与 GLM-5.2 的简化：不需要 IndexShare / 跨层 `dsa_topk_ids` 传递**——真实 checkpoint 的
+`indexer_types` 全部是 `"full"`：完整 45 层规模下是 11 个 DSA 主干层各自独立的 indexer
++ MTP 自己的 indexer，共 12 个（与 peer session 独立核对的结论一致；KDA 层没有 indexer
+子模块，`indexer_types` 字段只对 DSA 层有意义）。因此 `MoE._call_decoder_layer`（未覆写）与基类
+`MTPLayer`/`MTPBlock`（未子类化）原样可用，`build_mtp_block` 只需要显式传
+`mhc_cfg=None`（对应 checkpoint `layers.45` 没有 `hc_*` 参数）。**这也是设计文档列出的
+`mtp.py` 交付物最终没有新建的原因**——基类 `MTPLayer`（`enorm`/`hnorm`/`eh_proj`/
+`final_layernorm`）与真实 checkpoint `layers.45` 的 `enorm`/`hnorm`/`eh_proj`/
+`shared_head.norm` 键名逐一核对完全吻合，不需要 GLM-5.2 那样的定制子类。
+
+**排查记录（真实根因，非推测）**：
+1. 最初端到端 forward+backward 冒烟测试里，KDA 层（`A_log`/`dt_bias`/`q_proj`/`k_proj`/
+   `v_proj`/conv1d 权重）全部显示无梯度。没有直接假设是 mHC 集成 bug 或跳过，而是先写了一个
+   隔离单层（`Glm53DenseDecoderLayer`，只含一个 KDA attn + mHC，不含其余 44 层）的最小复现，
+   对比 `head_dim=8/seq_len=12`（无梯度）与 `head_dim=16/seq_len=128`（有梯度）两组参数，
+   确认是 FLA 的 `chunk_kda` Triton kernel 对 `head_dim<16` 的 `tl.dot` 有隐式最小 K 维度要求——
+   forward 在小 head_dim 下能跑但 backward 静默丢梯度、不报错。真实 GLM-5.3-Flash 的 KDA
+   `head_dim=128` 远高于这个阈值，不是生产 bug；只是我最初的单测合成 config 用了过小的
+   `head_dim=8`。F3 自己的 `tests/model/test_glm53_kda.py` 从未测过 backward（只测 forward
+   bitwise parity），所以这条 kernel 约束此前完全没有被记录，本次补进了新测试的注释里。
+2. 同一次冒烟测试里，DSA indexer 的全部参数（`wq_b`/`wk`/`k_norm`/`weights_proj`/
+   `index_kpool_compress_*`）显示无梯度，即使显式传了 `freeze_dsa_indexer=False`。读
+   `nope_dsa_mla.py` 源码定位到第 279 行：`topk_ids = reuse_during_recompute(...)` 整体包在
+   `with torch.no_grad():` 里，与 `freeze_dsa_indexer` 标志无关——indexer 的 top-k 选择本身是
+   离散、不可微操作，这个 `no_grad()` 包裹是 F5 里就已经存在的有意设计（indexer 通常靠独立的
+   蒸馏/辅助信号训练，不经主 LM loss 反传），不是本次引入的 bug，也不是需要修的东西；确认后
+   把这条断言写进了新测试（indexer 参数梯度预期为 `None`，其余全部参数预期非 `None`）。
+3. `tests/model/test_glm53_text_moe.py` 与 `tests/model/test_glm53_compose.py` 各自单独跑
+   pytest 全部通过（6/6、5/5），但两个文件放进同一次 `pytest a.py b.py` 调用会在第二个文件的
+   KDA 层触发 `torch._dynamo.exc.Unsupported`（`compile_cfg=False` 已经在两边的 config 都显式
+   设置，问题与本次代码逻辑无关）。用独立脚本复现同样代码路径确认不受影响后判定为
+   `torch._dynamo` 编译缓存/状态在同一进程内跨测试文件遗留的已知类别问题，不是 F6 的产品 bug；
+   本次的处理方式是让两个测试文件各自独立可跑通（已验证），不强行合并到一次 pytest 调用里。
+4. 端到端 8 卡冒烟（`EP_SIZE=4`）在 `Glm53TextMoE` 补上 `default_compile_cfg`
+   （`GLM53_MOE_NON_EP_COMPILE_CFG`/`GLM53_MOE_EP_COMPILE_CFG`，镜像 GLM-5.2 的做法）之后，
+   `MODEL_COMPILE=1` 仍在 FLA 的 `prepare_chunk_indices`/`prepare_lens`
+   （`fla/ops/utils/index.py`）触发 `ConstraintViolationError`——这两个函数用
+   `.tolist()` 驱动 Python 层循环展开 `cu_seqlens`，与 `MoE._forward` 对其
+   `mark_dynamic` 的动态 shape 约束天然不兼容，是上游 FLA/dynamo 的真实、已确认限制，不是
+   xtuner 集成 bug，也不在验收 2 的必测范围内（"覆盖 SP/EP/`XTUNER_ACTIVATION_OFFLOAD`/MTP"未
+   列 compile）；本次冒烟统一用 `MODEL_COMPILE=0` 跑通，compile 路径的这个上游限制记录于此，
+   留给后续单独排查。
+5. 8 卡冒烟 `EP_SIZE=4`（`dp_size=world_size/ep_size`，8 卡下为 2）在第一层（dense、无 MoE）
+   的 KDA `self_attn` 里稳定触发 `RuntimeError: Triton Error [CUDA]: an illegal memory access`，
+   `CUDA_LAUNCH_BLOCKING=1`/`compute-sanitizer --tool memcheck` 定位到
+   `fla.modules.fused_norm_gate.rms_norm_gated`（KDA 的 `o_norm`，gated RMSNorm）内的
+   Triton kernel 读取地址 `0x0` 附近（越界读，"42983227392 bytes before the nearest
+   allocation"）。加临时 debug print 确认 `self.o_norm.weight` 在调用时仍是
+   `DTensor`、`data_ptr()==0`——`kda.py` 里 `A_log`/`dt_bias`/conv 权重全部显式用
+   `_to_local()` 从 FSDP 的 DTensor 解出本地张量再传入 Triton kernel，但
+   `class FusedRMSNormGated(_FLAFusedRMSNormGated): pass` 直接复用 FLA 上游的
+   `forward`，其内部读 `self.weight` 时没有同样的解包，`ep_size=1` 下 FSDP2 的
+   pre-forward hook 恰好把它自动 unshard 成了 plain tensor（掩盖了问题），
+   `ep_size>1` 下这条路径未生效，DTensor 原样传进 Triton kernel 导致其 `data_ptr()`
+   为空指针。**根因确认后**（4 卡 `dp=1` 退化 mesh 与 8 卡 `dp=2` 真实拓扑各自最小复现均可
+   稳定复现，非推测），最小修复：给 `FusedRMSNormGated` 覆写 `forward`，在调用 FLA 的
+   `rms_norm_gated` 前对 `self.weight`/`self.bias` 做 `_to_local()`（`xtuner/v1/module/
+   attention/kda.py`），4 卡与 8 卡 `ep_size=4`（`dp=1`/`dp=2`）复现脚本均转为通过，随后
+   真实 8 卡 `sft_glm53_tiny.sh` 默认 profile 与三组冒烟组合全部跑通。
+
+**测试结果**：
+- `tests/model/test_glm53_text_moe.py`（6/6，GPU）：layer schedule 与真实 checkpoint pattern
+  一致；小合成 config 前向+反向全参数梯度检查（含上述 indexer 例外断言）；MTP block 构造与
+  前向；`GLM_5_3_FLASH_PATH`（F0 25B 裁剪模型）真实权重覆盖——`from_hf(strict=False)` 零
+  missing/unloaded，全部 167 个顶层参数张量加载成功。
+- `tests/model/test_glm53_compose.py`（5/5，GPU）：纯文本前向；image splice；video splice
+  （含 `flatten_video_grid_thw`）；placeholder 数量不符时立即 `raise ValueError`（不是 Qwen
+  compose 那种 `except Exception` 后继续训练，§16.2）；image+video 混合样本 `AssertionError`。
+- 额外用真实完整（非裁剪）checkpoint 做了一次 forward 冒烟（`GLM_5_3_FLASH_PATH` 指向 F0 的
+  25B 裁剪模型加载完整权重 + 真实随机 input_ids 前向）：无 NaN/Inf，logits 统计量合理。
+- 单机 8 卡 `sft_glm53_tiny.sh`（真实 25B 裁剪 checkpoint、`PACK_MAX_LENGTH=16384`、
+  `TOTAL_STEP=20`、`MODEL_COMPILE=0`，理由见排查记录 4），四组 profile 全部 20 step 完成、
+  loss 单调下降、无 NaN/OOM（以下均为 rank0 数值，`mem` 为 `max_memory`/`reserved_memory`，
+  `tgs`/`seqlen_tgs`/`exp_tgs` 为 step 20 的吞吐）：
+
+  | profile | step1 loss | step20 loss | grad_norm@20 | mem@20 (GB) | tgs@20 | seqlen_tgs@20 | exp_tgs@20 | 用时 |
+  |---|---|---|---|---|---|---|---|---|
+  | 默认（`EP4 SP1 offload=1`） | 11.2955 | 10.3044 | 48.08 | 85.00 / 104.98 | 12357.8 | 12379.0 | 4472.0 | 73s |
+  | `SP2 EP4` | 11.3876 | 10.4090 | 45.27 | 75.10 / 96.08 | 9677.1 | 9677.1 | 1315.1 | 125s |
+  | `EP8 SP1` | 11.2955 | 10.3042 | 48.03 | 98.84 / 111.17 | 12313.3 | 12334.4 | 4405.3 | 74s |
+  | `offload=0`（EP4 SP1） | 11.2955 | 10.3042 | 48.10 | 84.48 / 104.44 | 12538.9 | 12560.4 | 5028.6 | 65s |
+
+  几点读数：`SP2` 因每卡有效 seqlen 减半（8192 vs 16384）且引入 SP 通信，`tgs` 明显更低；
+  `offload=0` 比默认（`offload=1`）快且 `tgs` 更高，是激活值 CPU-GPU 搬运开销被省掉的预期结果；
+  `EP8` 与默认（`EP4`）loss/tgs 基本持平，`mem` 更高是因为 `dp_size = world_size/ep_size` 从
+  2 变成 1，FSDP 在更少的 dp 维度上切分非专家参数；`EP4`/`EP8`/`offload=0` 三组的 step1/step20
+  loss 几乎逐位一致，符合预期——这些旋钮不改变数学结果，只改变并行/内存策略。
+- "验收 1"（`tests/model/test_glm53_text_moe.py::TestGlm53TextMoEAccuracy::test_fsdp_accuracy`，
+  与真实 `transformers.Glm5NextForConditionalGeneration` 的 loss 对比，F0 25B 裁剪 checkpoint）：
+  `(dispatcher, ep_size) ∈ {(None, 1), ("all2all", 4), ("all2all", 8)}` 全部通过
+  （`_check_loss_curve` cosine 相似度 + rtol 3e-2）。`Glm5NextForConditionalGeneration` 未在
+  `AutoModelForCausalLM` 注册（是 VL/compose 入口类，需直接 import 使用，不能走 Auto 类）；
+  两侧比较范围对齐为主栈 5 层（HF 侧没有 MTP 前向，XTuner 侧显式 `mtp_config=None`）；
+  `sparse_mla_backend`/`indexer_backend` 强制设为 `"torch"`（eager，alignment=1）而非生产默认
+  `flash_mla_cudnn`（alignment=512），因为测试用的短句远小于一个对齐块。`ep_size=4/8` 两组
+  同时是排查记录 5（EP+mHC/o_norm DTensor bug）的真实 checkpoint 回归覆盖，不只是当时的
+  一次性复现脚本。
+
+**已知缺口**：
+- `Glm53TextMoEConfig` / `Glm53VisionConfig` / `Glm53ProjectorConfig` / `Glm53BaseConfig` 的
+  `hf_config` 均返回 `None`：`save_hf` 只能沿用原始 HF config，训练中若改过结构/维度，导出的
+  checkpoint 无法自洽。本期定位是先跑通训练，明确记录而非静默跳过；
+- ~~Vision SP 沿用 F2 记录的缺口；splice 逻辑假设 `sequence_parallel_mesh` 为 `None`/size=1~~
+  —— 已实现并补 2 卡 parity，见 H2；
+- FSDP2/compile/FP8 训练路径在 compose 层未做单测验证（`fully_shard`/`compile_cfg` 接线
+  存在，但未跑多卡）；
+- `MODEL_COMPILE=1` 端到端训练未跑通，见排查记录 4（FLA `prepare_chunk_indices`/
+  `prepare_lens` 与 dynamo 动态 shape 的上游不兼容，不在验收 2 必测范围内）；
+- FP8（`FP8=1`）未纳入本次冒烟组合，仅验证了 `FP8=0`。**2026-09-22 补测：`FP8=1` 实际跑不通**，
+  见下方 review 修复轮。
+
+## Review 修复轮（2026-09-22）
+
+对 `review_glm5p3flash_2026-09-22_04-28.md` 的意见逐条落地，10 个提交（`dfbb6800..0904fcff`），
+每条先补一个失败的测试再改实现。带删除线的两条（`_pre_moe_forward` 分层重构、`sft_glm53_tiny.sh`
+移位）按要求未做。
+
+**最重要的一条**：KPool 索引器此前在四处用 `torch.arange(seq_len)` 重建 packed 序列簿记，却从不加
+`SequenceContext._shard_start`，于是 `sp_size > 1` 时 rank>0 把自己的分片当成序列开头编号，选到错误
+的 token。这不是"未验证"而是"已确认错误"——20 step 冒烟的 loss 曲线对 top-k 选错不敏感，所以此前
+`SP_SIZE=2` 跑过却没暴露。修复后 pool 构建改到全局序列上（`k`/`gate_scores` 先 gather），query 侧用
+`shard_start` 映射。**不能**靠 `shard_size % index_kpool == 0` 断言：池在文档边界重启而文档起点任意，
+文档长度 `[5, 11]` + `sp_size=2` 仍会让池 `[5,6,7,8]` 横跨接缝。
+
+其余：routed experts 未启用 clamped SwiGLU（`moe_act_fn_cfg` 没配，42 层 × 288 个专家与 HF
+`Glm5NextTextExperts._apply_gate` 不一致）；`init_weights()` 对 16 个新参数直接 `RuntimeError`，
+from-scratch 路径不可用；mHC/KDA 的 fp32 参数没进 `fp32_keys_pattern` 因而被 FSDP 降到 bf16；
+EP 配置 pop 掉编译边界导致 42 层的 `hc_pre`/`hc_post` 跑 eager。
+
+### 端到端矩阵（8 卡，20 step，`TOTAL_STEP=20`）
+
+| 配置 | 结果 | step1 `local_loss` | step20 | 与 baseline 差 |
+|---|---|---:|---:|---:|
+| baseline（EP=4 SP=1 offload=1） | ✅ | 11.30479431 | 10.31408882 | — |
+| `SP_SIZE=2`（**修复后**） | ✅ | 11.31528187 | 10.32396603 | 0.010 / 0.010 |
+| `SP_SIZE=2`（修复前，见上方旧记录） | ✅ | 11.39 | 10.41 | 0.09 / 0.11 |
+| `EP_SIZE=8` | ✅ | 11.30479431 | 10.31379890 | 0.000 / 0.000 |
+| `XTUNER_ACTIVATION_OFFLOAD=0` | ✅ | 11.30479431 | 10.31401062 | 0.000 / 0.000 |
+| `FP8=1`（修复后） | ✅ | 11.30907917 | 10.18041611 | — |
+| `MODEL_COMPILE=1`（修复后） | ✅ | 11.30469227 | 10.31412411 | 0.000 / 0.000 |
+
+SP 的数学等价性是这轮最直接的证据：修复前 SP=2 与 SP=1 相差约 0.1，正是 rank1 选错 token 的特征；
+修复后收敛到 ~0.01（bf16 与数据分片非确定性的量级）。EP=8 与 offload=0 的 step1 与 baseline 逐位相同。
+
+### 两个**既有**缺口（已在基线提交 `1684247e` 上复现同样的报错，非当时引入）——均已在下一轮修复
+
+- ~~**`FP8=1` 跑不通**~~：`NotImplementedError: attempting to run aten.split_with_sizes.default`。
+  根因：absorbed MLA 需要**未量化**的 `kv_b_proj.weight` 折进 query / 展开输出，而
+  `build_linear(float8_cfg=...)` 把它变成 `Float8Tensor`，后者既不支持 `view` 也不支持 `split`。
+  修法与 GLM-5.2 的 DSA 一致：`float8_cfg` 开启时单独用 `float8_cfg=None` 重建这一个投影。
+  20 step 冒烟 `local_loss` 11.30907917 → 10.18041611。
+- ~~**`MODEL_COMPILE=1` 跑不通**~~：`DataDependentOutputException: aten._local_scalar_dense.default`。
+  根因比"FLA 与 dynamo 不兼容"更具体：FLA 的 `prepare_chunk_indices` 对 `cu_seqlens` 调
+  `.tolist()`，单独看会被 dynamo 折成常量；但训练用 `_mark_dynamic` 把 packed 边界标成动态以复用
+  计算图，此时它才成为真正的数据依赖算子而 inductor 无法 lower。修法：把 FLA 的入口
+  （chunk / recurrent kernel **以及短卷积**）包进 `torch._dynamo.disable`，让 dynamo 在调用处断图
+  ——外层编译区本就都是 `fullgraph=False`。20 step 冒烟 `local_loss` 11.30469227 → 10.31412411，
+  与 eager baseline（11.30479431 → 10.31408882）在 1e-4 量级一致。
+
+### 后续一轮（2026-09-23）：TODO 清理、两个缺口修复、单测精简
+
+- 工作区遗留的 4 条 TODO 全部落地：DSA 的 `sparse_mla_backend` / `indexer_backend` 改为各自显式
+  默认 `tilelang`（不再继承，`resolve_indexer_backend` 随之删除）；KPool 接上
+  `indexer_topk_query_chunk_size`；cute_dsl indexer 经调研**不做**，原因写在代码注释里——其 kernel
+  只特化了 topk ∈ {1024, 2048}（radix 位宽、候选 tile、compaction 轮数逐值调优），而 KPool 要的是
+  `index_topk // index_kpool` = 512，需要新增并调优第三档特化；top-k ids offload 按 review 结论放弃。
+- 接 chunking 时顺带修掉一个潜在 bug：`kpool_topk_indices` 直接调 TileLang 原语，而该原语没有尾块
+  保护，只在 query 数能被 `block_q = 128 // index_n_heads`（=4）整除时正确。生产 pack 恰好整除，所以
+  一直没暴露。现在两个 indexer 共用 `tilelang_indexer_topk_from_ranges`，尾块补齐与分块都在里面。
+- 单测按 `zdev/zcoding/refactor_test.md` 精简：去掉唯一一处 mock 项目内模块的用例（compose 的 SP
+  护栏此前把 model 和 device mesh 都 Mock 掉了，现在用真实模型 + 真实 2-rank mesh 走 public
+  forward）；删掉断言 pydantic 默认值之类的过简用例与被端到端用例完全覆盖的中间步骤用例
+  （`test_glm53_dsa.py` 21 → 14）；所有文件补上两级 docstring 与逐用例中文注释。
+
+同源的一条测试可观测性问题：`MaybeCompile.enable_compile` 是**进程级**的，任一构建了编译模型的
+测试会为整个进程打开这些函数的编译，于是 `tests/model/test_glm53_compose.py::TestGlm53ComposeForward`
+的 3 例只在与 `test_glm53_text_moe.py` 同进程运行时失败（单独跑该文件 6/6 绿）。同样在 `1684247e`
+上复现，非本轮引入。
+
+## 多模态全功能打通与 Automodel 对照 review（2026-09-24）
+
+**目标**：以 `~/github/Automodel/doc/glm5p3_flash_sft.md`（Automodel `44cf34834` 的 GLM-5.3-Flash
+SFT 实现）与 `doc/xtuner_glm5p3flash_design.md` 为对照 review 文本/多模态实现，修掉问题，并把前面
+各节记录的「已知缺口」清到可用状态——重点是让多模态端到端训练跑通，验收矩阵与文本模态一致。
+
+### 一、与 Automodel 的契约逐条核对（结论：文本侧契约全部一致，无需改动）
+
+逐条核对 Automodel 文档第 3 节列出的模型局部契约，全部与 XTuner 现有实现吻合，均**不是**问题：
+
+| 契约 | Automodel 记录 | XTuner 现状 |
+|---|---|---|
+| KPool 物理宽度 | `index_topk + index_kpool - 1` = 2051，`-1` 填充，尾块最多 `kpool-1` | `kpool_output_width()` 同式（再按 kernel alignment 上取整），`-1` 填充，`_visible_tail_tokens` 同语义 |
+| `index_kpool` | 发布 checkpoint 为 4（HF 默认 16 只是无字段时的 fallback） | `NoPEDSAMLAConfig.index_kpool = 4` |
+| DSA score scale | `qk_nope_head_dim=256` 的 -0.5 次方，不是 latent 512 | `qk_rope_head_dim=0` 使基类自然得到 `softmax_scale = 256 ** -0.5` |
+| clamped SwiGLU 覆盖面 | dense 前 3 层 + routed/shared experts + **vision MLP**，漏 vision 是典型错误 | dense/shared 走 `swiglu_limit`，routed 走 `moe_act_fn_cfg`，vision MLP 与 merger 各自内联同一公式 |
+| KDA | `gate_lower_bound=-5.0`、kernel 内 QK L2 norm、safe gate | `KDAConfig(gate_lower_bound=-5.0)`、`use_qk_l2norm_in_kernel=True`、`safe_gate` 跟随 |
+| MoE router | sigmoid+bias、fp32、top-8、288 routed + 1 shared、route scale 2.5 | `NoAuxRouterConfig(scoring_func="sigmoid", norm_topk_prob=True, router_scaling_factor=2.5)` |
+| mHC | 每层两套（attn/ffn），`base/scale` 与 KDA `A_log/dt_bias` 走 fp32 holder | `MHCConfig(hc_mult=4, hc_sinkhorn_iters=20)` + `fp32_keys_pattern`（Review 修复轮已补） |
+
+Automodel 文档里两处与 XTuner **有意不同**、不按它改：其一它把 `layer 45`（MTP）在加载时直接丢弃、
+`num_nextn_predict_layers=0`，XTuner 是实现 MTP 的；其二它 `pixel_values_videos` 直接
+`NotImplementedError`，XTuner 的 F1 已支持视频。另外它 clamped SwiGLU 中间用 fp32 计算再 cast 回，
+HF `Glm5NextTextMLP`/`Glm5NextVisionMLP` 并没有这一步，XTuner 按 HF（数值 oracle）实现。
+
+### 二、本轮修掉的真实 bug（都是端到端跑起来才暴露的）
+
+1. **`glm53_vl_sft_collator` 无法被训练配置选中**（F1 记录的缺口）：`DataloaderConfig.build_collator()`
+   只认三个老 collator，dotted-path 兜底又没法传它多出来的两个必填参数，任何 VL 配置都会在
+   dataloader 构建阶段 `TypeError`。现在按名字注册，并加通用的 `collator_kwargs` 绑定额外参数。
+2. **`Glm53VLTokenizeFnConfig` 构造即报错**：类注释写明「不需要 chat_template」，但基类把该字段声明为
+   必填，`ValidationError: chat_template Field required`。给了默认值。
+3. **视觉塔 `attn_impl="flash_attention"` 直接跑不通**：塔是全仓唯一把 `max_seqlen` 用
+   `int(...item())` 物化的调用点，而 `flash_attn_varlen_func` v2 的 `max_seqlen_q` 声明是 Tensor，
+   直接报 `Expected a value of type 'Tensor' ... but instead found type 'int'`；顺带还多一次设备同步。
+   改为与其它所有 attention 调用点一致传 tensor。
+4. **视觉塔不搬 `pixel_values` 的设备**：`SequenceContext.to()` 有意不搬这两个媒体张量（注释写明由模型
+   侧切分后各自搬），塔却没搬，真实训练第一步就 `Input type (CPUBFloat16Type) and weight type
+   (CUDABFloat16Type) should be the same`。单测一直直接喂 device 张量，所以没暴露。现在在 SP 切分
+   **之后**搬，只搬本 rank 那一份。
+5. **`Glm53BaseConfig.from_hf` 是 `NotImplementedError`**：VL 训练没法从 checkpoint 构造模型。按
+   §5.2 的模块边界把 checkpoint 里同一份 `vision_config` 分发给 tower 与 projector 两个配置。
+
+### 三、Vision SP：从「显式拒绝」做到与非 SP 逐位一致
+
+原状态是 attention 里有半套 Ulysses、forward 不切 patch 序列（算错），上游 ShilohYu 的
+`ca8a9137` 已先把 `size()>1` 改成显式 `NotImplementedError`。本轮按设计文档 §9.3/§9.6 补齐：
+
+- `_shard_patches_for_sequence_parallel` 把全局 patch 序列补齐到 `sp_size * merge_unit` 的整数倍再
+  连续切分。**merge 对齐**是硬约束：projector 的 `downsample` 按连续 4 个 patch 组成 2×2 块，切在块
+  中间就会把两个 rank 的 patch 合成一个 token；对齐之后每个 rank 才能各自跑 projector（local
+  projector）。**等长**是 Ulysses all-to-all 的要求。
+- 补齐部分作为**额外一行 `grid_thw`** 声明，而不是静默 append，这样它在 `cu_seqlens` 里自成一段，
+  padding patch 与真实图像之间不可能互相 attend。
+- position ids 按 rank 切（RoPE 在 all-to-all 之前算），`cu_seqlens` 保持全局（all-to-all 之后
+  attention 看到的是整条序列）。
+- compose 侧 `_splice` 负责把各 rank 的特征 gather 回来：`mm_token_type_ids` 与 `input_ids` 同步被
+  切分，本地 mask 能索引本地 embedding，但说不出「全局特征里哪一段是我的」，所以先 gather mask 算出
+  本 rank 的偏移（= 前面各 rank 的同模态 placeholder 数），再切特征。gather 用 autograd 版本，反向
+  reduce-scatter，各 rank 拿回自己那份梯度。placeholder/特征数量校验改成比**全局**总数，SP 与非 SP
+  报错行为一致。
+
+### 四、视觉塔缺激活重算：多模态 OOM 的真正原因
+
+多模态端到端第一次跑就在 backward OOM（`PACK_MAX_LENGTH=16384`），把 pack 降到 8192 后 step 1
+能过（73.31 GB）但 step 2 仍然 OOM。按最小复现的思路先看日志里的实际量纲，而不是直接调小配置：
+step 1 打出的是 `seqlen_tokens: 8192` 但 `img_tokens: 14688`——**视觉塔处理的是 raw patch，数量
+远超 LLM 的 token 数**（16384 的 pack 实测 ~3 万 patch）。再查 `Glm53VisionModel.fully_shard`，
+发现它**完全没有接激活重算**，24 个 ViT block 的 attention 与 4096 宽 MLP 激活全部驻留，峰值由视觉
+侧决定，语言塔远没到极限。qwen3_vl 的视觉塔一直是按 `vision_recompute_ratio` 逐 block 包
+`apply_activation_checkpointing` 的，GLM-5.3 这边漏了。
+
+接上重算后（默认 `vision_recompute_ratio=1.0`），16384 pack、~3 万 patch 的默认 profile 峰值
+85.85 GB，OOM 消失。这条是本轮对多模态可用性影响最大的修复。
+
+### 五、多模态端到端验收矩阵（8 卡，20 step，与文本模态同口径）
+
+`sft_glm53_vl_tiny.sh` + `examples/v1/config/sft_glm53_vl.py`，真实 F0 25B 裁剪 checkpoint，
+`PACK_MAX_LENGTH=16384`，数据为 `zdev/sft_qwen35_mengke.sh` 用的 `ci_vl`（含图像与视频样本）。
+六组 profile **全部 20 step 完成、loss 下降、无 NaN/OOM**（rank0 数值，`mem` 为
+`max_memory`/`reserved_memory`，吞吐为 step 20）：
+
+| profile | step1 loss | step20 loss | grad_norm@20 | mem@20 (GB) | tgs@20 | seqlen_tgs@20 | exp_tgs@20 | 用时 | img_tokens |
+|---|---:|---:|---:|---|---:|---:|---:|---:|---:|
+| 默认（`EP4 SP1 offload=1`） | 12.34349346 | 10.23751831 | 32.69 | 86.11 / 107.45 | 3479.8 | 7083.2 | 1286.7 | 53s | 29736 |
+| `SP2 EP4` | 12.13223362 | 10.24192142 | 52.60 | 73.86 / 96.08 | 2253.5 | 4721.4 | 1708.6 | 33s | 6516 |
+| `EP8 SP1` | 12.34349346 | 10.23978424 | 39.65 | 96.77 / 117.13 | 3399.5 | 6919.8 | 1183.9 | 56s | 29736 |
+| `offload=0`（EP4 SP1） | 12.34349346 | 10.25128174 | 32.17 | 85.07 / 107.21 | 3514.9 | 7154.6 | 1264.8 | 52s | 29736 |
+| `FP8=1` | 12.34872818 | 9.99082375 | 23.11 | 84.92 / 106.38 | 3391.6 | 6903.8 | 1359.4 | 53s | 29736 |
+| `MODEL_COMPILE=1` | 12.34103584 | 10.24398804 | 32.14 | 81.74 / 104.83 | 4353.5 | 8861.7 | 668.4 | 71s | 29736 |
+
+几点读数：
+
+- **默认/`EP8`/`offload=0` 三组 step1 loss 逐位相同**（12.34349346），与文本侧同一结论——EP、激活
+  offload 只改并行/内存策略，不改数学。
+- **`SP2` 的 loss 不能与其它行逐位比**：`GLOBAL_BATCH_SIZE = world/sp`，SP2 下每 step 吃的是不同的
+  样本（`img_tokens` 6516 vs 29736）。它与默认组的可比量是 step20 收敛值，差 0.004，在 bf16 与数据
+  分片非确定性的量级内；Vision SP 本身的正确性由 2 卡逐位 parity 单测保证，不靠这条冒烟。
+- **`MODEL_COMPILE=1` 吞吐最高**（tgs 4353.5，比默认 +25%），峰值内存也最低（81.74 GB）——编译把
+  视觉塔的 clamp/激活链和 mHC 原语都融了；代价是 step1 的图编译开销（总用时 71s vs 53s）。
+- **`FP8=1` 的 loss 明显更低**（step20 9.99 vs 10.24），与文本侧 FP8 的表现同向：absorbed-MLA 路径
+  的数值确实被改变，不是 bug。
+- `EP8` 内存最高（96.77 GB），因为 `dp_size = world_size/ep_size` 从 2 变成 1，FSDP 在更少的 dp 维度
+  上切分非专家参数——与文本矩阵同一解释。
+
+### 六、本轮结束后仍然保留的缺口
+
+- `hf_config` 仍返回 `None`（四个配置类都是）。**按结论这不是缺口**：`hf_config is None` 时
+  `BaseModel._write_hf_index_and_config` 会把初始化模型用的原始 HF config/tokenizer 原样拷进导出
+  目录，对「不改结构的微调」而言导出的 checkpoint 是自洽的。只有训练中改过结构/维度才需要真正的
+  反向导出，那时再补。
+- `sparse_mla_backend="tilelang"`（NoPE）与 `indexer_backend="deep_gemm_fp8"` 仍是显式
+  `NotImplementedError`，沿用 F5 的结论（各自需要专门的 kernel 改造/核对，本期不做）。
+- 视觉侧 FSDP2 多卡 parity 仍只由端到端冒烟覆盖，没有独立的 `test_vision_fsdp_parity`。
+
+## torch.compile 吞吐回退的定位与修复（2026-09-24 续）
+
+**问题**：review 时发现文本矩阵里 `MODEL_COMPILE=1` 的 `tgs` 只有默认（不开 compile）的一半左右
+（5168.4 vs 12203.1）。开了 compile 反而慢一倍多，不合常理。
+
+**先排除"看起来合理"的解释**（都靠测量，不靠推断）：
+
+- 不是配置串了：两次跑记录的 env 除 `MODEL_COMPILE` 外完全一致（`EP4 SP1 16384 FP8=0 TORCH_COMPILE=1`）。
+- 不是数据不同：两次每个 step 的 `text_tokens` 逐步相同（16378/16381/16375/16028/...）。
+- 不是 warmup 没摊销（PR 里我原来就是这么写的，**是错的**）：eager 第 8 步起稳定在 1.34s±0.5%，
+  compile 到第 20 步还在 2.64~4.32s 之间跳，方差反而更大。编译好的模型 step 时间应该比 eager
+  更稳，不是更抖。
+- 不是反复重编译：`TORCH_LOGS=recompiles` 显示 200 次重编译，但都在 step 2 之前结束，dynamo cache
+  版本最多到 `/3`；guard 失败原因是 `tensor 'x' requires_grad mismatch`，即激活重算路径带来的
+  一次性双份编译，属正常。
+
+**真因**：`TORCH_LOGS=graph_breaks` 显示 32 处 graph break，位置正好是 `kda.py` 里三个
+`@torch._dynamo.disable` 包住的 FLA 入口。GLM-5.3-Flash 是 KDA 主导的（45 层里 34 层），于是**每个
+KDA 层都把外层编译区打断**，留下的编译块很碎，guard 与重入开销盖过了融合收益。
+
+这个 workaround 当初是"知情选择"——旧注释就写着："XTuner's own GatedDeltaNet sidesteps this by
+owning the op behind a `torch.library.custom_op`; KDA uses FLA's kernel directly, so mark the call
+itself as untraceable instead."。Qwen3.5 的 GatedDeltaNet 之所以能把
+`GatedDeltaNet.forward` 设成 `fullgraph=True`，正是因为它把 FLA kernel 包在了 custom_op 后面。
+
+**修法**：新增 `xtuner/v1/ops/kda/`，照搬 `xtuner/v1/ops/gated_deltanet` 的路子——直接调 FLA 的
+`chunk_kda_fwd`/`chunk_kda_bwd`（绕开 FLA 自己带 `@torch.compiler.disable` 的 `chunk_kda`），用
+`torch.library.custom_op` + `register_fake` 包起来。dynamo 把 custom op 当不透明节点直接穿过去，
+`prepare_chunk_indices`（对 `cu_seqlens` 调 `.tolist()`，inductor 无法 lower）就留在图外而不再断图。
+
+只支持本模型实际用到的调用形态（无 initial_state/output_final_state、gate 由 `fused_kda_gate` 外
+部算好、不走 FLA CP），其余显式 raise 而不是悄悄换路径。recurrent kernel 保留 `dynamo.disable`：
+它只在 `seq_len <= 64` 触发，编译训练走不到，且分支由 Python int 选择，只有被选中的分支会被 trace。
+短卷积那处 break 暂留（见下）。
+
+**数值验证**：与 `fla.ops.kda.chunk_kda` 在 packed 双文档输入上逐位比对，forward 与 q/k/v/g/beta
+五个梯度 `max|diff|` 全为 0。这一步抓到了第一版实现的真 bug：FLA 的 backward 把**已 L2-norm 的**
+q/k 喂给 `l2norm_bwd`，我最初传了原始 q/k——forward 逐位正确、只有 q/k 梯度错（max|diff| ~1.0/1.5）。
+只测 forward parity 的测试抓不到这种错。
+
+**效果**（8 卡、20 step、`PACK_MAX_LENGTH=16384`、同一批数据）：
+
+| 文本模型 | step 稳态耗时 | tgs@20 | mem@20 | step20 loss |
+|---|---:|---:|---:|---:|
+| eager（`MODEL_COMPILE=0`） | 1.34s | 12203.1 | 86.22 | 10.31408882 |
+| compile（修复前） | 2.6~4.3s，不收敛 | 5168.4 | 82.15 | 10.31412411 |
+| **compile（修复后）** | **1.21s** | **13381.1** | 82.11 | 10.31426430 |
+
+compile 从"比 eager 慢 2.4 倍"变成"比 eager 快约 10%"，step 时间也终于收敛稳定。graph break 从 32
+降到 30，`chunk_kda` 那处消失，剩下的是短卷积（`kda.py:161`）与 KPool indexer（`kpool.py:115/155`）。
+
+**多模态侧几乎没变**（tgs 4353.5 → 4090.7，在 step 间波动范围内；step1 loss 逐位相同 12.34103584）：
+VL 的 step 时间由视觉塔的 ~3 万 patch 主导，文本塔占比小，所以 KDA 这条修复对 VL 吞吐帮助有限。
+VL 的 step20 loss 从 10.24398804 变成 10.28855610——step1 逐位一致、数据逐步一致，说明前向没变；
+差异来自编译区变大后融合顺序变化的末位误差，经 MoE router / DSA indexer 的**离散 top-k 选择**放大
+（与 F5 记录的 near-tie 翻转同源），20 步累积到这个量级，不是数值错误。
+
+### 续：把剩下的 FLA 入口也移植掉，以及一个反直觉的测量结果
+
+`chunk_kda` 之后，把 KDA 另外两个入口也按同样方式移植：FLA 的 `fused_kda_gate` 自己带
+`@torch.compiler.disable`（break 原因就是 "Skip calling `torch.compiler.disable()`d function"），
+短卷积的 dispatcher 会走到 dynamo 追不进去的 Triton launch helper。两者改为调 FLA 的
+`kda_gate_fwd`/`kda_gate_bwd`、`causal_conv1d_fwd`/`causal_conv1d_bwd`，用 `custom_op` 包起来，
+kernel 不变所以数值不变。另外 `build_pools` 里那条"整序列"护栏要读 `cu_seq_lens_q[-1]`，既是 host
+sync 又是每个 DSA 层一次 break；它防的是"调用方忘了跨 SP gather"这种编程错误而不是数据条件，
+所以改成只在 eager 下检查（测试与第一步训练都会走到）。
+
+数值同样逐位验证：与 FLA 对应入口比对，forward 与全部梯度 `max|diff|` 为 0。写这个比对时又抓到两
+个真实细节——KDA 的 `dt_bias` 形状是 `[H*K]` 而不是 `[H]`（FLA 用 `dg.view(-1, H*K).sum(0)` 归约），
+以及 `kda_gate_bwd` 返回的 `dg` 是 `type_as(g)`，我第一版 fake 实现写成了 fp32；后者在 compile 下
+会悄悄产出错误 dtype。
+
+**反直觉的结果**：graph break 从 30 降到 10，**吞吐一点没变**（tgs@20 13376.2 vs 13381.1，稳态都是
+1.21s/step）。也就是说整个回退完全来自 `chunk_kda` 那一处 break——它落在最大的编译区中间；而 gate 与
+短卷积这些 break 很便宜。**break 的数量不是指标，break 落在哪里才是**。这两处移植仍然值得保留（去掉
+了每层的 host sync，也是让 `KimiDeltaAttention.forward` 能像 Qwen3.5 的 `GatedDeltaNet.forward`
+一样上 `fullgraph=True` 的前提），但不应记成吞吐优化。
+
+据此**不再移植** `kpool.py:115` 那处（`num_pools` 决定张量形状，属真正的 data-dependent shape）：
+它只值 2 处 break，而修法要把 `ctx.new_dynamic_size()` 的动态维度推进下游 DSA indexer kernel，
+动态 shape 本身是重编译的常见诱因——按上面的测量，这笔交易大概率是负的。
+
+### 与 Qwen3.5-VL 的机制对照结论
+
+| 机制 | Qwen3.5-VL | GLM-5.3-Flash（本轮前） | 处理 |
+|---|---|---|---|
+| 线性注意力 kernel | FLA 包在 `custom_op` 后面 | `torch._dynamo.disable` | **已借鉴**（compile 从慢 2.4x 变快 10%） |
+| 线性注意力 gate / 短卷积 | 同上 | 同上 | **已借鉴**（数值逐位一致） |
+| compile 粒度 | `GatedDeltaNet.forward`/`DenseDecoderLayer.forward` 走 `fullgraph=True` | 对应项都是 `fullgraph=False` | 之前是被 break 逼的，现在具备上调条件，待测 |
+| 文本 SP | Ulysses all-to-all，conv 在还原的全序列上做 | 同构 | 等价 |
+| 视觉 SP / splice | merge 对齐 + local projector + 特征 gather | 本轮补齐 | 等价 |
+| 视觉重算 | 逐 block，按 `vision_recompute_ratio` | 缺失（导致 OOM） | 本轮补齐 |
+| 视觉激活 offload | 逐 block `async_save_on_cpu` | 无 | Qwen3.5 更全，未借鉴（GLM 侧已有重算这个更大的收益） |
+| splice 失配处理 | `except` 后继续 | 立即 `raise` | **GLM 更严**，不改 |

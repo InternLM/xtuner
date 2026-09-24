@@ -14,11 +14,15 @@ Field names/defaults are checked against the real checkpoint's ``vision_config``
 - the checkpoint field is ``out_hidden_size``, not ``text_hidden_size``.
 """
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import ConfigDict
+from typing_extensions import Self
 
 from xtuner.v1.model.base import XTunerBaseModelConfig
+from xtuner.v1.model.compose.base import BaseComposeConfig
+from xtuner.v1.model.moe.glm53.glm53 import Glm53TextMoEConfig
 
 
 class Glm53VisionConfig(XTunerBaseModelConfig):
@@ -69,4 +73,94 @@ class Glm53ProjectorConfig(XTunerBaseModelConfig):
 
     @property
     def hf_config(self):
+        return None
+
+
+class Glm53BaseConfig(BaseComposeConfig):
+    """GLM-5.3-Flash compose config, see doc/xtuner_glm5p3flash_design.md F6.
+
+    ``image_token_id``/``video_start_token_id``/``video_end_token_id`` are kept only for
+    reference/debugging; the splice itself uses the global ``mm_token_type_ids`` (produced by
+    ``Glm53VLTokenizeFunction`` via the real HF processor's own ``create_mm_token_type_ids``, see
+    F1.b) to separate image (1) from video (2) positions, never
+    ``input_ids == video_token_id`` -- that token never appears in the expanded sequence.
+    """
+
+    model_config = ConfigDict(title="GLM-5.3-Flash compose config for xtuner", extra="forbid")
+    vision_config: Glm53VisionConfig = Glm53VisionConfig()
+    projector_config: Glm53ProjectorConfig = Glm53ProjectorConfig()
+    text_config: Glm53TextMoEConfig = Glm53TextMoEConfig()
+
+    image_token_id: int = 154854
+    video_token_id: int = 154855
+    video_start_token_id: int = 154832
+    video_end_token_id: int = 154833
+    only_llm_forward: bool = False
+
+    def build(self):
+        from .modeling_glm53 import Glm53ForConditionalGeneration
+
+        return Glm53ForConditionalGeneration(self)
+
+    @classmethod
+    def from_hf(cls, hf_path: str | Path) -> Self:
+        """Build the VL compose config from a published GLM-5.3-Flash
+        checkpoint.
+
+        The checkpoint carries one ``vision_config`` that covers both XTuner modules, because
+        XTuner splits HF's single ``Glm5NextVisionModel`` into ``vision_tower`` +
+        ``multi_modal_projector`` (§5.2); the fields are therefore read once and fanned out to
+        both configs. ``rope_parameters`` is deliberately left at its default -- the published
+        ``config.json`` has no such key and HF's ``AutoConfig`` fills the same default (§3.7.4).
+
+        Args:
+            hf_path (str | Path): Local path to the checkpoint directory.
+
+        Returns:
+            Self: The compose config, with the text half delegated to
+            :meth:`Glm53TextMoEConfig.from_hf`.
+        """
+        from transformers import AutoConfig
+
+        cfg = AutoConfig.from_pretrained(hf_path)
+        vision = cfg.vision_config
+        return cls(
+            vision_config=Glm53VisionConfig(
+                in_channels=vision.in_channels,
+                depth=vision.depth,
+                hidden_size=vision.hidden_size,
+                num_heads=vision.num_heads,
+                intermediate_size=vision.intermediate_size,
+                patch_size=vision.patch_size,
+                temporal_patch_size=vision.temporal_patch_size,
+                spatial_merge_size=vision.spatial_merge_size,
+                rms_norm_eps=vision.rms_norm_eps,
+                hidden_act=vision.hidden_act,
+                swiglu_limit=vision.swiglu_limit,
+                attention_bias=vision.attention_bias,
+                attention_dropout=vision.attention_dropout,
+            ),
+            projector_config=Glm53ProjectorConfig(
+                vision_hidden_size=vision.hidden_size,
+                out_hidden_size=vision.out_hidden_size,
+                spatial_merge_size=vision.spatial_merge_size,
+                projection_intermediate_size=vision.projection_intermediate_size,
+                hidden_act=vision.hidden_act,
+                swiglu_limit=vision.swiglu_limit,
+            ),
+            text_config=Glm53TextMoEConfig.from_hf(hf_path),
+            image_token_id=cfg.image_token_id,
+            video_token_id=cfg.video_token_id,
+            video_start_token_id=cfg.video_start_token_id,
+            video_end_token_id=cfg.video_end_token_id,
+        )
+
+    @property
+    def hf_config(self):
+        from xtuner.v1.utils import log_rank0
+
+        log_rank0.warning(
+            f"{type(self)} does not support conversion to HuggingFace config format. Only the "
+            "original HuggingFace config will be retained in the saved HuggingFace format checkpoint."
+        )
         return None
