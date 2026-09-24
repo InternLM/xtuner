@@ -9,7 +9,9 @@
                           parameter, covering all four communication strategies
                           (all_to_all, agrs, local, subgroup_allgather).
 4. TestMuonCheckpoint  — A DCP round trip through TrainEngine restores the optimizer
-                          states, so the next step matches the run that was never saved.
+                          states, so the next step matches the run that was never saved;
+                          swapping the momentum to host memory is bitwise identical to
+                          keeping it on the device, and checkpoints load across both.
 """
 
 import copy
@@ -805,11 +807,30 @@ class TestMuonCheckpoint(DeterministicDDPTestCase):
     def world_size(self) -> int:
         return 4
 
-    def test_dcp_round_trip_restores_states(self):
-        """Loading a TrainEngine DCP checkpoint into a fresh optimizer (the resume case: no step yet) must restore
-        every optimizer state, so the next step is bitwise identical to the run that was never saved."""
+    def test_swap_momentum_matches_device_momentum(self):
+        """Three steps with the Muon momentum swapped to host memory must leave the parameters and the optimizer
+        states bitwise identical to the default run, across all four communication strategies of ToyMoEModel."""
         self.create_pg("cuda")
         model, optim = self._build(seed=42)
+        swap_model, swap_optim = self._build(seed=42, swap_optimizer=True)
+
+        for step in range(3):
+            input_ids = self._inputs(seed=step)
+            self._train_step(model, optim, input_ids)
+            self._train_step(swap_model, swap_optim, input_ids)
+            self._assert_params_equal(model, swap_model)
+
+        self._assert_states_equal(optim, swap_optim)
+        self._assert_momentum_device(optim, swap=False)
+        self._assert_momentum_device(swap_optim, swap=True)
+
+    @parametrize.parametrize("save_swap,load_swap", [(False, False), (True, True), (False, True), (True, False)])
+    def test_dcp_round_trip_restores_states(self, save_swap: bool, load_swap: bool):
+        """Loading a TrainEngine DCP checkpoint into a fresh optimizer (the resume case: no step yet) must restore
+        every optimizer state, so the next step is bitwise identical to the run that was never saved. A checkpoint
+        saved with or without the momentum swap loads into either setting."""
+        self.create_pg("cuda")
+        model, optim = self._build(seed=42, swap_optimizer=save_swap)
         for step in range(2):
             self._train_step(model, optim, self._inputs(seed=step))
 
@@ -818,11 +839,12 @@ class TestMuonCheckpoint(DeterministicDDPTestCase):
         weights_dir = Path(ckpt_dir[0]) / "dcp"  # type: ignore[arg-type]
         self._engine(model, optim).save_dcp(weights_dir)
 
-        loaded_model, loaded_optim = self._build(seed=0)
+        loaded_model, loaded_optim = self._build(seed=0, swap_optimizer=load_swap)
         self._engine(loaded_model, loaded_optim).load_dcp(weights_dir)
 
         self._assert_params_equal(model, loaded_model)
         self._assert_states_equal(optim, loaded_optim)
+        self._assert_momentum_device(loaded_optim, swap=load_swap)
 
         input_ids = self._inputs(seed=2)
         self._train_step(model, optim, input_ids)
@@ -859,6 +881,15 @@ class TestMuonCheckpoint(DeterministicDDPTestCase):
     def _assert_params_equal(model: BaseModel, other: BaseModel) -> None:
         for (name, p), (_, q) in zip(model.named_parameters(), other.named_parameters()):
             assert torch.equal(p.to_local(), q.to_local()), f"parameter {name} differs"
+
+    @staticmethod
+    def _assert_momentum_device(optim: Muon, swap: bool) -> None:
+        # Only the Muon groups swap; the AdamW groups keep their states on the device.
+        for group in optim.param_groups:
+            for p in group["params"]:
+                local = optim.state[p]["momentum"].to_local()
+                on_host = swap and group["algorithm"] == "muon"
+                assert local.is_pinned() if on_host else local.is_cuda
 
     @staticmethod
     def _assert_states_equal(optim: Muon, other: Muon) -> None:

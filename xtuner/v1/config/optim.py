@@ -86,6 +86,9 @@ class MuonConfig(OptimConfig):
         Literal["all", "adamw_only"],
         Parameter(help="Gradient clipping policy: clip all parameters or only the AdamW parameter groups"),
     ] = "adamw_only"
+    swap_optimizer: Annotated[
+        bool, Parameter(help="Keep the momentum of Muon parameters in host memory and swap it in during the step.")
+    ] = False
 
     def build(self, model):
         trainable_parameters_names = model.trainable_parameters()
@@ -224,6 +227,7 @@ class MuonConfig(OptimConfig):
             enable_all2all=self.enable_all2all,
             remainder_strategy=self.remainder_strategy,
             muon_split_sizes=muon_split_sizes,
+            swap_momentum=self.swap_optimizer,
         )
 
         return optimizer

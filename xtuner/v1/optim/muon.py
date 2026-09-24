@@ -38,11 +38,25 @@ from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.placement_types import Placement, Shard
 from torch.optim.optimizer import Optimizer, ParamsT
 
+from xtuner.v1.utils import get_torch_device_module
 from xtuner.v1.utils.dtensor import group_tensors_by_device_mesh_and_placements
+
+
+DEVICE_MODULE = get_torch_device_module()
 
 
 def maybe_to_local(tensor: list[Tensor]) -> list[Tensor]:
     return [t.to_local() if isinstance(t, DTensor) else t for t in tensor]
+
+
+def _to_pinned_host(tensor: Tensor) -> Tensor:
+    if isinstance(tensor, DTensor):
+        # `DTensor.from_local` would move a host tensor back to the mesh device and DTensor has no `pin_memory`,
+        # so pin the local tensor in place, as `torch.distributed._state_dict_utils` does for CPU offload.
+        host = cast(DTensor, tensor.to("cpu"))
+        host._local_tensor = host._local_tensor.pin_memory()
+        return host
+    return tensor.to("cpu").pin_memory()
 
 
 def create_param_batches(
@@ -323,6 +337,10 @@ class Muon(Optimizer):
             Ignored when ``enable_all2all`` is False, where AGRS is the only available path.
         muon_split_sizes (dict[Tensor, tuple[int, ...]] | None): Logical row blocks that Muon should
             orthogonalize and scale independently. Used by GLM MuonSplit attention projections.
+        swap_momentum (bool): Keep the momentum of Muon parameters in pinned host memory. Each step copies a
+            batch's momentum to the device, updates it, and copies it back right away, so the device holds only
+            the momentum of the batches in flight. Saves one fp32 copy of the Muon parameters on the device at
+            the cost of the host-device copies. The AdamW-updated parameters keep their states on the device.
 
     Muon optimizer algorithm by Keller Jordan: https://kellerjordan.github.io/posts/muon/
     FSDP2 Muon uses all-to-all communications: https://www.essential.ai/blog/infra
@@ -344,6 +362,7 @@ class Muon(Optimizer):
         enable_all2all: bool = True,
         remainder_strategy: Literal["agrs", "pad_all2all", "ragged_all_to_all"] = "pad_all2all",
         muon_split_sizes: dict[Tensor, tuple[int, ...]] | None = None,
+        swap_momentum: bool = False,
     ):
         # Check hyperparameters
         if lr < 0.0:
@@ -381,11 +400,15 @@ class Muon(Optimizer):
         self._enable_all2all = enable_all2all
         self._remainder_strategy = remainder_strategy
         self._muon_split_sizes = muon_split_sizes or {}
+        self._swap_momentum = swap_momentum
         self.register_state_dict_post_hook(self._remove_clip_grad_policy)
         self.register_load_state_dict_pre_hook(self._restore_clip_grad_policy)
         # DCP loads a checkpoint into the keys of the current state_dict, and `lr_ratio` below makes the state look
         # initialized to torch's `_init_optim_state`: materialize the lazy states so that a resume restores them.
         self.register_state_dict_pre_hook(self._initialize_states)
+        if swap_momentum:
+            # `Optimizer.load_state_dict` casts every state tensor to its parameter's device.
+            self.register_load_state_dict_post_hook(self._swap_loaded_momentum_to_host)
 
         # Pre-compute lr adjustment ratios for each Muon parameter based on global shape.
         # This must happen at init time because DTensor.shape here is guaranteed to be
@@ -502,6 +525,11 @@ class Muon(Optimizer):
         runtime = AsyncRuntime(all_tasks, max_concurrent_tasks=3)
         runtime.run()
 
+        if self._swap_momentum:
+            # The momentum copies back to host are non-blocking; wait for them so that the host tensors are
+            # complete when they are read, e.g. by a checkpoint save.
+            DEVICE_MODULE.synchronize()
+
         return loss
 
     def _get_or_initialize_state(self, param: Tensor, algo: str) -> dict:
@@ -512,7 +540,19 @@ class Muon(Optimizer):
             state["momentum"] = torch.zeros_like(param)
             if algo == "adamw":
                 state["variance"] = torch.zeros_like(param)
+            elif self._swap_momentum:
+                state["momentum"] = _to_pinned_host(state["momentum"])
         return state
+
+    @staticmethod
+    def _swap_loaded_momentum_to_host(optimizer: Optimizer) -> None:
+        for group in optimizer.param_groups:
+            if group["algorithm"] != "muon":
+                continue
+            for p in group["params"]:
+                state = optimizer.state[p]
+                if "momentum" in state:
+                    state["momentum"] = _to_pinned_host(state["momentum"])
 
     @staticmethod
     def _find_fsdp_mesh_dim(device_mesh: DeviceMesh) -> int | None:
@@ -828,6 +868,11 @@ class Muon(Optimizer):
 
         states = [self._get_or_initialize_state(p, algo_name) for p in params]
         momentums = [s["momentum"] for s in states]
+        host_momentums = None
+        if self._swap_momentum:
+            # Same stream as the update, so the copy needs no extra synchronization.
+            host_momentums = maybe_to_local(momentums)
+            momentums = [m.to(g.device, non_blocking=True) for m, g in zip(host_momentums, gradients)]
         lr_ratios = [1.0 if p in self._muon_split_sizes else s["lr_ratio"] for p, s in zip(params, states)]
         assert len(set(lr_ratios)) == 1, f"Found different lr_ratios: {set(lr_ratios)}"
 
@@ -879,6 +924,7 @@ class Muon(Optimizer):
                 process_group=plan.comm_pg,
                 num_experts=plan.num_experts,
                 global_shard_dim_size=global_shard_dim_size,
+                M_host=host_momentums,
             )
         )
 
@@ -945,6 +991,7 @@ def muon_update_batch_async(
     num_experts: int = 1,  # Number of experts for MoE models
     batch_size: int | None = None,  # If set, pad X/G/M to this size with zeros
     global_shard_dim_size: int | None = None,  # FSDP-visible shard dim; required for "agrs"/"all_to_all"
+    M_host: list[Tensor] | None = None,  # Host copies of M when the momentum is swapped (updated in place)
 ) -> Generator[None, None, None]:
     """Batched version of Muon update.
 
@@ -981,6 +1028,11 @@ def muon_update_batch_async(
         momentum=momentum,
         nesterov=nesterov,
     )
+    if M_host is not None:
+        # The rest of the update reads only U, so the momentum goes back to host now. Padding entries of M come
+        # after the real ones and have no host copy.
+        for host, m in zip(M_host, maybe_to_local(M)):
+            host.copy_(m, non_blocking=True)
 
     # Orthogonalize — dispatch to the appropriate communication strategy
     if comm_strategy == "agrs":
