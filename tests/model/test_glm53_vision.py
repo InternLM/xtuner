@@ -10,10 +10,11 @@ TestGlm53VisionFp32Params
 TestGlm53VisionWeightMapping
     test_vision_weight_mapping_bitwise             真实 checkpoint 权重映射逐位一致
 TestGlm53VisionForwardParity
-    test_image_forward_matches_hf_bitwise          图像前向与 HF 逐位一致
+    test_image_forward_matches_hf_bitwise          图像前向与 HF 在 fp32/bf16 逐位一致
     test_multi_tubelet_video_forward_matches_hf_bitwise  多 tubelet 视频前向一致
     test_multi_image_batch_forward_matches_hf_bitwise    多图批次前向一致
-    test_forward_backward_gradients_flow           反向梯度可达所有参数
+    test_forward_backward_gradients_flow           反向梯度到达每个参数
+    test_sequence_parallel_mesh_is_rejected        未实现的视觉 SP 直接拒绝
 """
 
 import os
@@ -22,7 +23,6 @@ import pytest
 import torch
 
 from xtuner.v1.model.compose.glm53 import (
-    Glm53BaseConfig,
     Glm53ProjectorConfig,
     Glm53VisionConfig,
     flatten_video_grid_thw,
@@ -71,9 +71,8 @@ class TestGlm53VisionFp32Params:
         vision-side fp32 pin would silently let those gradients diverge across ranks. Lifting
         that reduction to `BaseModel` is a separate change; until then this stays empty."""
         # 视觉侧 pin fp32 的参数梯度不会被 all-reduce，会静默发散，故必须为空。
-        cfg = Glm53BaseConfig()
-        assert not cfg.vision_config.hf_save_cfg.fp32_keys_pattern
-        assert not cfg.projector_config.hf_save_cfg.fp32_keys_pattern
+        assert not Glm53VisionConfig().hf_save_cfg.fp32_keys_pattern
+        assert not Glm53ProjectorConfig().hf_save_cfg.fp32_keys_pattern
 
 
 class TestGlm53VisionWeightMapping:
@@ -143,7 +142,7 @@ PROJ_INTERMEDIATE = 40
 IN_CHANNELS = 3
 
 
-def _build_models():
+def _build_models(dtype: torch.dtype = torch.float32):
     xt_vis_cfg = Glm53VisionConfig(
         in_channels=IN_CHANNELS,
         depth=DEPTH,
@@ -197,9 +196,9 @@ def _build_models():
         p.data.normal_(mean=0.0, std=0.02)
     _copy_weights(hf_model, xt_vision, xt_projector, DEPTH)
 
-    hf_model.eval()
-    xt_vision.eval()
-    xt_projector.eval()
+    hf_model.to(dtype).eval()
+    xt_vision.to(dtype).eval()
+    xt_projector.to(dtype).eval()
     return hf_model, xt_vision, xt_projector
 
 
@@ -209,8 +208,10 @@ def _hf_pre_downsample(hf_model, xt_hidden: torch.Tensor) -> torch.Tensor:
 
 
 class TestGlm53VisionForwardParity:
-    def test_image_forward_matches_hf_bitwise(self):
-        hf_model, xt_vision, xt_projector = _build_models()
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    def test_image_forward_matches_hf_bitwise(self, dtype):
+        # fp32 与 bf16 都要逐位对齐：共享 RMSNorm 的舍入和 HF 只在 bf16 上分叉。
+        hf_model, xt_vision, xt_projector = _build_models(dtype)
         grid_thw = torch.tensor([[1, 4, 4]])
         patch_dim = IN_CHANNELS * TEMPORAL_PATCH_SIZE * PATCH_SIZE * PATCH_SIZE
         pixel_values = torch.randn(16, patch_dim)
@@ -265,5 +266,19 @@ class TestGlm53VisionForwardParity:
         (xt_out * probe).sum().backward()
 
         assert pixel_values.grad is not None and pixel_values.grad.abs().sum() > 0
-        assert xt_vision.patch_embed.proj.weight.grad is not None
-        assert xt_vision.patch_embed.proj.weight.grad.abs().sum() > 0
+        for name, param in list(xt_vision.named_parameters()) + list(xt_projector.named_parameters()):
+            assert param.grad is not None and param.grad.abs().sum() > 0, name
+
+    def test_sequence_parallel_mesh_is_rejected(self):
+        # mesh size>1 时塔还没做 merge 对齐切分，必须拒绝，不能走半套 Ulysses。
+        _, xt_vision, _ = _build_models()
+        grid_thw = torch.tensor([[1, 4, 4]])
+        patch_dim = IN_CHANNELS * TEMPORAL_PATCH_SIZE * PATCH_SIZE * PATCH_SIZE
+        pixel_values = torch.randn(16, patch_dim)
+
+        class _Mesh:
+            def size(self) -> int:
+                return 2
+
+        with pytest.raises(NotImplementedError, match="vision sequence parallel"):
+            xt_vision(pixel_values, grid_thw, sequence_parallel_mesh=_Mesh())
