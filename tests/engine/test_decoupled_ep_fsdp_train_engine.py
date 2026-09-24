@@ -8,6 +8,8 @@ layouts and fails when the decoupled layout departs from the legacy one:
   that AdamW would hide from the loss curve; after the first update bf16 weight differences flip
   individual top-k routing decisions and router gradients legitimately differ by percents) and
   per-rank parameter memory, for ``efsdp == 1``, ``efsdp > 1`` and HSDP + EP.
+  With intra-layer micro-batches and full recompute it also counts the expert groups' FSDP
+  all-gathers per step, which the numeric checks cannot see.
 * ``TestDecoupledEpFsdpCheckpoint`` (L3): bit-exact HF export right after ``from_hf``, DCP resume,
   HF export after resume and cross-layout DCP resharding.
 
@@ -120,11 +122,40 @@ class TestDecoupledEpFsdpNumerics(_SharedTmpDirMixin, DeterministicDDPTestCase):
         self._assert_param_memory(results["H41"], results["B4"], dense_ratio=(1 / 4) / (1 / 2), expert_ratio=2.0)
         self._assert_param_memory(results["H22"], results["B4"], dense_ratio=(1 / 4) / (1 / 2), expert_ratio=2.0)
 
+    def test_expert_groups_gather_once_per_layer_with_micro_batches_and_recompute(self) -> None:
+        # The decoupled expert groups are FSDP units nested inside each layer's reentrant activation checkpoint.
+        # With two intra-layer micro-batches, full recompute (the default `recompute_ratio`) and `efsdp == 2`,
+        # FSDP2's per-call reshard re-gathered them for every forward call, replayed call and backward call
+        # (6 all-gathers per layer and step), and checkpoint replay pointed their default backward prefetch at
+        # the already-finished experts of the layer above (one unused all-gather per layer). Expected now: one
+        # all-gather in forward and one in backward per layer, and no unused one except from the first layer,
+        # which keeps FSDP2's default backward prefetch target.
+        #
+        # Only communication is asserted here; loss and gradient parity with the legacy layout is covered by the
+        # tests above. With intra-layer micro-batches the all2all dispatcher's asynchronous path occasionally
+        # produces non-finite gradients on both layouts, independent of this change, which would make a numeric
+        # comparison flaky. The counts do not depend on the values.
+        results = self._run_layouts(
+            ("C4:ep=4,decouple=1",), steps=3, intra_layer_micro_batch=2, count_all_gathers_at=2
+        )
+        experts = {fqn: counts for fqn, counts in results["C4"]["all_gathers"].items() if fqn.endswith("experts")}
+        self.assertEqual(len(experts), 4, f"expected one expert group per layer, got {sorted(experts)}")
+        for fqn, (issued, used) in experts.items():
+            self.assertLessEqual(used, 2, f"{fqn}: {used} all-gathers used in one step, expected forward + backward")
+        unused = sum(issued - used for issued, used in experts.values())
+        self.assertLessEqual(unused, 1, f"{unused} expert all-gathers were issued but never used: {experts}")
+
     @property
     def world_size(self) -> int:
         return 8
 
-    def _run_layouts(self, specs: tuple[str, ...], steps: int) -> dict[str, dict[str, Any]]:
+    def _run_layouts(
+        self,
+        specs: tuple[str, ...],
+        steps: int,
+        intra_layer_micro_batch: int = 1,
+        count_all_gathers_at: int | None = None,
+    ) -> dict[str, dict[str, Any]]:
         self.create_pg("cuda")
         root = self._make_shared_tmpdir()
         try:
@@ -142,6 +173,8 @@ class TestDecoupledEpFsdpNumerics(_SharedTmpDirMixin, DeterministicDDPTestCase):
                     fp8=False,
                     grad_norm_steps=(0,),
                     tag=self._testMethodName,
+                    intra_layer_micro_batch=intra_layer_micro_batch,
+                    count_all_gathers_at=count_all_gathers_at,
                 )
                 dist.barrier()
             return results

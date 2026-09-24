@@ -11,13 +11,17 @@ from __future__ import annotations
 
 import gc
 import time
-from collections.abc import Iterable, Sequence
+from collections import defaultdict
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, TypedDict
+from unittest import mock
 
 import torch
 import torch.distributed as dist
 from safetensors.torch import load_file
+from torch.distributed.fsdp._fully_shard._fsdp_param_group import FSDPParamGroup
 from torch.distributed.tensor import DTensor
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig
@@ -157,6 +161,7 @@ def build_engine(
     dispatcher: str = "all2all",
     fp8: bool = False,
     lr: float = 1e-4,
+    intra_layer_micro_batch: int = 1,
 ) -> TrainEngine:
     """Build a ``TrainEngine`` for ``mode`` without loading weights.
 
@@ -167,6 +172,7 @@ def build_engine(
         dispatcher (str): MoE dispatcher (``"all2all"`` or ``"deepep"``).
         fp8 (bool): Enable tile-wise float8 for linear and grouped linear layers.
         lr (float): AdamW learning rate.
+        intra_layer_micro_batch (int): Number of micro-batches interleaved inside every decoder layer.
 
     Returns:
         TrainEngine: Sharded engine with freshly built (uninitialised) parameters.
@@ -187,7 +193,45 @@ def build_engine(
         hsdp_sharding_size=mode["hsdp"],
         torch_compile=False,
     )
-    return TrainEngine(model_cfg=model_cfg, optim_cfg=AdamWConfig(lr=lr), fsdp_cfg=fsdp_cfg)
+    return TrainEngine(
+        model_cfg=model_cfg,
+        optim_cfg=AdamWConfig(lr=lr),
+        fsdp_cfg=fsdp_cfg,
+        intra_layer_micro_batch=intra_layer_micro_batch,
+    )
+
+
+@contextmanager
+def count_fsdp_all_gathers() -> Iterator[dict[str, list[int]]]:
+    """Count, per FSDP unit, the parameter all-gathers issued and the ones whose result was used.
+
+    An all-gather that is issued but never waited on was prefetched for nothing: FSDP2 only waits on it in
+    ``finalize_backward`` at the end of backward, and its output buffer stays allocated until then. Units whose
+    shard mesh has a single rank do not communicate and are not counted.
+
+    Yields:
+        dict[str, list[int]]: ``{module_fqn: [issued, used]}``, filled while the context is active.
+    """
+    counts: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    unshard = FSDPParamGroup.unshard
+    wait_for_unshard = FSDPParamGroup.wait_for_unshard
+
+    def counting_unshard(self: FSDPParamGroup, async_op: bool = False) -> None:
+        pending = self._all_gather_result is not None
+        unshard(self, async_op)
+        if not pending and self._all_gather_result is not None and self._all_gather_process_group.size() > 1:
+            counts[self._module_fqn][0] += 1
+
+    def counting_wait_for_unshard(self: FSDPParamGroup) -> None:
+        if self._all_gather_result is not None and self._all_gather_process_group.size() > 1:
+            counts[self._module_fqn][1] += 1
+        wait_for_unshard(self)
+
+    with (
+        mock.patch.object(FSDPParamGroup, "unshard", counting_unshard),
+        mock.patch.object(FSDPParamGroup, "wait_for_unshard", counting_wait_for_unshard),
+    ):
+        yield counts
 
 
 def train(engine: TrainEngine, steps: Iterable[int], vocab_size: int, seq_len: int) -> list[float]:
@@ -221,6 +265,8 @@ def run_mode(
     fp8: bool,
     grad_norm_steps: Sequence[int] = (0, 1, 25),
     tag: str = "numerics",
+    intra_layer_micro_batch: int = 1,
+    count_all_gathers_at: int | None = None,
 ) -> dict[str, Any]:
     """Train ``mode`` from the HF checkpoint and record losses, grad norms, memory and step time.
 
@@ -234,6 +280,9 @@ def run_mode(
         fp8 (bool): Enable tile-wise float8.
         grad_norm_steps (Sequence[int]): Steps whose per-parameter grad norms are recorded.
         tag (str): Mesh-prefix tag passed to :func:`build_engine`.
+        intra_layer_micro_batch (int): Micro-batches per step, interleaved inside every decoder layer.
+        count_all_gathers_at (int | None): Step whose FSDP all-gathers are counted with
+            :func:`count_fsdp_all_gathers`; the counts are returned under ``all_gathers``.
 
     Returns:
         dict[str, Any]: ``losses``, ``grad_norms`` (per step), ``param_grad_norms`` (per recorded
@@ -244,7 +293,9 @@ def run_mode(
     torch.cuda.synchronize()
     base_allocated = torch.cuda.memory_allocated()
 
-    engine = build_engine(mode, hf_path, tag, dispatcher=dispatcher, fp8=fp8, lr=lr)
+    engine = build_engine(
+        mode, hf_path, tag, dispatcher=dispatcher, fp8=fp8, lr=lr, intra_layer_micro_batch=intra_layer_micro_batch
+    )
     engine.from_hf(hf_path=hf_path, strict=True)
     vocab_size = engine.model.config.vocab_size
     torch.cuda.synchronize()
@@ -262,8 +313,14 @@ def run_mode(
     for step in range(steps):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        batch = make_batch(step, rank, vocab_size, seq_len)
-        info = engine.train_step([batch])
+        batches = [
+            make_batch(step * intra_layer_micro_batch + i, rank, vocab_size, seq_len)
+            for i in range(intra_layer_micro_batch)
+        ]
+        with count_fsdp_all_gathers() if step == count_all_gathers_at else nullcontext() as all_gathers:
+            info = engine.train_step(batches)
+        if all_gathers is not None:
+            result["all_gathers"] = {fqn: list(counts) for fqn, counts in all_gathers.items()}
         grad_norm = engine.clip_grad_norm()
         if step in grad_norm_steps:
             result["param_grad_norms"][str(step)] = per_param_grad_norms(engine.model)
