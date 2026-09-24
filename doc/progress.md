@@ -776,3 +776,41 @@ VL 的 step 时间由视觉塔的 ~3 万 patch 主导，文本塔占比小，所
 VL 的 step20 loss 从 10.24398804 变成 10.28855610——step1 逐位一致、数据逐步一致，说明前向没变；
 差异来自编译区变大后融合顺序变化的末位误差，经 MoE router / DSA indexer 的**离散 top-k 选择**放大
 （与 F5 记录的 near-tie 翻转同源），20 步累积到这个量级，不是数值错误。
+
+### 续：把剩下的 FLA 入口也移植掉，以及一个反直觉的测量结果
+
+`chunk_kda` 之后，把 KDA 另外两个入口也按同样方式移植：FLA 的 `fused_kda_gate` 自己带
+`@torch.compiler.disable`（break 原因就是 "Skip calling `torch.compiler.disable()`d function"），
+短卷积的 dispatcher 会走到 dynamo 追不进去的 Triton launch helper。两者改为调 FLA 的
+`kda_gate_fwd`/`kda_gate_bwd`、`causal_conv1d_fwd`/`causal_conv1d_bwd`，用 `custom_op` 包起来，
+kernel 不变所以数值不变。另外 `build_pools` 里那条"整序列"护栏要读 `cu_seq_lens_q[-1]`，既是 host
+sync 又是每个 DSA 层一次 break；它防的是"调用方忘了跨 SP gather"这种编程错误而不是数据条件，
+所以改成只在 eager 下检查（测试与第一步训练都会走到）。
+
+数值同样逐位验证：与 FLA 对应入口比对，forward 与全部梯度 `max|diff|` 为 0。写这个比对时又抓到两
+个真实细节——KDA 的 `dt_bias` 形状是 `[H*K]` 而不是 `[H]`（FLA 用 `dg.view(-1, H*K).sum(0)` 归约），
+以及 `kda_gate_bwd` 返回的 `dg` 是 `type_as(g)`，我第一版 fake 实现写成了 fp32；后者在 compile 下
+会悄悄产出错误 dtype。
+
+**反直觉的结果**：graph break 从 30 降到 10，**吞吐一点没变**（tgs@20 13376.2 vs 13381.1，稳态都是
+1.21s/step）。也就是说整个回退完全来自 `chunk_kda` 那一处 break——它落在最大的编译区中间；而 gate 与
+短卷积这些 break 很便宜。**break 的数量不是指标，break 落在哪里才是**。这两处移植仍然值得保留（去掉
+了每层的 host sync，也是让 `KimiDeltaAttention.forward` 能像 Qwen3.5 的 `GatedDeltaNet.forward`
+一样上 `fullgraph=True` 的前提），但不应记成吞吐优化。
+
+据此**不再移植** `kpool.py:115` 那处（`num_pools` 决定张量形状，属真正的 data-dependent shape）：
+它只值 2 处 break，而修法要把 `ctx.new_dynamic_size()` 的动态维度推进下游 DSA indexer kernel，
+动态 shape 本身是重编译的常见诱因——按上面的测量，这笔交易大概率是负的。
+
+### 与 Qwen3.5-VL 的机制对照结论
+
+| 机制 | Qwen3.5-VL | GLM-5.3-Flash（本轮前） | 处理 |
+|---|---|---|---|
+| 线性注意力 kernel | FLA 包在 `custom_op` 后面 | `torch._dynamo.disable` | **已借鉴**（compile 从慢 2.4x 变快 10%） |
+| 线性注意力 gate / 短卷积 | 同上 | 同上 | **已借鉴**（数值逐位一致） |
+| compile 粒度 | `GatedDeltaNet.forward`/`DenseDecoderLayer.forward` 走 `fullgraph=True` | 对应项都是 `fullgraph=False` | 之前是被 break 逼的，现在具备上调条件，待测 |
+| 文本 SP | Ulysses all-to-all，conv 在还原的全序列上做 | 同构 | 等价 |
+| 视觉 SP / splice | merge 对齐 + local projector + 特征 gather | 本轮补齐 | 等价 |
+| 视觉重算 | 逐 block，按 `vision_recompute_ratio` | 缺失（导致 OOM） | 本轮补齐 |
+| 视觉激活 offload | 逐 block `async_save_on_cpu` | 无 | Qwen3.5 更全，未借鉴（GLM 侧已有重算这个更大的收益） |
+| splice 失配处理 | `except` 后继续 | 立即 `raise` | **GLM 更严**，不改 |
