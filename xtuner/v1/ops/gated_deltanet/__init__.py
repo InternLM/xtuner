@@ -27,6 +27,18 @@ def _hf_impl_enabled() -> bool:
     return os.getenv("XTUNER_HF_IMPL", "").strip().lower() in _TRUTHY
 
 
+def _gdn_ascendc_enabled() -> bool:
+    from xtuner.v1.utils import get_device
+
+    return os.environ.get("XTUNER_NPU_GDN_ASCENDC", "1") == "1" and get_device() == "npu"
+
+
+def _npu_conv_enabled() -> bool:
+    from xtuner.v1.utils import get_device
+
+    return os.environ.get("XTUNER_NPU_CONV", "1") == "1" and get_device() == "npu"
+
+
 def _hf_causal_conv1d_adapter(x, weight, bias, activation, seq_idx):
     from causal_conv1d import causal_conv1d_fn as _hf_causal_conv1d_fn
 
@@ -43,6 +55,12 @@ def get_chunk_gated_delta_rule_fn():
         from fla.ops.gated_delta_rule import chunk_gated_delta_rule as _hf_chunk_gated_delta_rule
 
         return _hf_chunk_gated_delta_rule
+    if _gdn_ascendc_enabled():
+        from .chunk_gated_delta_rule_npu import ascendc_chunk_gated_delta_rule_fn
+
+        fn = ascendc_chunk_gated_delta_rule_fn()
+        if fn is not None:
+            return fn
     from .chunk_gated_delta_rule import chunk_gated_delta_rule as _xtuner_chunk_gated_delta_rule
 
     return _xtuner_chunk_gated_delta_rule
@@ -51,6 +69,10 @@ def get_chunk_gated_delta_rule_fn():
 def get_causal_conv1d_fn():
     if _hf_impl_enabled():
         return _hf_causal_conv1d_adapter
+    if _npu_conv_enabled():
+        from .causal_conv1d_npu import causal_conv1d as _npu_causal_conv1d
+
+        return _npu_causal_conv1d
     from .causal_conv1d import causal_conv1d_fn as _xtuner_causal_conv1d_fn
 
     return _xtuner_causal_conv1d_fn
