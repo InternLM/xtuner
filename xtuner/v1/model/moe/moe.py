@@ -3,7 +3,7 @@ import contextlib
 import os
 import types
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal, Self, Sequence, TypedDict, cast
+from typing import TYPE_CHECKING, Annotated, Callable, Literal, Self, Sequence, TypedDict, cast
 
 import torch
 import torch.distributed as dist
@@ -42,6 +42,8 @@ from xtuner.v1.model.base import (
     DEFAULT_FLOAT8_CFG,
     BaseModel,
     BatchForwardInfo,
+    DataBatchInfo,
+    ModelItem,
     ModelOutputs,
     TorchCompileOption,
     TransformerConfig,
@@ -49,6 +51,7 @@ from xtuner.v1.model.base import (
 from xtuner.v1.model.utils import (
     ModelForwardExtraLogInfo,
     apply_activation_checkpointing,
+    is_checkpoint_replay,
     module_dict_repr,
 )
 from xtuner.v1.module import (
@@ -264,6 +267,8 @@ class MoE(BaseModel):
         self.embed_tokens = self.build_embeddings(config)
         self.mtp_block = self.build_mtp_block(config) if config.mtp_config is not None else None
         self._configure_model_specific_layers()
+        # Per-dispatch grouped-GEMM row counts of the current train step; None outside one.
+        self._ep_recv_tokens: list[int] | None = None
 
         self.fp32_layers = [self.rotary_emb]
 
@@ -560,9 +565,19 @@ class MoE(BaseModel):
                 return_router_logits=return_router_logits,
             )
 
+    @override
+    def pre_micro_batch_forward(self, data_batches: Sequence[ModelItem]) -> DataBatchInfo:
+        # Record received tokens only between pre/post of a train step, so forward-only calls (e.g. RL logprob)
+        # never leak into the next step's EP load metrics.
+        if self.ep_mesh is not None and self.ep_mesh.size() > 1:
+            self._ep_recv_tokens = []
+            self._set_recv_tokens_hook(self._record_ep_recv_tokens)
+        return super().pre_micro_batch_forward(data_batches)
+
     def post_micro_batch_forward(self, batch_outputs: Sequence[MoEModelOutputs]) -> MoEBatchForwardInfo:
         base_info = super().post_micro_batch_forward(batch_outputs)
         logs_info = base_info["logs_info"]
+        logs_info.update(self._ep_load_info())
 
         first_tokens_per_expert = batch_outputs[0]["tokens_per_expert_global"]
         tokens_per_expert_global = torch.zeros_like(first_tokens_per_expert)
@@ -580,6 +595,63 @@ class MoE(BaseModel):
 
         moe_info = cast(MoEBatchForwardInfo, base_info)
         return moe_info
+
+    def _record_ep_recv_tokens(self, num_tokens: int) -> None:
+        # Activation checkpointing replays the dispatch during backward; count only the original forward.
+        if self._ep_recv_tokens is not None and not is_checkpoint_replay():
+            self._ep_recv_tokens.append(num_tokens)
+
+    def _set_recv_tokens_hook(self, hook: Callable[[int], None] | None) -> None:
+        for module in self.modules():
+            if isinstance(module, MoEDecoderLayer):
+                module.recv_tokens_hook = hook
+
+    def _ep_load_info(self) -> dict[str, float]:
+        # EP load imbalance, measured on what each rank actually computes: the grouped-GEMM rows (routed token
+        # copies, padding included) that land on its local experts after every dispatch. The balanced share of a
+        # dispatch is the mean over the rank's EP group, which equals n_tokens * topk for fixed-length packs.
+        #   ep_load_ratio       step-summed rows / balanced share -> expert compute time of this rank
+        #   ep_load_peak_ratio  max per-dispatch rows / balanced share -> transient dispatch buffers (memory)
+        #   ep_straggler_ratio  sum over dispatches of the EP-group max / balanced share -> the all-to-all waits
+        #                       for the busiest rank at every layer, so this is the step slowdown from imbalance
+        # Each ranges from 1.0 (balanced) to ep_size (the whole EP group routed to one rank).
+        recv_tokens = self._ep_recv_tokens
+        if recv_tokens is None:
+            return {}
+        self._ep_recv_tokens = None
+        self._set_recv_tokens_hook(None)
+        assert self.ep_mesh is not None
+        ep_size = self.ep_mesh.size()
+
+        # One all_gather per step. Every rank dispatches equally often: the dispatch collectives force it inside
+        # an EP group, and the per-forward WORLD all-reduce of aux-loss expert counts forces equal micro-batch
+        # counts across groups. Column 0 identifies the EP group by its lowest global rank.
+        ep_group_id = min(dist.get_process_group_ranks(self.ep_mesh.get_group()))
+        local = torch.tensor([ep_group_id, *recv_tokens], dtype=torch.int64, device=DEVICE)
+        gathered = local.new_empty(dist.get_world_size(), local.numel())
+        dist.all_gather_into_tensor(gathered, local)
+        gathered = gathered.cpu()
+
+        _, group_idx = gathered[:, 0].unique(return_inverse=True)  # [world]
+        recv = gathered[:, 1:].double()  # [world, n_dispatch]
+        n_groups = int(group_idx.max()) + 1
+        group_sum = recv.new_zeros(n_groups, recv.shape[1]).index_add_(0, group_idx, recv)
+        group_max = recv.new_zeros(n_groups, recv.shape[1]).index_reduce_(0, group_idx, recv, "amax")
+        fair_share = group_sum / ep_size  # [n_groups, n_dispatch]
+
+        load_ratio = recv.sum(dim=1) / fair_share.sum(dim=1)[group_idx]
+        peak_ratio = (recv / fair_share[group_idx]).amax(dim=1)
+        straggler_ratio = group_max.sum(dim=1) / fair_share.sum(dim=1)
+        rank = dist.get_rank()
+        return {
+            "ep_load_ratio": load_ratio[rank].item(),
+            "ep_load_ratio_max": load_ratio.max().item(),
+            "ep_load_ratio_max_rank": float(load_ratio.argmax()),
+            "ep_load_peak_ratio": peak_ratio[rank].item(),
+            "ep_load_peak_ratio_max": peak_ratio.max().item(),
+            "ep_load_peak_ratio_max_rank": float(peak_ratio.argmax()),
+            "ep_straggler_ratio": straggler_ratio.max().item(),
+        }
 
     def _micro_batch_forward(
         self,

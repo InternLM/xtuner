@@ -83,7 +83,7 @@ case:
             type: sft
             phase: resume
             pre_action:
-                command: 'python ./autotest/utils/update_meta.py /mnt/hwfile/llmrazor/qa-llm-cicd/test_output npu-qwen3-sft-ep8 sft'
+                command: 'python ./autotest/utils/update_meta.py /mnt/hwfile/llmrazor/qa-llm-cicd/test_output qwen3-ep8 sft'
             parameters:
                 config: autotest/config/npu_qwen3_moe_30BA3_ep8_resume.py
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
@@ -217,7 +217,8 @@ case:
                 accelerator: NPU
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cic/qa-llm-cicd/test_output
             resource:
-                image: ccr-hw/910c_cann910_pta291_rl_s1_vllm:v0.1.0-20260826T114552Z
+                image: ccr-hw/910c_cann910_pta291_rl_s1_vllm:v0.5.0-20260917T114217Z
+                pip_package: unset ASCEND_WORK_PATH;pip install -e . --no-deps; pip install more-itertools triton
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/gsm8k/train-mini.jsonl
@@ -230,6 +231,9 @@ case:
                     - XTUNER_ACTIVATION_OFFLOAD=1
                     - VLLM_VERSION=0.11.0
                     - VLLM_USE_V1=1
+                    - TORCH_NPU_DEVICE_CAPABILITY=9.0
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
                 base_metric: npu-qwen3-rl-vllm/tracker.jsonl
                 check_metrics:

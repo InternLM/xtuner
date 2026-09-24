@@ -8,7 +8,10 @@ from .protocol import RMSNormProtocol
 def native_rms_norm(x: torch.Tensor, weight: torch.Tensor, epsilon: float) -> torch.Tensor:
     from torch.nn import functional as F
 
-    return F.rms_norm(x, weight.shape, weight, epsilon)
+    # Flatten the leading dims: for a [1, S, H] input Inductor lowers the weight gradient to one program per hidden
+    # column walking all S rows with an H stride (13.4 ms vs 0.93 ms at [1, 65536, 6144]), while a 2D input gets a
+    # coalesced split reduction.
+    return F.rms_norm(x.reshape(-1, *weight.shape), weight.shape, weight, epsilon).view_as(x)
 
 
 def npu_rms_norm(x: torch.Tensor, weight: torch.Tensor, epsilon: float) -> torch.Tensor:

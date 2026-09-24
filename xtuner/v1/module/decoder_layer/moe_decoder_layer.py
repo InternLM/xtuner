@@ -47,6 +47,18 @@ RouterTopKIds: TypeAlias = torch.Tensor
 HiddenStates: TypeAlias = torch.Tensor
 
 
+def _prepare_rollout_routed_experts_for_router(
+    rollout_routed_experts: torch.Tensor,
+    hidden_states: torch.Tensor,
+    *,
+    offload_rollout_routed_experts: bool,
+) -> torch.Tensor:
+    """Move one layer's routed-expert IDs to the router index dtype."""
+    if offload_rollout_routed_experts and rollout_routed_experts.device != hidden_states.device:
+        rollout_routed_experts = rollout_routed_experts.contiguous()
+    return rollout_routed_experts.to(device=hidden_states.device, dtype=torch.long)
+
+
 class MoEDecoderLayerOutput(TypedDict):
     """Per-micro-batch outputs of one :class:`MoEDecoderLayer` forward."""
 
@@ -328,6 +340,9 @@ class MoEDecoderLayer(nn.Module):
             training_dtype="fp8" if float8_cfg is not None else "bf16",
             generate_dtype=generate_config.dtype if generate_config is not None else "bf16",
         )
+        # Set by the owning model for the duration of a train step; receives this rank's grouped-GEMM row count
+        # (routed token copies landing on its local experts) after every dispatch.
+        self.recv_tokens_hook: Callable[[int], None] | None = None
 
     def forward(
         self,
@@ -454,6 +469,8 @@ class MoEDecoderLayer(nn.Module):
             pre_dispatched=pre_dispatched,
             dispatched=dispatched,
         )
+        if self.recv_tokens_hook is not None:
+            self.recv_tokens_hook(post_dispatched["hidden_states"].shape[0])
         # ProberList.after_dispatch(
         #     self.layer_idx,
         #     post_dispatched["hidden_states"],
@@ -614,6 +631,8 @@ class MoEDecoderLayer(nn.Module):
                 dispatched=dispatched,
                 async_op=True,
             )
+            if self.recv_tokens_hook is not None:
+                self.recv_tokens_hook(post_dispatched["hidden_states"].shape[0])
             if self.ep_mesh is not None:
                 # Preserve the same dynamic-token compile contract for every in-layer micro-batch.
                 torch._dynamo.mark_dynamic(post_dispatched["hidden_states"], 0)
@@ -755,9 +774,11 @@ class MoEDecoderLayer(nn.Module):
             rollout_routed_experts = seq_ctx.rollout_routed_experts[:, self.layer_idx, :]  # seq_l, expert
             # TODO: pin_memory() + to(device, non_blocking=True) on a CUDA stream would allow overlapping the transfer
             # with prior-layer compute
-            if seq_ctx.offload_rollout_routed_experts and rollout_routed_experts.device != hidden_states.device:
-                rollout_routed_experts = rollout_routed_experts.contiguous()
-                rollout_routed_experts = rollout_routed_experts.to(hidden_states.device)
+            rollout_routed_experts = _prepare_rollout_routed_experts_for_router(
+                rollout_routed_experts,
+                hidden_states,
+                offload_rollout_routed_experts=seq_ctx.offload_rollout_routed_experts,
+            )
         else:
             rollout_routed_experts = None
         router_results: RouterResults = self.gate(hidden_states, rollout_routed_experts)

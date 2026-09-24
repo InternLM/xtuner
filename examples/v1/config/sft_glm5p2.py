@@ -7,6 +7,7 @@ from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.model import get_model_config_from_hf
+from xtuner.v1.model.moe.glm52.indexer_chunk import resolve_indexer_topk_query_chunk_size
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.train import TrainerConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
@@ -77,7 +78,22 @@ if model_cfg.mtp_config is not None:
     model_cfg.mtp_config.loss_scaling_factor = float(os.environ.get("MTP_LOSS_WEIGHT", "0.1"))
     model_cfg.mtp_config.tv_loss_chunk_size = int(os.environ.get("MTP_TV_LOSS_CHUNK_SIZE", "128"))
 if hasattr(model_cfg.attention, "sparse_mla_backend"):
-    model_cfg.attention.sparse_mla_backend = os.environ.get("SPARSE_MLA_BACKEND", "tilelang")
+    sparse_mla_backend = os.environ.get("SPARSE_MLA_BACKEND", "tilelang").strip().lower()
+    model_cfg.attention.sparse_mla_backend = sparse_mla_backend
+    if "INDEXER_BACKEND" in os.environ:
+        # ``deep_gemm_fp8`` uses DeepGEMM's FP8 MQA path to match LMDeploy's
+        # Indexer scoring contract.
+        indexer_backend = os.environ["INDEXER_BACKEND"].strip().lower()
+        model_cfg.attention.indexer_backend = indexer_backend
+    else:
+        indexer_backend = sparse_mla_backend
+    # Keep the historical one-shot path for the PyTorch selector.  TileLang
+    # (including the cuDNN DSA and FlashMLA adapters) uses Slime's 8K query
+    # block by default; set INDEXER_TOPK_QUERY_CHUNK_SIZE=0/none to disable it
+    # for A/B tests.
+    model_cfg.attention.indexer_topk_query_chunk_size = resolve_indexer_topk_query_chunk_size(
+        os.environ.get("INDEXER_TOPK_QUERY_CHUNK_SIZE"), indexer_backend
+    )
 
 cache_dir = os.path.join(work_dir, "jsonl_cache")
 cache_tag = os.environ.get("CACHE_TAG", f"glm52_{sample_max_length}")
@@ -157,5 +173,7 @@ trainer = TrainerConfig(
     profile_memory=_get_bool_env("PROFILE_MEMORY", False),
     profile_time=_get_bool_env("PROFILE_TIME", False),
     profile_step=[int(x) for x in os.environ.get("PROFILE_STEP", "2,3").split(",") if x],
+    profile_time_step=[int(step) for step in os.environ.get("PROFILE_TIME_STEP", "").split(",") if step] or None,
+    profile_memory_step=[int(step) for step in os.environ.get("PROFILE_MEMORY_STEP", "").split(",") if step] or None,
     debug_skip_save=_get_bool_env("DEBUG_SKIP_SAVE", False),
 )

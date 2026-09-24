@@ -64,6 +64,49 @@ class TestMoETorchAll2AllDispatcher(DistributedTestBase):
 
         self.assertTrue(torch.allclose(noep_results, all2all_results, atol=1e-6, rtol=1e-4))
 
+    def test_sync_dispatch_and_combine_buffers_are_reusable_once_freed(self):
+        # A synchronous DeepEP call already orders the compute stream after the communication kernels, so its
+        # buffers must neither live in a comm-stream allocator pool nor stay pending on comm-stream events after
+        # the host frees them. At 512K/SP8 such pending multi-GiB buffers made the next large allocation miss and
+        # forced a device-wide `release_cached_blocks`.
+        self.create_pg("cuda")
+        num_experts = 16
+        dispatcher = DeepEPDispatcher(
+            n_routed_experts=num_experts,
+            training_dtype="bf16",
+            process_group=cast(dist.ProcessGroup, dist.group.WORLD),
+        )
+        hidden_states = torch.rand(32, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        topk_idx = torch.randint(0, num_experts, (32, 4), device="cuda", dtype=torch.int32)
+        topk_weights = torch.ones(32, 4, device="cuda", dtype=torch.float32, requires_grad=True)
+
+        def fwd_bwd():
+            out = self._dispatcher_call(dispatcher, hidden_states, topk_idx, topk_weights)
+            # DeepEP requires a contiguous gradient, which `out.sum().backward()` would not give.
+            out.backward(torch.ones_like(out))
+            torch.cuda.synchronize()
+
+        # Warm up so that the DeepEP buffer is created outside the recorded window.
+        fwd_bwd()
+        torch.cuda.memory._record_memory_history(max_entries=100000)
+        try:
+            fwd_bwd()
+            snapshot = torch.cuda.memory._snapshot()
+        finally:
+            torch.cuda.memory._record_memory_history(enabled=None)
+
+        events = [event for trace in snapshot["device_traces"] for event in trace]
+        compute_stream = torch.cuda.current_stream().cuda_stream
+        self.assertEqual({event["stream"] for event in events if event["action"] == "alloc"}, {compute_stream})
+        # Without cross-stream uses, the allocator completes a free right when the host requests it.
+        pending_frees = [
+            (event["size"], event["addr"])
+            for index, event in enumerate(events)
+            if event["action"] == "free_requested"
+            and not (events[index + 1]["action"] == "free_completed" and events[index + 1]["addr"] == event["addr"])
+        ]
+        self.assertEqual(pending_frees, [])
+
     def _dispatcher_call(
         self,
         dispatcher: GenericDispatcher,

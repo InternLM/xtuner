@@ -19,6 +19,7 @@ with patch.dict(
         "lagent.utils.rate_limiter": MagicMock(),
     },
 ):
+    from xtuner.v1.rl.agent_loop.sandbox_agent_loop import agent_in_sandbox_loop as sandbox_impl
     from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import AgentInSandboxLoop
     from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import AgentRolloutItem, RolloutStatus
 
@@ -93,10 +94,7 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
         original_artifacts = copy.deepcopy(item.artifacts)
         trace_store = self._trace_store(segment_count=2)
 
-        with patch(
-            "xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop.get_store",
-            return_value=trace_store,
-        ):
+        with patch.object(sandbox_impl, "get_store", return_value=trace_store):
             segments = await loop._build_rollout_states(state, item)
 
         self.assertEqual(len(segments), 2)
@@ -124,10 +122,7 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
         state = self._make_state()
         item = self._make_item(RolloutStatus.COMPLETED, segment_count=1)
 
-        with patch(
-            "xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop.get_store",
-            return_value=self._trace_store(segment_count=1),
-        ):
+        with patch.object(sandbox_impl, "get_store", return_value=self._trace_store(segment_count=1)):
             segments = await loop._build_rollout_states(state, item)
 
         self.assertEqual(len(segments), 1)
