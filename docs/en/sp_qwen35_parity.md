@@ -10,6 +10,7 @@ dependencies; no checkpoint, tokenizer download, or external dataset is needed.
   `_fully_shard` explicitly excluded from FSDP. These parameters are replicated
   DTensors, so FSDP does not synchronize their gradients. Without this reduction,
   Qwen3.5's `A_log` and GDN norm weights diverge between ranks after updates.
+  Reductions are coalesced by process group, following the existing MoE path.
 - Qwen3.5 Dense keeps convolution parameters and their gradients in FP32 through
   replica reduction. The convolution wrapper casts weights to the activation
   dtype for computation and returns gradients in the original parameter dtype.
@@ -136,6 +137,10 @@ PJLab job for both the unfixed parent and final patch, including all repeats and
 16 CUDA tests: `xtuner-sp-upstream-20260924-97500998`.
 Follow-up job for all 18 regression cases and the documented comparison with both
 loss and parameter assertions: `xtuner-sp-review-20260924-37136298`.
+After coalescing reductions by process group, `xtuner-sp-coalesced-20260924-88848809`
+passed all 18 cases and repeated all six 30-step fixed runs. All 15 pairs still
+have zero loss/final-parameter differences; each run also matches its same-SP
+reference from before coalescing.
 
 Initialization SHA-256: `65b3f557d2d8c67bbfd0d10d192e9f4c4c511d44e33c19ec974eb9fc641747f7`.
 Corpus SHA-256: `31e39d875fed6d6998587bf8e810b103452497c94d8ef91cd18f08dd8ea60b01`.

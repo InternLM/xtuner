@@ -20,12 +20,13 @@ class IgnoredGradModel(BaseModel):
             XTunerBaseModelConfig(
                 compile_cfg=False,
                 hf_key_mapping={r"^": "model."},
-                hf_save_cfg=HFSaveCfg(fp32_keys_pattern=[r"^model\.(scale|unused)$"]),
+                hf_save_cfg=HFSaveCfg(fp32_keys_pattern=[r"^model\.(scale|offset|unused)$"]),
             )
         )
         self.mesh_shape = mesh_shape
         self.proj = nn.Linear(4, 4, bias=False)
         self.scale = nn.Parameter(torch.ones(4))
+        self.offset = nn.Parameter(torch.ones(4))
         self.unused = nn.Parameter(torch.ones(4))
         nn.init.ones_(self.proj.weight)
         self._init_load_spec()
@@ -38,7 +39,7 @@ class IgnoredGradModel(BaseModel):
         return init_device_mesh("cuda", self.mesh_shape, mesh_dim_names=names)
 
     def forward(self, x):
-        return (self.proj(x).float() * self.scale.to_local()).sum()
+        return (self.proj(x).float() * self.scale.to_local() + x.float() * self.offset.to_local()).sum()
 
 
 def _check_ignored_gradients(rank, init_method, mesh_shape):
@@ -47,7 +48,7 @@ def _check_ignored_gradients(rank, init_method, mesh_shape):
     try:
         model = IgnoredGradModel(mesh_shape).cuda()
         model.fully_shard(FSDPConfig(param_dtype=torch.bfloat16, reduce_dtype=torch.float32, torch_compile=False))
-        assert model._fsdp_ignored_param_names == {"scale", "unused"}
+        assert model._fsdp_ignored_param_names == {"scale", "offset", "unused"}
         assert isinstance(model.scale, DTensor)
         assert all(isinstance(p, Replicate) for p in model.scale.placements)
         assert model.scale.dtype == torch.float32
@@ -57,15 +58,18 @@ def _check_ignored_gradients(rank, init_method, mesh_shape):
         # The ignored gradient is 8 on rank 0 and 16 on rank 1; FSDP already
         # averages the managed projection gradient to 3 on both ranks.
         torch.testing.assert_close(model.scale.grad.to_local(), torch.full((4,), 8.0 * (rank + 1), device="cuda"))
+        torch.testing.assert_close(model.offset.grad.to_local(), torch.full((4,), 2.0 * (rank + 1), device="cuda"))
         managed_grad = model.proj.weight.grad.to_local().clone()
         torch.testing.assert_close(managed_grad, torch.full_like(managed_grad, 3.0), rtol=0, atol=0)
         model.scale_and_reduce_grad()
         torch.testing.assert_close(model.scale.grad.to_local(), torch.full((4,), 12.0, device="cuda"), rtol=0, atol=0)
+        torch.testing.assert_close(model.offset.grad.to_local(), torch.full((4,), 3.0, device="cuda"), rtol=0, atol=0)
         torch.testing.assert_close(model.proj.weight.grad.to_local(), managed_grad, rtol=0, atol=0)
         assert model.unused.grad is None
 
         optimizer.step()
         torch.testing.assert_close(model.scale.to_local(), torch.full((4,), -0.5, device="cuda"), rtol=0, atol=0)
+        torch.testing.assert_close(model.offset.to_local(), torch.full((4,), 0.625, device="cuda"), rtol=0, atol=0)
         torch.testing.assert_close(
             model.proj.weight.full_tensor(), torch.full((4, 4), 0.625, device="cuda"), rtol=0, atol=0
         )

@@ -607,6 +607,7 @@ class BaseModel(nn.Module):
         """Average gradients of FP32 parameters explicitly excluded from
         FSDP."""
         ignored_names: set[str] = getattr(self, "_fsdp_ignored_param_names", set())
+        grads_by_group: dict[dist.ProcessGroup, list[torch.Tensor]] = {}
         for name, param in self.named_parameters():
             if self._clean_param_name(name) not in ignored_names or param.grad is None:
                 continue
@@ -617,7 +618,13 @@ class BaseModel(nn.Module):
                 mesh = mesh._flatten()
             grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
             grad.div_(mesh.size())
-            dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=mesh.get_group())
+            grads_by_group.setdefault(mesh.get_group(), []).append(grad)
+
+        # Coalesce small replicated gradients as in MoE.scale_and_reduce_grad.
+        for group, grads in grads_by_group.items():
+            with dist._coalescing_manager(group=group):
+                for grad in grads:
+                    dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=group)
 
     def cal_grad_norm(self, grads: list[DTensor], dtype=torch.float32):
         from xtuner.v1.utils.grad_norm import cal_grad_norm
