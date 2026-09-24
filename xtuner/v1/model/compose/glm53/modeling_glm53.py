@@ -176,10 +176,6 @@ class Glm53ForConditionalGeneration(BaseComposeModel):
             return inputs_embeds
 
         assert not self.only_llm_forward, "only_llm_forward is True, but pixel_values/pixel_values_videos is not None."
-        assert not (has_image and has_video), (
-            "GLM-5.3-Flash TokenizeFn only supports image-only or video-only samples (F1.b); "
-            "a mixed-media SequenceContext should never reach the compose model."
-        )
         assert seq_ctx.mm_token_type_ids is not None, (
             "mm_token_type_ids is required to splice visual features; input_ids == video_token_id "
             "cannot be used post-expansion (design doc F1.b/§16.2)."
@@ -189,16 +185,20 @@ class Glm53ForConditionalGeneration(BaseComposeModel):
         # this rank's slice, split alongside input_ids; `_splice` reconciles it with the features.
         mm_token_type_ids = seq_ctx.mm_token_type_ids
 
+        # A *sample* never mixes image and video -- the tokenize fn rejects that (F1.b) -- but a
+        # *pack* routinely holds an image sample next to a video sample, and this is the pack.
+        # Each modality is spliced onto its own positions (mm_token_type_ids 1 vs 2), so the two
+        # are independent and both run when both are present.
         if has_image:
             assert seq_ctx.image_grid_thw is not None
             features = self.get_visual_features(seq_ctx.pixel_values, seq_ctx.image_grid_thw, sp_mesh)  # type: ignore[arg-type]
-            modality = 1
-        else:
+            inputs_embeds = self._splice(inputs_embeds, mm_token_type_ids, 1, features, sp_mesh)
+        if has_video:
             assert seq_ctx.video_grid_thw is not None
             flat_grid_thw = flatten_video_grid_thw(seq_ctx.video_grid_thw)
             features = self.get_visual_features(seq_ctx.pixel_values_videos, flat_grid_thw, sp_mesh)  # type: ignore[arg-type]
-            modality = 2
-        return self._splice(inputs_embeds, mm_token_type_ids, modality, features, sp_mesh)
+            inputs_embeds = self._splice(inputs_embeds, mm_token_type_ids, 2, features, sp_mesh)
+        return inputs_embeds
 
     def forward(
         self,
