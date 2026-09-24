@@ -155,6 +155,10 @@ class BaseComposeModel(BaseModel):
             if missing:
                 raise RuntimeError(f"Missing parameters from {hf_path}: {list(missing)}. ")
 
+    def _head_checkpoint_meta(self) -> dict:
+        """Forward text-module head_type into the compose safetensors index."""
+        return self.language_model._head_checkpoint_meta()
+
     def save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16, safetensors_prefix: str = "model"):
         hf_dir = Path(hf_dir)
         self.language_model.save_hf(hf_dir, save_dtype, "model-language")
@@ -170,7 +174,11 @@ class BaseComposeModel(BaseModel):
 
         if dist.get_rank() == 0:
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
-                json.dump({"weight_map": weight_map_dict, "metadata": {}}, f, indent=4)
+                json.dump(
+                    {"weight_map": weight_map_dict, "metadata": self._head_checkpoint_meta()},
+                    f,
+                    indent=4,
+                )
         dist.barrier()
 
     def async_save_hf(

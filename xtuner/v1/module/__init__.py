@@ -8,7 +8,7 @@ from .attention import (
     MultiLatentAttention,
 )
 from .dispatcher import NaiveDispatcher, TorchAll2AllDispatcher, build_dispatcher
-from .lm_head import LMHead
+from .head import LMHead, ValueHead
 from .rms_norm import RMSNorm
 from .rope import (
     Qwen3VLTextRotaryEmbedding,
@@ -42,6 +42,7 @@ __all__ = [
     "GreedyRouterConfig",
     "RouterResults",
     "LMHead",
+    "ValueHead",
     "Qwen3VLTextRotaryEmbedding",
     "get_rope_embedding",
     "RotaryEmbeddingProtocol",

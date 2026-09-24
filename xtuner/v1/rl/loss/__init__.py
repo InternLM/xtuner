@@ -5,6 +5,7 @@ from .base_loss import (
     compute_kl_loss_weight,
     finalize_train_policy_metrics,
 )
+from .critic_loss import CriticLossConfig, CriticLossContext, CriticLossKwargs
 from .distillation_loss import (
     DistillationLossConfig,
     DistillationLossContext,
