@@ -13,12 +13,21 @@ from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy
 from typing_extensions import override
 
 from xtuner.v1.config import FSDPConfig
-from xtuner.v1.model import BaseModel
+from xtuner.v1.model import BaseModel, TorchCompileOption
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.utils.init_weight import default_init_weights
 
 from .glm53_config import Glm53ProjectorConfig
 from .modeling_vision import init_world_mesh
+
+
+# The projector is one Conv2d downsample plus the merger's clamped-SwiGLU chain, with no
+# kernel dispatch or collective inside, so it takes a full graph.
+GLM53_PROJECTOR_COMPILE_CFG: dict[str, TorchCompileOption] = {
+    "xtuner.v1.model.compose.glm53.modeling_projector.Glm53Projector.forward": TorchCompileOption(
+        fullgraph=True
+    ),
+}
 
 
 class Glm53VisionPatchMerger(nn.Module):
@@ -58,6 +67,11 @@ class Glm53Projector(BaseModel):
 
         self._hf_prefix = "model.visual."
         self._init_load_spec()
+
+    @property
+    @override
+    def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
+        return GLM53_PROJECTOR_COMPILE_CFG
 
     def to_hf_key_list(self, key: str) -> list[str]:
         return [self._hf_prefix + key]

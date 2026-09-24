@@ -17,10 +17,12 @@ from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy
 from typing_extensions import override
 
 from xtuner.v1.config import FSDPConfig
-from xtuner.v1.model import BaseModel
+from xtuner.v1.data_proto.utils import pad_to_max_length, split_for_sequence_parallel
+from xtuner.v1.model import BaseModel, TorchCompileOption
 from xtuner.v1.module import AttnOutputs
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.ops.attn_imp import AttnOpOutputs, get_attn_impl_fn
+from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_torch_device_module
 from xtuner.v1.utils.init_weight import default_init_weights
 
@@ -29,6 +31,14 @@ from .glm53_config import Glm53VisionConfig
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
+
+# The block forward is the whole ViT layer (norm -> attn -> norm -> clamped-SwiGLU MLP); compiling
+# it is what fuses the clamp/activation elementwise chain. `fullgraph=False`: the attention
+# dispatches into a kernel (flash/eager) that dynamo cannot trace through, and under SP the block
+# also contains all-to-all collectives.
+GLM53_VISION_COMPILE_CFG: dict[str, TorchCompileOption] = {
+    "xtuner.v1.model.compose.glm53.modeling_vision.Glm53VisionBlock.forward": TorchCompileOption(fullgraph=False),
+}
 
 
 def init_world_mesh() -> DeviceMesh:
@@ -117,12 +127,65 @@ class Glm53VisionRMSNorm(nn.Module):
         return self.weight * hidden_states.to(input_dtype)
 
 
-def _reject_vision_sequence_parallel(sequence_parallel_mesh: DeviceMesh | None) -> None:
-    if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
-        raise NotImplementedError(
-            "GLM-5.3 vision sequence parallel needs merge-aligned padding before the tower. "
-            "Ulysses on an unsharded patch sequence is not implemented."
+def _shard_patches_for_sequence_parallel(
+    hidden_states: torch.Tensor,
+    grid_thw: torch.Tensor,
+    spatial_merge_size: int,
+    sequence_parallel_mesh: DeviceMesh,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Split the raw patch sequence across SP ranks on a merge-aligned
+    boundary.
+
+    Two constraints drive the layout (design doc F2 §9.3/§9.6):
+
+    - **merge alignment.** The projector consumes patches in consecutive groups of
+      ``spatial_merge_size ** 2`` (``downsample`` reshapes to ``[-1, m, m, C]``), so a shard
+      boundary inside such a group would merge patches belonging to two different ranks. Every
+      shard therefore holds a whole number of merge blocks, which is also what lets each rank run
+      the projector on its own shard before the features are gathered.
+    - **equal shard length.** Ulysses all-to-all inside the attention requires every rank to carry
+      the same number of patches, so the global sequence is padded up to a multiple of
+      ``sp_size * merge_unit``. The padding is declared as an extra ``grid_thw`` row rather than
+      appended silently, which keeps it a separate ``cu_seqlens`` segment: padding patches can
+      never attend to, or be attended by, a real image.
+
+    Args:
+        hidden_states (torch.Tensor): Raw patches ``[num_patches, patch_dim]``.
+        grid_thw (torch.Tensor): Per-image ``[t, h, w]`` rows, already expanded for video.
+        spatial_merge_size (int): Projector merge size ``m``; a merge block is ``m ** 2`` patches.
+        sequence_parallel_mesh (DeviceMesh): The sequence-parallel mesh.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor, int]: This rank's patches (padded to the common shard
+        length), the ``grid_thw`` extended with the padding row, and that shard length.
+    """
+    sp_size = sequence_parallel_mesh.size()
+    merge_unit = spatial_merge_size**2
+    num_patches = hidden_states.shape[0]
+    if num_patches % merge_unit != 0:
+        raise ValueError(
+            f"GLM-5.3-Flash vision SP needs a merge-aligned patch count: {num_patches} is not a "
+            f"multiple of spatial_merge_size ** 2 ({merge_unit}). Every grid_thw row must have "
+            "even h and w, which the HF image processor guarantees."
         )
+
+    div_num = sp_size * merge_unit
+    if num_patches % div_num != 0:
+        pad_num = div_num - num_patches % div_num
+        # `pad_num` is a multiple of `merge_unit`, so `[1, m, pad_num // m]` is a well-formed grid
+        # row whose h and w are both multiples of `m` (what `_get_vision_position_ids` needs).
+        pad_grid = torch.tensor(
+            [[1, spatial_merge_size, pad_num // spatial_merge_size]], dtype=grid_thw.dtype, device=grid_thw.device
+        )
+        grid_thw = torch.cat([grid_thw, pad_grid], dim=0)
+
+    split_size = -(-num_patches // div_num) * div_num // sp_size
+    local_states = split_for_sequence_parallel(
+        hidden_states, dim=0, sp_mesh=sequence_parallel_mesh, split_size=split_size
+    )
+    # Trailing ranks get a short (possibly empty) slice; pad them up to the common shard length.
+    local_states = pad_to_max_length(local_states, 0, split_size, 0)
+    return local_states, grid_thw, split_size
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -178,11 +241,12 @@ class Glm53VisionAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        max_seqlen: int,
+        max_seqlen: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         sequence_parallel_mesh: DeviceMesh | None = None,
     ) -> AttnOutputs:
-        _reject_vision_sequence_parallel(sequence_parallel_mesh)
+        # `hidden_states` is this rank's patch shard; `cu_seqlens`/`max_seqlen` describe the whole
+        # (padded) global sequence, which is what the all-to-all below reassembles per head.
         seq_length = hidden_states.shape[0]
         query_states, key_states, value_states = (
             self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
@@ -196,6 +260,22 @@ class Glm53VisionAttention(nn.Module):
         query_states = query_states.transpose(0, 1).unsqueeze(0)
         key_states = key_states.transpose(0, 1).unsqueeze(0)
         value_states = value_states.transpose(0, 1).unsqueeze(0)
+
+        sp_size = sequence_parallel_mesh.size() if sequence_parallel_mesh is not None else 1
+        if sequence_parallel_mesh is not None and sp_size > 1:
+            # `[b, heads, local_seq, dim]` -> `[b, heads/sp, global_seq, dim]`: each rank keeps a
+            # slice of the heads but sees the whole sequence, so the attention below is exact
+            # (GLM-5.3's vision attention is plain MHA -- q/k/v share `num_heads`, so unlike
+            # qwen3_vl there is no GQA kv-repeat case to handle).
+            if self.num_heads % sp_size != 0:
+                raise ValueError(
+                    f"GLM-5.3-Flash vision SP needs num_heads ({self.num_heads}) divisible by "
+                    f"sp_size ({sp_size}) for the Ulysses head split."
+                )
+            query_states, key_states, value_states = (
+                ulysses_all_to_all(states, scatter_dim=1, gather_dim=2, mesh=sequence_parallel_mesh)
+                for states in (query_states, key_states, value_states)
+            )
 
         attn_op_outputs = self.attn_impl_func(
             query_states,
@@ -212,6 +292,10 @@ class Glm53VisionAttention(nn.Module):
         )
 
         raw_output = attn_op_outputs["raw_output"]
+        if sequence_parallel_mesh is not None and sp_size > 1:
+            # The attention returns `[b, seq, heads, dim]`, so the same (scatter_dim, gather_dim)
+            # literals undo the split above: scatter the sequence, gather the heads back.
+            raw_output = ulysses_all_to_all(raw_output, scatter_dim=1, gather_dim=2, mesh=sequence_parallel_mesh)
         raw_output = raw_output[0].reshape(seq_length, -1).contiguous()
         projected_output = self.proj(raw_output)
         return {"projected_output": projected_output, **attn_op_outputs}
@@ -229,7 +313,7 @@ class Glm53VisionBlock(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        max_seqlen: int,
+        max_seqlen: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         sequence_parallel_mesh: DeviceMesh | None = None,
     ) -> torch.Tensor:
@@ -276,6 +360,11 @@ class Glm53VisionModel(BaseModel):
 
         self._hf_prefix = "model.visual."
         self._init_load_spec()
+
+    @property
+    @override
+    def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
+        return GLM53_VISION_COMPILE_CFG
 
     def to_hf_key_list(self, key: str) -> list[str]:
         return [self._hf_prefix + key]
@@ -326,16 +415,34 @@ class Glm53VisionModel(BaseModel):
         grid_thw: torch.Tensor,
         sequence_parallel_mesh: DeviceMesh | None = None,
     ) -> torch.Tensor:
-        _reject_vision_sequence_parallel(sequence_parallel_mesh)
         # `grid_thw` must already be expanded (video rows are [1, h, w], see vision_utils.py /
         # F1.d); the tower is t-aware regardless (repeats position ids/cu_seqlens over t), but
         # mixing representations silently changes num_img_tokens/feature-grouping downstream.
+        sp_size = sequence_parallel_mesh.size() if sequence_parallel_mesh is not None else 1
+        split_size: int | None = None
+        if sp_size > 1:
+            assert sequence_parallel_mesh is not None
+            hidden_states, grid_thw, split_size = _shard_patches_for_sequence_parallel(
+                hidden_states, grid_thw, self.spatial_merge_size, sequence_parallel_mesh
+            )
+
+        # Both are derived from the padded global grid: position ids are sharded to match the
+        # local patches below (RoPE is applied before the attention all-to-all), while cu_seqlens
+        # stays global because the all-to-all hands attention the whole sequence.
         position_ids = _get_vision_position_ids(grid_thw, self.spatial_merge_size)
         cu_seqlens = _get_vision_cu_seqlens(grid_thw)
-        max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
+        # Kept as a tensor, never `int(...item())`: `flash_attn_varlen_func` v2 declares
+        # `max_seqlen_q` as a Tensor and rejects an int outright, and materializing it would also
+        # force a device sync. This mirrors every other XTuner attention call site, which passes
+        # `SequenceContext.max_length_q` (a CPU tensor) straight through.
+        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 
         hidden_states = self.patch_embed(hidden_states)
         cos, sin = self.rotary_pos_emb(position_ids.to(hidden_states.device))
+        if sp_size > 1:
+            assert sequence_parallel_mesh is not None
+            cos = split_for_sequence_parallel(cos, dim=0, sp_mesh=sequence_parallel_mesh, split_size=split_size)
+            sin = split_for_sequence_parallel(sin, dim=0, sp_mesh=sequence_parallel_mesh, split_size=split_size)
         position_embeddings = (cos.to(hidden_states.device), sin.to(hidden_states.device))
 
         for block in self.blocks:

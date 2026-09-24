@@ -224,10 +224,8 @@ post_layernorm 输出"，而不是回避这处已知的接口差异。
 本次未做生产级验收，明确记录而非静默跳过）：
 - `fully_shard()` 已按 `qwen3_vl` 的结构模式接线（逐 block fully_shard + root fully_shard），
   但未跑多卡 FSDP parity 测试（§5.3/§5.4 的 `test_vision_fsdp_parity`）；
-- `sequence_parallel_mesh.size()>1` 直接 `NotImplementedError`。只在 attention 里做 Ulysses、
-  forward 不切 patch 序列会算错；设计文档 §9.3/§9.6 的 merge-aligned padding + local projector
-  未实现，也未跑 SP=2/4 parity 测试（`tests/model/test_glm53_vision_sp.py` 未创建）；
-- `torch.compile` 配置（`default_compile_cfg`）未接入；
+- ~~`sequence_parallel_mesh.size()>1` 直接 `NotImplementedError`~~ —— 已实现，见 H2「Vision SP」。
+- ~~`torch.compile` 配置（`default_compile_cfg`）未接入~~ —— 已接入，见 H2。
 - 生产 attention kernel（FlashAttention/FlexAttention）容差矩阵（§11.7）未验收，目前只验证了
   `eager_attention` 路径的 bitwise 精度。`attn_impl` 默认改回 `eager_attention`，flash 需显式打开。
 - HF save round-trip（§6.2 后半）未验证。

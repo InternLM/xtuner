@@ -14,19 +14,25 @@ TestGlm53VisionForwardParity
     test_multi_tubelet_video_forward_matches_hf_bitwise  多 tubelet 视频前向一致
     test_multi_image_batch_forward_matches_hf_bitwise    多图批次前向一致
     test_forward_backward_gradients_flow           反向梯度到达每个参数
-    test_sequence_parallel_mesh_is_rejected        未实现的视觉 SP 直接拒绝
+    test_unaligned_patch_count_is_rejected_under_sp  patch 数不对齐 merge 块时拒绝切分
+TestGlm53VisionProductionAttention
+    test_flash_attention_matches_eager             flash kernel 与 eager 基准一致
+TestGlm53VisionSequenceParallel
+    test_sp_tower_and_projector_match_non_sp       2 卡 Vision SP 与非 SP 逐位一致
 """
 
 import os
 
 import pytest
 import torch
+from torch.testing._internal.common_distributed import DistributedTestBase
 
 from xtuner.v1.model.compose.glm53 import (
     Glm53ProjectorConfig,
     Glm53VisionConfig,
     flatten_video_grid_thw,
 )
+from xtuner.v1.utils.test_utils import init_data_mesh
 
 
 GLM_5_3_FLASH_PATH = os.environ.get(
@@ -269,16 +275,76 @@ class TestGlm53VisionForwardParity:
         for name, param in list(xt_vision.named_parameters()) + list(xt_projector.named_parameters()):
             assert param.grad is not None and param.grad.abs().sum() > 0, name
 
-    def test_sequence_parallel_mesh_is_rejected(self):
-        # mesh size>1 时塔还没做 merge 对齐切分，必须拒绝，不能走半套 Ulysses。
+    def test_unaligned_patch_count_is_rejected_under_sp(self):
+        # patch 数不是 merge 块整数倍时，分片会把同一个 2x2 合并块切到两个 rank 上，必须拒绝。
         _, xt_vision, _ = _build_models()
-        grid_thw = torch.tensor([[1, 4, 4]])
         patch_dim = IN_CHANNELS * TEMPORAL_PATCH_SIZE * PATCH_SIZE * PATCH_SIZE
-        pixel_values = torch.randn(16, patch_dim)
 
         class _Mesh:
             def size(self) -> int:
                 return 2
 
-        with pytest.raises(NotImplementedError, match="vision sequence parallel"):
-            xt_vision(pixel_values, grid_thw, sequence_parallel_mesh=_Mesh())
+        with pytest.raises(ValueError, match="merge-aligned patch count"):
+            xt_vision(torch.randn(6, patch_dim), torch.tensor([[1, 2, 3]]), sequence_parallel_mesh=_Mesh())
+
+
+class TestGlm53VisionProductionAttention:
+    @pytest.mark.gpu
+    def test_flash_attention_matches_eager(self):
+        """生产 attention kernel（flash）与已对齐 HF 的 eager 路径必须一致，否则
+        `attn_impl="flash_attention"` 一开就换掉了数值基准（F2 §11.7 容差矩阵）。"""
+        if not torch.cuda.is_available():
+            pytest.skip("needs a GPU")
+        torch.manual_seed(0)
+        _, eager_vision, _ = _build_models()
+        flash_cfg = eager_vision.config.model_copy(update={"attn_impl": "flash_attention"})
+        flash_vision = flash_cfg.build()
+        flash_vision.load_state_dict(eager_vision.state_dict())
+
+        # flash 只支持 fp16/bf16，故两侧都用 bf16 比较。
+        eager_vision = eager_vision.to("cuda", torch.bfloat16)
+        flash_vision = flash_vision.to("cuda", torch.bfloat16)
+        grid_thw = torch.tensor([[1, 4, 4], [1, 2, 2]], device="cuda")
+        patch_dim = IN_CHANNELS * TEMPORAL_PATCH_SIZE * PATCH_SIZE * PATCH_SIZE
+        pixel_values = torch.randn(20, patch_dim, device="cuda", dtype=torch.bfloat16)
+
+        eager_out = eager_vision(pixel_values, grid_thw)
+        flash_out = flash_vision(pixel_values, grid_thw)
+        torch.testing.assert_close(flash_out, eager_out, rtol=2e-2, atol=2e-2)
+
+
+class TestGlm53VisionSequenceParallel(DistributedTestBase):
+    """2 卡 Vision SP：merge 对齐切分 + Ulysses + 各自 projector，再 gather 回来必须与非 SP
+    逐位一致（见 doc/xtuner_glm5p3flash_design.md F2 §9.3/§9.6）。"""
+
+    @pytest.mark.gpu
+    def test_sp_tower_and_projector_match_non_sp(self, device="cuda"):
+        # 20 个 patch 不是 sp_size*merge_unit(=8) 的整数倍，刻意覆盖补齐分支。
+        self.create_pg(device)
+        sp_size = self.world_size
+        torch.manual_seed(0)
+        _, xt_vision, xt_projector = _build_models()
+        xt_vision, xt_projector = xt_vision.to(device), xt_projector.to(device)
+        for param in list(xt_vision.parameters()) + list(xt_projector.parameters()):
+            torch.distributed.broadcast(param.data, src=0)
+
+        grid_thw = torch.tensor([[1, 4, 4], [1, 2, 2]], device=device)
+        patch_dim = IN_CHANNELS * TEMPORAL_PATCH_SIZE * PATCH_SIZE * PATCH_SIZE
+        pixel_values = torch.randn(20, patch_dim, device=device)
+        torch.distributed.broadcast(pixel_values, src=0)
+
+        reference = xt_projector(xt_vision(pixel_values, grid_thw))
+
+        sp_mesh = init_data_mesh(device, sp_size)["sp"]
+        local = xt_projector(xt_vision(pixel_values, grid_thw, sequence_parallel_mesh=sp_mesh))
+        gathered = [torch.empty_like(local) for _ in range(sp_size)]
+        torch.distributed.all_gather(gathered, local, group=sp_mesh.get_group())
+        # 补齐块排在末尾，按真实 patch 数截断后必须与非 SP 结果一致。
+        merged = torch.cat(gathered, dim=0)[: pixel_values.shape[0] // (MERGE * MERGE)]
+
+        assert merged.shape == reference.shape
+        torch.testing.assert_close(merged, reference, rtol=1e-5, atol=1e-5)
+
+    @property
+    def world_size(self) -> int:
+        return 2
