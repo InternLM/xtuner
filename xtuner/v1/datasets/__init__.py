@@ -11,6 +11,8 @@ from .config import (
 from .ftdp import FTDPTokenizeFnConfig, FtdpTokenizeFunction
 from .jsonl import JsonlDataset
 from .mllm_tokenize_fn import (
+    Glm53VLTokenizeFnConfig,
+    Glm53VLTokenizeFunction,
     InternS1VLTokenizeFnConfig,
     InternS1VLTokenizeFunction,
     Qwen3VLTokenizeFnConfig,
@@ -62,6 +64,8 @@ __all__ = [
     "FtdpTokenizeFunction",
     "InternS1VLTokenizeFunction",
     "Qwen3VLTokenizeFnConfig",
+    "Glm53VLTokenizeFnConfig",
+    "Glm53VLTokenizeFunction",
     "Qwen3VLTokenizeFunction",
     "VLMJsonlDataset",
     "FTDPTokenizeFnConfig",
