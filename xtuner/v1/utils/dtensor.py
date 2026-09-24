@@ -11,6 +11,40 @@ from torch.utils._foreach_utils import (
 )
 
 
+def materialize_full(param: torch.Tensor, *, name: str = "") -> torch.Tensor:
+    """Unwrap a parameter into a plain, whole :class:`torch.Tensor` for a
+    kernel that does not understand :class:`DTensor` (Triton, FLA, an absorbed-
+    MLA einsum, a compiled region).
+
+    Accepts only parameters that are already whole -- a plain tensor, or a ``Replicate``
+    :class:`DTensor` such as FSDP2 hands back after unsharding a module whose parameters were
+    replicated on the expert-parallel mesh. A ``Shard`` placement raises instead of returning
+    the local slice: every call site reshapes by head or channel immediately afterwards, so a
+    slice would be silently mis-grouped rather than caught as a shape error.
+
+    Note this is *not* a gradient-synchronization point. Unwrapping ends DTensor's autograd
+    contract: ``to_local`` labels the (per-rank different) gradient with the parameter's own
+    placement and communicates nothing, and ``full_tensor()`` without ``grad_placements``
+    behaves the same way. Replicated gradients are all-reduced separately by
+    ``MoE.scale_and_reduce_grad``.
+
+    Args:
+        param (torch.Tensor): Parameter to unwrap, possibly a :class:`DTensor`.
+        name (str): Parameter name, used only to make the error message locatable.
+
+    Returns:
+        torch.Tensor: The whole tensor, local to this rank.
+    """
+    if not isinstance(param, DTensor):
+        return param
+    if any(isinstance(placement, Shard) for placement in param.placements):
+        raise RuntimeError(
+            f"{name or 'parameter'} is still sharded ({param.placements}) where a whole tensor is "
+            "required; the local shard would be silently mis-grouped by the reshape that follows."
+        )
+    return param.to_local()
+
+
 def group_tensors_by_device_mesh_and_placements(
     tensors: list[DTensor],
 ) -> dict[tuple[DeviceMesh, tuple[Placement, ...]], list[DTensor]]:
