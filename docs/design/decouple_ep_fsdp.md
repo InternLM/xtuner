@@ -50,11 +50,11 @@ expert    : Shard(0) over ep  +  FSDP over efsdp             (+ replicate 上 HS
 
 ## 3. 实现
 
-各小节的"位置"行给出文件与行号，行号对应分支 `feat/decouple-ep-fsdp` 的代码提交 `0a7c6523`（2026-09-17，基于 upstream/main `6c06f96e`）。
+各小节的"位置"行给出文件与行号，行号对应加入专家组 reshard 修复（§3.3.1）之后的代码（2026-09-24；分支 `feat/decouple-ep-fsdp` 与 PR 分支上这些文件内容相同）。
 
 ### 3.1 配置与校验
 
-位置：`xtuner/v1/config/fsdp.py` 44–73，`xtuner/v1/model/moe/moe.py` 1764–1771。
+位置：`xtuner/v1/config/fsdp.py` 44–73，`xtuner/v1/model/moe/moe.py` 1832–1839。
 
 ```python
 # xtuner/v1/config/fsdp.py
@@ -77,7 +77,7 @@ def _validate_ep_fsdp_topology(self):
 
 ### 3.2 单一 root mesh
 
-位置：`xtuner/v1/model/moe/moe.py` 1743–1808（`_init_decoupled_device_mesh`），1576–1581（分流）。
+位置：`xtuner/v1/model/moe/moe.py` 1811–1876（`_init_decoupled_device_mesh`），1578–1583（分流）。
 
 ```python
 # xtuner/v1/model/moe/moe.py::_init_decoupled_device_mesh（节选）
@@ -112,7 +112,7 @@ else:
 
 ### 3.3 两级 `fully_shard`
 
-位置：`xtuner/v1/model/moe/moe.py` 1310–1342（decoder layer），1370–1380（prefetch），1419–1451（MTP），1723–1741（helper）。
+位置：`xtuner/v1/model/moe/moe.py` 1311–1362（decoder layer），1364–1379（prefetch），1405–1451（MTP），1459–1461（模型 forward pre-hook），1724–1808（helper）。
 
 ```python
 # xtuner/v1/model/moe/moe.py::fully_shard（节选）
@@ -122,30 +122,57 @@ if not decoupled and (self.ep_mesh.size() > 1 or tp_enabled):
 
 for layer_idx, layer in self.layers.items():
     if decoupled:                             # 1) 先包 MoEBlock -> expert_fsdp_mesh
-        self._fully_shard_expert_blocks(layer, mp_policy=mp_policy, reshard_after_forward=...)
+        self._fully_shard_expert_blocks(layer, mp_policy=mp_policy)
     ...
     self._fully_shard(                        # 2) 再包整层 -> dense 的 fsdp_mesh / hsdp_mesh
         mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh, module=layer, ...
     )
+    if decoupled:                             # 3) 专家组按层 reshard（§3.3.1）
+        self._reshard_expert_blocks_per_layer(layer, reshard_after_forward=reshard_after_forward)
 
 for layer_cur, layer_next in zip(layers[:-1], layers[1:]):
     if decoupled:                             # expert 的 all-gather 与下一层 dense 一起预取
         layer_cur.set_modules_to_forward_prefetch([*self._expert_blocks(layer_cur), layer_next])
+if decoupled:                                 # 专家组的反向预取指向下一层（§3.3.1）
+    self._set_expert_backward_prefetch(layers)
 
 @staticmethod
 def _expert_blocks(module):
     return [m for m in module.modules() if isinstance(m, MoEBlock)]
 
-def _fully_shard_expert_blocks(self, module, mp_policy, reshard_after_forward):
+def _fully_shard_expert_blocks(self, module, mp_policy):
     for expert_block in self._expert_blocks(module):
-        self._fully_shard(mesh=self.expert_fsdp_mesh, module=expert_block, mp_policy=mp_policy, ...)
+        self._fully_shard(mesh=self.expert_fsdp_mesh, module=expert_block, reshard_after_forward=False, ...)
+        expert_block.set_reshard_after_backward(False)   # reshard 时机见 §3.3.1
 ```
 
 解耦路径跳过 `_replicate_other_params`：dense 参数进入 `fully_shard` 时是普通 tensor，由 FSDP 在完整 `dp_shard` 上分片。每个 decoder layer 先把所有 `MoEBlock`（只含 routed expert 的 grouped linear 与激活）在 `expert_fsdp_mesh` 上 `fully_shard`，再在 dense mesh 上包装整层；FSDP2 会保留内层的 expert wrapper，把 expert 参数从外层 param group 中排除。MTP layer 使用同样的两级包装。forward prefetch 列表同时包含下一层与其 expert block，让 expert 的 all-gather 与 attention 重叠，而不是串行等在 MoE block 前。
 
+#### 3.3.1 专家组的 reshard 时机与反向预取
+
+专家组的 FSDP 单元嵌在整层的 reentrant activation checkpoint **里面**（外层 dense 单元则包在它外面）。重算会把这一层的前向
+再跑一遍，途中重新触发专家组的 FSDP hook，这带来两个问题：
+
+1. **重复 all-gather**：按 FSDP2 默认的 `reshard_after_forward=True` / `reshard_after_backward=True`，专家组每次调用后都会释放，
+   前向每个层内微批、重算每次调用、反向每个微批都要重新 all-gather。mb=4、全重算时每层每步 13 次，旧布局的整层单元只要 2 次。
+2. **反向预取目标错位**：重算在反向期间往 FSDP2 的前向完成顺序里追加记录，专家组的默认预取目标变成上一层（反向已经做完的）
+   专家，发出一次永远不会被用到的 all-gather，其输出缓冲要到反向结束才释放；同时没有单元预取下一层的 dense 单元，
+   它的 all-gather 只能排在本层 dense 的 reduce-scatter 后面。
+
+处理方式，两者都不新增配置，解耦路径下默认生效：
+
+- 专家组关闭 FSDP2 的自动 reshard，由 `_reshard_expert_blocks_per_layer` 在外层单元上挂两个 hook：前向结束后 reshard 一次
+  （forward post-hook，重算不会调用外层单元）；该层输入梯度产生时——即重算、所有微批反向与 reduce-scatter 都已发出之后——
+  再 reshard 一次。最后一层（无 MTP 时）沿用外层的 `reshard_after_forward=False`。模型的 forward pre-hook 在每步前向前
+  reshard 仍处于拼好状态的专家组，保证不会用到优化器更新前的权重。
+- `_set_expert_backward_prefetch` 让第 i 层（i ≥ 1）的专家组显式预取第 i−1 层；显式列表替换默认目标。
+
+decoder layer 与 MTP layer 都按此处理。每层专家组每步 all-gather 两次，同一时刻最多一层专家处于拼好状态。
+机制、trace 计数与测量见 [decoupled_ep_fsdp_expert_reshard_zh.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/decoupled_ep_fsdp_expert_reshard_zh.md)。
+
 ### 3.4 梯度归约
 
-位置：`xtuner/v1/model/moe/moe.py` 1482–1486（分流），1673–1722（`_scale_and_reduce_grad_decoupled`）。
+位置：`xtuner/v1/model/moe/moe.py` 1484–1488（分流），1675–1722（`_scale_and_reduce_grad_decoupled`）。
 
 不变式：每个参数的最终梯度等于全 data-parallel world 上的均值，与 `ep` / `efsdp` 取值无关。
 
@@ -183,7 +210,7 @@ for group, grads in grads_by_group.items():   # 每个 group 一次 coalesced al
 
 ### 3.5 FP8
 
-位置：`xtuner/v1/float8/float8_handler.py` 121–164、166–238、316–335；`xtuner/v1/float8/fsdp_utils.py` 127–137；`xtuner/v1/model/moe/moe.py` 1281–1292；`xtuner/v1/model/base.py` 1015。
+位置：`xtuner/v1/float8/float8_handler.py` 121–164、166–238、316–335；`xtuner/v1/float8/fsdp_utils.py` 127–137；`xtuner/v1/model/moe/moe.py` 1282–1293；`xtuner/v1/model/base.py` 1015。
 
 tile-wise FP8 需要知道每个本地权重会被多少个 FSDP rank 切分（决定 padding），以及 scale 的 reduce-max 应跨哪些 rank。解耦后 dense 与 expert 的答案不同：
 
@@ -279,6 +306,7 @@ def _param_owner(model, name):
 | FP8 | 3.4B 与 GLM-5.2 tile-wise FP8 训练 20 步稳定，差异量级接近同配置重复噪声 | FP8 + HSDP、FP8 + checkpoint 未测 | [L3.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/L3.md)、[GLM52.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/GLM52.md) |
 | GLM-5.2-30B，8×H200 目标配方 | EP4：1.688 s / 99.5 GiB → 1.658 s / 83.5 GiB；EP8：11.8 s / 120.0 GiB → 1.64 s / 76.3 GiB | EP8 的加速来自离开 allocator 上限（legacy 每步 2–3 次 alloc retry，解耦为 0），不是 collective 本身快 7 倍 | [GLM52.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/GLM52.md) |
 | RL 权重同步 | plain MoE 的 per-spec gather 逻辑成立；compose 的 owner 错误已修复并有单测 | 未做真实 Turbomind 端到端对拍 | [test_weight_iterator.py](../../tests/rl/test_weight_iterator.py#L237-L427) |
+| 专家组 reshard 时机与反向预取（§3.3.1） | Qwen3-30B-A3B EP4、mb4、64K token/卡/步（8×H200 同批 3 次交错，DeepEP v1）：专家组 all-gather 每步 614 → 96 次、发出后从未被使用 46 → 1；解耦对旧布局由 −5.3%、峰值 +3.2 GB 变为 +0.6%、−8.3 GB。EP8（efsdp=1）−1.6% → +1.0%。GLM-5.2-30B（含 MTP 层）EP4 mb2：对修复前 +4.4%，峰值 87.0 → 83.2 GB，MTP 层专家组每步同样 ≤ 2 次。两机 16 卡（专家组跨机）：对修复前 EP8（efsdp=2）+8.0%、EP4（efsdp=4）+11.2%、GLM +4.7%，与旧布局持平，显存少 8.6 / 3.8 GB | 单机与两机；更多节点、efsdp > 4 未测；主干第 0 层保留默认反向预取，每步 1 次未被使用的 all-gather | [test_decoupled_ep_fsdp_train_engine.py](../../tests/engine/test_decoupled_ep_fsdp_train_engine.py)（8 卡 gate：EP4、2 个层内微批、全重算下每个专家组每步被使用的 all-gather ≤ 2、发出后未被使用的合计 ≤ 1；只数通信，不比数值）、[decoupled_ep_fsdp_expert_reshard_zh.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/decoupled_ep_fsdp_expert_reshard_zh.md) |
 | legacy 兼容 | 开关默认关闭，旧分支执行逻辑未改动，L0 旧布局回归通过 | 未做 base-vs-branch 端到端逐 tensor 对照 | [baseline.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/baseline.md)、[decisions.md](https://github.com/silencelamb/xtuner/blob/feat/decouple-ep-fsdp/reports/decisions.md) |
 
 `reports/` 下的报告不随代码 PR 合入，链接指向 fork 分支 `feat/decouple-ep-fsdp` 上的固定地址；测试与脚本是仓库内相对链接。
