@@ -3,6 +3,7 @@
 TestGlm53TokenizeCacheRuntimeParity
     test_glm53_tokenize_cache_runtime_image_parity  图像：cache 预测与 runtime 实算一致
     test_glm53_tokenize_cache_runtime_video_parity  视频：同上
+    test_glm53_frame_folder_samples_the_processed_frames  帧文件夹按重采样后的帧取下标
 TestGlm53VisualPlaceholderAndTokenSemantics
     test_glm53_visual_placeholder_count             占位符数量等于 patch 数 / merge_unit
     test_glm53_num_img_tokens_is_per_vit_sequence   num_img_tokens 按 ViT 序列计数
@@ -12,7 +13,7 @@ TestGlm53MmTokenTypeIdsMatchesProcessorGolden
     test_video_only                                 视频模态标记与 HF processor 一致
 TestGlm53MixedMediaAndTruncation
     test_glm53_mixed_media_fails_fast               图文混合视频未支持，必须快速失败
-    test_glm53_visual_truncation_is_dropped         截断会切断视觉跨度时丢弃该样本
+    test_glm53_visual_truncation_is_dropped         截断会切断视觉跨度时 cache 阶段就丢弃
 TestGlm53CacheInvalidation
     test_glm53_cache_invalidates_on_processor_or_pack_change  processor/pack 变化使缓存失效
 """
@@ -87,7 +88,15 @@ def _image_item(image_path: str, width: int = 448, height: int = 448):
     }
 
 
-def _video_item(video_dir: str, num_frames: int = 6, fps: float = 2.0, width: int = 224, height: int = 224):
+def _video_item(
+    video_dir: str,
+    num_frames: int = 6,
+    fps: float = 2.0,
+    width: int = 224,
+    height: int = 224,
+    processed: tuple[int, float] | None = None,
+):
+    extra = {} if processed is None else {"processed_video_length": processed[0], "processed_fps": processed[1]}
     return {
         "messages": [
             {
@@ -100,6 +109,7 @@ def _video_item(video_dir: str, num_frames: int = 6, fps: float = 2.0, width: in
                             "image_wh": [width, height],
                             "origin_video_length": num_frames,
                             "origin_fps": fps,
+                            **extra,
                         },
                     },
                     {"type": "text", "text": "describe"},
@@ -123,6 +133,19 @@ class TestGlm53TokenizeCacheRuntimeParity:
 
     def test_glm53_tokenize_cache_runtime_video_parity(self, tokenize_fn, video_fixture):
         item = _video_item(video_fixture)
+        tokenize_fn.state = "cache"
+        cache_ret = tokenize_fn(item)
+        tokenize_fn.state = "runtime"
+        runtime_ret = tokenize_fn(item)
+
+        assert cache_ret["num_tokens"] == runtime_ret["num_tokens"] == len(runtime_ret["input_ids"])
+        assert cache_ret["num_img_tokens"] == runtime_ret["num_img_tokens"]
+
+    def test_glm53_frame_folder_samples_the_processed_frames(self, tokenize_fn, video_fixture):
+        # 帧文件夹里是重采样之后的视频（此处 6 帧 @2fps），元数据却同时描述了更长的原始视频
+        # （180 帧 @30fps）——真实 VLM 数据就是这个形态。之前按原始视频算帧下标，runtime 直接越界，
+        # 数据集静默换成 33 token 的假样本，而 cache 仍按原始视频预测长度，打包按错误长度装箱。
+        item = _video_item(video_fixture.rstrip("/") + "/", num_frames=180, fps=30.0, processed=(6, 2.0))
         tokenize_fn.state = "cache"
         cache_ret = tokenize_fn(item)
         tokenize_fn.state = "runtime"
@@ -218,9 +241,13 @@ class TestGlm53MixedMediaAndTruncation:
             tokenize_fn(item)
 
     def test_glm53_visual_truncation_is_dropped(self, ckpt_path, tokenizer, image_fixture):
-        # max_length shorter than the un-truncated sample cuts into the 256-token image span;
-        # the resulting placeholder-count mismatch must raise, not silently train on half a span.
+        # max_length 短于样本、会切进 256 token 的图像跨度：cache 阶段就必须报 num_tokens=0，让
+        # 数据集在打包前把它滤掉。只在 runtime 报错是不够的——数据集会吞掉异常换成假样本，而
+        # packer 早已按 cache 报的截断长度给它留了位置。
         short_fn = Glm53VLTokenizeFnConfig(processor_path=ckpt_path, max_length=20).build(tokenizer, anno_name="test")
+        short_fn.state = "cache"
+        assert short_fn(_image_item(image_fixture))["num_tokens"] == 0
+        # runtime 仍然拒绝，作为 cache 过滤漏掉时的最后一道防线。
         short_fn.state = "runtime"
         with pytest.raises(AssertionError):
             short_fn(_image_item(image_fixture))
