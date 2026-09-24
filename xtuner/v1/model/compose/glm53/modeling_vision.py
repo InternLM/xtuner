@@ -18,10 +18,9 @@ from typing_extensions import override
 
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.model import BaseModel
-from xtuner.v1.module import AttnOutputs, RMSNorm
+from xtuner.v1.module import AttnOutputs
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.ops.attn_imp import AttnOpOutputs, get_attn_impl_fn
-from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_torch_device_module
 from xtuner.v1.utils.init_weight import default_init_weights
 
@@ -98,6 +97,34 @@ class Glm53VisionRotaryEmbedding(nn.Module):
         return torch.cat([freq_hw, freq_hw], dim=-1)
 
 
+class Glm53VisionRMSNorm(nn.Module):
+    """Match HF/Automodel ``Glm5NextRMSNorm``: fp32 stats, cast, then affine.
+
+    The shared XTuner RMSNorm multiplies the weight before the dtype cast (``(x * rstd * weight).to(dtype)``). That
+    matches in fp32 and diverges in bf16.
+    """
+
+    def __init__(self, hidden_size: int, eps: float) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.float()
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
+
+
+def _reject_vision_sequence_parallel(sequence_parallel_mesh: DeviceMesh | None) -> None:
+    if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
+        raise NotImplementedError(
+            "GLM-5.3 vision sequence parallel needs merge-aligned padding before the tower. "
+            "Ulysses on an unsharded patch sequence is not implemented."
+        )
+
+
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
@@ -140,8 +167,8 @@ class Glm53VisionAttention(nn.Module):
         self.proj = nn.Linear(self.dim, self.dim, bias=config.attention_bias)
         self.scale = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
-        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.q_norm = Glm53VisionRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = Glm53VisionRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.attn_impl_func: Callable[..., AttnOpOutputs] = get_attn_impl_fn(config.attn_impl)  # type: ignore[assignment]
 
     def get_muon_split_sizes(self) -> dict[nn.Parameter, tuple[int, ...]]:
@@ -155,6 +182,7 @@ class Glm53VisionAttention(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         sequence_parallel_mesh: DeviceMesh | None = None,
     ) -> AttnOutputs:
+        _reject_vision_sequence_parallel(sequence_parallel_mesh)
         seq_length = hidden_states.shape[0]
         query_states, key_states, value_states = (
             self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
@@ -168,11 +196,6 @@ class Glm53VisionAttention(nn.Module):
         query_states = query_states.transpose(0, 1).unsqueeze(0)
         key_states = key_states.transpose(0, 1).unsqueeze(0)
         value_states = value_states.transpose(0, 1).unsqueeze(0)
-
-        if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
-            query_states = ulysses_all_to_all(query_states, scatter_dim=1, gather_dim=2, mesh=sequence_parallel_mesh)
-            key_states = ulysses_all_to_all(key_states, scatter_dim=1, gather_dim=2, mesh=sequence_parallel_mesh)
-            value_states = ulysses_all_to_all(value_states, scatter_dim=1, gather_dim=2, mesh=sequence_parallel_mesh)
 
         attn_op_outputs = self.attn_impl_func(
             query_states,
@@ -189,9 +212,6 @@ class Glm53VisionAttention(nn.Module):
         )
 
         raw_output = attn_op_outputs["raw_output"]
-        if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
-            raw_output = ulysses_all_to_all(raw_output, scatter_dim=1, gather_dim=2, mesh=sequence_parallel_mesh)
-
         raw_output = raw_output[0].reshape(seq_length, -1).contiguous()
         projected_output = self.proj(raw_output)
         return {"projected_output": projected_output, **attn_op_outputs}
@@ -200,8 +220,8 @@ class Glm53VisionAttention(nn.Module):
 class Glm53VisionBlock(nn.Module):
     def __init__(self, config: Glm53VisionConfig) -> None:
         super().__init__()
-        self.norm1 = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.norm2 = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm1 = Glm53VisionRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm2 = Glm53VisionRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.attn = Glm53VisionAttention(config)
         self.mlp = Glm53VisionMLP(config)
 
@@ -252,7 +272,7 @@ class Glm53VisionModel(BaseModel):
         self.patch_embed = Glm53VisionPatchEmbed(config)
         self.rotary_pos_emb = Glm53VisionRotaryEmbedding(head_dim, theta=config.rope_parameters["rope_theta"])
         self.blocks = nn.ModuleList([Glm53VisionBlock(config) for _ in range(config.depth)])
-        self.post_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_layernorm = Glm53VisionRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self._hf_prefix = "model.visual."
         self._init_load_spec()
@@ -306,6 +326,7 @@ class Glm53VisionModel(BaseModel):
         grid_thw: torch.Tensor,
         sequence_parallel_mesh: DeviceMesh | None = None,
     ) -> torch.Tensor:
+        _reject_vision_sequence_parallel(sequence_parallel_mesh)
         # `grid_thw` must already be expanded (video rows are [1, h, w], see vision_utils.py /
         # F1.d); the tower is t-aware regardless (repeats position ids/cu_seqlens over t), but
         # mixing representations silently changes num_img_tokens/feature-grouping downstream.
