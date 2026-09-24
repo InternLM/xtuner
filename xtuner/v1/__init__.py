@@ -17,7 +17,11 @@ def _patch_triton_autotune_for_determinism() -> None:
         # 从而改变浮点累加顺序。确定性模式固定第一个 config，并禁用 cache 结果。
         if configs:
             configs = configs[:1]
-        kwargs["cache_results"] = False
+        # 仅当 triton.autotune 支持时才传 cache_results；triton-ascend 3.2.0 无此参数
+        import inspect as _inspect
+
+        if "cache_results" in _inspect.signature(original_autotune).parameters:
+            kwargs["cache_results"] = False
         return original_autotune(configs, *args, **kwargs)
 
     patched = cast(Any, deterministic_autotune)

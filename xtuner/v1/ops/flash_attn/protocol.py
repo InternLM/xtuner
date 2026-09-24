@@ -20,6 +20,8 @@ class FlashAttnVarlenProtocol(Protocol):
         deterministic=False,
         return_attn_probs=False,
         block_table=None,
+        cu_seqlens_q_list: list[int] | None = None,
+        cu_seqlens_k_list: list[int] | None = None,
     ): ...
 
 
@@ -40,5 +42,7 @@ def cpu_flash_varlen_attn(
     deterministic=False,
     return_attn_probs=False,
     block_table=None,
+    cu_seqlens_q_list: list[int] | None = None,
+    cu_seqlens_k_list: list[int] | None = None,
 ):
     raise NotImplementedError("CPU Flash Attention is not implemented yet.")

@@ -7,7 +7,7 @@ from xtuner.v1.data_proto import SequenceContext
 
 def roll_packed_tensor(
     tensor: torch.Tensor,
-    cu_seq_lens: torch.IntTensor,
+    cu_seq_lens: list[int],
     shifts: int = -1,
     dim: int = -1,
     fill_value: float | int = 0,
@@ -19,7 +19,7 @@ def roll_packed_tensor(
 
     Args:
         tensor (torch.Tensor): Input packed tensor to roll.
-        cu_seq_lens (torch.IntTensor): Cumulative sequence lengths defining packed
+        cu_seq_lens (list[int]): Cumulative sequence lengths defining packed
             sequence boundaries. Shape [num_sequences + 1].
         shifts (int): Number of positions to shift. Use -1 for left shift (default).
             Only negative shifts are supported.
@@ -35,13 +35,13 @@ def roll_packed_tensor(
     Example:
         For packed sequences [1,2,3] and [4,5,6] with shifts=-1, dim=-1:
         >>> tensor = torch.tensor([[1, 2, 3, 4, 5, 6]])
-        >>> cu_seq_lens = torch.tensor([0, 3, 6], dtype=torch.int32)
+        >>> cu_seq_lens = [0, 3, 6]
         >>> rolled = roll_packed_tensor(tensor, cu_seq_lens, shifts=-1, dim=-1)
         >>> rolled  # [[2, 3, 0, 5, 6, 0]]
 
         For a 3D tensor with dim=-2 (e.g., inputs_embeds of shape [1, seq_len, hidden]):
         >>> tensor = torch.arange(12).reshape(1, 6, 2)
-        >>> cu_seq_lens = torch.tensor([0, 3, 6], dtype=torch.int32)
+        >>> cu_seq_lens = [0, 3, 6]
         >>> rolled = roll_packed_tensor(tensor, cu_seq_lens, shifts=-1, dim=-2)
         >>> rolled[0, 2]  # tensor([0, 0])  (boundary filled with fill_value=0)
     """
@@ -54,8 +54,8 @@ def roll_packed_tensor(
 
     # Roll each packed sequence independently within its boundaries
     for i in range(len(cu_seq_lens) - 1):
-        start_idx = cu_seq_lens[i].item()
-        end_idx = cu_seq_lens[i + 1].item()
+        start_idx = cu_seq_lens[i]
+        end_idx = cu_seq_lens[i + 1]
 
         # Extract sequence slice along the specified dimension
         seq_slice = tensor.narrow(dim, start_idx, end_idx - start_idx)  # type: ignore[arg-type]
@@ -108,7 +108,12 @@ def roll_sequence_context(
 
     raw_input_ids = seq_ctx.raw_input_ids
     if raw_input_ids is not None:
-        rolled = roll_packed_tensor(tensor=raw_input_ids, cu_seq_lens=seq_ctx.cu_seq_lens_q, shifts=shifts, dim=-1)
+        rolled = roll_packed_tensor(
+            tensor=raw_input_ids,
+            cu_seq_lens=seq_ctx.cu_seq_lens_q_list,
+            shifts=shifts,
+            dim=-1,
+        )
         overrides["raw_input_ids"] = rolled
         if is_sp:
             s = seq_ctx._shard_start
@@ -119,7 +124,10 @@ def roll_sequence_context(
     raw_inputs_embeds = seq_ctx.raw_inputs_embeds
     if raw_inputs_embeds is not None:
         rolled_e = roll_packed_tensor(
-            tensor=raw_inputs_embeds, cu_seq_lens=seq_ctx.cu_seq_lens_q, shifts=shifts, dim=-2
+            tensor=raw_inputs_embeds,
+            cu_seq_lens=seq_ctx.cu_seq_lens_q_list,
+            shifts=shifts,
+            dim=-2,
         )
         overrides["raw_inputs_embeds"] = rolled_e
         if is_sp:

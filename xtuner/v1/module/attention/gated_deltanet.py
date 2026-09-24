@@ -15,8 +15,7 @@ from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import get_logger
 
-from ...ops.gated_deltanet import get_causal_conv1d_fn, get_chunk_gated_delta_rule_fn
-from ...ops.gated_deltanet.gen_seq_idx import gen_seq_idx
+from ...ops.gated_deltanet import get_causal_conv1d_fn, get_chunk_gated_delta_rule_fn, get_rms_norm_gated_cls
 from ..linear import build_linear
 from .attn_outputs import AttnOutputs
 
@@ -38,45 +37,29 @@ def _all_to_all_out(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
 
 
-_fused_rms_norm_gated_import_error: ImportError | None = None
+def _repeat_qk_heads(x: torch.Tensor, repeats: int) -> torch.Tensor:
+    """Repeat Q/K heads while preserving the backend-native storage layout.
 
-try:
-    from fla.modules import FusedRMSNormGated as FLA_FusedRMSNormGated
+    The logical input and output layout is always ``[B, T, H, K]``. Supported
+    physical layouts are:
 
-    class FusedRMSNormGated(FLA_FusedRMSNormGated):
-        def forward(
-            self,
-            x: torch.Tensor,
-            g: torch.Tensor,
-            residual: torch.Tensor | None = None,
-            prenorm: bool = False,
-            residual_in_fp32: bool = False,
-        ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-            from ...ops.gated_deltanet.rms_norm_gated import rms_norm_gated
+    - contiguous time-major ``[B, T, H, K]``: repeat logical head dim 2;
+    - contiguous head-first ``[B, H, T, K]`` exposed through a
+      ``[B, T, H, K]`` transpose view: repeat native head dim 1 and return the
+      corresponding time-major view;
+    - any other strided ``[B, T, H, K]`` view: fall back to repeating logical
+      head dim 2, which materializes a time-major output.
+    """
+    if repeats == 1:
+        return x
 
-            weight = self.weight
-            if isinstance(weight, DTensor):
-                weight = weight.to_local()
+    head_first = x.transpose(1, 2)
+    time_major_contiguous = x.is_contiguous()
+    head_first_contiguous = head_first.is_contiguous()
+    if head_first_contiguous and (not time_major_contiguous or x.stride(2) != x.shape[-1]):
+        return head_first.repeat_interleave(repeats, dim=1).transpose(1, 2)
+    return x.repeat_interleave(repeats, dim=2)
 
-            return rms_norm_gated(
-                x,
-                g,
-                weight,
-                self.bias,
-                self.activation,
-                residual=residual,
-                eps=self.eps,
-                prenorm=prenorm,
-                residual_in_fp32=residual_in_fp32,
-            )
-
-except (ImportError, ModuleNotFoundError) as e:
-    has_fused_rms_norm_gated = False
-    FusedRMSNormGated = None  # type: ignore
-    _fused_rms_norm_gated_import_error = e
-else:
-    has_fused_rms_norm_gated = True
-    _fused_rms_norm_gated_import_error = None
 
 logger = get_logger()
 
@@ -119,6 +102,16 @@ class GatedDeltaNet(nn.Module):
         float8_cfg: Float8Config | None = None,
     ) -> None:
         super().__init__()
+        if num_value_heads % num_key_heads != 0:
+            raise ValueError(
+                "GatedDeltaNet requires num_value_heads to be an integer multiple of num_key_heads, "
+                f"got num_value_heads={num_value_heads} and num_key_heads={num_key_heads}"
+            )
+        if value_head_dim != key_head_dim:
+            raise ValueError(
+                "GatedDeltaNet requires value_head_dim to equal key_head_dim, "
+                f"got value_head_dim={value_head_dim} and key_head_dim={key_head_dim}"
+            )
         self.name = f"layers.{layer_idx}.gate_deltanet"
         self.float8_cfg = float8_cfg
 
@@ -127,6 +120,7 @@ class GatedDeltaNet(nn.Module):
         self.num_k_heads = num_key_heads
         self.head_k_dim = key_head_dim
         self.head_v_dim = value_head_dim
+        self.qk_head_repeat = self.num_v_heads // self.num_k_heads
         self.key_dim = self.head_k_dim * self.num_k_heads
         self.value_dim = self.head_v_dim * self.num_v_heads
 
@@ -155,13 +149,10 @@ class GatedDeltaNet(nn.Module):
 
         # Resolved at build time so `XTUNER_HF_IMPL` selects the HF-native fla call patterns
         # (same convention as `get_attn_impl_fn`).
-        if not has_fused_rms_norm_gated:
-            assert _fused_rms_norm_gated_import_error is not None
-            raise _fused_rms_norm_gated_import_error
-        assert FusedRMSNormGated is not None
         self.causal_conv1d_fn = get_causal_conv1d_fn()
         self.chunk_gated_delta_rule = get_chunk_gated_delta_rule_fn()
-        self.norm = FusedRMSNormGated(self.head_v_dim, eps=self.rms_norm_eps, activation=self.activation)
+        rms_norm_gated_cls = get_rms_norm_gated_cls()
+        self.norm = rms_norm_gated_cls(self.head_v_dim, eps=self.rms_norm_eps, activation=self.activation)
 
         self.out_proj = build_linear(
             self.value_dim,
@@ -221,12 +212,12 @@ class GatedDeltaNet(nn.Module):
         assert seq_ctx.sequence_parallel_mesh is not None, "sequence_parallel_mesh is required for forward_for_sp"
         sp_rank = seq_ctx.sp_rank
         sp_size = seq_ctx.sequence_parallel_mesh.size()
-        if seq_ctx.seq_idx is None:
-            # SP restores the full packed sequence before convolution, so seq_idx uses the global length.
-            seq_idx = gen_seq_idx(seq_len * sp_size, seq_ctx.cu_seq_lens_q)
-            seq_ctx.seq_idx = cast(torch.IntTensor, seq_idx)
-        else:
-            seq_idx = seq_ctx.seq_idx
+        if self.num_k_heads % sp_size != 0 or self.num_v_heads % sp_size != 0:
+            raise ValueError(
+                "GatedDeltaNet requires num_key_heads and num_value_heads to be divisible by the sequence "
+                f"parallel size, got num_key_heads={self.num_k_heads}, num_value_heads={self.num_v_heads}, "
+                f"sp_size={sp_size}"
+            )
 
         query, key, value = torch.split(
             mixed_qkv,  # (1, L/sp_size, 8192)
@@ -275,30 +266,49 @@ class GatedDeltaNet(nn.Module):
         if bias is not None:
             bias = bias.chunk(sp_size, dim=0)[sp_rank]
 
-        # The local causal-conv custom op consumes channel-last tensors when seq_idx is set.
         query = query.transpose(1, 2).contiguous()
         key = key.transpose(1, 2).contiguous()
         value = value.transpose(1, 2).contiguous()
+        query = query.reshape(batch_size, seq_len * sp_size, self.num_k_heads // sp_size, self.head_k_dim)
+        key = key.reshape(batch_size, seq_len * sp_size, self.num_k_heads // sp_size, self.head_k_dim)
+        value = value.reshape(batch_size, seq_len * sp_size, self.num_v_heads // sp_size, self.head_v_dim)
+        gdn_metadata = seq_ctx.gdn_metadata
+        seq_idx = gdn_metadata.seq_idx if gdn_metadata is not None else None
+        cu_seqlens_int64 = gdn_metadata.cu_seqlens_int64 if gdn_metadata is not None else None
+        chunk_indices = gdn_metadata.chunk_indices if gdn_metadata is not None else None
+        chunk_indices_list = gdn_metadata.chunk_indices_list if gdn_metadata is not None else None
         query = self.causal_conv1d_fn(
             x=query,
             weight=query_weight,
             bias=bias,
             activation=self.activation,
+            cu_seqlens=seq_ctx.cu_seq_lens_q,
+            cu_seqlens_list=seq_ctx.cu_seq_lens_q_list,
             seq_idx=seq_idx,
+            cu_seqlens_int64=cu_seqlens_int64,
+            chunk_indices=chunk_indices,
         )
         key = self.causal_conv1d_fn(
             x=key,
             weight=key_weight,
             bias=bias,
             activation=self.activation,
+            cu_seqlens=seq_ctx.cu_seq_lens_q,
+            cu_seqlens_list=seq_ctx.cu_seq_lens_q_list,
             seq_idx=seq_idx,
+            cu_seqlens_int64=cu_seqlens_int64,
+            chunk_indices=chunk_indices,
         )
         value = self.causal_conv1d_fn(
             x=value,
             weight=value_weight,
             bias=bias,
             activation=self.activation,
+            cu_seqlens=seq_ctx.cu_seq_lens_q,
+            cu_seqlens_list=seq_ctx.cu_seq_lens_q_list,
             seq_idx=seq_idx,
+            cu_seqlens_int64=cu_seqlens_int64,
+            chunk_indices=chunk_indices,
         )
 
         beta = b.sigmoid()
@@ -316,9 +326,9 @@ class GatedDeltaNet(nn.Module):
         key = key.reshape(batch_size, seq_len * sp_size, -1, self.head_k_dim)
         value = value.reshape(batch_size, seq_len * sp_size, -1, self.head_v_dim)
 
-        if self.num_v_heads // self.num_k_heads > 1:
-            query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
-            key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
+        if self.qk_head_repeat > 1:
+            query = _repeat_qk_heads(query, self.qk_head_repeat)
+            key = _repeat_qk_heads(key, self.qk_head_repeat)
 
         if seq_ctx.sequence_parallel_mesh and seq_ctx.sequence_parallel_mesh.size() > 1:
             g = g.transpose(1, 2)
@@ -349,6 +359,10 @@ class GatedDeltaNet(nn.Module):
             output_final_state=False,
             use_qk_l2norm_in_kernel=True,
             cu_seqlens=seq_ctx.cu_seq_lens_q,
+            cu_seqlens_list=seq_ctx.cu_seq_lens_q_list,
+            cu_seqlens_int64=cu_seqlens_int64,
+            chunk_indices=chunk_indices,
+            chunk_indices_list=chunk_indices_list,
         )
 
         if seq_ctx.sequence_parallel_mesh and seq_ctx.sequence_parallel_mesh.size() > 1:
@@ -398,33 +412,33 @@ class GatedDeltaNet(nn.Module):
         if bias and isinstance(bias, DTensor):
             bias = bias.to_local()
 
-        if seq_ctx.seq_idx is None:
-            # Keep seq_idx generation in a custom op so full-graph compile avoids Python tensor construction.
-            seq_idx = gen_seq_idx(seq_len, seq_ctx.cu_seq_lens_q)
-            seq_ctx.seq_idx = cast(torch.IntTensor, seq_idx)
-        else:
-            seq_idx = seq_ctx.seq_idx
-
+        mixed_qkv = mixed_qkv.reshape(
+            batch_size,
+            seq_len,
+            2 * self.num_k_heads + self.num_v_heads,
+            self.head_k_dim,
+        )
+        gdn_metadata = seq_ctx.gdn_metadata
+        seq_idx = gdn_metadata.seq_idx if gdn_metadata is not None else None
+        cu_seqlens_int64 = gdn_metadata.cu_seqlens_int64 if gdn_metadata is not None else None
+        chunk_indices = gdn_metadata.chunk_indices if gdn_metadata is not None else None
+        chunk_indices_list = gdn_metadata.chunk_indices_list if gdn_metadata is not None else None
         mixed_qkv = self.causal_conv1d_fn(
-            x=mixed_qkv,  # need non contiguous
+            x=mixed_qkv,
             weight=weight,
             bias=bias,
             activation=self.activation,
+            cu_seqlens=seq_ctx.cu_seq_lens_q,
+            cu_seqlens_list=seq_ctx.cu_seq_lens_q_list,
             seq_idx=seq_idx,
+            cu_seqlens_int64=cu_seqlens_int64,
+            chunk_indices=chunk_indices,
         )
-        # mixed_qkv = mixed_qkv.transpose(1, 2)
         query, key, value = torch.split(
             mixed_qkv,
-            [
-                self.key_dim,
-                self.key_dim,
-                self.value_dim,
-            ],
-            dim=-1,
+            [self.num_k_heads, self.num_k_heads, self.num_v_heads],
+            dim=2,
         )
-        query = query.reshape(batch_size, seq_len, -1, self.head_k_dim)
-        key = key.reshape(batch_size, seq_len, -1, self.head_k_dim)
-        value = value.reshape(batch_size, seq_len, -1, self.head_v_dim)
 
         beta = b.sigmoid()
         # If the model is loaded in fp16, without the .float() here, A might be -inf
@@ -437,9 +451,9 @@ class GatedDeltaNet(nn.Module):
 
         g = -A_log.float().exp() * F.softplus(a.float() + dt_bias)
 
-        if self.num_v_heads // self.num_k_heads > 1:
-            query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
-            key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
+        if self.qk_head_repeat > 1:
+            query = _repeat_qk_heads(query, self.qk_head_repeat)
+            key = _repeat_qk_heads(key, self.qk_head_repeat)
 
         core_attn_out, _ = self.chunk_gated_delta_rule(
             query,
@@ -451,6 +465,10 @@ class GatedDeltaNet(nn.Module):
             output_final_state=False,
             use_qk_l2norm_in_kernel=True,
             cu_seqlens=seq_ctx.cu_seq_lens_q,
+            cu_seqlens_list=seq_ctx.cu_seq_lens_q_list,
+            cu_seqlens_int64=cu_seqlens_int64,
+            chunk_indices=chunk_indices,
+            chunk_indices_list=chunk_indices_list,
         )
         # reshape input data into 2D tensor
         core_attn_out = core_attn_out.reshape(-1, self.head_v_dim)

@@ -1,5 +1,6 @@
 import os
 import subprocess
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Callable, List
 
 
@@ -28,6 +29,15 @@ def check_triton_available():
 
         return True
     except ImportError:
+        return False
+
+
+def check_triton_ascend_available():
+    """Check whether the installed Triton distribution targets Ascend."""
+    try:
+        version("triton-ascend")
+        return True
+    except PackageNotFoundError:
         return False
 
 
