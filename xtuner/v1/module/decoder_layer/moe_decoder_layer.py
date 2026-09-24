@@ -17,6 +17,8 @@ from xtuner.v1.module import (
     GatedDeltaNet,
     GatedDeltaNetConfig,
     GreedyRouterConfig,
+    KDAConfig,
+    KimiDeltaAttention,
     MHAConfig,
     MLAConfig,
     MultiHeadAttention,
@@ -254,7 +256,7 @@ class MoEDecoderLayer(nn.Module):
         n_shared_experts: int,
         with_shared_expert_gate: bool = False,
         hidden_factor: float = 1.0,
-        attention_config: MHAConfig | MLAConfig | GatedDeltaNetConfig,
+        attention_config: MHAConfig | MLAConfig | GatedDeltaNetConfig | KDAConfig,
         rope_scaling_cfg: RopeScalingConfig | None = None,
         layer_type: Literal["full_attention", "sliding_attention"] | None = None,
         generate_config: GenerateConfig | None = None,
@@ -276,13 +278,15 @@ class MoEDecoderLayer(nn.Module):
         self.n_shared_experts = n_shared_experts
         self.hidden_factor = hidden_factor
 
-        self.self_attn: MultiHeadAttention | MultiLatentAttention | GatedDeltaNet = attention_config.build(
-            hidden_size=hidden_size,
-            layer_idx=layer_idx,
-            generate_config=generate_config,
-            rope_scaling_cfg=rope_scaling_cfg,
-            layer_type=layer_type,
-            float8_cfg=float8_cfg,
+        self.self_attn: MultiHeadAttention | MultiLatentAttention | GatedDeltaNet | KimiDeltaAttention = (
+            attention_config.build(
+                hidden_size=hidden_size,
+                layer_idx=layer_idx,
+                generate_config=generate_config,
+                rope_scaling_cfg=rope_scaling_cfg,
+                layer_type=layer_type,
+                float8_cfg=float8_cfg,
+            )
         )
         self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps, type=rms_norm_type)
         self.layer_idx = layer_idx
