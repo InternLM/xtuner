@@ -79,10 +79,7 @@ class WeightUpdater:
         transport = self._transport
         if transport is None:
             return False
-        has_registered = getattr(transport, "has_registered_checkpoint", None)
-        if has_registered is None:
-            return False
-        return bool(has_registered())
+        return bool(transport.has_registered_checkpoint())
 
     def _set_transport(self) -> None:
         rollout_info = self.rollout_info

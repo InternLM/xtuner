@@ -10,7 +10,7 @@ from xtuner.v1.float8 import Float8Config, ScalingGranularity
 from xtuner.v1.float8.fsdp_utils import WeightWithDynamicTilewiseFloat8CastTensor
 from xtuner.v1.float8.triton_kernels.per_block_quant_gemm import per_block_quant_torch
 from xtuner.v1.model.base import BaseModel, HFSaveCfg, XTunerBaseModelConfig
-from xtuner.v1.rl.weight_update.data import RolloutWeightUpdateInfo, RolloutWeightUpdateTarget
+from xtuner.v1.rl.weight_update.data import RolloutBackend, RolloutWeightUpdateInfo, RolloutWeightUpdateTarget
 from xtuner.v1.rl.weight_update.weight_iterator import WeightIterator
 from xtuner.v1.utils import get_device
 from xtuner.v1.utils import load_spec as load_spec_module
@@ -77,15 +77,27 @@ class DirectFloat8WeightModel(BaseModel):
         return [key]
 
 
-def test_hf_weight_update_batches_have_one_dtype() -> None:
-    model = MixedDtypeModel()
-    rollout_info = RolloutWeightUpdateInfo(
+def _single_rank_rollout_info(*, backend: RolloutBackend) -> RolloutWeightUpdateInfo:
+    return RolloutWeightUpdateInfo(
         rollout_config=cast(Any, SimpleNamespace()),
-        weight_update_targets=(),
+        weight_update_targets=(
+            RolloutWeightUpdateTarget(
+                endpoint_rank=0,
+                update_ranks=(0,),
+                inference_engine_ranks=(0,),
+                server_url="http://rollout",
+                lifecycle_state="active",
+            ),
+        ),
         train_rank=0,
         transport_type="ipc",
-        backend="pytorch",
+        backend=backend,
     )
+
+
+def test_hf_weight_update_batches_have_one_dtype() -> None:
+    model = MixedDtypeModel()
+    rollout_info = _single_rank_rollout_info(backend="pytorch")
     iterator = WeightIterator(
         config=SimpleNamespace(update_weight_bucket_size_in_gb=1, model_cfg=None),
         engine=SimpleNamespace(model=model),
@@ -106,13 +118,7 @@ def test_fp8_hf_weight_update_uses_bfloat16() -> None:
     model = MixedDtypeModel()
     model.config.float8_cfg = Float8Config(scaling_granularity_gemm=ScalingGranularity.TILEWISE)
     model.fsdp_config = SimpleNamespace(ep_size=1)
-    rollout_info = RolloutWeightUpdateInfo(
-        rollout_config=cast(Any, SimpleNamespace()),
-        weight_update_targets=(),
-        train_rank=0,
-        transport_type="ipc",
-        backend="pytorch",
-    )
+    rollout_info = _single_rank_rollout_info(backend="pytorch")
     iterator = WeightIterator(
         config=SimpleNamespace(update_weight_bucket_size_in_gb=1, model_cfg=None),
         engine=SimpleNamespace(model=model),
@@ -135,13 +141,7 @@ def test_direct_fp8_weight_update_quantizes_bfloat16() -> None:
     assert not (torch.equal(fp16_data, expected_data) and torch.equal(fp16_scale, expected_scale))
 
     model = DirectFloat8WeightModel(master)
-    rollout_info = RolloutWeightUpdateInfo(
-        rollout_config=cast(Any, SimpleNamespace()),
-        weight_update_targets=(),
-        train_rank=0,
-        transport_type="ipc",
-        backend="turbomind",
-    )
+    rollout_info = _single_rank_rollout_info(backend="turbomind")
     iterator = WeightIterator(
         config=SimpleNamespace(model_cfg=model.config),
         engine=SimpleNamespace(model=model),
@@ -205,8 +205,9 @@ def test_ipc_hf_weight_batches_follow_rollout_expert_topology(
         ),
         weight_update_targets=(
             RolloutWeightUpdateTarget(
-                endpoint_rank=0,
+                endpoint_rank=train_rank,
                 update_ranks=tuple(range(max(rollout_ep, rollout_tp))),
+                inference_engine_ranks=tuple(range(max(rollout_ep, rollout_tp))),
                 server_url="http://rollout",
                 lifecycle_state="active",
             ),

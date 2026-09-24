@@ -49,6 +49,7 @@ from xtuner.v1.utils import (
     log_rank0,
     profile_time_and_memory,
 )
+from xtuner.v1.utils.activation_offload import OffloadManager
 from xtuner.v1.utils.grad_norm import cal_grad_norm
 
 
@@ -220,33 +221,42 @@ class TrainEngine:
         data_batch_info = self.model.pre_micro_batch_forward(data_batches)
         total_loss = torch.tensor(0.0, device=DEVICE)
 
-        for i in range(0, len(data_batches), intra_layer_micro_batch):
-            ProberList.set_micro_batch_iter(micro_batch_iter)
-            micro_batch_iter += 1
-            data_batch = data_batches[i : i + intra_layer_micro_batch]
-            seq_ctx_list = [i["seq_ctx"] for i in data_batch]
-            loss_ctx_list = [i["loss_ctx"] for i in data_batch]
+        # Saved-tensor offload is scoped to one complete optimizer step. All
+        # microbatch backwards are done inside this scope, so no saved
+        # activation is needed afterwards; the scope exit is also the only
+        # point where it is safe to wait for the offload copy streams before
+        # dropping their references. `finally` guarantees the release even
+        # when backward raises (OOM retry, NaN abort, ...).
+        try:
+            for i in range(0, len(data_batches), intra_layer_micro_batch):
+                ProberList.set_micro_batch_iter(micro_batch_iter)
+                micro_batch_iter += 1
+                data_batch = data_batches[i : i + intra_layer_micro_batch]
+                seq_ctx_list = [i["seq_ctx"] for i in data_batch]
+                loss_ctx_list = [i["loss_ctx"] for i in data_batch]
 
-            if self.intra_layer_micro_batch == 1:
-                output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
-            else:
-                # For intra_layer_micro_batch > 1, we need to handle the data batches differently.
-                # Here we assume that the model can handle a list of seq_ctx and loss_ctx.
-                output = self.model(
-                    seq_ctx=seq_ctx_list,
-                    loss_ctx=loss_ctx_list,  # type: ignore[arg-type]
-                )
-            output.free_nongrad_feature()
+                if self.intra_layer_micro_batch == 1:
+                    output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
+                else:
+                    # For intra_layer_micro_batch > 1, we need to handle the data batches differently.
+                    # Here we assume that the model can handle a list of seq_ctx and loss_ctx.
+                    output = self.model(
+                        seq_ctx=seq_ctx_list,
+                        loss_ctx=loss_ctx_list,  # type: ignore[arg-type]
+                    )
+                output.free_nongrad_feature()
 
-            micro_batch_results.append(output)
+                micro_batch_results.append(output)
 
-            loss = self._get_total_loss(output)
-            loss.backward()
-            total_loss += loss.detach()
-            # call dump_forward_records after backward to record the recomputed activations
-            ProberList.after_micro_iter_forward()
+                loss = self._get_total_loss(output)
+                loss.backward()
+                total_loss += loss.detach()
+                # call dump_forward_records after backward to record the recomputed activations
+                ProberList.after_micro_iter_forward()
 
-        batch_forward_info = self.model.post_micro_batch_forward(micro_batch_results)
+            batch_forward_info = self.model.post_micro_batch_forward(micro_batch_results)
+        finally:
+            OffloadManager().clear_step()
         return TrainStepInfo(total_loss=total_loss.item(), **data_batch_info, **batch_forward_info)
 
     def from_hf(self, hf_path: str | Path, strict: bool = False):
