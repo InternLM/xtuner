@@ -43,6 +43,7 @@ PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" \
   --sp 2 --steps 30 --out /tmp/qwen35-fixed-sp2
 python -m pytest -q tests/ops/test_causal_conv1d_sp.py
 python -m pytest -q tests/model/test_fsdp_ignored_grad.py
+python -m pytest -q tests/model/test_sp_conv_grad_scale.py
 ```
 
 Output directories must be new. Each run saves per-step loss, rank spread before
@@ -120,7 +121,7 @@ saved full-model snapshot from rank 0; its replicated parameters also diverge
 within each run (maximum rank spread 0.009059607982635498).
 
 The 16 CUDA convolution cases pass, including unequal document lengths and optional
-bias. Two distributed regression cases also pass on two GPUs, covering FP32 ignored
+bias. Four distributed regression cases also pass on two GPUs, covering FP32 ignored
 gradient averaging, unchanged FSDP-managed gradients, unused parameters, and an SGD
 update on 1D/2D meshes. Ruff lint/format checks, Python compilation, and `git diff --check` pass.
 The entire repository test suite was not run. GitHub Actions runs the pre-commit
@@ -144,6 +145,29 @@ reference from before coalescing.
 
 Initialization SHA-256: `65b3f557d2d8c67bbfd0d10d192e9f4c4c511d44e33c19ec974eb9fc641747f7`.
 Corpus SHA-256: `31e39d875fed6d6998587bf8e810b103452497c94d8ef91cd18f08dd8ea60b01`.
+
+## Convolution gradient normalization
+
+`LMHeadLossContext.build_batches` divides token losses by the global valid-token
+count. `LMHeadLossContext.forward` then sums the loss over WORLD using an
+autograd-aware all-reduce. Every rank backpropagates that reduced loss, so its
+backward sums the incoming unit gradients and supplies a factor of `world_size`.
+
+An SP convolution channel is evaluated on one rank per DP replica, but its raw
+gradient still includes that factor. Summing its contributions and dividing by
+`world_size = DP * SP` recovers the global mean gradient. Dividing by DP alone
+would multiply the result by SP. Counting only ranks with nonzero gradients misses
+the loss-backward scaling.
+
+`test_sp_conv_grad_scale.py` checks this against a full-batch mean cross-entropy
+reference without distributed loss or gradient reduction. It covers FP32/BF16,
+SP1/SP2, unequal valid-token counts, and a plain SGD update. A negative control
+explicitly reduces the same raw gradients with SUM / DP.
+
+On two H200 GPUs, `xtuner-sp-scale-20260924-88063843` passed all 20 regression
+cases. Both dtypes and SP sizes match the reference gradients and SGD-updated
+weights with zero maximum absolute difference. With SP2, the SUM / DP negative
+control has exactly twice the reference gradient norm.
 
 ## Scope and cost
 

@@ -617,6 +617,8 @@ class BaseModel(nn.Module):
             if mesh.ndim > 1:
                 mesh = mesh._flatten()
             grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
+            # Match FSDP averaging: LMHeadLossContext's autograd global SUM scales
+            # backward by world size, including gradients of SP-owned conv channels.
             grad.div_(mesh.size())
             grads_by_group.setdefault(mesh.get_group(), []).append(grad)
 
