@@ -437,7 +437,11 @@ class Glm53VisionModel(BaseModel):
         # `SequenceContext.max_length_q` (a CPU tensor) straight through.
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 
-        hidden_states = self.patch_embed(hidden_states)
+        # `SequenceContext` deliberately leaves `pixel_values` on CPU (see its `.to()` comment):
+        # under SP only this rank's shard is worth moving, so the move happens here, after the
+        # split, rather than for the whole batch up front. Follows the module's own device rather
+        # than the global one so a CPU-resident tower still works. `patch_embed` casts the dtype.
+        hidden_states = self.patch_embed(hidden_states.to(self.patch_embed.proj.weight.device))
         cos, sin = self.rotary_pos_emb(position_ids.to(hidden_states.device))
         if sp_size > 1:
             assert sequence_parallel_mesh is not None
