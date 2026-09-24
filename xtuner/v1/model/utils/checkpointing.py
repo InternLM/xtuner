@@ -11,7 +11,14 @@ from torch.utils._pytree import TreeSpec, tree_flatten, tree_unflatten
 from torch.utils.checkpoint import checkpoint
 
 
-__all__ = ["apply_activation_checkpointing", "reuse_during_recompute"]
+__all__ = ["apply_activation_checkpointing", "is_checkpoint_replay", "reuse_during_recompute"]
+
+
+def is_checkpoint_replay() -> bool:
+    """Return True while reentrant activation checkpoint is replaying
+    forward."""
+    state = _CURRENT_ACTIVATION_CHECKPOINT.get()
+    return state is not None and state[1]
 
 
 class _ActivationCheckpointFrame:
