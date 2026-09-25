@@ -14,32 +14,42 @@ _STORE_NAMESPACE = "xtuner_rollout"
 _handle_cache: Any = None
 
 
-def _free_ray_refs(obj: Any):
+def _ray_ref_key(ref: ray.ObjectRef) -> str:
+    """Return a stable key for de-duplicating one Ray object reference."""
+    return ref.hex()
+
+
+def _free_ray_refs(obj: Any, *, _seen: set[str] | None = None):
     """Recursively free ray.ObjectRef instances trapped inside an object.
 
     Args:
         obj (Any): The object that may contain ray.ObjectRef references (e.g., dict, list, tuple).
     """
+    seen = set() if _seen is None else _seen
     if isinstance(obj, ray.ObjectRef):
+        ref_key = _ray_ref_key(obj)
+        if ref_key in seen:
+            return
+        seen.add(ref_key)
         try:
             ray.internal.free([obj], local_only=False)
         except Exception as e:
             get_logger().error(f"Failed to free Ray ObjectRef {obj}: {e}")
     elif isinstance(obj, dict):
         for v in obj.values():
-            _free_ray_refs(v)
+            _free_ray_refs(v, _seen=seen)
     elif isinstance(obj, (list, tuple)):
         for v in obj:
-            _free_ray_refs(v)
+            _free_ray_refs(v, _seen=seen)
     elif hasattr(obj, "model_dump"):  # Pydantic v2
         for v in obj.model_dump().values() if hasattr(obj.model_dump, "__call__") else {}.values():
-            _free_ray_refs(v)
+            _free_ray_refs(v, _seen=seen)
     elif hasattr(obj, "dict") and callable(getattr(obj, "dict")):  # Pydantic v1
         for v in obj.dict().values():
-            _free_ray_refs(v)
+            _free_ray_refs(v, _seen=seen)
     elif hasattr(obj, "__dict__"):
         for v in vars(obj).values():
-            _free_ray_refs(v)
+            _free_ray_refs(v, _seen=seen)
 
 
 def _common_prefix_len(left: str, right: str) -> int:
@@ -173,6 +183,10 @@ class Trie:
                 node = node.children[key]
                 break
 
+        # A rerolled turn may overwrite an existing key.  Do not free the
+        # old value here: borrowers (sibling RolloutStates) keep their own
+        # refs alive via Ray's reference counting, and the trie dropping
+        # its handle never invalidates them.
         node.value = value
 
     def search(self, text: str, filter_none: bool = False) -> Tuple[str, List["TreeNode"]]:
@@ -220,16 +234,16 @@ class Trie:
                 If None, releases the entire tree.
         """
 
-        def _free_subtree(node: TreeNode):
+        def _free_subtree(node: TreeNode, seen: set[str]):
             for child in node.children.values():
-                _free_subtree(child)
+                _free_subtree(child, seen)
             if node.value is not None:
-                _free_ray_refs(node.value)
+                _free_ray_refs(node.value, _seen=seen)
                 node.value = None
             node.children.clear()
 
         if key is None:
-            _free_subtree(self.root)
+            _free_subtree(self.root, set())
             return
 
         node = self.root
@@ -523,6 +537,7 @@ async def release_and_discard_rollout_groups(groups: list[list[RolloutState]]) -
         for item in group:
             if item.session_id is not None and str(item.session_id) in released_session_ids:
                 item.routed_experts = None
+                item.routed_experts_owner = None
             discard_rollout_state(item)
 
 
