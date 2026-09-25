@@ -86,14 +86,11 @@ Import `Qwen3_5_VLDense4BConfig`, add a `model_mapping` alias
 hard-coded `qwen3_5` family (no `get_model_config_from_hf` dispatch is added for
 this family today).
 
-## 4. MTP — deferred (decision)
+## 4. MTP
 
-Baseline ships **without** MTP. The 15 `mtp.*` checkpoint keys are not built, so
-`from_hf` reports them as unexpected (matching HF, which lists
-`_keys_to_ignore_on_load_unexpected = [r"^mtp.*"]`), and `save_hf` does not
-re-emit them. The round-trip test is scoped to non-`mtp.*` keys. Adding MTP to
-the Dense path (mirroring `MoE.build_mtp_block` + forward/loss integration) is a
-follow-up commit.
+Default `mtp_config` is `None` (checkpoint `mtp.*` keys are unused). Set
+`text_config.mtp_config = MTPConfig(...)` to build and train the dense MTP
+block. HF mapping lives on `Qwen3_5_VLTextDense.to_hf_key_list`.
 
 ## 5. Parity result (decoder-layer bitwise)
 
@@ -147,6 +144,6 @@ selects its attention op through `get_attn_impl_fn`.
 1. Dense text tower + config + compose 4B config + registration (baseline,
    no MTP).
 2. Baseline tests (decoder-layer parity + save_hf round-trip).
-3. (later) MTP support in the Dense path.
+3. Dense MTP (`TransformerConfig.mtp_config` / `Dense.build_mtp_block`).
 4. (later) §8 optimizations: EP n/a (dense), SP, torch.compile, fp8,
    activation offload — each with a comparison test.

@@ -1,17 +1,35 @@
 """Multi-Token Prediction (MTP) Layer implementation."""
 
-from typing import Literal
+from typing import Literal, NotRequired, TypedDict
 
 import torch
 import torch.nn as nn
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.module import RMSNorm
-from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
-    MoEDecoderLayerMicroBatchOutput,
-    MoEDecoderLayerOutput,
-)
 from xtuner.v1.module.linear import build_linear
+
+
+class MTPDepthOutput(TypedDict):
+    """Per-depth output of one MTP forward.
+
+    Dense decoder layers only fill ``hidden_states``. MoE decoder layers also
+    fill the router fields.
+    """
+
+    hidden_states: torch.Tensor
+    router_logits: NotRequired[torch.Tensor]
+    router_weights: NotRequired[torch.Tensor]
+    router_topk_ids: NotRequired[torch.Tensor]
+
+
+class MTPDepthMicroBatchOutput(TypedDict):
+    """Per-depth output of one MTP forward over several micro-batches."""
+
+    hidden_states: list[torch.Tensor]
+    router_logits: NotRequired[list[torch.Tensor]]
+    router_weights: NotRequired[list[torch.Tensor]]
+    router_topk_ids: NotRequired[list[torch.Tensor]]
 
 
 class MTPLayer(nn.Module):
@@ -90,7 +108,7 @@ class MTPLayer(nn.Module):
         future_embeddings: torch.Tensor | list[torch.Tensor],
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | list[tuple[torch.Tensor, torch.Tensor]],
         seq_ctx: SequenceContext | list[SequenceContext],
-    ) -> MoEDecoderLayerOutput | MoEDecoderLayerMicroBatchOutput:
+    ) -> MTPDepthOutput | MTPDepthMicroBatchOutput:
         """Forward pass through the MTP layer.
 
         Mirrors :meth:`MoEDecoderLayer.forward`: passing lists runs ``N`` micro-batches together
@@ -108,8 +126,9 @@ class MTPLayer(nn.Module):
             seq_ctx (SequenceContext | list[SequenceContext]): Sequence context, aligned with
                 ``hidden_states``.
         Returns:
-            MoEDecoderLayerOutput | MoEDecoderLayerMicroBatchOutput: The wrapped decoder layer's
-            outputs with the MTP final layernorm applied to the hidden states.
+            MTPDepthOutput | MTPDepthMicroBatchOutput: The wrapped decoder layer's outputs with
+            the MTP final layernorm applied to the hidden states. Router fields are present only
+            when the wrapped layer is MoE.
         """
         if not isinstance(hidden_states, list):
             assert isinstance(future_embeddings, torch.Tensor), (
@@ -150,20 +169,20 @@ class MTPLayer(nn.Module):
         future_embeddings: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
-    ) -> MoEDecoderLayerOutput:
+    ) -> MTPDepthOutput:
         projected = self._preprocess(hidden_states=hidden_states, future_embeddings=future_embeddings)
 
-        layer_results: MoEDecoderLayerOutput = self.decoder_layer(
+        layer_results = self.decoder_layer(
             projected,
             position_embeddings=position_embeddings,
             seq_ctx=seq_ctx,
         )
-        return {
-            "hidden_states": self.final_layernorm(layer_results["hidden_states"]),
-            "router_logits": layer_results["router_logits"],
-            "router_weights": layer_results["router_weights"],
-            "router_topk_ids": layer_results["router_topk_ids"],
-        }
+        output: MTPDepthOutput = {"hidden_states": self.final_layernorm(layer_results["hidden_states"])}
+        if "router_logits" in layer_results:
+            output["router_logits"] = layer_results["router_logits"]
+            output["router_weights"] = layer_results["router_weights"]
+            output["router_topk_ids"] = layer_results["router_topk_ids"]
+        return output
 
     def _micro_batch_forward(
         self,
@@ -172,7 +191,7 @@ class MTPLayer(nn.Module):
         future_embeddings_list: list[torch.Tensor],
         position_embeddings_list: list[tuple[torch.Tensor, torch.Tensor]],
         seq_ctx_list: list[SequenceContext],
-    ) -> MoEDecoderLayerMicroBatchOutput:
+    ) -> MTPDepthMicroBatchOutput:
         n = len(hidden_states_list)
         assert len(future_embeddings_list) == n and len(position_embeddings_list) == n and len(seq_ctx_list) == n, (
             "All per-microbatch inputs must share the same length"
@@ -184,17 +203,19 @@ class MTPLayer(nn.Module):
             self._preprocess(hidden_states=h, future_embeddings=e)
             for h, e in zip(hidden_states_list, future_embeddings_list)
         ]
-        layer_results: MoEDecoderLayerMicroBatchOutput = self.decoder_layer(
+        layer_results = self.decoder_layer(
             projected_list,
             position_embeddings=position_embeddings_list,
             seq_ctx=seq_ctx_list,
         )
-        return {
+        output: MTPDepthMicroBatchOutput = {
             "hidden_states": [self.final_layernorm(hidden) for hidden in layer_results["hidden_states"]],
-            "router_logits": layer_results["router_logits"],
-            "router_weights": layer_results["router_weights"],
-            "router_topk_ids": layer_results["router_topk_ids"],
         }
+        if "router_logits" in layer_results:
+            output["router_logits"] = layer_results["router_logits"]
+            output["router_weights"] = layer_results["router_weights"]
+            output["router_topk_ids"] = layer_results["router_topk_ids"]
+        return output
 
     def _preprocess(
         self,
