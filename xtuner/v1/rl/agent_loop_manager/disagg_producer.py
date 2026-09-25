@@ -259,9 +259,9 @@ class DisaggAsyncProduceStrategyConfig(DisaggProduceStrategyConfig):
             response token may lag behind before it is masked out of the loss.
             ``None`` disables token-level masking, ``0`` accepts only tokens
             produced within the current sync period, and ``N`` allows ``N``
-            extra periods. Partially stale responses have their
-            ``response_mask`` reduced before training. If a state has no
-            trainable response token left, the state expires and its group
+            extra periods. Partially stale responses have the corresponding
+            response labels cleared to ``-100`` before training. If a state has
+            no trainable response token left, the state expires and its group
             enters the expired-group lifecycle. Defaults to None.
         tail_batch_trigger_size (int): Expired-group rerollout policy. ``-1``
             disables rerollout and terminally discards expired groups, ``0``
