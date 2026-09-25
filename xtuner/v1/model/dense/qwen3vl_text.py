@@ -8,7 +8,7 @@ from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model.base import ModelOutputs
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayerOutput
 
-from .qwen3 import Qwen3Dense, Qwen3Dense4BConfig, Qwen3Dense8BConfig
+from .qwen3 import Qwen3Dense, Qwen3Dense2BConfig, Qwen3Dense4BConfig, Qwen3Dense8BConfig
 
 
 class Qwen3VLTextDense(Qwen3Dense):
@@ -93,6 +93,11 @@ class Qwen3VLTextDense(Qwen3Dense):
             output["extra_info"] = extra_info
 
         return ModelOutputs(**output)
+
+
+class Qwen3VLTextDense2BConfig(Qwen3Dense2BConfig):
+    def build(self) -> Qwen3VLTextDense:
+        return Qwen3VLTextDense(self)
 
 
 class Qwen3VLTextDense4BConfig(Qwen3Dense4BConfig):
