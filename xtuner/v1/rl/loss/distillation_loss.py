@@ -117,6 +117,7 @@ class DistillationLossConfig(BaseRLLossConfig):
         self,
         data: dict,
         sp_mesh: DeviceMesh | None = None,
+        device: str | torch.device = DEVICE,
     ) -> "DistillationLossContext | None":
         if "shifted_labels" not in data or "advantages" not in data:
             return None
@@ -136,7 +137,7 @@ class DistillationLossConfig(BaseRLLossConfig):
         # local slice to the accelerator.
         if sp_mesh is not None and sp_mesh.size() > 1:
             loss_kwargs = loss_kwargs.sp_split(sp_mesh)
-        loss_kwargs = loss_kwargs.to(DEVICE)
+        loss_kwargs = loss_kwargs.to(device)
         return self.loss_ctx_cls(self, loss_kwargs)
 
 

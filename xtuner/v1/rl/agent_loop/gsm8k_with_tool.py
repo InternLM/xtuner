@@ -152,12 +152,19 @@ class GSM8KToolAgentLoop(AgentLoop):
         final_response_mask = final_response_mask[:max_len]
         final_logprobs = final_logprobs[:max_len]
 
+        prompt_ids = rollout_state.prompt_ids
+        assert prompt_ids is not None and len(prompt_ids) > 0, (
+            f"Prompt ids cannot be None or empty in data: {rollout_state}"
+        )
         rollout_state.response_ids = final_response_ids
-        rollout_state.response_mask = final_response_mask
         rollout_state.logprobs = final_logprobs
+        rollout_state.input_ids = list(prompt_ids) + final_response_ids
+        rollout_state.labels = [-100] * len(prompt_ids) + [
+            resp_id if mask_value else -100 for resp_id, mask_value in zip(final_response_ids, final_response_mask)
+        ]
         rollout_state.response = self.tokenizer.decode(rollout_state.response_ids)
-        assert len(rollout_state.response_ids) == len(rollout_state.response_mask) == len(rollout_state.logprobs), (
-            f"{len(rollout_state.response_ids)} vs {len(rollout_state.response_mask)} vs {len(rollout_state.logprobs)}"
+        assert len(rollout_state.input_ids) == len(rollout_state.labels) == len(rollout_state.logprobs), (
+            f"{len(rollout_state.input_ids)} vs {len(rollout_state.labels)} vs {len(rollout_state.logprobs)}"
         )
         if self.judger is not None and not self.enable_batch_judge:
             rollout_state = await self.run_judger(rollout_state)

@@ -50,7 +50,6 @@ def make_rollout_state(
     response: str | None = None,
     response_ids: list[int] | None = None,
     response_model_steps: list[int] | None = None,
-    response_mask: list[int] | None = None,
     logprobs: list[float] | None = None,
     reward: dict | None = None,
     error_msg: str | None = None,
@@ -74,7 +73,6 @@ def make_rollout_state(
         response=response if response is not None else f"response {uid}",
         response_ids=response_ids,
         response_model_steps=list(response_model_steps) if response_model_steps is not None else None,
-        response_mask=list(response_mask) if response_mask is not None else [1 for _ in response_ids],
         logprobs=logprobs,
         routed_experts=routed_experts,
         finish_reason="stop" if status == Status.COMPLETED else None,
@@ -280,7 +278,6 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 assert reusable.error_msg is None
                 assert reusable.routed_experts is None
                 assert reusable.finish_reason is None
-                assert reusable.response_mask is None
                 assert reusable.mm_info is not None
                 assert reusable.mm_info["pixel_values"] is pixel_values
                 assert reusable.extra_fields == {"train_prompt_ids": [101, 102]}

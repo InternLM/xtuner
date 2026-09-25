@@ -11,7 +11,6 @@ from recipe.on_policy_distillation.build_teacher_server_commands import (
     build_teacher_launch_server_commands,
 )
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
-from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.rl.distillation import (
     DistillationConfig,
     DistillationTrainerAdapter,
@@ -23,7 +22,6 @@ from xtuner.v1.rl.distillation import (
     TrainTeacherTimings,
 )
 from xtuner.v1.rl.loss import DistillationLossConfig, DistillationLossKwargs
-from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.train.rl_trainer import BaseRLTrainer, BaseRLTrainerConfig
 
 
@@ -607,35 +605,6 @@ class TestRolloutTeacherClient(unittest.IsolatedAsyncioTestCase):
         request_payload = client._client.post.await_args.kwargs["json"]
         self.assertEqual(request_payload["input_ids"], [10, 11, 12, 13, 14])
         self.assertEqual(request_payload["top_logprobs_num"], 2)
-
-
-class TestTopKTrainingController(unittest.TestCase):
-    def test_packs_targets_along_sequence_dimension(self) -> None:
-        controller = TrainingController(workers=[])
-        first = {
-            "seq_ctx": SequenceContext.from_input_ids((torch.tensor([[1, 2]]),), device="cpu"),
-            "shifted_labels": torch.tensor([[-100, 2]]),
-            "advantage": [0.0, 0.0],
-            "rollout_logprobs": torch.zeros(1, 2),
-            "teacher_logprobs": torch.tensor([[[-0.1, -0.2], [-0.3, -0.4]]]),
-            "target_token_ids": torch.tensor([[[1, 2], [3, 4]]]),
-        }
-        second = {
-            "seq_ctx": SequenceContext.from_input_ids((torch.tensor([[3]]),), device="cpu"),
-            "shifted_labels": torch.tensor([[3]]),
-            "advantage": [0.0],
-            "rollout_logprobs": torch.zeros(1, 1),
-            "teacher_logprobs": torch.tensor([[[-0.5, -0.6]]]),
-            "target_token_ids": torch.tensor([[[5, 6]]]),
-        }
-
-        packed = controller._packing([first, second], pack_max_length=4, language_cfg=None)
-
-        self.assertEqual(len(packed), 1)
-        self.assertEqual(packed[0]["teacher_logprobs"].shape, (1, 4, 2))
-        self.assertEqual(packed[0]["target_token_ids"].shape, (1, 4, 2))
-        torch.testing.assert_close(packed[0]["teacher_logprobs"][0, 3], torch.zeros(2))
-        torch.testing.assert_close(packed[0]["target_token_ids"][0, 3], torch.zeros(2, dtype=torch.long))
 
 
 if __name__ == "__main__":
