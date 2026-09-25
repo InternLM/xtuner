@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import http.server
 import json
+import logging
 import os
 import threading
 import time
@@ -26,6 +27,9 @@ from recipe.trace.viewer.payload import (
     load_jaeger_traces_from_otel_jsonl,
 )
 from recipe.trace.viewer.render import render_rollout_trace_html, write_rollout_trace_html
+
+
+logger = logging.getLogger(__name__)
 
 
 _JAEGER_PROXY_PREFIX = "/jaeger"
@@ -122,6 +126,28 @@ def _train_step_cache_key(train_step: str | int | None) -> str:
     return text or "latest"
 
 
+def _empty_payload(
+    *,
+    trace_jsonl_path: Path | str,
+    service_name: str | None,
+    run_id: str | None,
+) -> dict[str, Any]:
+    return {
+        "title": "XTuner Rollout Trace Viewer",
+        "generated_at_s": None,
+        "source": "trace_jsonl",
+        "jaeger_query_url": None,
+        "jaeger_link_url": None,
+        "service_name": service_name,
+        "run_id": run_id,
+        "trace_jsonl_path": os.fspath(Path(trace_jsonl_path).expanduser()),
+        "available_train_steps": [],
+        "samples": [],
+        "sample_count": 0,
+        "unavailable": "trace JSONL not readable yet",
+    }
+
+
 def fetch_rollout_view_payload_from_trace_jsonl(
     trace_jsonl_path: Path | str,
     *,
@@ -181,7 +207,6 @@ def start_rollout_trace_viewer(
         load_base_payload,
         source_signature=current_source_signature,
     )
-    payload_cache.get(train_step)
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -211,7 +236,15 @@ def start_rollout_trace_viewer(
             return values[-1]
 
         def _payload(self, selected_train_step: str | int | None) -> dict[str, Any]:
-            return payload_cache.get(selected_train_step)
+            try:
+                return payload_cache.get(selected_train_step)
+            except (OSError, ValueError) as exc:
+                logger.warning("Trace payload unavailable for %s: %s", self.path, exc)
+                return _empty_payload(
+                    trace_jsonl_path=trace_jsonl_path,
+                    service_name=service_name,
+                    run_id=run_id,
+                )
 
         def _send_json(self, payload: dict[str, Any]) -> None:
             self._send_bytes(json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json")
@@ -302,7 +335,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--output", type=Path, default=None)
-    parser.add_argument("--train-step", default="latest", help="Initial train step to render: latest, all, or a step value.")
+    parser.add_argument(
+        "--train-step", default="latest", help="Initial train step to render: latest, all, or a step value."
+    )
     return parser.parse_args(argv)
 
 
