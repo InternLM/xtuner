@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 from safetensors import safe_open
 from torch import nn
+from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
 
 from xtuner._testing.testcase import DeterministicDDPTestCase
@@ -84,6 +85,22 @@ class TestFSDPModel(DeterministicDDPTestCase):
     @property
     def world_size(self) -> int:
         return 4
+
+    def test_cannot_disable_gradient_sync(self):
+        self.create_pg("cuda")
+        config = ToyModelConfig(compile_cfg=False)
+        model = config.build().cuda()
+        model.fully_shard(FSDPConfig(torch_compile=False))
+
+        for recurse in (False, True):
+            with self.assertRaisesRegex(ValueError, "requires gradient ReduceScatter on every backward"):
+                model.set_requires_gradient_sync(False, recurse=recurse)
+            model.set_requires_gradient_sync(True, recurse=recurse)
+
+        # The restriction belongs to XTuner instances, not PyTorch's class.
+        native = fully_shard(nn.Linear(4, 4).cuda())
+        native.set_requires_gradient_sync(False)
+        native.set_requires_gradient_sync(True)
 
     def test_model_forward_backward(self):
         self.create_pg("cuda")
