@@ -40,4 +40,3 @@ class InternVLVisionModel(InternS1VisionModel):
         self.encoder = InternVLVisionEncoder(config)
 
         self._hf_prefix = "vision_tower."
-        self._init_load_spec()
