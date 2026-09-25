@@ -26,6 +26,455 @@ default_config:
                 - HF_HUB_OFFLINE=1
 
 case: 
+    intern-s2-preview-sft:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_interns2_preview.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-interns2-preview-sft/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    intern-s2-preview-sft-tp2:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_interns2_preview_tp2.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - XTUNER_USE_FA3=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-interns2-preview-sft-tp2/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    intern-s2-preview-sft-ep-vs:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_interns2_preview_ep_vs.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-interns2-preview-sft/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.02
+                    loss/reduced_llm_loss: 0.02
+                    lr: 0
+            timeout: 10800
+
+    intern-s2-preview-sft-recompute:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_interns2_preview_recompute.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                num_nodes: 2
+                cpus_per_task: 256
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - TORCH_NPU_USE_HCCL=1
+                    - TORCH_HCCL_ZERO_COPY=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-interns2-preview-sft-recompute/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    intern-s2-preview-sft-sp4-resume:
+        -
+            type: sft
+            phase: first
+            parameters:
+                config: autotest/config/npu_interns2_preview_sp4.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - XTUNER_GC_ENABLE=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-interns2-preview-sft-sp4-resume/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+        -
+            type: sft
+            phase: resume
+            pre_action:
+                command: 'python ./autotest/utils/update_meta.py /mnt/hwfile/llmrazor/qa-llm-cicd/test_output intern-s2-preview-sft-sp4-resume sft'
+            parameters:
+                config: autotest/config/npu_interns2_preview_sp4.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - XTUNER_GC_ENABLE=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-interns2-preview-sft-sp4-resume/tracker-resume.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/text_tokens: 0
+            post_action:
+                command: 'python ./autotest/utils/resume_validation.py /mnt/hwfile/llmrazor/qa-llm-cicd/test_output intern-s2-preview-sft-sp4-resume sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_balancing_loss,loss/reduced_llm_loss,loss/local_loss"'
+            timeout: 10800
+
+    intern-s2-preview-sft-16nums:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_interns2_preview_16nums.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                num_nodes: 2
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-interns2-preview-sft/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+            timeout: 10800
+
+    intern-s2-preview-sft-mtp:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_interns2_preview_mtp.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-interns2-preview-sft-mtp/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    intern-s2-preview-sft-vl:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_interns2_preview_vl.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                cpus_per_task: 80
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - MEDIA_ROOT=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-interns2-preview-sft-vl/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    intern-s2-preview-sft-tp2-vl:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_interns2_preview_tp2_vl.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                cpus_per_task: 80
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - MEDIA_ROOT=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-interns2-preview-sft-tp2-vl/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    intern-s2-preview-sft-sp4-resume-vl:
+        -
+            type: sft
+            phase: first
+            parameters:
+                config: autotest/config/npu_interns2_preview_sp4_vl.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - MEDIA_ROOT=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_GC_ENABLE=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-interns2-preview-sft-sp4-resume-vl/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+        -
+            type: sft
+            phase: resume
+            pre_action:
+                command: 'python ./autotest/utils/update_meta.py /mnt/hwfile/llmrazor/qa-llm-cicd/test_output intern-s2-preview-sft-sp4-resume-vl sft'
+            parameters:
+                config: autotest/config/npu_interns2_preview_sp4_vl.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - MEDIA_ROOT=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_GC_ENABLE=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-interns2-preview-sft-sp4-resume-vl/tracker-resume.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/text_tokens: 0
+            post_action:
+                command: 'python ./autotest/utils/resume_validation.py /mnt/hwfile/llmrazor/qa-llm-cicd/test_output intern-s2-preview-sft-sp4-resume-vl sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_balancing_loss,loss/reduced_llm_loss,loss/local_loss"'
+            timeout: 10800
+
+    intern-s2-preview-sft-mtp-vl:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_interns2_preview_mtp_vl.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - MEDIA_ROOT=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-interns2-preview-sft-mtp-vl/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    intern-s2-preview-sft-ep2-mtp4-vl:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_interns2_preview_ep2_mtp4_vl.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                num_nodes: 2
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/internlm/Intern-S2-Preview
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - MEDIA_ROOT=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-interns2-preview-sft-ep2-mtp4-vl/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
     qwen3:
         -
             type: sft
