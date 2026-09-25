@@ -110,7 +110,6 @@ class WeightTransport(ABC, Generic[AdapterT]):
                 for batch in batches:
                     self._send(batch)
                 self.after_update_per_group()
-                DEVICE_MODULE.empty_cache()
         finally:
             self.after_update_all_groups()
             DEVICE_MODULE.empty_cache()
@@ -355,7 +354,7 @@ class LMDeployIPCBackendAdapter(IPCBackendAdapter):
         self, finished: bool, cpu_group: dist.ProcessGroup, train_enable_ep: bool = False
     ) -> None:
         # TODO(chenchiyu): narrow this condition.
-        if finished or (train_enable_ep and self.rollout_tp > 1):
+        if finished or self.rollout_tp > 1:
             # Make each TP head rank sync with other ranks in engine_parallel group.
             # FSDP all-gather of the next state_dict cannot cover this case, so without
             # this barrier some ranks could overwrite the IPC tensor before LMDeploy loads it.

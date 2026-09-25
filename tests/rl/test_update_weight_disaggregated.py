@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 
+import numpy as np
 import ray
 import requests
 
@@ -25,8 +26,27 @@ from xtuner.v1.rl.utils import (
 from xtuner.v1.rl.rollout.worker_registry import WorkerLifecycleState
 
 RL_TRAINER_RAY_GET_TIMEOUT = 3600
-
 TEST_TEXT_MESSAGES = [{"role": "user", "content": "Hello!"}]
+# Tokens can still match when a few shards are wrong; sampled-token logprobs
+# catch that. Keep this tight: identical weights should stay near exact.
+GENERATE_LOGPROB_RTOL = 1e-5
+GENERATE_LOGPROB_ATOL = 1e-5
+# SGLang: temperature=0 is greedy. LMDeploy /generate always sets do_sample=True
+# and divides logits by temperature, so greedy is top_k=1 with temperature=1.0.
+SGLANG_GREEDY_SAMPLE_PARAMS = SampleParams(
+    temperature=0.0,
+    max_tokens=128,
+    top_k=1,
+    return_logprob=True,
+    return_token_ids=True,
+)
+LMDEPLOY_GREEDY_SAMPLE_PARAMS = SampleParams(
+    temperature=1.0,
+    max_tokens=128,
+    top_k=1,
+    return_logprob=True,
+    return_token_ids=True,
+)
 MODEL_PATH = os.environ["QWEN3_VL_DENSE_PATH"]
 
 class TestUpdateWeightDisaggregated(unittest.TestCase):
@@ -138,6 +158,27 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
             results.append(response.json())
         return results
 
+    def _assert_generate_outputs_match(
+        self,
+        actual: RolloutState,
+        expected: RolloutState,
+        err_msg: str,
+    ) -> None:
+        self.assertEqual(actual.response, expected.response)
+        self.assertEqual(actual.response_ids, expected.response_ids)
+        self.assertIsNotNone(expected.logprobs)
+        self.assertIsNotNone(actual.logprobs)
+        self.assertGreater(len(expected.logprobs), 0)
+        self.assertEqual(len(actual.logprobs), len(expected.logprobs))
+        self.assertEqual(len(actual.logprobs), len(actual.response_ids or []))
+        np.testing.assert_allclose(
+            actual.logprobs,
+            expected.logprobs,
+            rtol=GENERATE_LOGPROB_RTOL,
+            atol=GENERATE_LOGPROB_ATOL,
+            err_msg=err_msg,
+        )
+
     @unittest.skipIf(os.environ.get("XTUNER_USE_SGLANG", "0") == "0", "sglang backend is not enabled")
     def test_sglang_disaggregated_update_weight_and_generate(self):
         TrainingWorker = ray.remote(
@@ -157,9 +198,23 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         self.rollout_cfg.skip_load_weights = False
         rollout_controller = self.rollout_cfg.build(self.rollout_pg)
 
-        sample_params = SampleParams(temperature=0.0, max_tokens=128, top_k=1)
-        input_state = RolloutState(message=TEST_TEXT_MESSAGES, sample_params=sample_params)
-        res_baseline = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
+        sample_params = SGLANG_GREEDY_SAMPLE_PARAMS
+
+        def _generate() -> RolloutState:
+            return ray.get(
+                rollout_controller.generate.remote(
+                    rollout_state=RolloutState(message=TEST_TEXT_MESSAGES, sample_params=sample_params),
+                ),
+                timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+            )
+
+        res_baseline = _generate()
+        res_repeat = _generate()
+        self._assert_generate_outputs_match(
+            res_repeat,
+            res_baseline,
+            err_msg="rollout logprobs changed between repeated generates before weight update",
+        )
 
         # 1) 清 KV + 释放旧权重（sleep level=2 -> meta）
         ray.get(
@@ -184,8 +239,12 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
             timeout=RL_TRAINER_RAY_GET_TIMEOUT,
         )
 
-        res_update_weight = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
-        self.assertEqual(res_update_weight.response, res_baseline.response)
+        res_update_weight = _generate()
+        self._assert_generate_outputs_match(
+            res_update_weight,
+            res_baseline,
+            err_msg="rollout logprobs changed after weight update",
+        )
         ray.get(rollout_controller.shutdown.remote(), timeout=60)
 
     @unittest.skip("skip sglang parameter-only weight check test until the parameter-check-only patch is applied")
@@ -226,7 +285,6 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         finally:
             ray.get(rollout_controller.shutdown.remote(), timeout=60)
 
-    @unittest.skip("skip lmdeploy disaggregated update-weight generation test until PR4638 is merged")
     def test_lmdeploy_disaggregated_update_weight_and_generate(self):
         # TODO(shipengcheng): Remove skip when CI update lmdeploy.
         TrainingWorker = ray.remote(
@@ -250,9 +308,23 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         }
         rollout_controller = self.rollout_cfg.build(self.rollout_pg)
 
-        sample_params = SampleParams(temperature=0.0, max_tokens=128, top_k=1)
-        input_state = RolloutState(message=TEST_TEXT_MESSAGES, sample_params=sample_params)
-        res_baseline = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
+        sample_params = LMDEPLOY_GREEDY_SAMPLE_PARAMS
+
+        def _generate() -> RolloutState:
+            return ray.get(
+                rollout_controller.generate.remote(
+                    rollout_state=RolloutState(message=TEST_TEXT_MESSAGES, sample_params=sample_params),
+                ),
+                timeout=RL_TRAINER_RAY_GET_TIMEOUT,
+            )
+
+        res_baseline = _generate()
+        res_repeat = _generate()
+        self._assert_generate_outputs_match(
+            res_repeat,
+            res_baseline,
+            err_msg="rollout logprobs changed between repeated generates before weight update",
+        )
 
         # 1) 清 KV + 释放旧权重（sleep level=2 -> meta）
         ray.get(
@@ -277,8 +349,12 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
             timeout=RL_TRAINER_RAY_GET_TIMEOUT,
         )
 
-        res_update_weight = ray.get(rollout_controller.generate.remote(rollout_state=input_state))
-        self.assertEqual(res_update_weight.response, res_baseline.response)
+        res_update_weight = _generate()
+        self._assert_generate_outputs_match(
+            res_update_weight,
+            res_baseline,
+            err_msg="rollout logprobs changed after weight update",
+        )
         ray.get(rollout_controller.shutdown.remote(), timeout=60)
 
 if __name__ == "__main__":
