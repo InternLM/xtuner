@@ -6,6 +6,7 @@ import triton.language as tl
 from torch.profiler import ProfilerActivity, profile
 
 from xtuner.v1.float8.float8_utils import to_fp8_saturated
+from xtuner.v1.float8.triton_kernels.quantization import quantize_per_block
 
 
 @triton.jit
@@ -41,10 +42,8 @@ def trans_per_block_quant_gemm_kernel(
     )
     output_scale_offset = output_scales_ptr + m * stride_out_scale_m + n * stride_out_scale_n
     input_block = tl.load(input_offset, mask=mask_m[:, None] & mask_n[None, :], other=0.0).to(tl.float32)
-    output_block_scale = tl.max(tl.abs(input_block)) / fmax
-    output_block_scale = tl.clamp(output_block_scale, 1e-12, 3e38)
-    input_block = input_block / output_block_scale
-    input_block = tl.clamp(input_block, fmin, fmax).to(output_ptr.dtype.element_ty)
+    input_block, output_block_scale = quantize_per_block(input_block, fmin, fmax, REDUCE_ALL=True)
+    input_block = input_block.to(output_ptr.dtype.element_ty)
     tl.store(output_offset, input_block, mask=mask_m[:, None] & mask_n[None, :])
     tl.store(output_scale_offset, output_block_scale)
 
