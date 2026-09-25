@@ -1,0 +1,696 @@
+From f18d8252ee77939eaa109af35221424a439a0381 Mon Sep 17 00:00:00 2001
+From: ShilohYu <84455289+ShilohYu@users.noreply.github.com>
+Date: Thu, 10 Sep 2026 09:47:54 +0000
+Subject: [PATCH] feat(runtime): add per-microbatch replica buffer slots
+
+Allocate replica weight, scale, and grad buffers by max_microbatches
+and index them with the virtual-layer slot so intra-layer MB>1 can
+reuse one Manager without overwriting in-flight replicas.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ csrc/kernels/api.cuh        |   4 ++
+ csrc/kernels/grad_reduce.cu |   6 ++-
+ csrc/kernels/weight_sync.cu |  37 ++++++++++---
+ csrc/ultra_ep.cpp           | 100 +++++++++++++++++++++++++-----------
+ csrc/ultra_ep.hpp           |  17 +++++-
+ csrc/utils/ipc_manager.cuh  |   3 +-
+ setup.py                    |   6 ++-
+ ultra_ep/manager.py         |  39 ++++++++++----
+ 8 files changed, 158 insertions(+), 54 deletions(-)
+
+diff --git a/csrc/kernels/api.cuh b/csrc/kernels/api.cuh
+index 4660ec6..5c6c79f 100644
+--- a/csrc/kernels/api.cuh
++++ b/csrc/kernels/api.cuh
+@@ -170,6 +170,9 @@ void build_weight_sync_task_lists(const TaskBuildConfig* config,
+                                   const int64_t* local_master_fc2_scale_ptrs,
+                                   uint8_t* local_replica_weight_buffer,
+                                   uint8_t* local_replica_weight_scale_buffer,
++                                  size_t replica_weight_slot_offset_bytes,
++                                  size_t replica_weight_scale_slot_offset_bytes,
++                                  int ready_flag_slot_base,
+                                   WeightSyncTask* stage1_tasks,
+                                   int* stage1_task_tile_offsets,
+                                   int* stage1_task_metadata,
+@@ -187,6 +190,7 @@ void build_grad_reduce_tasks(const TaskBuildConfig* config,
+                              const int32_t* logical_to_physical_map,
+                              const int32_t* logical_replica_counts,
+                              void* const* remote_grad_ptrs,
++                             size_t replica_grad_slot_offset_bytes,
+                              const int64_t* local_master_fc1_ptrs,
+                              const int64_t* local_master_fc2_ptrs,
+                              GradReduceTask* tasks,
+diff --git a/csrc/kernels/grad_reduce.cu b/csrc/kernels/grad_reduce.cu
+index da55837..f3e4313 100644
+--- a/csrc/kernels/grad_reduce.cu
++++ b/csrc/kernels/grad_reduce.cu
+@@ -19,6 +19,7 @@ __global__ __launch_bounds__(32) void build_grad_reduce_tasks_kernel(const TaskB
+                                                                      const int32_t* __restrict__ l2p,
+                                                                      const int32_t* __restrict__ lcnts,
+                                                                      void* const* __restrict__ remote_grad_ptrs,
++                                                                     const size_t replica_grad_slot_offset_bytes,
+                                                                      const int64_t* __restrict__ local_master_fc1_ptrs,
+                                                                      const int64_t* __restrict__ local_master_fc2_ptrs,
+                                                                      GradReduceTask* __restrict__ tasks,
+@@ -52,7 +53,8 @@ __global__ __launch_bounds__(32) void build_grad_reduce_tasks_kernel(const TaskB
+             int replica_nvl_rank = replica_rank % num_nvl_ranks;
+             int replica_local_offset = replica_phy % num_local_physical - num_local_master;
+ 
+-            float* remote_buf = reinterpret_cast<float*>(remote_grad_ptrs[replica_nvl_rank]);
++            float* remote_buf = reinterpret_cast<float*>(
++                reinterpret_cast<uint8_t*>(remote_grad_ptrs[replica_nvl_rank]) + replica_grad_slot_offset_bytes);
+             float* remote_expert_base = remote_buf + replica_local_offset * total_numel;
+ 
+             // FC1 task
+@@ -86,6 +88,7 @@ void build_grad_reduce_tasks(const TaskBuildConfig* config,
+                              const int32_t* logical_to_physical_map,
+                              const int32_t* logical_replica_counts,
+                              void* const* remote_grad_ptrs,
++                             size_t replica_grad_slot_offset_bytes,
+                              const int64_t* local_master_fc1_ptrs,
+                              const int64_t* local_master_fc2_ptrs,
+                              GradReduceTask* tasks,
+@@ -101,6 +104,7 @@ void build_grad_reduce_tasks(const TaskBuildConfig* config,
+                   logical_to_physical_map,
+                   logical_replica_counts,
+                   remote_grad_ptrs,
++                  replica_grad_slot_offset_bytes,
+                   local_master_fc1_ptrs,
+                   local_master_fc2_ptrs,
+                   tasks,
+diff --git a/csrc/kernels/weight_sync.cu b/csrc/kernels/weight_sync.cu
+index 7f057db..cb84b9b 100644
+--- a/csrc/kernels/weight_sync.cu
++++ b/csrc/kernels/weight_sync.cu
+@@ -104,11 +104,14 @@ static __device__ __forceinline__ uint8_t* weight_sync_remote_shard_addr(const T
+                                                                          void* const* __restrict__ remote_scale_ptrs,
+                                                                          const int replica_nvl_rank,
+                                                                          const int replica_local_offset,
++                                                                         const size_t replica_weight_slot_offset_bytes,
++                                                                         const size_t replica_weight_scale_slot_offset_bytes,
+                                                                          const int shard_idx) {
+     const bool scale_shard = shard_idx >= 2;
+     void* const* remote_ptrs = scale_shard ? remote_scale_ptrs : remote_weight_ptrs;
+     uint8_t* remote_buf = reinterpret_cast<uint8_t*>(remote_ptrs[replica_nvl_rank]);
+-    return remote_buf +
++    const size_t slot_offset = scale_shard ? replica_weight_scale_slot_offset_bytes : replica_weight_slot_offset_bytes;
++    return remote_buf + slot_offset +
+         static_cast<size_t>(replica_local_offset) * weight_sync_expert_buffer_bytes(config, scale_shard) +
+         weight_sync_shard_offset_bytes(config, shard_idx);
+ }
+@@ -118,10 +121,13 @@ static __device__ __forceinline__ uint8_t* weight_sync_local_replica_shard_addr(
+     uint8_t* __restrict__ local_replica_weight_buffer,
+     uint8_t* __restrict__ local_replica_weight_scale_buffer,
+     const int replica_local_offset,
++    const size_t replica_weight_slot_offset_bytes,
++    const size_t replica_weight_scale_slot_offset_bytes,
+     const int shard_idx) {
+     const bool scale_shard = shard_idx >= 2;
+     uint8_t* local_buf = scale_shard ? local_replica_weight_scale_buffer : local_replica_weight_buffer;
+-    return local_buf +
++    const size_t slot_offset = scale_shard ? replica_weight_scale_slot_offset_bytes : replica_weight_slot_offset_bytes;
++    return local_buf + slot_offset +
+         static_cast<size_t>(replica_local_offset) * weight_sync_expert_buffer_bytes(config, scale_shard) +
+         weight_sync_shard_offset_bytes(config, shard_idx);
+ }
+@@ -158,8 +164,9 @@ static __host__ __device__ __forceinline__ int max_weight_sync_relay_chunks_per_
+ static __host__ __device__ __forceinline__ int weight_sync_ready_flag_slot(const TaskBuildConfig& config,
+                                                                            const int local_replica_offset,
+                                                                            const int shard_idx,
+-                                                                           const int chunk_idx) {
+-    return ((local_replica_offset * weight_sync_num_shards(config) + shard_idx) *
++                                                                           const int chunk_idx,
++                                                                           const int ready_flag_slot_base) {
++    return ready_flag_slot_base + ((local_replica_offset * weight_sync_num_shards(config) + shard_idx) *
+             max_weight_sync_relay_chunks_per_shard(config)) +
+         chunk_idx;
+ }
+@@ -215,6 +222,9 @@ __global__ __launch_bounds__(32) void build_weight_sync_task_lists_kernel(
+     const int64_t* __restrict__ local_master_fc2_scale_ptrs,
+     uint8_t* __restrict__ local_replica_weight_buffer,
+     uint8_t* __restrict__ local_replica_weight_scale_buffer,
++    const size_t replica_weight_slot_offset_bytes,
++    const size_t replica_weight_scale_slot_offset_bytes,
++    const int ready_flag_slot_base,
+     WeightSyncTask* __restrict__ stage1_tasks,
+     int* __restrict__ stage1_tile_offsets,
+     int* __restrict__ stage1_task_metadata,
+@@ -285,6 +295,8 @@ __global__ __launch_bounds__(32) void build_weight_sync_task_lists_kernel(
+                                                               remote_weight_scale_ptrs,
+                                                               replica_nvl_rank,
+                                                               replica_local_offset,
++                                                              replica_weight_slot_offset_bytes,
++                                                              replica_weight_scale_slot_offset_bytes,
+                                                               shard_idx);
+                         }
+                     }
+@@ -441,11 +453,13 @@ __global__ __launch_bounds__(32) void build_weight_sync_task_lists_kernel(
+                                                                                         remote_weight_scale_ptrs,
+                                                                                         relay_nvl_ranks[relay_idx],
+                                                                                         relay_local_offsets[relay_idx],
++                                                                                        replica_weight_slot_offset_bytes,
++                                                                                        replica_weight_scale_slot_offset_bytes,
+                                                                                         shard_idx);
+                             task.replica_remote_addrs[relay_idx] =
+                                 remote_expert_base + weight_sync_chunk_offset_bytes(chunk_idx);
+                             task.ready_signal_slots[relay_idx] = weight_sync_ready_flag_slot(
+-                                *config, relay_local_offsets[relay_idx], shard_idx, chunk_idx);
++                                *config, relay_local_offsets[relay_idx], shard_idx, chunk_idx, ready_flag_slot_base);
+                             task.ready_signal_nvl_ranks[relay_idx] = relay_nvl_ranks[relay_idx];
+                         }
+                     }
+@@ -466,6 +480,8 @@ __global__ __launch_bounds__(32) void build_weight_sync_task_lists_kernel(
+                                                                                      local_replica_weight_buffer,
+                                                                                      local_replica_weight_scale_buffer,
+                                                                                      relay_local_offsets[relay_idx],
++                                                                                     replica_weight_slot_offset_bytes,
++                                                                                     replica_weight_scale_slot_offset_bytes,
+                                                                                      shard_idx);
+                     const int num_chunks = weight_sync_num_chunks(shard_bytes);
+                     for (int chunk_idx = 0; chunk_idx < num_chunks; ++chunk_idx) {
+@@ -475,7 +491,8 @@ __global__ __launch_bounds__(32) void build_weight_sync_task_lists_kernel(
+                         task.num_replicas = relay_child_counts[relay_idx];
+                         task.num_bytes = weight_sync_chunk_num_bytes(shard_bytes, chunk_idx);
+                         task.wait_ready_slot =
+-                            weight_sync_ready_flag_slot(*config, relay_local_offsets[relay_idx], shard_idx, chunk_idx);
++                            weight_sync_ready_flag_slot(
++                                *config, relay_local_offsets[relay_idx], shard_idx, chunk_idx, ready_flag_slot_base);
+ 
+                         int child_idx = 0;
+                         for (int replica_idx = 0; replica_idx < num_replicas; ++replica_idx) {
+@@ -493,6 +510,8 @@ __global__ __launch_bounds__(32) void build_weight_sync_task_lists_kernel(
+                                                                                         remote_weight_scale_ptrs,
+                                                                                         replica_nvl_rank,
+                                                                                         replica_local_offset,
++                                                                                        replica_weight_slot_offset_bytes,
++                                                                                        replica_weight_scale_slot_offset_bytes,
+                                                                                         shard_idx);
+                             task.replica_remote_addrs[child_idx++] =
+                                 remote_expert_base + weight_sync_chunk_offset_bytes(chunk_idx);
+@@ -533,6 +552,9 @@ void build_weight_sync_task_lists(const TaskBuildConfig* config,
+                                   const int64_t* local_master_fc2_scale_ptrs,
+                                   uint8_t* local_replica_weight_buffer,
+                                   uint8_t* local_replica_weight_scale_buffer,
++                                  size_t replica_weight_slot_offset_bytes,
++                                  size_t replica_weight_scale_slot_offset_bytes,
++                                  int ready_flag_slot_base,
+                                   WeightSyncTask* stage1_tasks,
+                                   int* stage1_task_tile_offsets,
+                                   int* stage1_task_metadata,
+@@ -558,6 +580,9 @@ void build_weight_sync_task_lists(const TaskBuildConfig* config,
+                   local_master_fc2_scale_ptrs,
+                   local_replica_weight_buffer,
+                   local_replica_weight_scale_buffer,
++                  replica_weight_slot_offset_bytes,
++                  replica_weight_scale_slot_offset_bytes,
++                  ready_flag_slot_base,
+                   stage1_tasks,
+                   stage1_task_tile_offsets,
+                   stage1_task_metadata,
+diff --git a/csrc/ultra_ep.cpp b/csrc/ultra_ep.cpp
+index 1d5558e..00c6406 100644
+--- a/csrc/ultra_ep.cpp
++++ b/csrc/ultra_ep.cpp
+@@ -216,8 +216,11 @@ Manager::Manager(const int& num_layers,
+                  const int& weight_sync_plan_mode,
+                  const int& weight_sync_relay_min_replicas,
+                  const int& weight_sync_relay_max_relays,
+-                 const int& weight_sync_relay_min_fanout_gain)
++                 const int& weight_sync_relay_min_fanout_gain,
++                 const int& real_num_alloc_layers)
+     : num_layers(num_layers),
++      real_num_alloc_layers_(real_num_alloc_layers > 0 ? real_num_alloc_layers : num_layers),
++      max_microbatches_(1),
+       num_local_master_experts(num_local_master_experts),
+       num_local_redundant_experts(num_local_redundant_experts),
+       num_local_physical_experts(num_local_master_experts + num_local_redundant_experts),
+@@ -258,6 +261,10 @@ Manager::Manager(const int& num_layers,
+ {
+     // Common checks
+     EP_HOST_ASSERT(runtime::is_runtime_initialized and "Runtime must be initialized before creating Manager");
++    EP_HOST_ASSERT(real_num_alloc_layers_ > 0 && real_num_alloc_layers_ <= num_layers);
++    EP_HOST_ASSERT(num_layers % real_num_alloc_layers_ == 0 &&
++                   "virtual layer capacity must be a multiple of real layer capacity");
++    max_microbatches_ = num_layers / real_num_alloc_layers_;
+     EP_HOST_ASSERT(weight_data_element_bytes > 0);
+     EP_HOST_ASSERT(weight_scale_element_bytes > 0);
+     EP_HOST_ASSERT(grad_element_bytes == static_cast<int>(sizeof(float)) &&
+@@ -305,55 +312,61 @@ Manager::Manager(const int& num_layers,
+ 
+     // Allocate local replica weight data buffer via NVSHMEM symmetric heap.
+     // This enables automatic cross-GPU access within NVL domain.
+-    const int64_t local_replica_weight_bytes = static_cast<int64_t>(num_local_redundant_experts) *
+-        checked_num_bytes(expert_total_numel, weight_data_element_bytes);
++    const int64_t expert_total_weight_bytes = checked_num_bytes(expert_total_numel, weight_data_element_bytes);
++    const int64_t local_replica_weight_bytes = static_cast<int64_t>(max_microbatches_) *
++        num_local_redundant_experts * expert_total_weight_bytes;
+ 
+     local_replica_weight_buffer = nvshmem::alloc(local_replica_weight_bytes, kernels::kNumTMAAlignBytes);
+     EP_HOST_ASSERT(local_replica_weight_buffer != nullptr && "Failed to allocate NVSHMEM weight buffer");
+ 
+     auto byte_opts = torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device_id));
+-    const int64_t expert_total_weight_bytes = checked_num_bytes(expert_total_numel, weight_data_element_bytes);
+     local_replica_weight_buffer_tensor = torch::from_blob(local_replica_weight_buffer,
+-                                                          {num_local_redundant_experts, expert_total_weight_bytes},
+-                                                          {expert_total_weight_bytes, 1},
++                                                          {max_microbatches_, num_local_redundant_experts,
++                                                           expert_total_weight_bytes},
++                                                          {num_local_redundant_experts * expert_total_weight_bytes,
++                                                           expert_total_weight_bytes, 1},
+                                                           byte_opts);
+     local_replica_fc1_weight_buffer_tensor = torch::from_blob(local_replica_weight_buffer,
+-                                                              {num_local_redundant_experts, expert_fc1_weight_bytes},
+-                                                              {expert_total_weight_bytes, 1},
++                                                              {max_microbatches_, num_local_redundant_experts,
++                                                               expert_fc1_weight_bytes},
++                                                              {num_local_redundant_experts * expert_total_weight_bytes,
++                                                               expert_total_weight_bytes, 1},
+                                                               byte_opts);
+     local_replica_fc2_weight_buffer_tensor =
+         torch::from_blob(reinterpret_cast<uint8_t*>(local_replica_weight_buffer) + expert_fc1_weight_bytes,
+-                         {num_local_redundant_experts, expert_fc2_weight_bytes},
+-                         {expert_total_weight_bytes, 1},
++                         {max_microbatches_, num_local_redundant_experts, expert_fc2_weight_bytes},
++                         {num_local_redundant_experts * expert_total_weight_bytes, expert_total_weight_bytes, 1},
+                          byte_opts);
+ 
+     if (expert_weight_scale_total_numel > 0) {
+         const int64_t local_replica_weight_scale_bytes =
+-            static_cast<int64_t>(num_local_redundant_experts) * expert_weight_scale_stride_bytes;
++            static_cast<int64_t>(max_microbatches_) * num_local_redundant_experts * expert_weight_scale_stride_bytes;
+         local_replica_weight_scale_buffer =
+             nvshmem::alloc(local_replica_weight_scale_bytes, kernels::kNumTMAAlignBytes);
+         EP_HOST_ASSERT(local_replica_weight_scale_buffer != nullptr &&
+                        "Failed to allocate NVSHMEM weight-scale buffer");
+         local_replica_weight_scale_buffer_tensor =
+             torch::from_blob(local_replica_weight_scale_buffer,
+-                             {num_local_redundant_experts, expert_weight_scale_stride_bytes},
+-                             {expert_weight_scale_stride_bytes, 1},
++                             {max_microbatches_, num_local_redundant_experts, expert_weight_scale_stride_bytes},
++                             {num_local_redundant_experts * expert_weight_scale_stride_bytes,
++                              expert_weight_scale_stride_bytes, 1},
+                              byte_opts);
+         local_replica_fc1_weight_scale_buffer_tensor =
+             torch::from_blob(local_replica_weight_scale_buffer,
+-                             {num_local_redundant_experts, expert_fc1_weight_scale_bytes},
+-                             {expert_weight_scale_stride_bytes, 1},
++                             {max_microbatches_, num_local_redundant_experts, expert_fc1_weight_scale_bytes},
++                             {num_local_redundant_experts * expert_weight_scale_stride_bytes,
++                              expert_weight_scale_stride_bytes, 1},
+                              byte_opts);
+         local_replica_fc2_weight_scale_buffer_tensor = torch::from_blob(
+             reinterpret_cast<uint8_t*>(local_replica_weight_scale_buffer) + expert_weight_scale_fc2_offset_bytes,
+-            {num_local_redundant_experts, expert_fc2_weight_scale_bytes},
+-            {expert_weight_scale_stride_bytes, 1},
++            {max_microbatches_, num_local_redundant_experts, expert_fc2_weight_scale_bytes},
++            {num_local_redundant_experts * expert_weight_scale_stride_bytes, expert_weight_scale_stride_bytes, 1},
+             byte_opts);
+     } else {
+         auto byte_opts = torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device_id));
+-        local_replica_weight_scale_buffer_tensor = torch::empty({num_local_redundant_experts, 0}, byte_opts);
+-        local_replica_fc1_weight_scale_buffer_tensor = torch::empty({num_local_redundant_experts, 0}, byte_opts);
+-        local_replica_fc2_weight_scale_buffer_tensor = torch::empty({num_local_redundant_experts, 0}, byte_opts);
++        local_replica_weight_scale_buffer_tensor = torch::empty({max_microbatches_, num_local_redundant_experts, 0}, byte_opts);
++        local_replica_fc1_weight_scale_buffer_tensor = torch::empty({max_microbatches_, num_local_redundant_experts, 0}, byte_opts);
++        local_replica_fc2_weight_scale_buffer_tensor = torch::empty({max_microbatches_, num_local_redundant_experts, 0}, byte_opts);
+     }
+ 
+     const int max_relay_chunks_per_shard = max_weight_sync_chunks_per_shard(expert_fc1_numel,
+@@ -361,8 +374,9 @@ Manager::Manager(const int& num_layers,
+                                                                             expert_fc1_weight_scale_bytes,
+                                                                             expert_fc2_weight_scale_bytes,
+                                                                             weight_data_element_bytes);
+-    const int64_t local_ready_flag_count = static_cast<int64_t>(num_local_redundant_experts) *
++    const int64_t ready_flags_per_slot = static_cast<int64_t>(num_local_redundant_experts) *
+         weight_sync_num_shards(expert_weight_scale_total_numel) * max_relay_chunks_per_shard;
++    const int64_t local_ready_flag_count = static_cast<int64_t>(max_microbatches_) * ready_flags_per_slot;
+     local_weight_sync_ready_flags = reinterpret_cast<uint64_t*>(
+         nvshmem::alloc(local_ready_flag_count * sizeof(uint64_t), kernels::kNumTMAAlignBytes));
+     EP_HOST_ASSERT(local_weight_sync_ready_flags != nullptr &&
+@@ -373,23 +387,27 @@ Manager::Manager(const int& num_layers,
+ 
+     // Grad buffer only needed for training
+     if (is_train) {
+-        int64_t local_replica_grad_bytes = static_cast<int64_t>(num_local_redundant_experts) *
++        int64_t local_replica_grad_bytes = static_cast<int64_t>(max_microbatches_) * num_local_redundant_experts *
+             checked_num_bytes(expert_total_numel, grad_element_bytes);
+         local_replica_grad_buffer = nvshmem::alloc(local_replica_grad_bytes, kernels::kNumTMAAlignBytes);
+         EP_HOST_ASSERT(local_replica_grad_buffer != nullptr && "Failed to allocate NVSHMEM grad buffer");
+         auto grad_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::Device(torch::kCUDA, device_id));
+         local_replica_grad_buffer_tensor = torch::from_blob(local_replica_grad_buffer,
+-                                                            {num_local_redundant_experts, expert_total_numel},
+-                                                            {expert_total_numel, 1},
++                                                            {max_microbatches_, num_local_redundant_experts,
++                                                             expert_total_numel},
++                                                            {num_local_redundant_experts * expert_total_numel,
++                                                             expert_total_numel, 1},
+                                                             grad_opts);
+         local_replica_fc1_grad_buffer_tensor = torch::from_blob(local_replica_grad_buffer,
+-                                                                {num_local_redundant_experts, expert_fc1_numel},
+-                                                                {expert_total_numel, 1},
++                                                                {max_microbatches_, num_local_redundant_experts,
++                                                                 expert_fc1_numel},
++                                                                {num_local_redundant_experts * expert_total_numel,
++                                                                 expert_total_numel, 1},
+                                                                 grad_opts);
+         local_replica_fc2_grad_buffer_tensor =
+             torch::from_blob(reinterpret_cast<float*>(local_replica_grad_buffer) + expert_fc1_numel,
+-                             {num_local_redundant_experts, expert_fc2_numel},
+-                             {expert_total_numel, 1},
++                             {max_microbatches_, num_local_redundant_experts, expert_fc2_numel},
++                             {num_local_redundant_experts * expert_total_numel, expert_total_numel, 1},
+                              grad_opts);
+         local_replica_grad_buffer_tensor.zero_();
+     }
+@@ -995,8 +1013,9 @@ void Manager::set_weight_sync_plan_mode(const int& plan_mode) {
+                                                                                 expert_fc1_weight_scale_bytes,
+                                                                                 expert_fc2_weight_scale_bytes,
+                                                                                 weight_data_element_bytes);
+-        const int64_t local_ready_flag_count = static_cast<int64_t>(num_local_redundant_experts) *
+-            weight_sync_num_shards(expert_weight_scale_total_numel) * max_relay_chunks_per_shard;
++        const int64_t local_ready_flag_count = static_cast<int64_t>(max_microbatches_) *
++            num_local_redundant_experts * weight_sync_num_shards(expert_weight_scale_total_numel) *
++            max_relay_chunks_per_shard;
+         CUDA_RUNTIME_CHECK(cudaMemsetAsync(
+             local_weight_sync_ready_flags, 0, local_ready_flag_count * sizeof(uint64_t), stream.stream()));
+     }
+@@ -1061,11 +1080,15 @@ std::optional<EventHandle> Manager::grad_reduce(const int& layer_id,
+ 
+     auto [physical_to_logical_map, logical_to_physical_map, logical_replica_counts] =
+         placement.get_device_ptrs(layer_id);
++    const int mb_slot = microbatch_slot(layer_id);
++    const size_t replica_grad_slot_offset_bytes = static_cast<size_t>(mb_slot) * num_local_redundant_experts *
++        checked_num_bytes(expert_total_numel, grad_element_bytes);
+     kernels::build_grad_reduce_tasks(_task_build_config,
+                                      physical_to_logical_map,
+                                      logical_to_physical_map,
+                                      logical_replica_counts,
+                                      _remote_grad_ptrs,
++                                     replica_grad_slot_offset_bytes,
+                                      local_master_fc1_grad_ptrs,
+                                      local_master_fc2_grad_ptrs,
+                                      _grad_reduce_tasks,
+@@ -1140,6 +1163,20 @@ std::optional<EventHandle> Manager::weight_sync(const int& layer_id,
+ 
+     auto [physical_to_logical_map, logical_to_physical_map, logical_replica_counts] =
+         placement.get_device_ptrs(layer_id);
++    const int mb_slot = microbatch_slot(layer_id);
++    const size_t expert_total_weight_bytes = checked_num_bytes(expert_total_numel, weight_data_element_bytes);
++    const size_t replica_weight_slot_offset_bytes = static_cast<size_t>(mb_slot) * num_local_redundant_experts *
++        expert_total_weight_bytes;
++    const size_t replica_weight_scale_slot_offset_bytes =
++        static_cast<size_t>(mb_slot) * num_local_redundant_experts * expert_weight_scale_stride_bytes;
++    const int max_relay_chunks_per_shard = max_weight_sync_chunks_per_shard(expert_fc1_numel,
++                                                                              expert_fc2_numel,
++                                                                              expert_fc1_weight_scale_bytes,
++                                                                              expert_fc2_weight_scale_bytes,
++                                                                              weight_data_element_bytes);
++    const int ready_flags_per_slot = num_local_redundant_experts *
++        weight_sync_num_shards(expert_weight_scale_total_numel) * max_relay_chunks_per_shard;
++    const int ready_flag_slot_base = mb_slot * ready_flags_per_slot;
+     kernels::build_weight_sync_task_lists(_task_build_config,
+                                           physical_to_logical_map,
+                                           logical_to_physical_map,
+@@ -1152,6 +1189,9 @@ std::optional<EventHandle> Manager::weight_sync(const int& layer_id,
+                                           local_master_fc2_weight_scale_ptrs,
+                                           reinterpret_cast<uint8_t*>(local_replica_weight_buffer),
+                                           reinterpret_cast<uint8_t*>(local_replica_weight_scale_buffer),
++                                          replica_weight_slot_offset_bytes,
++                                          replica_weight_scale_slot_offset_bytes,
++                                          ready_flag_slot_base,
+                                           _weight_sync_tasks,
+                                           _task_tile_offsets,
+                                           _task_metadata,
+diff --git a/csrc/ultra_ep.hpp b/csrc/ultra_ep.hpp
+index c32a793..00b2445 100644
+--- a/csrc/ultra_ep.hpp
++++ b/csrc/ultra_ep.hpp
+@@ -94,6 +94,11 @@ struct GlobalExpertPlacement {
+ class Manager {
+     // Model and expert settings
+     int num_layers;
++    // ``num_layers`` is the full virtual-layer capacity.  Virtual IDs are
++    // laid out as ``mb_slot * real_num_alloc_layers + real_layer_id`` so the
++    // slot can be recovered with an integer divide in communication kernels.
++    int real_num_alloc_layers_;
++    int max_microbatches_;
+     int num_local_master_experts;
+     int num_local_redundant_experts;
+     int num_local_physical_experts;
+@@ -234,7 +239,8 @@ public:
+             const int& weight_sync_plan_mode = static_cast<int>(kernels::WeightSyncPlanMode::kAdaptive),
+             const int& weight_sync_relay_min_replicas = 4,
+             const int& weight_sync_relay_max_relays = 8,
+-            const int& weight_sync_relay_min_fanout_gain = 2);
++            const int& weight_sync_relay_min_fanout_gain = 2,
++            const int& real_num_alloc_layers = 0);
+     ~Manager() noexcept(false);
+     void destroy();
+     bool is_available() const { return _available; }
+@@ -323,6 +329,10 @@ public:
+                                        torch::kInt32,
+                                        torch::Device(torch::kCUDA, runtime::device_id));
+     };
++    int microbatch_slot(const int& virtual_layer_id) const {
++        EP_HOST_ASSERT(virtual_layer_id >= 0 && virtual_layer_id < num_layers);
++        return virtual_layer_id / real_num_alloc_layers_;
++    }
+ };
+ 
+ static void register_apis(pybind11::module_& m) {
+@@ -352,6 +362,7 @@ static void register_apis(pybind11::module_& m) {
+                             int,
+                             int,
+                             int,
++                            int,
+                             int>(),
+              pybind11::arg("num_layers"),
+              pybind11::arg("num_local_master_experts"),
+@@ -378,7 +389,8 @@ static void register_apis(pybind11::module_& m) {
+              pybind11::arg("weight_sync_plan_mode") = static_cast<int>(kernels::WeightSyncPlanMode::kAdaptive),
+              pybind11::arg("weight_sync_relay_min_replicas") = 4,
+              pybind11::arg("weight_sync_relay_max_relays") = 8,
+-             pybind11::arg("weight_sync_relay_min_fanout_gain") = 2)
++             pybind11::arg("weight_sync_relay_min_fanout_gain") = 2,
++             pybind11::arg("real_num_alloc_layers") = 0)
+         .def("destroy", &Manager::destroy)
+         .def("is_available", &Manager::is_available)
+         .def("update_placement", &Manager::update_placement)
+@@ -422,6 +434,7 @@ static void register_apis(pybind11::module_& m) {
+         .def("get_logical_instance_quota_tensor", &Manager::get_logical_instance_quota_tensor)
+         .def("get_logical_instance_quota_prefix_tensor", &Manager::get_logical_instance_quota_prefix_tensor)
+         .def("get_rank_quota_prefix_tensor", &Manager::get_rank_quota_prefix_tensor)
++        .def("microbatch_slot", &Manager::microbatch_slot)
+         .def("get_global_logical_expert_loads_tensor", &Manager::get_global_logical_expert_loads_tensor);
+ 
+     m.def(
+diff --git a/csrc/utils/ipc_manager.cuh b/csrc/utils/ipc_manager.cuh
+index 3667a00..5133035 100644
+--- a/csrc/utils/ipc_manager.cuh
++++ b/csrc/utils/ipc_manager.cuh
+@@ -2,7 +2,6 @@
+ 
+ #include <ATen/cuda/CUDAContext.h>
+ #include <cuda.h>
+-#include <cuda_profiler_api.h>
+ #include <cuda_runtime.h>
+ #include <cuda_runtime_api.h>
+ #include <pybind11/pybind11.h>
+@@ -73,4 +72,4 @@ static void register_apis(pybind11::module_& m) {
+         .def("is_fabric_supported", &IpcManager::is_fabric_supported);
+ }
+ 
+-}  // namespace ultra_ep::ipc
+\ No newline at end of file
++}  // namespace ultra_ep::ipc
+diff --git a/setup.py b/setup.py
+index 745b110..6a54507 100644
+--- a/setup.py
++++ b/setup.py
+@@ -7,7 +7,7 @@ import importlib
+ 
+ from pathlib import Path
+ import torch
+-from torch.utils.cpp_extension import BuildExtension, CUDAExtension
++from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
+ 
+ current_dir = os.path.dirname(os.path.realpath(__file__))
+ 
+@@ -125,7 +125,9 @@ if __name__ == "__main__":
+     nvcc_flags.extend(["-rdc=true", "--ptxas-options=--register-usage-level=10"])
+     # Compilation workaround for CUDA 13.x
+     if torch.version.cuda and torch.version.cuda.startswith("13."):
+-        include_dirs.extend(["/usr/local/cuda/include/cccl/"])
++        cuda_home = os.getenv("CUDA_HOME") or CUDA_HOME
++        if cuda_home is not None:
++            include_dirs.extend([f"{cuda_home}/include/cccl/"])
+ 
+     # Disable aggressive PTX instructions
+     if int(os.getenv("DISABLE_AGGRESSIVE_PTX_INSTRS", "1")):
+diff --git a/ultra_ep/manager.py b/ultra_ep/manager.py
+index 6a21caa..b25a439 100644
+--- a/ultra_ep/manager.py
++++ b/ultra_ep/manager.py
+@@ -154,6 +154,7 @@ class Manager:
+             tuning.weight_sync_relay_min_replicas,
+             tuning.weight_sync_relay_max_relays,
+             tuning.weight_sync_relay_min_fanout_gain,
++            self.real_num_alloc_layers,
+         )
+         assert self.runtime.is_available()
+ 
+@@ -177,23 +178,24 @@ class Manager:
+         self._rank_quota_prefix: torch.Tensor = (
+             self.runtime.get_rank_quota_prefix_tensor()
+         )
+-        # Full buffers keep the original contiguous expert layout for backward
+-        # compatibility. The fc1/fc2 tensors below are strided views into these
+-        # buffers: each expert row is contiguous, while rows use the full-expert stride.
++        # Buffers are contiguous per slot with the expert layout preserved
++        # inside each slot. The fc1/fc2 tensors below are strided views into
++        # these buffers: each expert row is contiguous, while rows use the
++        # full-expert stride.
+         self.local_replica_weight_buffer: torch.Tensor = (
+             self.runtime.get_local_replica_weight_buffer_tensor()
+             .view(self.weight_data_dtype)
+-            .view(self.num_local_redundant_experts, self.expert_total_numel)
++            .view(self.max_microbatches, self.num_local_redundant_experts, self.expert_total_numel)
+         )
+         self.local_replica_fc1_weight_buffer: torch.Tensor = (
+             self.runtime.get_local_replica_fc1_weight_buffer_tensor()
+             .view(self.weight_data_dtype)
+-            .view(self.num_local_redundant_experts, self.expert_fc1_numel)
++            .view(self.max_microbatches, self.num_local_redundant_experts, self.expert_fc1_numel)
+         )
+         self.local_replica_fc2_weight_buffer: torch.Tensor = (
+             self.runtime.get_local_replica_fc2_weight_buffer_tensor()
+             .view(self.weight_data_dtype)
+-            .view(self.num_local_redundant_experts, self.expert_fc2_numel)
++            .view(self.max_microbatches, self.num_local_redundant_experts, self.expert_fc2_numel)
+         )
+         self.local_replica_weight_scale_buffer_raw: torch.Tensor = (
+             self.runtime.get_local_replica_weight_scale_buffer_tensor()
+@@ -208,23 +210,25 @@ class Manager:
+             self.local_replica_fc1_weight_scale_buffer: (
+                 torch.Tensor
+             ) = raw_fc1_scale_buffer.view(self.weight_scale_dtype).view(
++                self.max_microbatches,
+                 self.num_local_redundant_experts,
+                 self.expert_fc1_weight_scale_numel,
+             )
+             self.local_replica_fc2_weight_scale_buffer: (
+                 torch.Tensor
+             ) = raw_fc2_scale_buffer.view(self.weight_scale_dtype).view(
++                self.max_microbatches,
+                 self.num_local_redundant_experts,
+                 self.expert_fc2_weight_scale_numel,
+             )
+         else:
+             self.local_replica_fc1_weight_scale_buffer = torch.empty(
+-                (self.num_local_redundant_experts, 0),
++                (self.max_microbatches, self.num_local_redundant_experts, 0),
+                 dtype=self.weight_scale_dtype,
+                 device=raw_fc1_scale_buffer.device,
+             )
+             self.local_replica_fc2_weight_scale_buffer = torch.empty(
+-                (self.num_local_redundant_experts, 0),
++                (self.max_microbatches, self.num_local_redundant_experts, 0),
+                 dtype=self.weight_scale_dtype,
+                 device=raw_fc2_scale_buffer.device,
+             )
+@@ -310,7 +314,7 @@ class Manager:
+         """Allocate the next virtual layer ID for this real layer.
+ 
+         Maps ``(real_layer_id, mb_slot)`` → ``virtual_layer_id`` using:
+-            ``virtual = real_layer_id * max_microbatches + (counter % max_microbatches)``
++            ``virtual = mb_slot * real_num_alloc_layers + real_layer_id``
+ 
+         The counter wraps modulo ``max_microbatches``, so once a micro-batch's
+         backward completes and frees a slot, that slot can be reused by a later
+@@ -323,11 +327,16 @@ class Manager:
+         assert real_layer_id < self.real_num_alloc_layers
+         mb_slot = self._mb_counters[real_layer_id] % self.max_microbatches
+         self._mb_counters[real_layer_id] += 1
+-        return real_layer_id * self.max_microbatches + mb_slot
++        return mb_slot * self.real_num_alloc_layers + real_layer_id
+ 
+     def _real_layer_id(self, virtual_layer_id: int) -> int:
+         """Map a virtual layer ID back to the real layer ID."""
+-        return virtual_layer_id // self.max_microbatches
++        return virtual_layer_id % self.real_num_alloc_layers
++
++    def microbatch_slot(self, virtual_layer_id: int) -> int:
++        """Map a virtual layer ID to its replica-buffer micro-batch slot."""
++        assert 0 <= virtual_layer_id < self.num_alloc_layers
++        return virtual_layer_id // self.real_num_alloc_layers
+ 
+     def _profile_physical_loads_from_quota(
+         self, layer_id: int, fused: bool = True
+@@ -692,6 +701,7 @@ class Manager:
+         )
+         assert self.local_replica_weight_buffer.dtype == self.weight_data_dtype
+         assert self.local_replica_weight_buffer.shape == (
++            self.max_microbatches,
+             self.num_local_redundant_experts,
+             self.expert_total_numel,
+         )
+@@ -700,6 +710,7 @@ class Manager:
+         )
+         assert self.local_replica_fc1_weight_buffer.dtype == self.weight_data_dtype
+         assert self.local_replica_fc1_weight_buffer.shape == (
++            self.max_microbatches,
+             self.num_local_redundant_experts,
+             self.expert_fc1_numel,
+         )
+@@ -708,6 +719,7 @@ class Manager:
+         )
+         assert self.local_replica_fc2_weight_buffer.dtype == self.weight_data_dtype
+         assert self.local_replica_fc2_weight_buffer.shape == (
++            self.max_microbatches,
+             self.num_local_redundant_experts,
+             self.expert_fc2_numel,
+         )
+@@ -722,6 +734,7 @@ class Manager:
+             self.local_replica_fc1_weight_scale_buffer.dtype == self.weight_scale_dtype
+         )
+         assert self.local_replica_fc1_weight_scale_buffer.shape == (
++            self.max_microbatches,
+             self.num_local_redundant_experts,
+             self.expert_fc1_weight_scale_numel,
+         )
+@@ -732,6 +745,7 @@ class Manager:
+             self.local_replica_fc2_weight_scale_buffer.dtype == self.weight_scale_dtype
+         )
+         assert self.local_replica_fc2_weight_scale_buffer.shape == (
++            self.max_microbatches,
+             self.num_local_redundant_experts,
+             self.expert_fc2_weight_scale_numel,
+         )
+@@ -741,6 +755,7 @@ class Manager:
+             )
+             assert self.local_replica_grad_buffer.dtype == self.grad_dtype
+             assert self.local_replica_grad_buffer.shape == (
++                self.max_microbatches,
+                 self.num_local_redundant_experts,
+                 self.expert_total_numel,
+             )
+@@ -749,6 +764,7 @@ class Manager:
+             )
+             assert self.local_replica_fc1_grad_buffer.dtype == self.grad_dtype
+             assert self.local_replica_fc1_grad_buffer.shape == (
++                self.max_microbatches,
+                 self.num_local_redundant_experts,
+                 self.expert_fc1_numel,
+             )
+@@ -757,6 +773,7 @@ class Manager:
+             )
+             assert self.local_replica_fc2_grad_buffer.dtype == self.grad_dtype
+             assert self.local_replica_fc2_grad_buffer.shape == (
++                self.max_microbatches,
+                 self.num_local_redundant_experts,
+                 self.expert_fc2_numel,
+             )
+-- 
+2.43.0
+

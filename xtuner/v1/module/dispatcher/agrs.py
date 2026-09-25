@@ -19,6 +19,7 @@ from . import XTUNER_DISPATCHER_DEBUG
 from .base import (
     CombineResult,
     DispatchResult,
+    ExpertWeightLayout,
     GenericDispatcher,
     PostCombineResult,
     PostDispatchResult,
@@ -259,8 +260,10 @@ class MoEAGRSDispatcher(
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,  # noqa: ARG002 — kept for interface compatibility; not used here
+        layer_state: object | None = None,
         async_op: bool = False,
     ) -> MoEAGRSPreDispatchResult:
+        del layer_state
         if async_op:
             forward_finished_event = cast(torch.cuda.Event, torch.cuda.Event())
             forward_finished_event.record()
@@ -396,6 +399,7 @@ class MoEAGRSDispatcher(
             hidden_states=permuted_hidden_states,
             row_ids_map=row_ids_map,
             tokens_per_expert=tokens_per_expert,
+            expert_weight_layout=ExpertWeightLayout(),
         )
 
     @override

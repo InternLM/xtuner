@@ -6,6 +6,7 @@ export XTUNER_URL=https://github.com/InternLM/xtuner@${XTUNER_COMMIT}
 export FLASH_ATTN_URL=https://github.com/Dao-AILab/flash-attention@060c9188beec3a8b62b33a3bfa6d5d2d44975fab
 export ADAPTIVE_GEMM_URL=https://github.com/InternLM/AdaptiveGEMM@10411e08b182e853d0f3ecec4c68bf90c90e309f # fix fp8 dw k_grouped_gemm bug
 export GROUPED_GEMM_URL=https://github.com/InternLM/GroupedGEMM@aa5ffb21cb626d6cd61d99fc42958127b0b99be7
+export TE_GROUPED_GEMM_URL=https://github.com/ShilohYu/TEGroupedGEMM@8661ef18465241439b9c61470cf2445844d52dfc
 export DEEP_EP_URL=https://github.com/deepseek-ai/DeepEP@9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee # v1.2.1
 export DEEP_GEMM_URL=https://github.com/deepseek-ai/DeepGEMM@88965b078186ee7510ab9fc4f1d5ebc19adfa8d1 # v2.6.1 88965b0
 export CAUSAL_CONV1D_URL=https://github.com/Dao-AILab/causal-conv1d@da6dbaa9fd5a919967f14d3fd031da1288ad5025 # v1.6.0
@@ -34,6 +35,7 @@ docker build . \
   --build-arg ADAPTIVE_GEMM_URL="$ADAPTIVE_GEMM_URL" \
   --build-arg FLASH_ATTN_URL=$FLASH_ATTN_URL \
   --build-arg GROUPED_GEMM_URL=$GROUPED_GEMM_URL \
+  --build-arg TE_GROUPED_GEMM_URL=$TE_GROUPED_GEMM_URL \
   --build-arg CAUSAL_CONV1D_URL=$CAUSAL_CONV1D_URL \
   --build-arg FLA_URL="$FLA_URL" \
   --build-arg DEEP_EP_URL=$DEEP_EP_URL \
@@ -49,6 +51,7 @@ docker build . \
   --label "ADAPTIVE_GEMM_URL=${ADAPTIVE_GEMM_URL/@/\/tree\/}" \
   --label "FLASH_ATTN_URL=${FLASH_ATTN_URL/@/\/tree\/}" \
   --label "GROUPED_GEMM_URL=${GROUPED_GEMM_URL/@/\/tree\/}" \
+  --label "TE_GROUPED_GEMM_URL=${TE_GROUPED_GEMM_URL/@/\/tree\/}" \
   --label "CAUSAL_CONV1D_URL=${CAUSAL_CONV1D_URL/@/\/tree\/}" \
   --label "FLA_URL=${FLA_URL/@/\/tree\/}" \
   --label "DEEP_EP_URL=${DEEP_EP_URL/@/\/tree\/}" \
