@@ -1,13 +1,12 @@
 from abc import abstractmethod
 from typing import Literal, Optional, Tuple
 
-import torch
 import torch.distributed as dist
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 from typing_extensions import Annotated
 
-from xtuner.v1.optim import Muon, SwapAdamW
+from xtuner.v1.optim import AdamW, Muon, Optimizer, SwapAdamW
 from xtuner.v1.utils import get_logger
 
 
@@ -23,7 +22,7 @@ class OptimConfig(BaseModel):
     ] = None
 
     @abstractmethod
-    def build(self, params):
+    def build(self, params) -> Optimizer:
         pass
 
 
@@ -34,7 +33,7 @@ class AdamWConfig(OptimConfig):
     foreach: Annotated[Optional[bool], Parameter(help="Use foreach implementation for AdamW")] = None
     swap_optimizer: Annotated[Optional[bool], Parameter(help="Swap optimizer states to host memory.")] = False
 
-    def build(self, model):
+    def build(self, model) -> Optimizer:
         params = [p for p in model.parameters() if p.requires_grad]
 
         trainable_parameters_names = model.trainable_parameters()
@@ -62,7 +61,7 @@ class AdamWConfig(OptimConfig):
                 weight_decay=self.weight_decay,
                 foreach=self.foreach,
             )
-        return torch.optim.AdamW(
+        return AdamW(
             params, lr=self.lr, betas=self.betas, eps=self.eps, weight_decay=self.weight_decay, foreach=self.foreach
         )
 
@@ -87,10 +86,11 @@ class MuonConfig(OptimConfig):
         Parameter(help="Gradient clipping policy: clip all parameters or only the AdamW parameter groups"),
     ] = "adamw_only"
     swap_optimizer: Annotated[
-        bool, Parameter(help="Keep the momentum of Muon parameters in host memory and swap it in during the step.")
+        bool,
+        Parameter(help="Keep Muon momentum and AdamW momentum and variance in pinned host memory."),
     ] = False
 
-    def build(self, model):
+    def build(self, model) -> Optimizer:
         trainable_parameters_names = model.trainable_parameters()
         trainable_names = {name for name, _ in trainable_parameters_names}
 
@@ -227,7 +227,7 @@ class MuonConfig(OptimConfig):
             enable_all2all=self.enable_all2all,
             remainder_strategy=self.remainder_strategy,
             muon_split_sizes=muon_split_sizes,
-            swap_momentum=self.swap_optimizer,
+            swap_optimizer=self.swap_optimizer,
         )
 
         return optimizer
