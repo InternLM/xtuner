@@ -36,13 +36,30 @@ from torch.distributed import ProcessGroup
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.placement_types import Placement, Shard
-from torch.optim.optimizer import Optimizer, ParamsT
+from torch.optim.optimizer import Optimizer as TorchOptimizer
+from torch.optim.optimizer import ParamsT
 
+from xtuner.v1.utils import get_torch_device_module
 from xtuner.v1.utils.dtensor import group_tensors_by_device_mesh_and_placements
+
+from .optimizer import Optimizer
+
+
+DEVICE_MODULE = get_torch_device_module()
 
 
 def maybe_to_local(tensor: list[Tensor]) -> list[Tensor]:
     return [t.to_local() if isinstance(t, DTensor) else t for t in tensor]
+
+
+def _to_pinned_host(tensor: Tensor) -> Tensor:
+    if isinstance(tensor, DTensor):
+        # `DTensor.from_local` would move a host tensor back to the mesh device and DTensor has no `pin_memory`,
+        # so pin the local tensor in place, as `torch.distributed._state_dict_utils` does for CPU offload.
+        host = cast(DTensor, tensor.to("cpu"))
+        host._local_tensor = host._local_tensor.pin_memory()
+        return host
+    return tensor.to("cpu").pin_memory()
 
 
 def create_param_batches(
@@ -323,6 +340,9 @@ class Muon(Optimizer):
             Ignored when ``enable_all2all`` is False, where AGRS is the only available path.
         muon_split_sizes (dict[Tensor, tuple[int, ...]] | None): Logical row blocks that Muon should
             orthogonalize and scale independently. Used by GLM MuonSplit attention projections.
+        swap_optimizer (bool): Keep Muon momentum and AdamW momentum and variance in pinned host memory. Each step
+            copies those states to the device, updates them, and copies them back. Muon momentum is swapped per
+            batch; AdamW states are swapped for the whole group.
 
     Muon optimizer algorithm by Keller Jordan: https://kellerjordan.github.io/posts/muon/
     FSDP2 Muon uses all-to-all communications: https://www.essential.ai/blog/infra
@@ -344,6 +364,7 @@ class Muon(Optimizer):
         enable_all2all: bool = True,
         remainder_strategy: Literal["agrs", "pad_all2all", "ragged_all_to_all"] = "pad_all2all",
         muon_split_sizes: dict[Tensor, tuple[int, ...]] | None = None,
+        swap_optimizer: bool = False,
     ):
         # Check hyperparameters
         if lr < 0.0:
@@ -381,8 +402,15 @@ class Muon(Optimizer):
         self._enable_all2all = enable_all2all
         self._remainder_strategy = remainder_strategy
         self._muon_split_sizes = muon_split_sizes or {}
+        self._swap_optimizer = swap_optimizer
         self.register_state_dict_post_hook(self._remove_clip_grad_policy)
         self.register_load_state_dict_pre_hook(self._restore_clip_grad_policy)
+        # DCP loads a checkpoint into the keys of the current state_dict, and `lr_ratio` below makes the state look
+        # initialized to torch's `_init_optim_state`: materialize the lazy states so that a resume restores them.
+        self.register_state_dict_pre_hook(self._initialize_states)
+        if swap_optimizer:
+            # `Optimizer.load_state_dict` casts every state tensor to its parameter's device.
+            self.register_load_state_dict_post_hook(self._swap_loaded_states_to_host)
 
         # Pre-compute lr adjustment ratios for each Muon parameter based on global shape.
         # This must happen at init time because DTensor.shape here is guaranteed to be
@@ -438,13 +466,20 @@ class Muon(Optimizer):
         super().add_param_group(param_group)
 
     @staticmethod
-    def _remove_clip_grad_policy(_optimizer: Optimizer, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def _remove_clip_grad_policy(_optimizer: TorchOptimizer, state_dict: dict[str, Any]) -> dict[str, Any]:
         for group in state_dict["param_groups"]:
             group.pop("clip_grad", None)
         return state_dict
 
     @staticmethod
-    def _restore_clip_grad_policy(optimizer: Optimizer, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def _initialize_states(optimizer: TorchOptimizer) -> None:
+        muon = cast(Muon, optimizer)
+        for group in muon.param_groups:
+            for p in group["params"]:
+                muon._get_or_initialize_state(p, group["algorithm"])
+
+    @staticmethod
+    def _restore_clip_grad_policy(optimizer: TorchOptimizer, state_dict: dict[str, Any]) -> dict[str, Any]:
         if len(state_dict["param_groups"]) != len(optimizer.param_groups):
             return state_dict
 
@@ -453,6 +488,19 @@ class Muon(Optimizer):
         for loaded_group, current_group in zip(state_dict["param_groups"], optimizer.param_groups):
             loaded_group["clip_grad"] = current_group.get("clip_grad", True)
         return state_dict
+
+    def put_state_to_device(self, device: torch.device | str) -> bool:
+        """Move tensor state, or keep pinned host state when swapping.
+
+        Args:
+            device (torch.device | str): Target device for movable tensor state.
+
+        Returns:
+            bool: Whether any state tensor moved. False when optimizer swap is enabled.
+        """
+        if self._swap_optimizer:
+            return False
+        return super().put_state_to_device(device)
 
     @overload
     def step(self, closure: None = None) -> None: ...
@@ -492,6 +540,11 @@ class Muon(Optimizer):
         runtime = AsyncRuntime(all_tasks, max_concurrent_tasks=3)
         runtime.run()
 
+        if self._swap_optimizer:
+            # Muon momentum and AdamW momentum/variance copy back with non_blocking=True. Wait for this device
+            # so every host state is complete when step() returns.
+            DEVICE_MODULE.synchronize()
+
         return loss
 
     def _get_or_initialize_state(self, param: Tensor, algo: str) -> dict:
@@ -502,7 +555,25 @@ class Muon(Optimizer):
             state["momentum"] = torch.zeros_like(param)
             if algo == "adamw":
                 state["variance"] = torch.zeros_like(param)
+            if self._swap_optimizer:
+                # Muon keeps momentum on pinned host. AdamW keeps momentum and variance there too.
+                state["momentum"] = _to_pinned_host(state["momentum"])
+                if algo == "adamw":
+                    state["variance"] = _to_pinned_host(state["variance"])
         return state
+
+    @staticmethod
+    def _swap_loaded_states_to_host(optimizer: TorchOptimizer) -> None:
+        # load_state_dict puts tensors on the parameter device. Restore pinned host copies for both algorithms
+        # and keep the DTensor wrapper, placements, and checkpoint keys.
+        for group in optimizer.param_groups:
+            state_keys = ("momentum", "variance") if group["algorithm"] == "adamw" else ("momentum",)
+            for param in group["params"]:
+                state = optimizer.state[param]
+                for key in state_keys:
+                    value = state.get(key)
+                    if isinstance(value, torch.Tensor):
+                        state[key] = _to_pinned_host(value)
 
     @staticmethod
     def _find_fsdp_mesh_dim(device_mesh: DeviceMesh) -> int | None:
@@ -818,6 +889,11 @@ class Muon(Optimizer):
 
         states = [self._get_or_initialize_state(p, algo_name) for p in params]
         momentums = [s["momentum"] for s in states]
+        host_momentums = None
+        if self._swap_optimizer:
+            # Same stream as the update, so the copy needs no extra synchronization.
+            host_momentums = maybe_to_local(momentums)
+            momentums = [m.to(g.device, non_blocking=True) for m, g in zip(host_momentums, gradients)]
         lr_ratios = [1.0 if p in self._muon_split_sizes else s["lr_ratio"] for p, s in zip(params, states)]
         assert len(set(lr_ratios)) == 1, f"Found different lr_ratios: {set(lr_ratios)}"
 
@@ -869,6 +945,7 @@ class Muon(Optimizer):
                 process_group=plan.comm_pg,
                 num_experts=plan.num_experts,
                 global_shard_dim_size=global_shard_dim_size,
+                M_host=host_momentums,
             )
         )
 
@@ -889,9 +966,21 @@ class Muon(Optimizer):
 
             gradients = [p.grad for p in params]
             states = [self._get_or_initialize_state(p, algo_name) for p in params]
-
-            momentums = [s["momentum"] for s in states]
-            variances = [s["variance"] for s in states]
+            local_params = maybe_to_local(params)
+            momentums = maybe_to_local([state["momentum"] for state in states])
+            variances = maybe_to_local([state["variance"] for state in states])
+            host_momentums = None
+            host_variances = None
+            if self._swap_optimizer:
+                # Host buffers stay in optimizer.state. The foreach update runs on temporary device copies.
+                host_momentums = momentums
+                host_variances = variances
+                momentums = [
+                    momentum.to(param.device, non_blocking=True) for momentum, param in zip(momentums, local_params)
+                ]
+                variances = [
+                    variance.to(param.device, non_blocking=True) for variance, param in zip(variances, local_params)
+                ]
 
             lr = torch.tensor(group["lr"])
             beta1 = torch.tensor(group["beta1"])
@@ -903,16 +992,18 @@ class Muon(Optimizer):
 
             yield AsyncTask(
                 adamw_update_foreach_async(
-                    X=maybe_to_local(params),
+                    X=local_params,
                     G=maybe_to_local(gradients),
-                    M=maybe_to_local(momentums),
-                    V=maybe_to_local(variances),
+                    M=momentums,
+                    V=variances,
                     lr=lr,
                     beta1=beta1,
                     beta2=beta2,
                     weight_decay=weight_decay,
                     step=step,
                     epsilon=epsilon,
+                    M_host=host_momentums,
+                    V_host=host_variances,
                 )
             )
 
@@ -935,6 +1026,7 @@ def muon_update_batch_async(
     num_experts: int = 1,  # Number of experts for MoE models
     batch_size: int | None = None,  # If set, pad X/G/M to this size with zeros
     global_shard_dim_size: int | None = None,  # FSDP-visible shard dim; required for "agrs"/"all_to_all"
+    M_host: list[Tensor] | None = None,  # Host copies of M when the momentum is swapped (updated in place)
 ) -> Generator[None, None, None]:
     """Batched version of Muon update.
 
@@ -971,6 +1063,11 @@ def muon_update_batch_async(
         momentum=momentum,
         nesterov=nesterov,
     )
+    if M_host is not None:
+        # The rest of the update reads only U, so the momentum goes back to host now. Padding entries of M come
+        # after the real ones and have no host copy.
+        for host, m in zip(M_host, maybe_to_local(M)):
+            host.copy_(m, non_blocking=True)
 
     # Orthogonalize — dispatch to the appropriate communication strategy
     if comm_strategy == "agrs":
@@ -1560,9 +1657,19 @@ def adamw_update_foreach_async(
     weight_decay: Tensor,  # Weight decay (scalar tensor)
     step: int,
     epsilon: float,
+    M_host: list[Tensor] | None = None,  # Pinned host momentum, authoritative when swapping
+    V_host: list[Tensor] | None = None,  # Pinned host variance, authoritative when swapping
 ) -> Generator[None, None, None]:
     """Async wrapper around foreach AdamW update."""
     adamw_update_foreach(X, G, M, V, lr, beta1, beta2, weight_decay, step, epsilon)
+    # Copy back after M and V are updated. Host buffers stay the authoritative optimizer state; the device tensors
+    # are temporary. step() then synchronizes the device so a host read sees the completed copy.
+    if M_host is not None:
+        for host, updated in zip(M_host, M):
+            host.copy_(updated, non_blocking=True)
+    if V_host is not None:
+        for host, updated in zip(V_host, V):
+            host.copy_(updated, non_blocking=True)
     yield
 
 

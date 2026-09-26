@@ -8,10 +8,18 @@
                           model must match a single-process reference for every
                           parameter, covering all four communication strategies
                           (all_to_all, agrs, local, subgroup_allgather).
+4. TestMuonCheckpoint  — A DCP round trip through TrainEngine restores the optimizer
+                          states, so the next step matches the run that was never saved;
+                          swapping Muon and AdamW state to host memory is bitwise identical
+                          to keeping it on the device, and checkpoints load across both.
+5. TestPutStateToDevice — AdamW and SwapAdamW honor put_state_to_device: real offload and
+                          onload, or a host-state no-op, then the next step still matches.
 """
 
 import copy
 import math
+import tempfile
+from pathlib import Path
 from typing import Callable, Literal, overload
 
 import parametrize
@@ -26,7 +34,7 @@ from torch.distributed.tensor.placement_types import Shard
 
 from xtuner._testing.testcase import DeterministicDDPTestCase
 from xtuner.v1.config import FSDPConfig
-from xtuner.v1.config.optim import MuonConfig
+from xtuner.v1.config.optim import AdamWConfig, MuonConfig
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.model.base import BaseModel, XTunerBaseModelConfig
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseMLP
@@ -791,3 +799,490 @@ class TestMuonFSDP(DeterministicDDPTestCase):
                 atol=1e-2,
                 rtol=1e-2,
             )
+
+
+# ─── Test: DCP resume ────────────────────────────────────────────────────────
+
+
+class TestMuonCheckpoint(DeterministicDDPTestCase):
+    @property
+    def world_size(self) -> int:
+        return 4
+
+    def test_swap_optimizer_matches_device_state(self):
+        """Three steps with Muon and AdamW state swapped to host must leave parameters and state bitwise identical
+        to the default run, across all four communication strategies of ToyMoEModel."""
+        self.create_pg("cuda")
+        model, optim = self._build(seed=42)
+        swap_model, swap_optim = self._build(seed=42, swap_optimizer=True)
+
+        for step in range(3):
+            input_ids = self._inputs(seed=step)
+            self._train_step(model, optim, input_ids)
+            self._train_step(swap_model, swap_optim, input_ids)
+            self._assert_params_equal(model, swap_model)
+
+        self._assert_states_equal(optim, swap_optim)
+        self._assert_state_device(optim, swap=False)
+        self._assert_state_device(swap_optim, swap=True)
+
+    @parametrize.parametrize("save_swap,load_swap", [(False, False), (True, True), (False, True), (True, False)])
+    def test_dcp_round_trip_restores_states(self, save_swap: bool, load_swap: bool):
+        """Loading a TrainEngine DCP checkpoint into a fresh optimizer (the resume case: no step yet) must restore
+        every optimizer state, so the next step is bitwise identical to the run that was never saved. A checkpoint
+        saved with or without the state swap loads into either setting."""
+        self.create_pg("cuda")
+        model, optim = self._build(seed=42, swap_optimizer=save_swap)
+        for step in range(2):
+            self._train_step(model, optim, self._inputs(seed=step))
+
+        ckpt_dir = [tempfile.mkdtemp() if dist.get_rank() == 0 else None]
+        dist.broadcast_object_list(ckpt_dir, src=0)
+        weights_dir = Path(ckpt_dir[0]) / "dcp"  # type: ignore[arg-type]
+        self._engine(model, optim).save_dcp(weights_dir)
+
+        loaded_model, loaded_optim = self._build(seed=0, swap_optimizer=load_swap)
+        self._engine(loaded_model, loaded_optim).load_dcp(weights_dir)
+
+        self._assert_params_equal(model, loaded_model)
+        self._assert_states_equal(optim, loaded_optim)
+        self._assert_state_device(loaded_optim, swap=load_swap)
+
+        input_ids = self._inputs(seed=2)
+        self._train_step(model, optim, input_ids)
+        self._train_step(loaded_model, loaded_optim, input_ids)
+        self._assert_params_equal(model, loaded_model)
+        self._assert_states_equal(optim, loaded_optim)
+        self._assert_state_device(loaded_optim, swap=load_swap)
+
+    def test_swap_offload_keeps_host_buffers(self):
+        """With swap enabled, engine offload and onload are no-ops and the next step still matches a reference."""
+        self.create_pg("cuda")
+        ref_model, ref_optim = self._build(seed=42)
+        model, optim = self._build(seed=42, swap_optimizer=True)
+        self._train_step(ref_model, ref_optim, self._inputs(seed=0))
+        self._train_step(model, optim, self._inputs(seed=0))
+        buffers, values = self._buffer_snapshot(optim)
+
+        # The engine must delegate without reading optim_cfg.
+        engine = self._engine(model, optim)
+        assert engine.put_optimizer_to_device("cpu") is False
+        assert engine.put_optimizer_to_device("cuda") is False
+        self._assert_buffers_unchanged(optim, buffers, values)
+
+        self._train_step(ref_model, ref_optim, self._inputs(seed=1))
+        self._train_step(model, optim, self._inputs(seed=1))
+        self._assert_params_equal(ref_model, model)
+        self._assert_states_equal(ref_optim, optim)
+
+    def test_device_muon_offload_onload_then_step(self):
+        """Non-swap Muon moves every tensor state to CPU and back, then matches a reference step."""
+        self.create_pg("cuda")
+        fresh, fresh_optim = self._build(seed=1)
+        assert fresh_optim.put_state_to_device("cpu") is False
+        assert fresh_optim.put_state_to_device("cuda") is False
+        for state in fresh_optim.state.values():
+            assert "momentum" not in state
+            assert "variance" not in state
+        del fresh
+
+        ref_model, ref_optim = self._build(seed=7)
+        model, optim = self._build(seed=7)
+        self._train_step(ref_model, ref_optim, self._inputs(seed=0))
+        self._train_step(model, optim, self._inputs(seed=0))
+        buffers, values = self._buffer_snapshot(optim)
+        assert optim.put_state_to_device("cuda") is False
+        self._assert_buffers_unchanged(optim, buffers, values)
+
+        engine = self._engine(model, optim)
+        assert engine.put_optimizer_to_device("cpu") is True
+        self._assert_tensor_device(optim, "cpu")
+        self._assert_values(optim, values)
+        assert engine.put_optimizer_to_device("cuda") is True
+        self._assert_state_device(optim, swap=False)
+        self._assert_values(optim, values)
+        assert engine.put_optimizer_to_device("cuda") is False
+
+        self._train_step(ref_model, ref_optim, self._inputs(seed=1))
+        self._train_step(model, optim, self._inputs(seed=1))
+        self._assert_params_equal(ref_model, model)
+        self._assert_states_equal(ref_optim, optim)
+
+    def test_swap_step_exposes_complete_host_state(self):
+        """step() returns with host momentum and variance complete. Parameters without a gradient keep their state."""
+        self.create_pg("cuda")
+        ref_model, ref_optim = self._build(seed=42)
+        swap_model, swap_optim = self._build(seed=42, swap_optimizer=True)
+        self._train_step(ref_model, ref_optim, self._inputs(seed=0))
+        self._train_step(swap_model, swap_optim, self._inputs(seed=0))
+
+        ref_model(self._inputs(seed=1)).backward()
+        swap_model(self._inputs(seed=1)).backward()
+        self._clear_one_grad_per_algorithm(ref_optim)
+        frozen = self._clear_one_grad_per_algorithm(swap_optim)
+        frozen_locals: dict[tuple[int, str], torch.Tensor] = {}
+        frozen_values: dict[tuple[int, str], torch.Tensor] = {}
+        for param in frozen:
+            for key, value in swap_optim.state[param].items():
+                if isinstance(value, torch.Tensor):
+                    local = self._local_tensor(value)
+                    frozen_locals[id(param), key] = local
+                    frozen_values[id(param), key] = local.clone()
+
+        ref_optim.step()
+        ref_optim.zero_grad()
+        # Snapshot the reference on CPU before the swap step, so the host read below is not validated by a later sync.
+        expected = self._grouped_cpu_snapshot(ref_optim)
+
+        swap_optim.step()
+        actual = self._grouped_host_snapshot(swap_optim)
+        for group_actual, group_expected in zip(actual, expected):
+            for state_actual, state_expected in zip(group_actual, group_expected):
+                assert state_actual.keys() == state_expected.keys()
+                for key, value in state_actual.items():
+                    assert torch.equal(value, state_expected[key]), key
+        for param in frozen:
+            for key, value in swap_optim.state[param].items():
+                if isinstance(value, torch.Tensor):
+                    local = self._local_tensor(value)
+                    assert local is frozen_locals[id(param), key]
+                    assert torch.equal(local, frozen_values[id(param), key])
+        self._assert_params_equal(ref_model, swap_model)
+
+    def _build(self, seed: int, **optim_kwargs) -> tuple[BaseModel, Muon]:
+        torch.manual_seed(seed)
+        model = ToyMoEModelConfig(compile_cfg=False).build().to("cuda")
+        model.fully_shard(FSDPConfig(param_dtype=torch.float32, reduce_dtype=torch.float32, torch_compile=False))
+        return model, MuonConfig(lr=0.01, weight_decay=0.01, **optim_kwargs).build(model)
+
+    def _inputs(self, seed: int) -> torch.Tensor:
+        # Each rank gets its own sample, as in real FSDP training.
+        torch.manual_seed(seed * self.world_size + dist.get_rank())
+        return torch.randint(0, ToyMoEModelConfig().vocab_size, (1, 8), device="cuda")
+
+    @staticmethod
+    def _train_step(model: BaseModel, optim: Muon, input_ids: torch.Tensor) -> None:
+        model(input_ids).backward()
+        optim.step()
+        optim.zero_grad()
+
+    @staticmethod
+    def _engine(model: BaseModel, optim: Muon) -> TrainEngine:
+        engine = object.__new__(TrainEngine)
+        engine.model = model
+        engine.model_cfg = model.config
+        engine.optimizer = optim
+        engine.has_freeze_params = False
+        return engine
+
+    @staticmethod
+    def _assert_params_equal(model: BaseModel, other: BaseModel) -> None:
+        for (name, p), (_, q) in zip(model.named_parameters(), other.named_parameters()):
+            assert torch.equal(p.to_local(), q.to_local()), f"parameter {name} differs"
+
+    @staticmethod
+    def _required_state_keys(algorithm: str) -> set[str]:
+        if algorithm == "adamw":
+            return {"momentum", "variance"}
+        return {"momentum"}
+
+    @classmethod
+    def _assert_state_device(cls, optim: Muon, swap: bool) -> None:
+        for group in optim.param_groups:
+            required = cls._required_state_keys(group["algorithm"])
+            for param in group["params"]:
+                state = optim.state[param]
+                assert required <= state.keys()
+                for key, value in state.items():
+                    if not isinstance(value, torch.Tensor):
+                        continue
+                    local = cls._local_tensor(value)
+                    if swap:
+                        assert local.device.type == "cpu" and local.is_pinned(), key
+                    else:
+                        assert local.is_cuda, key
+
+    @staticmethod
+    def _local_tensor(value: torch.Tensor) -> torch.Tensor:
+        # Grad mode wraps DTensor.to_local() in a new autograd tensor. The stored shard is _local_tensor.
+        with torch.no_grad():
+            return value.to_local()
+
+    @staticmethod
+    def _assert_tensor_device(optim: Muon, device_type: str) -> None:
+        saw_tensor = False
+        for state in optim.state.values():
+            for value in state.values():
+                if not isinstance(value, torch.Tensor):
+                    continue
+                assert TestMuonCheckpoint._local_tensor(value).device.type == device_type
+                saw_tensor = True
+        assert saw_tensor
+
+    @staticmethod
+    def _buffer_snapshot(
+        optim: Muon,
+    ) -> tuple[dict[tuple[int, str], torch.Tensor], dict[tuple[int, str], torch.Tensor]]:
+        buffers: dict[tuple[int, str], torch.Tensor] = {}
+        values: dict[tuple[int, str], torch.Tensor] = {}
+        for group in optim.param_groups:
+            for param in group["params"]:
+                for key, value in optim.state[param].items():
+                    if isinstance(value, torch.Tensor):
+                        local = TestMuonCheckpoint._local_tensor(value)
+                        buffers[id(param), key] = local
+                        values[id(param), key] = local.detach().cpu().clone()
+        assert values
+        return buffers, values
+
+    @staticmethod
+    def _assert_buffers_unchanged(
+        optim: Muon,
+        buffers: dict[tuple[int, str], torch.Tensor],
+        values: dict[tuple[int, str], torch.Tensor],
+    ) -> None:
+        for group in optim.param_groups:
+            for param in group["params"]:
+                for key, value in optim.state[param].items():
+                    if isinstance(value, torch.Tensor):
+                        local = TestMuonCheckpoint._local_tensor(value)
+                        assert local is buffers[id(param), key]
+                        assert torch.equal(local.cpu(), values[id(param), key])
+
+    @staticmethod
+    def _assert_values(optim: Muon, values: dict[tuple[int, str], torch.Tensor]) -> None:
+        seen: set[tuple[int, str]] = set()
+        for group in optim.param_groups:
+            for param in group["params"]:
+                for key, value in optim.state[param].items():
+                    if isinstance(value, torch.Tensor):
+                        local = TestMuonCheckpoint._local_tensor(value)
+                        assert torch.equal(local.cpu(), values[id(param), key]), key
+                        seen.add((id(param), key))
+        assert seen == set(values)
+
+    @classmethod
+    def _grouped_cpu_snapshot(cls, optim: Muon) -> list[list[dict[str, torch.Tensor]]]:
+        grouped: list[list[dict[str, torch.Tensor]]] = []
+        for group in optim.param_groups:
+            states: list[dict[str, torch.Tensor]] = []
+            required = cls._required_state_keys(group["algorithm"])
+            for param in group["params"]:
+                tensors = {
+                    key: cls._local_tensor(value).detach().to("cpu").clone()
+                    for key, value in optim.state[param].items()
+                    if isinstance(value, torch.Tensor)
+                }
+                assert required <= tensors.keys()
+                if group["algorithm"] != "adamw":
+                    assert "variance" not in tensors
+                states.append(tensors)
+            grouped.append(states)
+        return grouped
+
+    @classmethod
+    def _grouped_host_snapshot(cls, optim: Muon) -> list[list[dict[str, torch.Tensor]]]:
+        """Read swap state directly from pinned host memory."""
+        grouped: list[list[dict[str, torch.Tensor]]] = []
+        for group in optim.param_groups:
+            states: list[dict[str, torch.Tensor]] = []
+            required = cls._required_state_keys(group["algorithm"])
+            for param in group["params"]:
+                tensors: dict[str, torch.Tensor] = {}
+                for key, value in optim.state[param].items():
+                    if not isinstance(value, torch.Tensor):
+                        continue
+                    local = cls._local_tensor(value)
+                    assert local.device.type == "cpu" and local.is_pinned(), key
+                    tensors[key] = local
+                assert required <= tensors.keys()
+                if group["algorithm"] != "adamw":
+                    assert "variance" not in tensors
+                states.append(tensors)
+            grouped.append(states)
+        return grouped
+
+    @staticmethod
+    def _clear_one_grad_per_algorithm(optim: Muon) -> list[torch.Tensor]:
+        cleared: list[torch.Tensor] = []
+        seen: set[str] = set()
+        for group in optim.param_groups:
+            algorithm = group["algorithm"]
+            if algorithm in seen:
+                continue
+            for param in group["params"]:
+                assert param.grad is not None
+                param.grad = None
+                cleared.append(param)
+                seen.add(algorithm)
+                break
+        assert seen == {"muon", "adamw"}
+        return cleared
+
+    @staticmethod
+    def _assert_states_equal(optim: Muon, other: Muon) -> None:
+        for group, other_group in zip(optim.param_groups, other.param_groups):
+            assert group["algorithm"] == other_group["algorithm"]
+            required = {"momentum", "variance"} if group["algorithm"] == "adamw" else {"momentum"}
+            for param, other_param in zip(group["params"], other_group["params"]):
+                state, other_state = optim.state[param], other.state[other_param]
+                assert state.keys() == other_state.keys()
+                assert required <= state.keys()
+                if group["algorithm"] != "adamw":
+                    assert "variance" not in state
+                for key, value in state.items():
+                    if isinstance(value, torch.Tensor):
+                        assert torch.equal(value.to_local().cpu(), other_state[key].to_local().cpu()), key
+                    else:
+                        assert value == other_state[key], key
+
+
+class TestPutStateToDevice(DeterministicDDPTestCase):
+    @property
+    def world_size(self) -> int:
+        return 1
+
+    def test_adamw_offload_onload_then_step(self):
+        """AdamW state moves CPU then back to the accelerator, and the next step matches a reference."""
+        self.create_pg("cuda")
+        ref_model, ref_optim = self._build(seed=3, swap=False)
+        model, optim = self._build(seed=3, swap=False)
+        assert optim.put_state_to_device("cpu") is False
+        assert optim.put_state_to_device("cuda") is False
+        assert not optim.state
+
+        self._train_step(ref_model, ref_optim, self._inputs(0))
+        self._train_step(model, optim, self._inputs(0))
+        values = self._cpu_values(optim)
+
+        engine = self._engine(model, optim)
+        assert engine.put_optimizer_to_device("cpu") is True
+        self._assert_device(optim, "cpu")
+        self._assert_values(optim, values)
+        assert engine.put_optimizer_to_device("cpu") is False
+        assert engine.put_optimizer_to_device("cuda") is True
+        self._assert_device(optim, "cuda")
+        self._assert_values(optim, values)
+        buffers = self._locals(optim)
+        assert engine.put_optimizer_to_device("cuda") is False
+        assert engine.put_optimizer_to_device(torch.device("cuda", torch.cuda.current_device())) is False
+        self._assert_same_locals(optim, buffers)
+
+        self._train_step(ref_model, ref_optim, self._inputs(1))
+        self._train_step(model, optim, self._inputs(1))
+        self._assert_params_equal(ref_model, model)
+        self._assert_optimizer_values_equal(ref_optim, optim)
+
+    def test_swap_adamw_offload_is_noop(self):
+        """SwapAdamW keeps its host buffers through offload and onload, then matches a reference step."""
+        self.create_pg("cuda")
+        ref_model, ref_optim = self._build(seed=5, swap=True)
+        model, optim = self._build(seed=5, swap=True)
+        self._train_step(ref_model, ref_optim, self._inputs(0))
+        self._train_step(model, optim, self._inputs(0))
+        self._assert_swap_adamw_host(optim)
+        buffers = self._locals(optim)
+        values = self._cpu_values(optim)
+
+        engine = self._engine(model, optim)
+        assert engine.put_optimizer_to_device("cpu") is False
+        assert engine.put_optimizer_to_device("cuda") is False
+        self._assert_same_locals(optim, buffers)
+        self._assert_values(optim, values)
+        self._assert_swap_adamw_host(optim)
+
+        self._train_step(ref_model, ref_optim, self._inputs(1))
+        self._train_step(model, optim, self._inputs(1))
+        self._assert_params_equal(ref_model, model)
+        self._assert_optimizer_values_equal(ref_optim, optim)
+        self._assert_swap_adamw_host(optim)
+
+    def _build(self, seed: int, swap: bool):
+        torch.manual_seed(seed)
+        model = ToyMoEModelConfig(compile_cfg=False).build().to("cuda")
+        optim = AdamWConfig(lr=0.01, weight_decay=0.01, swap_optimizer=swap).build(model)
+        return model, optim
+
+    def _inputs(self, seed: int) -> torch.Tensor:
+        torch.manual_seed(seed)
+        return torch.randint(0, ToyMoEModelConfig().vocab_size, (1, 8), device="cuda")
+
+    @staticmethod
+    def _train_step(model: BaseModel, optim: torch.optim.Optimizer, input_ids: torch.Tensor) -> None:
+        model(input_ids).backward()
+        optim.step()
+        optim.zero_grad()
+
+    @staticmethod
+    def _engine(model: BaseModel, optim: torch.optim.Optimizer) -> TrainEngine:
+        engine = object.__new__(TrainEngine)
+        engine.model = model
+        engine.model_cfg = model.config
+        engine.optimizer = optim
+        engine.has_freeze_params = False
+        return engine
+
+    @staticmethod
+    def _local(value: torch.Tensor) -> torch.Tensor:
+        to_local = getattr(value, "to_local", None)
+        return to_local() if callable(to_local) else value
+
+    @classmethod
+    def _locals(cls, optim: torch.optim.Optimizer) -> dict[tuple[int, str], torch.Tensor]:
+        locals_: dict[tuple[int, str], torch.Tensor] = {}
+        for param, state in optim.state.items():
+            for key, value in state.items():
+                if isinstance(value, torch.Tensor):
+                    locals_[id(param), key] = cls._local(value)
+        assert locals_
+        return locals_
+
+    @classmethod
+    def _cpu_values(cls, optim: torch.optim.Optimizer) -> dict[tuple[int, str], torch.Tensor]:
+        return {key: value.detach().cpu().clone() for key, value in cls._locals(optim).items()}
+
+    @classmethod
+    def _assert_same_locals(cls, optim: torch.optim.Optimizer, buffers: dict[tuple[int, str], torch.Tensor]) -> None:
+        assert cls._locals(optim).keys() == buffers.keys()
+        for key, value in cls._locals(optim).items():
+            assert value is buffers[key]
+
+    @classmethod
+    def _assert_values(cls, optim: torch.optim.Optimizer, values: dict[tuple[int, str], torch.Tensor]) -> None:
+        actual = cls._cpu_values(optim)
+        assert actual.keys() == values.keys()
+        for key, value in actual.items():
+            assert torch.equal(value, values[key]), key
+
+    @classmethod
+    def _assert_device(cls, optim: torch.optim.Optimizer, device_type: str) -> None:
+        saw_tensor = False
+        for value in cls._locals(optim).values():
+            assert value.device.type == device_type
+            saw_tensor = True
+        assert saw_tensor
+
+    @staticmethod
+    def _assert_swap_adamw_host(optim: torch.optim.Optimizer) -> None:
+        saw_state = False
+        for state in optim.state.values():
+            assert state["exp_avg"].is_pinned()
+            assert state["exp_avg_sq"].is_pinned()
+            assert state["step"].device.type == "cpu"
+            saw_state = True
+        assert saw_state
+
+    @staticmethod
+    def _assert_params_equal(model: BaseModel, other: BaseModel) -> None:
+        for (name, param), (_, other_param) in zip(model.named_parameters(), other.named_parameters()):
+            left = param.to_local() if hasattr(param, "to_local") else param
+            right = other_param.to_local() if hasattr(other_param, "to_local") else other_param
+            assert torch.equal(left, right), name
+
+    @classmethod
+    def _assert_optimizer_values_equal(cls, optim: torch.optim.Optimizer, other: torch.optim.Optimizer) -> None:
+        left = cls._cpu_values(optim)
+        right = cls._cpu_values(other)
+        assert len(left) == len(right)
+        for value, other_value in zip(left.values(), right.values()):
+            assert torch.equal(value, other_value)
