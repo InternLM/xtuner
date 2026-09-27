@@ -80,70 +80,53 @@ class Glm53ForConditionalGeneration(BaseComposeModel):
         gathered = distF.all_gather(features, group=sequence_parallel_mesh.get_group())
         return torch.cat(gathered, dim=0)[:num_features]
 
-    def _local_feature_slice(
-        self,
-        mm_token_type_ids: torch.Tensor,
-        modality: int,
-        sequence_parallel_mesh: DeviceMesh,
-    ) -> tuple[torch.Tensor, slice]:
-        """Return the global placeholder mask and this rank's slice of the
-        visual features.
-
-        ``mm_token_type_ids`` arrives already sharded, exactly like ``input_ids`` (F1.b), so the
-        local mask is what indexes the local embeddings. What the local mask cannot say is *which*
-        of the global features belong here: that offset is the number of same-modality
-        placeholders on all preceding ranks, which is why the mask is gathered first.
-        """
-        sp_size = sequence_parallel_mesh.size()
-        gathered = [torch.empty_like(mm_token_type_ids) for _ in range(sp_size)]
-        dist.all_gather(gathered, mm_token_type_ids.contiguous(), group=sequence_parallel_mesh.get_group())
-        global_mm_token_type_ids = torch.cat(gathered, dim=-1)
-
-        local_len = mm_token_type_ids.shape[-1]
-        rank = sequence_parallel_mesh.get_local_rank()
-        start = int((global_mm_token_type_ids[..., : rank * local_len] == modality).sum().item())
-        count = int((mm_token_type_ids == modality).sum().item())
-        return global_mm_token_type_ids, slice(start, start + count)
-
     def _splice(
         self,
         inputs_embeds: torch.Tensor,
         mm_token_type_ids: torch.Tensor,
-        modality: int,
         features: torch.Tensor,
+        num_features: dict[int, int],
         sequence_parallel_mesh: DeviceMesh | None = None,
     ) -> torch.Tensor:
-        """Write visual features over this modality's placeholder positions.
+        """Write the pack's visual features over their placeholder positions.
 
-        Under SP every tensor here is this rank's shard: `inputs_embeds` and `mm_token_type_ids`
-        were split with `input_ids`, and `features` is narrowed to the matching slice. The
-        placeholder<->feature count check is always made against the *global* totals, so a
-        corrupted sample is caught identically with and without SP.
+        ``features`` comes from a single tower call over ``[image patches; video patches]``, so its
+        rows are the modalities in that order, ``num_features`` of each. Under SP ``inputs_embeds``
+        and ``mm_token_type_ids`` are this rank's shard (split with ``input_ids``) and ``features``
+        is this rank's merge-aligned shard of the tower output: the mask is gathered once to learn
+        where each modality's placeholders fall globally, and the features are gathered back to
+        global order before each modality takes its slice. Every count check compares *global*
+        totals, so a corrupted sample is caught identically with and without SP.
         """
         sp_size = sequence_parallel_mesh.size() if sequence_parallel_mesh is not None else 1
         if sp_size > 1:
             assert sequence_parallel_mesh is not None
-            global_mm_token_type_ids, local_slice = self._local_feature_slice(
-                mm_token_type_ids, modality, sequence_parallel_mesh
-            )
-            features = self._gather_visual_features(
-                features, int((global_mm_token_type_ids == modality).sum().item()), sequence_parallel_mesh
-            )
-            n_tokens = int((global_mm_token_type_ids == modality).sum().item())
+            gathered = [torch.empty_like(mm_token_type_ids) for _ in range(sp_size)]
+            dist.all_gather(gathered, mm_token_type_ids.contiguous(), group=sequence_parallel_mesh.get_group())
+            global_mm_token_type_ids = torch.cat(gathered, dim=-1)
+            features = self._gather_visual_features(features, sum(num_features.values()), sequence_parallel_mesh)
+            local_len = mm_token_type_ids.shape[-1]
+            preceding = global_mm_token_type_ids[..., : sequence_parallel_mesh.get_local_rank() * local_len]
         else:
-            local_slice = slice(None)
-            n_tokens = int((mm_token_type_ids == modality).sum().item())
+            global_mm_token_type_ids = mm_token_type_ids
 
-        if n_tokens != features.shape[0]:
-            raise ValueError(
-                f"GLM-5.3-Flash modality={modality} placeholder count {n_tokens} != visual feature "
-                f"count {features.shape[0]}. Refusing to continue training on a corrupted splice "
-                "(design doc §16.2 -- unlike Qwen3-VL, this is not caught and skipped)."
-            )
-
-        mask = mm_token_type_ids == modality
-        local_features = features[local_slice]
-        inputs_embeds[mask] = inputs_embeds[mask] * 0.0 + local_features.to(inputs_embeds.dtype)
+        offset = 0
+        for modality, count in num_features.items():
+            n_tokens = int((global_mm_token_type_ids == modality).sum().item())
+            if n_tokens != count:
+                raise ValueError(
+                    f"GLM-5.3-Flash modality={modality} placeholder count {n_tokens} != visual feature "
+                    f"count {count}. Refusing to continue training on a corrupted splice (design doc "
+                    "§16.2 -- unlike Qwen3-VL, this is not caught and skipped)."
+                )
+            modality_features = features[offset : offset + count]
+            offset += count
+            mask = mm_token_type_ids == modality
+            if sp_size > 1:
+                # This rank's slice starts after the same-modality placeholders on preceding ranks.
+                start = int((preceding == modality).sum().item())
+                modality_features = modality_features[start : start + int(mask.sum().item())]
+            inputs_embeds[mask] = inputs_embeds[mask] * 0.0 + modality_features.to(inputs_embeds.dtype)
         return inputs_embeds
 
     def _prepare_llm_inputs(self, seq_ctx: SequenceContext) -> torch.Tensor:
@@ -187,18 +170,31 @@ class Glm53ForConditionalGeneration(BaseComposeModel):
 
         # A *sample* never mixes image and video -- the tokenize fn rejects that (F1.b) -- but a
         # *pack* routinely holds an image sample next to a video sample, and this is the pack.
-        # Each modality is spliced onto its own positions (mm_token_type_ids 1 vs 2), so the two
-        # are independent and both run when both are present.
+        #
+        # The tower runs exactly once per pack, whatever mix of modalities it holds. Under FSDP each
+        # tower call issues the tower's parameter all-gathers across every rank, and which
+        # modalities a pack holds is per-rank data: running the tower once per modality made a rank
+        # holding both call it twice while its peers called it once, desynchronizing those
+        # all-gathers and hanging the job (NCCL watchdog on the tower's root unit,
+        # patch_embed + post_layernorm). One call over the concatenated patches keeps every rank's
+        # collective sequence identical -- the same reason the pure-text path above runs a dummy.
+        merge_unit = self.vision_tower.spatial_merge_size**2
+        pixel_values: list[torch.Tensor] = []
+        grid_thw: list[torch.Tensor] = []
+        num_features: dict[int, int] = {}
         if has_image:
             assert seq_ctx.image_grid_thw is not None
-            features = self.get_visual_features(seq_ctx.pixel_values, seq_ctx.image_grid_thw, sp_mesh)  # type: ignore[arg-type]
-            inputs_embeds = self._splice(inputs_embeds, mm_token_type_ids, 1, features, sp_mesh)
+            pixel_values.append(seq_ctx.pixel_values)  # type: ignore[arg-type]
+            grid_thw.append(seq_ctx.image_grid_thw)
+            num_features[1] = int((seq_ctx.image_grid_thw.prod(-1) // merge_unit).sum().item())
         if has_video:
             assert seq_ctx.video_grid_thw is not None
             flat_grid_thw = flatten_video_grid_thw(seq_ctx.video_grid_thw)
-            features = self.get_visual_features(seq_ctx.pixel_values_videos, flat_grid_thw, sp_mesh)  # type: ignore[arg-type]
-            inputs_embeds = self._splice(inputs_embeds, mm_token_type_ids, 2, features, sp_mesh)
-        return inputs_embeds
+            pixel_values.append(seq_ctx.pixel_values_videos)  # type: ignore[arg-type]
+            grid_thw.append(flat_grid_thw)
+            num_features[2] = int((flat_grid_thw.prod(-1) // merge_unit).sum().item())
+        features = self.get_visual_features(torch.cat(pixel_values), torch.cat(grid_thw), sp_mesh)
+        return self._splice(inputs_embeds, mm_token_type_ids, features, num_features, sp_mesh)
 
     def forward(
         self,
