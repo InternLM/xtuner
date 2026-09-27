@@ -814,3 +814,43 @@ sync 又是每个 DSA 层一次 break；它防的是"调用方忘了跨 SP gathe
 | 视觉重算 | 逐 block，按 `vision_recompute_ratio` | 缺失（导致 OOM） | 本轮补齐 |
 | 视觉激活 offload | 逐 block `async_save_on_cpu` | 无 | Qwen3.5 更全，未借鉴（GLM 侧已有重算这个更大的收益） |
 | splice 失配处理 | `except` 后继续 | 立即 `raise` | **GLM 更严**，不改 |
+
+## VL 的 `tgs` 与 `seqlen_tgs`，以及混合 pack 把训练挂死
+
+`tgs = mask.sum() / step_time`（真实 token），`seqlen_tgs = mask.numel() / step_time`（含 padding 的全部槽位）。
+文本矩阵里两者几乎相等，因为 pack 填到 99.9% 以上。VL 旧表里 `seqlen_tgs` 大约是 `tgs` 的两倍，是 pack 有一半是空的，
+不是指标算错。
+
+空位的来源是数据，记在 F1：帧目录视频按原始视频的帧数取值，运行时 `IndexError` 被 dataset 吞掉后换成 33 token
+的假样本；超长视觉样本的 cache 仍报截断后的长度，packer 照样给它留位，运行时再失败。当时矩阵里**没有一条视频样本
+真正参与训练**。`SAMPLE_MAX_LENGTH` 提到 16384（与 pack 对齐，截断视觉 span 会直接丢样本）之后，视频进来了。
+非 SP 的 rank0 填充率是 87%–99%，20 step 平均 93%，step 20 的 `seqlen_tgs / tgs = 1.14`。剩下的空隙是 16384 的
+pack 尾部放不进下一条约 1.4 万 token 的视频。`SP2` 的每卡序列是 8192，20 step 全部恰好填满，两个吞吐相等。
+
+数据修好后 baseline 在 step 3 打完、step 4 挂住，30 分钟后 NCCL watchdog 超时。rank0 停在语言塔的 dp=2
+all-gather（`NumelOut/NumelIn = 2`），其余 rank 停在视觉塔的 world=8 all-gather（比值 8）。视觉塔的 FSDP mesh
+是全局 8 卡，语言塔是 dp。一个 pack 里同时有图像样本和视频样本时，旧代码按模态各调一次视觉塔，只含一种模态的
+rank 只调一次，all-gather 序号错开。`SP2` 那次失败是另一件事：baseline 被杀掉时 `m2_sp2` 的 `num_tokens.npy`
+写了一半。
+
+修法：一个 pack 不论模态组合，都把图像 patch 和视频 patch 拼起来只调一次视觉塔。每个 `grid_thw` 行仍是独立的
+`cu_seqlens` 段，所以和逐模态各调一次逐位相同。`test_every_pack_calls_the_vision_tower_exactly_once` 覆盖纯文本、
+纯图像、图+视频；混合 pack 的 logits 与手工 splice 逐位一致。2 卡 `tests/model/test_glm53_compose.py` 9 项通过。
+
+修好后重跑 baseline 与 `SP2`（`matrix3`），另外四组是同一份数据上、step1 loss 与新 baseline 逐位相同的那次
+（`matrix2`）。六组都跑完 20 step，loss 下降，无 NaN/OOM。rank0，step 20；`time` 是 step1 耗时加上 step1 到
+step20 的墙钟：
+
+| profile | step1 loss | step20 loss | grad_norm@20 | mem@20 (GB) | tgs@20 | seqlen_tgs@20 | exp_tgs@20 | time | img_tokens |
+|---|---:|---:|---:|---|---:|---:|---:|---:|---:|
+| 默认（`EP4 SP1 offload=1`） | 12.48675251 | 10.78624153 | 25.85 | 90.59 / 111.43 | 4465.1 | 5084.9 | 2740.3 | 67s | 56424 |
+| `SP2 EP4` | 12.21398830 | 11.29156303 | 40.15 | 77.09 / 97.02 | 3674.0 | 3674.0 | 1926.0 | 44s | 31884 |
+| `EP8 SP1` | 12.48675251 | 10.78038311 | 47.16 | 103.60 / 121.47 | 4468.9 | 5089.2 | 2563.4 | 71s | 56424 |
+| `offload=0`（EP4 SP1） | 12.48675251 | 10.81396198 | 24.98 | 90.25 / 111.00 | 4488.9 | 5112.0 | 2701.5 | 69s | 56424 |
+| `FP8=1` | 12.49881649 | 10.27666283 | 23.44 | 89.44 / 110.15 | 3972.2 | 4523.6 | 2886.5 | 70s | 56424 |
+| `MODEL_COMPILE=1` | 12.48672199 | 10.78443432 | 25.04 | 86.27 / 109.73 | 5727.1 | 6522.1 | 2366.0 | 62s | 56424 |
+
+默认 / `EP8` / `offload=0` 的 step1 loss 逐位相同（12.48675251）。`SP2` 每 step 的 token 大约是默认的一半
+（序列被切开，`GLOBAL_BATCH_SIZE = world/sp`），step20 loss 因此落在 11.29 而不是 10.79，不能按行对比；
+SP 的正确性靠 2 卡逐位 parity。`MODEL_COMPILE=1` 是这张表里最快的（tgs 5727 vs 4465），峰值内存也最低。
+`FP8` 的 step20 更低（10.28 vs 10.79），与文本侧同向。
