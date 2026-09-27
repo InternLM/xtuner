@@ -223,6 +223,33 @@ class TestGlm53ComposeForward:
         with pytest.raises(ValueError, match="placeholder count"):
             model(seq_ctx=seq_ctx, loss_ctx=None)
 
+    @pytest.mark.parametrize("media", ["text", "image", "image_and_video"])
+    def test_every_pack_calls_the_vision_tower_exactly_once(self, media):
+        # FSDP 每次视觉塔调用都会在全体 rank 上 all-gather 参数，而 pack 含哪些模态是各 rank
+        # 自己的数据。按模态各调一次时，图+视频的 rank 调两次、其余调一次，
+        # all-gather 序号错位，下一步卡死直到 NCCL watchdog。不论内容都只调一次。
+        model = _build_model()
+        calls = []
+        handle = model.vision_tower.register_forward_hook(lambda *_: calls.append(1))
+        input_ids = torch.randint(2, 200, (1, SEQ_LEN)).cuda()
+        seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cuda")
+        mm_type = torch.zeros(1, SEQ_LEN, dtype=torch.long, device="cuda")
+        grid = torch.tensor([[1, 2, 2]], device="cuda")
+        if media != "text":
+            mm_type[0, 10] = 1
+            seq_ctx.pixel_values = torch.randn(4, _patch_dim(model), device="cuda", dtype=torch.bfloat16)
+            seq_ctx.image_grid_thw = grid
+        if media == "image_and_video":
+            mm_type[0, 60] = 2
+            seq_ctx.pixel_values_videos = torch.randn(4, _patch_dim(model), device="cuda", dtype=torch.bfloat16)
+            seq_ctx.video_grid_thw = grid
+        seq_ctx.mm_token_type_ids = mm_type
+        try:
+            model(seq_ctx=seq_ctx, loss_ctx=None)
+        finally:
+            handle.remove()
+        assert len(calls) == 1
+
     def test_pack_with_an_image_sample_and_a_video_sample(self):
         # 单个样本不能混图视频（由 TokenizeFn 拦截），但一个 pack 里放一个图像样本和一个视频样本
         # 是常态。之前 compose 模型在 pack 级别拒绝，数据修好、视频真正参与训练后第 2 步就崩。
@@ -245,7 +272,9 @@ class TestGlm53ComposeForward:
         embeds = model.language_model.embed_tokens(input_ids)
         embeds[mm_type == 1] = model.get_visual_features(pixel_values, grid).to(embeds.dtype)
         embeds[mm_type == 2] = model.get_visual_features(pixel_values_videos, grid).to(embeds.dtype)
-        ref_ctx = SequenceContext.from_input_ids((input_ids,), device="cuda").copy(input_ids=None, inputs_embeds=embeds)
+        ref_ctx = SequenceContext.from_input_ids((input_ids,), device="cuda").copy(
+            input_ids=None, inputs_embeds=embeds
+        )
         reference = model.language_model(ref_ctx, None).logits
 
         torch.testing.assert_close(logits, reference, rtol=0, atol=0)
