@@ -39,7 +39,11 @@ SGLANG_GREEDY_SAMPLE_PARAMS = SampleParams(
     top_k=1,
     return_logprob=True,
     return_token_ids=True,
+    sampling_seed=1024,
 )
+SGLANG_DETERMINISTIC_EXTRA_CONFIG = {
+    "sglang_enable_deterministic_inference": True,
+}
 LMDEPLOY_GREEDY_SAMPLE_PARAMS = SampleParams(
     temperature=1.0,
     max_tokens=128,
@@ -196,6 +200,7 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         train_controller = TrainingController(workers=train_workers)
         
         self.rollout_cfg.skip_load_weights = False
+        self.rollout_cfg.extra_rollout_config = dict(SGLANG_DETERMINISTIC_EXTRA_CONFIG)
         rollout_controller = self.rollout_cfg.build(self.rollout_pg)
 
         sample_params = SGLANG_GREEDY_SAMPLE_PARAMS

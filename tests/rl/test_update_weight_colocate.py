@@ -1,16 +1,17 @@
 """共卡部署下的模型权重更新正确性测试。
 
-覆盖 IPC 与 checkpoint-engine：训练侧权重写入推理引擎后，检查引擎状态是否与
-更新前一致。两类用例互补，不是重复。
+覆盖 IPC 与 checkpoint-engine：训练侧权重写入推理引擎后，检查推理引擎状态是否与
+更新前一致。
 
 Generate 检查（默认启用）
     greedy generate 两次，确认引擎自身可复现；再走 IPC 更新后第三次 generate。
     比较 response / response_ids / sampled-token logprobs。
-    SGLang greedy 用 temperature=0；LMDeploy /generate 用 top_k=1 且 temperature=1.0。
+    SGLang greedy 用 temperature=0，并打开 enable_deterministic_inference。
+    LMDeploy /generate 用 top_k=1 且 temperature=1.0。
     - test_sglang_colocate_ipc_update_weight_and_generate
     - test_lmdeploy_colocate_ipc_update_weight_and_generate
 
-参数逐点检查（当前 skip，依赖 SGLang WeightChecker patch）
+checkpoint 检查（当前 skip，依赖 SGLang WeightChecker patch）
     snapshot_parameters -> reset_parameters -> update_weights -> compare_parameters。
     不 generate，直接比对引擎参数。WeightChecker:
     https://github.com/PengchengShi00/sglang/commit/05e89d63b5a1a80671b267ff4494ad950b2aba75
@@ -28,8 +29,7 @@ import requests
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
-from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
-from xtuner.v1.module.mtp import MTPConfig
+from xtuner.v1.model import Qwen3VLDense4BConfig
 
 from xtuner.v1.rl.loss import GRPOLossConfig as LossConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
@@ -61,7 +61,11 @@ SGLANG_GREEDY_SAMPLE_PARAMS = SampleParams(
     top_k=1,
     return_logprob=True,
     return_token_ids=True,
+    sampling_seed=1024,
 )
+SGLANG_DETERMINISTIC_EXTRA_CONFIG = {
+    "sglang_enable_deterministic_inference": True,
+}
 LMDEPLOY_GREEDY_SAMPLE_PARAMS = SampleParams(
     temperature=1.0,
     max_tokens=128,
@@ -69,7 +73,7 @@ LMDEPLOY_GREEDY_SAMPLE_PARAMS = SampleParams(
     return_logprob=True,
     return_token_ids=True,
 )
-MODEL_PATH = os.environ["QWEN3_5_MOE_PATH"]
+MODEL_PATH = os.environ["QWEN3_VL_DENSE_PATH"]
 
 
 class TestUpdateWeightColocate(unittest.TestCase):
@@ -146,9 +150,7 @@ class TestUpdateWeightColocate(unittest.TestCase):
             extra_rollout_config=extra_rollout_config or {},
         )
 
-        model_cfg = Qwen3_5_VLMoE35BA3Config(freeze_vision=True, freeze_projector=True)
-        model_cfg.text_config.mtp_config = MTPConfig(num_layers=1)
-        model_cfg.text_config.ep_size = 1
+        model_cfg = Qwen3VLDense4BConfig()
 
         optim_cfg = AdamWConfig(lr=1e-6, foreach=False, weight_decay=0.1)
         fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1)
@@ -298,7 +300,10 @@ class TestUpdateWeightColocate(unittest.TestCase):
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_SGLANG", "0") == "0", "sglang backend is not enabled")
     def test_sglang_colocate_ipc_update_weight_and_generate(self):
-        self._run_colocate_ipc_update_weight_and_generate()
+        self._run_colocate_ipc_update_weight_and_generate(
+            extra_rollout_config=SGLANG_DETERMINISTIC_EXTRA_CONFIG,
+            sample_params=SGLANG_GREEDY_SAMPLE_PARAMS,
+        )
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_colocate_ipc_update_weight_and_generate(self):
