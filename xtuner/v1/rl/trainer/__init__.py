@@ -6,6 +6,7 @@ from ..rollout_is import (
     merge_rollout_is_metrics,
 )
 from .controller import TrainingController
+from .critic_worker import CriticWorker, CriticWorkerConfig
 from .worker import TrainBatchAttr, TrainingWorker, WorkerConfig, WorkerLogItem, WorkerTrainLogItem
 
 
@@ -21,4 +22,6 @@ __all__ = [
     "WorkerTrainLogItem",
     "WorkerLogItem",
     "TrainingWorker",
+    "CriticWorker",
+    "CriticWorkerConfig",
 ]

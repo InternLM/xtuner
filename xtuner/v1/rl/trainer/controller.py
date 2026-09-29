@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, cast
 
 import ray
 import torch
@@ -28,8 +28,9 @@ class _DPRankDispatch(TypedDict):
     ``fit``."""
 
     plan: DPRankPackIndices
-    advantages: list[float]
     rollout_items: list[RolloutState]
+    sample_indices: list[int]
+    advantages: NotRequired[list[float] | list[list[float]]]
 
 
 class _PackPlan(TypedDict):
@@ -114,6 +115,46 @@ class TrainingController:
         self.distillation = distillation if distillation is not None else DistillationTrainerAdapter(None)
         self.task_adv_weight = self.distillation.task_adv_weight
         self.logger = get_logger()
+        self._roles: set[str] = set()
+
+    @staticmethod
+    def _invoke(worker: Any, method: str, *args, **kwargs):
+        call = getattr(worker, method)
+        remote = getattr(call, "remote", None)
+        return remote(*args, **kwargs) if remote is not None else call(*args, **kwargs)
+
+    @staticmethod
+    def _resolve(handles: list[Any]) -> list[Any]:
+        if handles and isinstance(handles[0], ray.ObjectRef):
+            return ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        return handles
+
+    def attach(self, name: str, worker_cls: type, worker_cfg: Any) -> None:
+        """Attach one in-process role to every actor and remember its name.
+
+        The critic reuses the actor Ray handles. Weight sync stays on the actor engine.
+        """
+        if not name or name == "actor" or name in self._roles:
+            raise ValueError(f"duplicate or invalid worker group: {name}")
+        handles = [self._invoke(worker, "attach", name, worker_cls, worker_cfg) for worker in self.workers]
+        self._resolve(handles)
+        self._roles.add(name)
+
+    def switch_role_modules(self, role: str) -> None:
+        """Switch the active role inside every actor process."""
+        if role not in {"actor", "none"} and role not in self._roles:
+            if not self._roles:
+                raise KeyError(f"role is not available in actor-only stage: {role}")
+            raise KeyError(f"role is not registered: {role}")
+        if role == "actor" and not self._roles:
+            return
+        handles = [self._invoke(worker, "switch_role_modules", role) for worker in self.workers]
+        self._resolve(handles)
+
+    def _uses_gae(self) -> bool:
+        from xtuner.v1.rl.advantage.gae import GAEEstimator
+
+        return isinstance(self.advantage_estimator, GAEEstimator)
 
     def _cluster_group_rewards(
         self, group: list[RolloutState]
@@ -158,12 +199,33 @@ class TrainingController:
             list[float]: Advantage per state, aligned with the group order. Zero when task advantage
             is disabled or the state carries no reward.
         """
+        if self._uses_gae():
+            # Token advantages are filled after the critic value pass.
+            return [0.0] * len(cluster_indices)
         if self.task_adv_weight != 0 and self.advantage_estimator is not None:
             cluster_advantages = self.advantage_estimator.compute(
                 torch.tensor(cluster_rewards, dtype=torch.float32), session_representatives
             )
             return [float(cluster_advantages[index].item()) if index is not None else 0.0 for index in cluster_indices]
         return [0.0] * len(cluster_indices)
+
+    @staticmethod
+    def _critic_log_scalars(critic_logs: list[WorkerLogItem] | None) -> dict[str, float]:
+        """Average rank-0 critic step metrics into ``data_info`` keys."""
+        if not critic_logs:
+            return {}
+        steps = critic_logs[0].get("train_metrics") or []
+        sums: dict[str, float] = {}
+        counts: dict[str, int] = {}
+        rename = {"reduced_llm_loss": "critic/value_loss", "grad_norm": "critic/grad_norm"}
+        for step in steps:
+            for key, value in step.items():
+                target = rename.get(key)
+                if target is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                sums[target] = sums.get(target, 0.0) + float(value)
+                counts[target] = counts.get(target, 0) + 1
+        return {key: sums[key] / counts[key] for key in sums}
 
     def _build_trainer_log_info(
         self,
@@ -172,6 +234,7 @@ class TrainingController:
         log_infos: list[WorkerLogItem],
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
+        critic_log_infos: list[WorkerLogItem] | None = None,
     ) -> dict[str, float]:
         """Assemble the complete ``data_info`` step log from one fit's phases.
 
@@ -182,9 +245,11 @@ class TrainingController:
         Args:
             prepared (_PreparedBatch): Output of ``_prepare_rollout_items``.
             pack_plan (_PackPlan): Output of ``_build_pack_plan``.
-            log_infos (list[WorkerLogItem]): Per-worker training logs of the batch.
+            log_infos (list[WorkerLogItem]): Per-worker actor training logs of the batch.
             raw_rewards_sum (float): Producer-side raw reward sum used by ``raw_rewards/mean``.
             raw_rewards_count (int): Producer-side raw reward count used by ``raw_rewards/mean``.
+            critic_log_infos (list[WorkerLogItem] | None): Per-worker critic logs. Rank 0 is
+                averaged into ``critic/value_loss`` and ``critic/grad_norm``.
 
         Returns:
             dict[str, float]: The step statistics dictionary.
@@ -251,6 +316,7 @@ class TrainingController:
             worker_values = [log_info[key] for log_info in worker_logs if key in log_info]
             if worker_values:
                 info_dict[target_key] = max(worker_values)
+        info_dict.update(self._critic_log_scalars(critic_log_infos))
         return info_dict
 
     def _prepare_rollout_items(self, rollout_groups: list[list[RolloutState]], rollout_idx: int) -> _PreparedBatch:
@@ -323,7 +389,6 @@ class TrainingController:
     def _build_pack_plan(
         self,
         rollout_items: list[RolloutState],
-        advantages: list[float],
         pack_max_length: int,
         worker_cfg: WorkerConfig,
         data_replicate_size: int,
@@ -331,19 +396,20 @@ class TrainingController:
         """Build the per-DP-rank pack plan and dispatch payloads without
         uploading.
 
+        Advantages stay outside this plan. Callers slice them with
+        ``sample_indices`` after the advantage step has finished.
+
         Args:
             rollout_items (list[RolloutState]): Flat rollout states in training order.
-            advantages (list[float]): Scalar advantage per rollout state, aligned with
-                ``rollout_items``.
             pack_max_length (int): Maximum token budget of one pack.
             worker_cfg (WorkerConfig): Training worker config providing packing options.
             data_replicate_size (int): Number of workers holding one data replica.
 
         Returns:
-            _PackPlan: One dispatch payload per DP rank — local plan, local advantages
-            and this rank's rollout states — plus the plan-derived ``packing/*``
-            metrics including the wall time of this call. Uploading the payloads to
-            the Ray object store happens in ``fit``.
+            _PackPlan: One dispatch payload per DP rank — local plan and this rank's
+            rollout states — plus the plan-derived ``packing/*`` metrics including
+            the wall time of this call. Uploading the payloads to the Ray object
+            store happens in ``fit``.
         """
         plan_begin = time.perf_counter()
         lengths = []
@@ -370,8 +436,8 @@ class TrainingController:
             global_to_local = {global_index: local_index for local_index, global_index in enumerate(global_indices)}
             dp_dispatches[dp_rank] = {
                 "plan": [[[global_to_local[index] for index in pack] for pack in step] for step in dp_plan],
-                "advantages": [advantages[index] for index in global_indices],
                 "rollout_items": [rollout_items[index] for index in global_indices],
+                "sample_indices": global_indices,
             }
         total_packs = sum(len(step) for dp_plan in packed_plan for step in dp_plan)
         total_tokens = real_tokens + padding_tokens
@@ -385,6 +451,65 @@ class TrainingController:
         }
         return {"dp_dispatches": dp_dispatches, "plan_log": plan_log}
 
+    def _compute_ppo_targets(
+        self,
+        rollout_items: list[RolloutState],
+        pack_plan: _PackPlan,
+        value_lists: list[list[list[float]]],
+        data_replicate_size: int,
+    ) -> tuple[list[list[float]], list[list[float]]]:
+        """Build per-sample token advantages and returns from critic values."""
+        from xtuner.v1.rl.advantage.gae import GAEEstimator
+
+        estimator = self.advantage_estimator
+        if not isinstance(estimator, GAEEstimator):
+            raise RuntimeError("Critic training requires a GAE advantage estimator")
+        token_advantages: list[list[float]] = [[] for _ in rollout_items]
+        token_returns: list[list[float]] = [[] for _ in rollout_items]
+        supervised_advantages: list[float] = []
+        for dp_rank, dispatch in pack_plan["dp_dispatches"].items():
+            local_values = value_lists[dp_rank * data_replicate_size]
+            sample_indices = dispatch["sample_indices"]
+            if len(local_values) != len(sample_indices):
+                raise ValueError(
+                    f"Critic values for dp_rank={dp_rank} do not match the packed samples: "
+                    f"{len(local_values)} vs {len(sample_indices)}"
+                )
+            for local_index, global_index in enumerate(sample_indices):
+                state = rollout_items[global_index]
+                labels = state.labels or []
+                mask = [label != -100 for label in labels[1:]]
+                reward = 0.0
+                if state.reward is not None and "score" in state.reward:
+                    reward = float(state.reward["score"])
+                advantages, returns = estimator.compute_token_gae(local_values[local_index], mask, reward)
+                token_advantages[global_index] = advantages
+                token_returns[global_index] = returns
+                supervised_advantages.extend(adv for adv, supervised in zip(advantages, mask) if supervised)
+
+        if supervised_advantages:
+            mean = sum(supervised_advantages) / len(supervised_advantages)
+            variance = sum((adv - mean) ** 2 for adv in supervised_advantages) / len(supervised_advantages)
+            scale = variance**0.5 + 1e-8
+            for advantages, state in zip(token_advantages, rollout_items):
+                mask = [label != -100 for label in (state.labels or [])[1:]]
+                for index, supervised in enumerate(mask):
+                    if supervised:
+                        advantages[index] = (advantages[index] - mean) / scale
+        return token_advantages, token_returns
+
+    @staticmethod
+    def _slice_advantages(advantages: list[float], sample_indices: list[int]) -> list[float]:
+        return [advantages[index] for index in sample_indices]
+
+    @staticmethod
+    def _mean_supervised_advantage(advantages: list[float], state: RolloutState) -> float:
+        mask = [label != -100 for label in (state.labels or [])[1:]]
+        supervised = [advantage for advantage, keep in zip(advantages, mask) if keep]
+        if not supervised:
+            return 0.0
+        return sum(supervised) / len(supervised)
+
     def fit(
         self,
         rollout_groups: list[list[RolloutState]],
@@ -393,6 +518,13 @@ class TrainingController:
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
     ) -> tuple[list[WorkerLogItem], dict[str, float]]:
+        use_gae = self._uses_gae()
+        has_critic = "critic" in self._roles
+        if use_gae and not has_critic:
+            raise RuntimeError("GAE requires a registered critic worker group")
+        if has_critic and not use_gae:
+            raise RuntimeError("Critic training requires a GAE advantage estimator")
+
         prepared = self._prepare_rollout_items(rollout_groups, rollout_idx)
         rollout_items = prepared["rollout_items"]
         if not rollout_items:
@@ -401,24 +533,78 @@ class TrainingController:
         worker_cfg = ray.get(self.workers[0].get_worker_cfg.remote())  # type: ignore[attr-defined]
         data_replicate_size = ray.get(self.workers[0].get_data_replicate_size.remote())  # type: ignore[attr-defined]
 
-        pack_plan = self._build_pack_plan(
-            rollout_items, prepared["advantages"], pack_max_length, worker_cfg, data_replicate_size
-        )
+        pack_plan = self._build_pack_plan(rollout_items, pack_max_length, worker_cfg, data_replicate_size)
 
         # Pixel-value object refs must stay alive until every worker has consumed the
         # dispatch, so the finally clause releases them on both the success and the
         # failure path.
         handles: list[ray.ObjectRef] = []
         try:
+            # Nested in a list so Ray does not dereference it before the worker
+            # explicitly fetches it. Replicas of one DP rank share the ref.
+            item_refs_by_dp = {
+                dp_rank: [ray.put(dispatch["rollout_items"])]
+                for dp_rank, dispatch in pack_plan["dp_dispatches"].items()
+            }
+            token_advantages: list[list[float]] | None = None
+            critic_log_infos: list[WorkerLogItem] | None = None
+            if has_critic:
+                self.switch_role_modules("critic")
+                value_handles = []
+                for worker_idx, worker in enumerate(self.workers):
+                    dp_rank = worker_idx // data_replicate_size
+                    dp_dispatch = pack_plan["dp_dispatches"][dp_rank]
+                    value_handles.append(
+                        worker.call_attached.remote(
+                            "critic",
+                            "collect_values",
+                            rollout_item_refs=item_refs_by_dp[dp_rank],
+                            batch_attr=prepared["batch_attr"],
+                            pack_plan=dp_dispatch["plan"],
+                        )
+                    )
+                value_lists = ray.get(value_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+                token_advantages, token_returns = self._compute_ppo_targets(
+                    rollout_items, pack_plan, value_lists, data_replicate_size
+                )
+                prepared["advantages"] = [
+                    self._mean_supervised_advantage(advantages, state)
+                    for advantages, state in zip(token_advantages, rollout_items)
+                ]
+                critic_handles = []
+                for worker_idx, worker in enumerate(self.workers):
+                    dp_rank = worker_idx // data_replicate_size
+                    dp_dispatch = pack_plan["dp_dispatches"][dp_rank]
+                    local_indices = dp_dispatch["sample_indices"]
+                    critic_handles.append(
+                        worker.call_attached.remote(  # type: ignore[attr-defined]
+                            "critic",
+                            "fit",
+                            rollout_item_refs=item_refs_by_dp[dp_rank],
+                            advantages=self._slice_advantages(prepared["advantages"], local_indices),
+                            pack_plan=dp_dispatch["plan"],
+                            batch_attr=prepared["batch_attr"],
+                            rollout_idx=rollout_idx,
+                            token_returns=[token_returns[index] for index in local_indices],
+                            token_values=value_lists[dp_rank * data_replicate_size],
+                        )
+                    )
+                critic_log_infos = ray.get(critic_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+                self.switch_role_modules("actor")
+
+            for dispatch in pack_plan["dp_dispatches"].values():
+                indices = dispatch["sample_indices"]
+                if token_advantages is None:
+                    dispatch["advantages"] = [prepared["advantages"][index] for index in indices]
+                else:
+                    dispatch["advantages"] = [token_advantages[index] for index in indices]
+
             for worker_idx, worker in enumerate(self.workers):
                 dp_rank = worker_idx // data_replicate_size
                 dp_dispatch = pack_plan["dp_dispatches"][dp_rank]
-                # Nested in a list so Ray does not dereference it before TrainingWorker.fit
-                # explicitly fetches it; one DP rank's replicas share the ref.
-                item_refs = [ray.put(dp_dispatch["rollout_items"])]
                 handles.append(
                     worker.fit.remote(  # type: ignore[attr-defined]
-                        rollout_item_refs=item_refs,
+                        rollout_item_refs=item_refs_by_dp[dp_rank],
                         advantages=dp_dispatch["advantages"],
                         pack_plan=dp_dispatch["plan"],
                         batch_attr=prepared["batch_attr"],
@@ -426,6 +612,8 @@ class TrainingController:
                 )
             log_infos = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         finally:
+            if has_critic:
+                self.switch_role_modules("actor")
             free_pixel_value_refs: list[ray.ObjectRef] = []
             for state in rollout_items:
                 pixel_values = state.mm_info.get("pixel_values") if state.mm_info is not None else None
@@ -441,6 +629,7 @@ class TrainingController:
             log_infos,
             raw_rewards_sum=raw_rewards_sum,
             raw_rewards_count=raw_rewards_count,
+            critic_log_infos=critic_log_infos,
         )
         return log_infos, data_info
 

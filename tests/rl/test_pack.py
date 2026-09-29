@@ -159,6 +159,28 @@ class TestRLDataPacker(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown packing strategy"):
             self._make_packer(pack_strategy="unknown")
 
+    def test_shuffled_visit_order_packs_by_each_samples_own_length(self):
+        # 非确定性路径会打乱下标。长度必须跟着下标走，否则贪心预算用的是别的样本的长度，
+        # 真实 token 数会超过 pack_max_length。
+        lengths = [30, 2, 30, 2]
+
+        def visit_long_samples_first(seq):
+            seq[:] = [0, 2, 1, 3]
+
+        for strategy in ("legacy", "greedy"):
+            packer = self._make_packer(world_size=1, optimizer_steps=1, pack_strategy=strategy)
+            with (
+                patch("xtuner.v1.rl.trainer.pack.XTUNER_DETERMINISTIC", False),
+                patch("xtuner.v1.rl.trainer.pack.random.shuffle", visit_long_samples_first),
+            ):
+                plan, padding = packer.pack(lengths)
+
+            self._assert_plan_invariants(plan, lengths, optimizer_steps=1)
+            packs = [pack for step in plan[0] for pack in step if pack]
+            self.assertEqual(packs, [[0], [2, 1], [3]])
+            total_packs = sum(len(step) for step in plan[0])
+            self.assertEqual(padding, total_packs * self.PACK_MAX_LENGTH - sum(lengths))
+
     def test_greedy_strategy_invariants(self):
         lengths = [10, 8, 6, 30, 12, 4, 7, 20, 2, 9]
         packer = self._make_packer(pack_strategy="greedy")

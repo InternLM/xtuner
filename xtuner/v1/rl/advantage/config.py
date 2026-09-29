@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Literal
 
 from cyclopts import Group, Parameter
 from pydantic import BaseModel, ConfigDict
@@ -16,6 +16,23 @@ class BaseAdvantageConfig(BaseModel):
 
     def build(self) -> AdvantageEstimator:
         raise NotImplementedError("Subclasses must implement this method.")
+
+
+class GAEAdvantageConfig(BaseAdvantageConfig):
+    """Configuration for the PPO generalized-advantage estimator.
+
+    Token GAE is computed per original sample after the critic value pass.
+    Group-scalar ``compute`` is intentionally unused.
+    """
+
+    gamma: float = 1.0
+    lam: float = 0.95
+    reward_scope: Literal["segment", "session"] = "segment"
+
+    def build(self) -> AdvantageEstimator:
+        from xtuner.v1.rl.advantage.gae import GAEEstimator
+
+        return GAEEstimator(gamma=self.gamma, lam=self.lam)
 
 
 class GRPOAdvantageConfig(BaseAdvantageConfig):
