@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
+    Any,
     Iterable,
     Literal,
     Sequence,
@@ -192,9 +193,8 @@ class WorkerConfig(BaseModel):
     Args:
         model_cfg (TransformerConfig): Model architecture configuration.
         optim_cfg (OptimConfig): Optimizer configuration for training.
-        loss_cfg (BaseRLLossConfig | CriticLossConfig): Policy RL loss or critic
-            value-loss configuration. TrainingWorker.fit still follows the actor
-            (advantages / logprobs) path; critic training is not wired yet.
+        loss_cfg (BaseRLLossConfig | CriticLossConfig): Policy RL loss. Critic
+            value loss belongs on ``critic_cfg``, so the actor keeps the policy path.
         lr_cfg (LRConfig): Learning rate scheduler configuration.
         fsdp_cfg (FSDPConfig): Fully Sharded Data Parallel configuration.
         load_from (str | Path): Path to load the main model from.
@@ -275,6 +275,10 @@ class WorkerConfig(BaseModel):
     rollout_steps_per_sft: int = 1
     sft_loss_cfg: CELossConfig = CELossConfig()
 
+    # The critic is hosted in this actor process. A configured critic selects
+    # the critic training flow; GAE is selected by the advantage estimator.
+    critic_cfg: Any | None = None
+
     def build(
         self,
         placement_group: PlacementGroup,
@@ -298,11 +302,16 @@ class WorkerConfig(BaseModel):
         )(TrainingWorker)
         train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorkerCls, self, placement_group)
         ray.wait([w.ready.remote() for w in train_workers])
-        return TrainingController(
+        controller = TrainingController(
             workers=train_workers,
             advantage_estimator=advantage_estimator,
             distillation=distillation,
         )
+        if self.critic_cfg is not None:
+            from xtuner.v1.rl.trainer.critic_worker import CriticWorker
+
+            controller.attach("critic", CriticWorker, self.critic_cfg)
+        return controller
 
 
 class TrainBatchAttr(TypedDict):
@@ -389,6 +398,10 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._set_deterministic()
         self._set_random_seed(worker_cfg.seed)
 
+        # The critic is an ordinary object in this actor process. The registry
+        # keeps role switching explicit.
+        self._attached: dict[str, Any] = {}
+
         self.data_mesh = self._init_data_mesh(sp_size=worker_cfg.sp_size)
         self.sp_mesh = self.data_mesh["sp"]
 
@@ -448,6 +461,64 @@ class TrainingWorker(SingleAcceleratorWorker):
             config=self.config,
             engine=self._engine,
         )
+
+    @ray_method
+    def attach(self, name: str, worker_cls: type, worker_cfg: Any) -> None:
+        """Build and register one role worker in this actor process.
+
+        The actor engine is moved to CPU before the attached engine is constructed, and the attached engine is moved
+        back to CPU before the actor returns to GPU. Peak memory stays at one resident model.
+        """
+        if not name:
+            raise ValueError("attached worker name must not be empty")
+        if name in self._attached:
+            raise ValueError(f"attached worker already exists: {name}")
+        self.offload_optimizer()
+        self.offload_model()
+        try:
+            worker = worker_cls(worker_cfg, host=self)
+            offload = getattr(worker, "offload", None)
+            if offload is not None:
+                offload()
+        finally:
+            DEVICE_MODULE.empty_cache()
+            self.onload_model()
+            self.onload_optimizer()
+        self._attached[name] = worker
+
+    @ray_method
+    def call_attached(self, name: str, method: str, *args, **kwargs):
+        """Invoke a method on an attached role in the current process."""
+        try:
+            worker = self._attached[name]
+        except KeyError as exc:
+            raise KeyError(f"attached worker is not registered: {name}") from exc
+        return getattr(worker, method)(*args, **kwargs)
+
+    @ray_method
+    def switch_role_modules(self, role: str) -> None:
+        """Onload one role and offload the others inside this process.
+
+        The actor optimizer state moves with the actor model. Departing roles are released and the cache is emptied
+        before the selected role is loaded.
+        """
+        valid_roles = {"actor", "none", *self._attached.keys()}
+        if role not in valid_roles:
+            raise KeyError(f"role is not registered: {role}")
+
+        if role != "actor":
+            self.offload_optimizer()
+            self.offload_model()
+        for name, worker in self._attached.items():
+            if name != role:
+                worker.offload()
+        DEVICE_MODULE.empty_cache()
+
+        if role == "actor":
+            self.onload_model()
+            self.onload_optimizer()
+        elif role != "none":
+            self._attached[role].onload()
 
     @ray_method
     def suspend_train_nccl_process_groups(self) -> dict[str, object]:
@@ -1010,6 +1081,32 @@ class TrainingWorker(SingleAcceleratorWorker):
             return torch.zeros(1, padding_len, top_k, dtype=torch.long)
         raise ValueError(f"Unknown pack loss input key: {key}")
 
+    def _prepare_forward_seq_ctx(self, seq_ctx: SequenceContext, *, sequence_parallel: bool = True) -> SequenceContext:
+        """Resolve multimodal refs, move to device, and sequence-parallel
+        split."""
+        pixel_values = seq_ctx.pixel_values
+        if pixel_values is not None:
+            if not isinstance(pixel_values, np.ndarray):
+                assert isinstance(pixel_values, list), (
+                    f"pixel_values should be list of tensor, got {type(pixel_values)}"
+                )
+                pixel_values = ray.get(list(pixel_values))
+                pixel_values = [torch.as_tensor(pixel_value) for pixel_value in pixel_values]
+                pixel_values = torch.cat(pixel_values, dim=0)
+                seq_ctx.pixel_values = pixel_values
+            else:
+                raise NotImplementedError("The case where pixel_values is a numpy array is not implemented yet.")
+
+        rollout_routed_experts = seq_ctx.rollout_routed_experts
+        if rollout_routed_experts is not None:
+            self._add_rollout_routed_experts(seq_ctx, rollout_routed_experts)
+
+        seq_ctx.offload_rollout_routed_experts = self.config.offload_rollout_routed_experts
+        seq_ctx = seq_ctx.to(DEVICE)
+        if sequence_parallel and self.sp_mesh.size() > 1:
+            seq_ctx = seq_ctx.split(self.sp_mesh)
+        return seq_ctx
+
     def _pack_padding_seq_ctx(
         self,
         padding_len: int,
@@ -1069,28 +1166,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         prepare_inputs_begin = time.perf_counter()
         for data in flat_data_batches:
             seq_ctx, loss_ctx = data
-            # update seq_ctx
-            pixel_values = seq_ctx.pixel_values
-            if pixel_values is not None:
-                if not isinstance(pixel_values, np.ndarray):
-                    assert isinstance(pixel_values, list), (
-                        f"pixel_values should be list of tensor, got {type(pixel_values)}"
-                    )
-                    pixel_values = ray.get(list(pixel_values))
-                    pixel_values = [torch.as_tensor(pixel_value) for pixel_value in pixel_values]
-                    pixel_values = torch.cat(pixel_values, dim=0)
-                    seq_ctx.pixel_values = pixel_values
-                else:
-                    raise NotImplementedError("The case where pixel_values is a numpy array is not implemented yet.")
-
-            rollout_routed_experts = seq_ctx.rollout_routed_experts
-            if rollout_routed_experts is not None:
-                self._add_rollout_routed_experts(seq_ctx, rollout_routed_experts)
-
-            seq_ctx.offload_rollout_routed_experts = self.config.offload_rollout_routed_experts
-            seq_ctx = seq_ctx.to(DEVICE)
-            if self.sp_mesh.size() > 1:
-                seq_ctx = seq_ctx.split(self.sp_mesh)
+            seq_ctx = self._prepare_forward_seq_ctx(seq_ctx)
 
             # update loss_ctx
             loss_kwargs = loss_ctx.loss_kwargs
@@ -1575,6 +1651,11 @@ class TrainingWorker(SingleAcceleratorWorker):
             save_optimizer=not no_save_optimizer,
         )
 
+        for name, worker in self._attached.items():
+            save_fn = getattr(worker, "save", None)
+            if save_fn is not None:
+                save_fn(checkpoint_path / name, no_save_optimizer=no_save_optimizer)
+
         # Save sft dataloader
         if self._sft_dataloader is not None:
             sft_dataloader_path = checkpoint_path / self._SAVE_SFT_DATALOADER_DIR
@@ -1620,6 +1701,16 @@ class TrainingWorker(SingleAcceleratorWorker):
             load_states=load_checkpoint_cfg.load_optimizer_states,
             load_args=load_checkpoint_cfg.load_optimizer_args,
         )
+
+        for name, worker in self._attached.items():
+            resume_fn = getattr(worker, "resume", None)
+            role_path = resume_from / name
+            if resume_fn is not None and role_path.exists():
+                resume_fn(
+                    role_path,
+                    load_optimizer_states=load_checkpoint_cfg.load_optimizer_states,
+                    load_optimizer_args=load_checkpoint_cfg.load_optimizer_args,
+                )
 
         # Resume sft dataloader
         if self._sft_dataloader is not None:
