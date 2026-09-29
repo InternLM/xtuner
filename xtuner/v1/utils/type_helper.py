@@ -31,6 +31,9 @@ class RemoteMethod(Generic[P, T]):
 
     def bind(self, *args: P.args, **kwargs: P.kwargs) -> Any: ...
 
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
+        raise NotImplementedError
+
 
 class RayMethodDecorator(Protocol):
     @overload
