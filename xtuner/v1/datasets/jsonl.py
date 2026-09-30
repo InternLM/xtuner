@@ -321,7 +321,17 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 if not os.path.exists(_cached_file):
                     offsets = self.count_offsets(file_cache_dir)
 
-                if not os.path.exists(self.meta_path):
+                # (Re)initialize the meta file when it is missing, empty, or
+                # corrupted (e.g. a previous run was killed between
+                # `truncate(0)` and `write`, or the user cleared its content).
+                need_init = not os.path.exists(self.meta_path)
+                if not need_init:
+                    try:
+                        with open(self.meta_path) as f:
+                            json.load(f)
+                    except (json.JSONDecodeError, ValueError):
+                        need_init = True
+                if need_init:
                     with open(self.meta_path, "w") as f:
                         f.write("{}")
 
