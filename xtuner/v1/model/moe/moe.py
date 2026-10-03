@@ -1588,7 +1588,17 @@ class MoE(BaseModel):
             # `_flatten()` collapses all Replicate dims into a 1D mesh whose
             # process group covers every rank across those dimensions, allowing
             # a single all_reduce regardless of how many Replicate dims exist.
-            if len(replicate_dim_names) > 1:
+            replica_mesh = self.world_mesh
+            if (
+                len(replicate_dim_names) == len(param.placements)
+                and replica_mesh is not None
+                and param.device_mesh.size() < replica_mesh.size()
+            ):
+                # Non-expert parameters are replicated on EP/ETP before FSDP. If
+                # ignored by FSDP, they also remain replicated over its DP dims,
+                # although the parameter still carries only the EP/ETP submesh.
+                flat_mesh = replica_mesh._flatten() if replica_mesh.ndim > 1 else replica_mesh
+            elif len(replicate_dim_names) > 1:
                 flat_mesh = param.device_mesh[replicate_dim_names]._flatten()
             else:
                 # In the case that only one replicate dim, in pt2.8 _flatten is worked due to a bug.
