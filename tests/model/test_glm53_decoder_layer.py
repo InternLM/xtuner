@@ -11,6 +11,8 @@ TestGlm53MoEDecoderLayer
     test_forward_finite_and_shape_preserving             同上，MoE 版
     test_mhc_cfg_none_matches_plain_moe_decoder_layer    同上，MoE 版
     test_grad_flows_through_hc_params_and_experts        梯度能到达 hc_* 与专家
+TestGlm53DecoderLayerNormEpsilon
+    test_configured_epsilon_matches_hf_residual_mix        两类层的两个 mHC 入口使用配置 epsilon
 TestGlm53DecoderLayerCompile
     test_dense_layer_forward_compiles_with_dynamic_cu_seqlens  动态 cu_seqlens 下可编译
 """
@@ -210,3 +212,69 @@ class TestGlm53DecoderLayerCompile:
 
         assert out.shape == streams.shape
         assert torch.isfinite(out).all()
+
+
+@pytest.mark.gpu
+class TestGlm53DecoderLayerNormEpsilon:
+    """通过真实 decoder 前向，对照 HF 的 mHC 残差混合，覆盖四处 epsilon 接线。"""
+
+    @pytest.mark.parametrize("kind", ["dense", "moe"])
+    @pytest.mark.parametrize("active_site", ["attn", "ffn"])
+    @torch.no_grad()
+    def test_configured_epsilon_matches_hf_residual_mix(self, kind: str, active_site: str) -> None:
+        # 将真实子模块输出置零，单独观测 mHC 残差；另一站点保留近似恒等混合，避免抹去误差。
+        from transformers.models.glm5_next.configuration_glm5_next import Glm5NextTextConfig
+        from transformers.models.glm5_next.modeling_glm5_next import Glm5NextTextHyperConnection
+
+        torch.manual_seed(17)
+        norm_eps = 1e-5
+        mhc_cfg = MHCConfig(hc_mult=HC_MULT)
+        if kind == "dense":
+            layer = Glm53DenseDecoderLayer(**_dense_kwargs(mhc_cfg), layer_idx=0, rms_norm_eps=norm_eps).cuda()
+            layer.mlp.down_proj.weight.zero_()
+        else:
+            layer = Glm53MoEDecoderLayer(**_moe_kwargs(mhc_cfg), layer_idx=0, rms_norm_eps=norm_eps)
+            layer = layer.cuda().to(torch.bfloat16)
+            _init_uninitialized_moe_params(layer)
+            layer.experts.fused_w2.weight.zero_()
+            layer.shared_experts.down_proj.weight.zero_()
+        layer.self_attn.o_proj.weight.zero_()
+        references = []
+        for site in ("attn", "ffn"):
+            fn = getattr(layer, f"hc_{site}_fn")
+            base = getattr(layer, f"hc_{site}_base")
+            scale = getattr(layer, f"hc_{site}_scale")
+            scale.fill_(1.0)
+            if site == active_site:
+                fn.normal_(std=0.1)
+                base.normal_(std=0.1)
+            else:
+                fn.zero_()
+                base.zero_()
+                base[2 * HC_MULT :].view(HC_MULT, HC_MULT).fill_(-10.0).fill_diagonal_(10.0)
+            reference = Glm5NextTextHyperConnection(
+                Glm5NextTextConfig(
+                    hidden_size=HIDDEN,
+                    hc_mult=HC_MULT,
+                    hc_eps=mhc_cfg.hc_eps,
+                    hc_sinkhorn_iters=mhc_cfg.hc_sinkhorn_iters,
+                    rms_norm_eps=norm_eps,
+                )
+            ).cuda()
+            reference.fn.copy_(fn)
+            reference.base.copy_(base)
+            reference.scale.copy_(scale)
+            references.append(reference)
+
+        dtype = layer.self_attn.o_proj.weight.dtype
+        streams = torch.randn(1, 9, HC_MULT, HIDDEN, device="cuda", dtype=dtype) * 0.001
+        actual = layer(hidden_states=streams, position_embeddings=(None, None), seq_ctx=_seq_ctx(9, "cuda"))[
+            "hidden_states"
+        ]
+        expected = streams
+        for reference in references:
+            _, combination, _ = reference(expected.float())
+            expected = torch.matmul(combination.transpose(-1, -2), expected.float()).to(dtype)
+        # HF projects in FP32; allow one BF16 ULP at the input scale for the BF16 decoder.
+        atol = torch.finfo(dtype).eps * streams.abs().max().item() if kind == "moe" else 1e-8
+        torch.testing.assert_close(actual, expected, atol=atol, rtol=0)
