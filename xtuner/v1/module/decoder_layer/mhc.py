@@ -168,11 +168,11 @@ def hc_pre(
     """
     shape, dtype = x.size(), x.dtype
     x_flat = x.flatten(2)
-    # HF's `Glm5NextTextUnweightedRMSNorm` rescales in fp32 (no learned weight), then the
-    # `fn` projection runs on the *input* dtype and only the sinkhorn split is upcast --
-    # matching `F.linear(flat_normed, hc_fn.to(dtype)).float()` below.
-    flat_normed = torch.nn.functional.rms_norm(x_flat.float(), (x_flat.size(-1),), weight=None, eps=norm_eps).to(dtype)
-    mixes = torch.nn.functional.linear(flat_normed, hc_fn.to(dtype)).float()
+    # HF keeps both the unweighted norm and mixing projection in fp32. A BF16
+    # projection can round differently when SP changes the number of token rows,
+    # perturbing the residual streams before attention even runs.
+    flat_normed = torch.nn.functional.rms_norm(x_flat.float(), (x_flat.size(-1),), weight=None, eps=norm_eps)
+    mixes = torch.nn.functional.linear(flat_normed, hc_fn.float())
 
     pre, post, comb = hc_split_sinkhorn(mixes, hc_scale, hc_base, hc_mult, iters, eps)
 
