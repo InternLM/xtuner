@@ -383,6 +383,7 @@ class Muon(Optimizer):
         self._muon_split_sizes = muon_split_sizes or {}
         self.register_state_dict_post_hook(self._remove_clip_grad_policy)
         self.register_load_state_dict_pre_hook(self._restore_clip_grad_policy)
+        self.register_load_state_dict_post_hook(self._refresh_flattened_lr_ratios)
 
         # Pre-compute lr adjustment ratios for each Muon parameter based on global shape.
         # This must happen at init time because DTensor.shape here is guaranteed to be
@@ -405,6 +406,10 @@ class Muon(Optimizer):
                         raise ValueError(f"MuonSplit sizes {split_sizes} exceed parameter shape {tuple(p.shape)}")
                     # Each logical block applies its own ratio inside the orthogonalization callback.
                     state["lr_ratio"] = 1.0
+                elif group["flatten"] and p.ndim >= 3 and ne == 1:
+                    # Match the logical matrix used by muon_update_newton_schulz;
+                    # convolution kernels flatten all input dimensions after the output axis.
+                    state["lr_ratio"] = _get_muon_lr_ratio(p.shape[0], math.prod(p.shape[1:]), adj)
                 else:
                     state["lr_ratio"] = _get_muon_lr_ratio(p.shape[-2] // ne, p.shape[-1], adj)
 
@@ -453,6 +458,20 @@ class Muon(Optimizer):
         for loaded_group, current_group in zip(state_dict["param_groups"], optimizer.param_groups):
             loaded_group["clip_grad"] = current_group.get("clip_grad", True)
         return state_dict
+
+    @staticmethod
+    def _refresh_flattened_lr_ratios(optimizer: Optimizer) -> None:
+        # Old checkpoints stored ratios from the unflattened trailing dimensions.
+        # Recompute only affected parameters using the restored group configuration.
+        muon = cast(Muon, optimizer)
+        for group in muon.param_groups:
+            if group["algorithm"] != "muon" or not group["flatten"] or group.get("num_experts", 1) != 1:
+                continue
+            for param in group["params"]:
+                if param.ndim >= 3 and param not in muon._muon_split_sizes:
+                    muon.state[param]["lr_ratio"] = _get_muon_lr_ratio(
+                        param.shape[0], math.prod(param.shape[1:]), group["adjust_lr"]
+                    )
 
     @overload
     def step(self, closure: None = None) -> None: ...
