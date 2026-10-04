@@ -12,6 +12,7 @@ TestHCPreHCPostMatchesHF
     test_grad_flows_through_hc_pre_and_hc_post       梯度能穿过 hc_pre/hc_post
 """
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -91,8 +92,7 @@ class TestHCPreHCPostMatchesHF:
     def test_hc_pre_hc_post_matches_hf_hyper_connection(self):
         """hc_pre + sub_block + hc_post, run in fp32, must match HF's
         Glm5NextTextHyperConnection + Glm5NextTextDecoderLayer's residual expression
-        closely: at fp32 the bf16-fast-path casts inside hc_pre become no-ops, so this
-        exercises the exact same arithmetic HF's reference uses."""
+        closely, exercising the same arithmetic as HF's reference."""
         # fp32 下 hc_pre/hc_post 组合必须与 HF Glm5NextTextHyperConnection 逐值一致。
         torch.manual_seed(0)
         hf_hc = _hf_glm53_hyper_connection(HIDDEN, HC_MULT, hc_eps=1e-6, hc_sinkhorn_iters=20)
@@ -117,9 +117,10 @@ class TestHCPreHCPostMatchesHF:
         torch.testing.assert_close(xtuner_out, hf_out, atol=1e-4, rtol=1e-4)
 
     def test_hc_pre_hc_post_matches_hf_bf16(self):
-        """Same check at the production bf16 dtype; wider tolerance since hc_pre's fast
-        path (bf16 Linear instead of HF's fp32-throughout) and hc_post's fp32-accumulate
-        eager path both differ from HF by a bf16 rounding boundary or two."""
+        """The pre-mix follows HF's FP32 path even with BF16 residual streams.
+
+        The final residual check allows rounding differences in hc_post.
+        """
         # bf16 下同样要与 HF 一致，覆盖训练实际使用的精度。
         torch.manual_seed(1)
         hf_hc = _hf_glm53_hyper_connection(HIDDEN, HC_MULT, hc_eps=1e-6, hc_sinkhorn_iters=20)
@@ -138,12 +139,44 @@ class TestHCPreHCPostMatchesHF:
         xtuner_collapsed, xtuner_post, xtuner_comb = hc_pre(
             streams, hf_hc.fn, hf_hc.scale, hf_hc.base, HC_MULT, iters=20, eps=1e-6, norm_eps=1e-6
         )
+        torch.testing.assert_close(xtuner_collapsed, hf_collapsed, atol=0, rtol=0)
+        torch.testing.assert_close(xtuner_post, hf_post, atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(xtuner_comb, hf_comb, atol=1e-6, rtol=1e-6)
         xtuner_sub_out = sub_block(xtuner_collapsed)
         xtuner_out = hc_post(xtuner_sub_out, residual, xtuner_post, xtuner_comb)
 
         diff = (xtuner_out.float() - hf_out.float()).abs()
         assert diff.max().item() < 5e-2, f"max abs diff {diff.max().item():.3e}"
         assert diff.mean().item() < 5e-3, f"mean abs diff {diff.mean().item():.3e}"
+
+    @pytest.mark.parametrize("fn_dtype", [torch.float32, torch.bfloat16])
+    @pytest.mark.parametrize(
+        "device",
+        ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"))],
+    )
+    def test_bf16_streams_match_hf_forward_and_gradients(self, device: str, fn_dtype: torch.dtype) -> None:
+        # 用非零缩放和更宽输入暴露 BF16 投影舍入；同时核验所有可训练参数的梯度。
+        torch.manual_seed(23)
+        hf = _hf_glm53_hyper_connection(256, HC_MULT, hc_eps=1e-6, hc_sinkhorn_iters=20).to(device)
+        with torch.no_grad():
+            hf.scale.fill_(0.5)
+            hf.fn.data = hf.fn.to(fn_dtype)
+        streams = torch.randn(1, 65, HC_MULT, 256, device=device, dtype=torch.bfloat16).requires_grad_()
+        params = (streams, hf.fn, hf.scale, hf.base)
+        hf_post, hf_comb, hf_collapsed = hf(streams)
+        actual = hc_pre(streams, hf.fn, hf.scale, hf.base, HC_MULT, 20, 1e-6, 1e-6)
+        reference = (hf_collapsed, hf_post, hf_comb)
+        for value, expected in zip(actual, reference):
+            torch.testing.assert_close(value, expected, atol=1e-6, rtol=1e-6)
+        cotangents = tuple(torch.randn_like(value) for value in reference)
+        expected_grads = torch.autograd.grad(reference, params, cotangents)
+        actual_grads = torch.autograd.grad(actual, params, cotangents)
+        for value, expected in zip(actual_grads, expected_grads):
+            if value.dtype == torch.bfloat16:
+                # HF 的显式 RMSNorm 与 PyTorch RMSNorm 反向在少数 BF16 舍入边界相差一个 ULP。
+                torch.testing.assert_close(value, expected, atol=2e-4, rtol=2e-2)
+            else:
+                torch.testing.assert_close(value, expected, atol=2e-5, rtol=2e-5)
 
     def test_zero_init_produces_uniform_stream_collapse(self):
         """With hc_fn=0/hc_base=0/hc_scale=[1,0,0] (the documented degenerate init), hc_pre
