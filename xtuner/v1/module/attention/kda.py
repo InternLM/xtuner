@@ -18,7 +18,7 @@ via a separate ``forget_gate`` module before calling the (kernelizable) chunk/re
 from __future__ import annotations
 
 import math
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 import torch
 import torch.nn as nn
@@ -327,7 +327,7 @@ class KimiDeltaAttention(nn.Module):
     def _project_gate(self, layer: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
         if not self.gate_projection_block_size:
             return layer(hidden_states)
-        weight = materialize_full(layer.weight, name="kda.gate.weight")
+        weight = materialize_full(cast(torch.Tensor, layer.weight), name="kda.gate.weight")
         return fp32_linear(hidden_states, weight, block_size=self.gate_projection_block_size)
 
     def _compute_gate_and_beta(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
