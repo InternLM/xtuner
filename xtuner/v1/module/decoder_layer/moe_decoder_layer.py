@@ -38,6 +38,7 @@ from xtuner.v1.module.dispatcher import (
 from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linear
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.act_fn import get_act_fn, get_gated_act_fn
+from xtuner.v1.ops.fp32_linear import fp32_linear
 from xtuner.v1.utils import ForwardState
 
 from ..linear import build_linear
@@ -146,10 +147,14 @@ class MoEGate(nn.Module):
         router_config: GreedyRouterConfig | NoAuxRouterConfig,
         gate_bias: bool = False,
         router_compute_dtype: Literal["float32", "native"] = "float32",
+        router_projection_block_size: int = 0,
     ):
         super().__init__()
         self.n_routed_experts = n_routed_experts
         self.router_compute_dtype = router_compute_dtype
+        self.router_projection_block_size = router_projection_block_size
+        if router_projection_block_size and router_compute_dtype != "float32":
+            raise ValueError("Fixed router projections require router_compute_dtype='float32'")
 
         self.gating_dim = hidden_size
         self.weight = nn.Parameter(torch.empty((self.n_routed_experts, self.gating_dim)))
@@ -183,7 +188,7 @@ class MoEGate(nn.Module):
             logits = F.linear(hidden_states, weight, bias)
         else:
             bias = bias.float() if bias is not None else None
-            logits = F.linear(hidden_states.float(), weight.float(), bias)
+            logits = fp32_linear(hidden_states, weight, bias, block_size=self.router_projection_block_size)
         return self.router(logits, rollout_routed_experts)
 
         # Debug for aligning with hf implementation.
@@ -273,6 +278,7 @@ class MoEDecoderLayer(nn.Module):
         generate_config: GenerateConfig | None = None,
         router_config: GreedyRouterConfig | NoAuxRouterConfig,
         router_compute_dtype: Literal["float32", "native"] = "float32",
+        router_projection_block_size: int = 0,
         moe_act_fn_cfg: MoEActFnConfig,
         float8_cfg: Float8Config | None = None,
         layer_idx: int = 0,
@@ -331,6 +337,7 @@ class MoEDecoderLayer(nn.Module):
             router_config=router_config,
             gate_bias=gate_bias,
             router_compute_dtype=router_compute_dtype,
+            router_projection_block_size=router_projection_block_size,
         )
         self.experts = MoEBlock(
             hidden_size=hidden_size,

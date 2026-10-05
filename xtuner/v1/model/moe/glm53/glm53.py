@@ -174,6 +174,7 @@ class Glm53TextMoE(MoE):
                     hidden_factor=config.hidden_factor,
                     router_config=config.router,
                     router_compute_dtype=config.router_compute_dtype,
+                    router_projection_block_size=config.router_projection_block_size,
                     moe_act_fn_cfg=config.moe_act_fn_cfg,
                     dispatcher=config.dispatcher,
                     ep_mesh=self.ep_mesh,
@@ -218,6 +219,7 @@ class Glm53TextMoE(MoE):
             generate_config=config.generate_config,
             router_config=config.router,
             router_compute_dtype=config.router_compute_dtype,
+            router_projection_block_size=config.router_projection_block_size,
             moe_act_fn_cfg=config.moe_act_fn_cfg,
             float8_cfg=config.float8_cfg,
             layer_idx=config.num_hidden_layers,
@@ -334,6 +336,7 @@ class Glm53TextMoEConfig(MoEConfig):
     mtp_config: MTPConfig | None = MTPConfig(num_layers=1, share_weights=True)
 
     mhc: MHCConfig = MHCConfig(hc_mult=4, hc_eps=1e-6, hc_sinkhorn_iters=20)
+    router_projection_block_size: int = Field(default=0, ge=0)
 
     # `fully_shard` upcasts every trainable parameter to an fp32 master and then casts it to
     # `MixedPrecisionPolicy.param_dtype` for the forward all-gather, so declaring a parameter
