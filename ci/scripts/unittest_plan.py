@@ -148,26 +148,45 @@ _GPU_SHARD_WORKERS = 4
 _GPUS_PER_SHARD_WORKER = 2
 _CLUSTER_GPUS_WHEN_SHARDING = _GPU_SHARD_WORKERS * _GPUS_PER_SHARD_WORKER
 
-# Only directories whose tests respect XTUNER_TEST_WORLD_SIZE (per worker).
-_GPU_SHARD_ELIGIBLE_DIRS = frozenset(
+# Per-worker sees 2 GPUs (XTUNER_TEST_WORLD_SIZE=2). These files need >2 visible devices
+# or ignore XTUNER_TEST_WORLD_SIZE — skipped when sharding; PRs that touch them fall back
+# to a single 8-GPU pytest process instead.
+_GPU_SHARD_UNSAFE_FILES = frozenset(
     {
-        "tests/autotest",
-        "tests/chat_template",
-        "tests/patch",
-        "tests/profiler",
-        "tests/utils",
-        # tests/datasets: test_dataloader.py hard-codes world_size=4 — not 2-GPU-safe yet.
+        "tests/datasets/test_dataloader.py",
+        "tests/loss/test_grpo_loss.py",
+        "tests/loss/test_oreal_loss.py",
+        "tests/module/dispatcher/test_agrs_all2all.py",
+        "tests/module/dispatcher/test_deepep.py",
+        "tests/module/dispatcher/test_deepep_expert_tp.py",
+        "tests/module/dispatcher/test_torch_all2all.py",
+        "tests/module/dispatcher/test_torch_all2all_shared_expert_tp.py",
+        "tests/optim/test_muon.py",
+        "tests/patch/test_dcp_interleaved_planner.py",
+        "tests/utils/test_interleaved_shard.py",
     }
 )
 
 
-def _use_gpu_sharding(test_target: str) -> bool:
+def _changed_touches_shard_unsafe(changed: list[str]) -> bool:
+    for path in changed:
+        if _posix(path) in _GPU_SHARD_UNSAFE_FILES:
+            return True
+    return False
+
+
+def _use_gpu_sharding(test_target: str, changed: list[str]) -> bool:
     if _logical_gpus_for_targets(test_target) != 2:
         return False
-    parts = test_target.split()
-    if not parts:
+    if not test_target.split():
         return False
-    return all(p in _GPU_SHARD_ELIGIBLE_DIRS for p in parts)
+    if _changed_touches_shard_unsafe(changed):
+        return False
+    return True
+
+
+def _gpu_shard_ignores() -> str:
+    return " ".join(f"--ignore={p}" for p in sorted(_GPU_SHARD_UNSAFE_FILES))
 
 
 def _wrap_pytest_gpu_shards(pytest_cmd: str) -> str:
@@ -197,14 +216,27 @@ def plan(changed_files: list[str]) -> dict[str, str]:
         targets = _collect_targets(changed)
         test_target = "tests" if not targets else " ".join(sorted(targets))
 
-    ignores = _pytest_ignores(changed, test_target)
-    shard = _use_gpu_sharding(test_target)
-    gpus = _CLUSTER_GPUS_WHEN_SHARDING if shard else _logical_gpus_for_targets(test_target)
+    logical_gpus = _logical_gpus_for_targets(test_target)
+    shard = _use_gpu_sharding(test_target, changed)
+    if shard:
+        gpus = _CLUSTER_GPUS_WHEN_SHARDING
+    elif logical_gpus == 2 and _changed_touches_shard_unsafe(changed):
+        gpus = 8
+    else:
+        gpus = logical_gpus
     cpus, memory = _cpus_memory(gpus)
 
+    ignore_parts: list[str] = []
+    rl_ignores = _pytest_ignores(changed, test_target)
+    if rl_ignores:
+        ignore_parts.extend(rl_ignores.split())
+    if shard:
+        ignore_parts.extend(_gpu_shard_ignores().split())
+
     pytest_opts = "-ra --durations=25"
-    if ignores:
-        pytest_cmd = f"pytest {pytest_opts} {ignores} {test_target}"
+    ignore_str = " ".join(ignore_parts)
+    if ignore_str:
+        pytest_cmd = f"pytest {pytest_opts} {ignore_str} {test_target}"
     else:
         pytest_cmd = f"pytest {pytest_opts} {test_target}"
 
