@@ -1272,6 +1272,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                         error_msg = f"Incomplete rollout data for msg {uid}: {', '.join(validation_errors)}"
                         self.logger.error(error_msg)
                         rollout_state.routed_experts = routed_experts
+                        rollout_state.routed_experts_owner = "rollout" if routed_experts is not None else None
                         rollout_state.status = Status.FAILED
                         rollout_state.error_msg = error_msg
                         return rollout_state
@@ -1279,6 +1280,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     error_msg = f"Rollout failed for msg {uid} with finish_reason {finish_reason}"
                     self.logger.error(error_msg)
                     rollout_state.routed_experts = routed_experts
+                    rollout_state.routed_experts_owner = "rollout" if routed_experts is not None else None
                     rollout_state.status = Status.FAILED
                     rollout_state.error_msg = error_msg
                     return rollout_state
@@ -1302,6 +1304,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     rollout_state.response_ids = response_ids
                     rollout_state.logprobs = logprobs
                     rollout_state.routed_experts = routed_experts
+                    rollout_state.routed_experts_owner = "rollout" if routed_experts is not None else None
                     rollout_state.finish_reason = finish_reason
                     rollout_state.status = rollout_status
                 return rollout_state

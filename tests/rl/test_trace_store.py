@@ -19,8 +19,12 @@ class TestRolloutTraceCleanup(unittest.TestCase):
     def test_release_and_discard_detaches_only_trace_owned_refs(self):
         trace_owned_ref = object()
         rollout_owned_ref = object()
-        trace_owned = SimpleNamespace(session_id="trace-owned", routed_experts=trace_owned_ref)
-        rollout_owned = SimpleNamespace(session_id="rollout-owned", routed_experts=rollout_owned_ref)
+        trace_owned = SimpleNamespace(
+            session_id="trace-owned", routed_experts=trace_owned_ref, routed_experts_owner="trace_store"
+        )
+        rollout_owned = SimpleNamespace(
+            session_id="rollout-owned", routed_experts=rollout_owned_ref, routed_experts_owner="rollout"
+        )
         routed_experts_seen_by_discard = {}
 
         def record_discard(item):
@@ -81,6 +85,48 @@ class TestRolloutTraceStore(unittest.TestCase):
             self.assertEqual(ray.get(store.list_sessions.remote()), ["b"])
         finally:
             ray.kill(store)
+
+    def test_trie_overwrite_drops_handle_without_freeing_borrowed_refs(self):
+        """Overwrite must not free replaced refs: sibling RolloutStates keep
+        their own handles alive via Ray's reference counting."""
+        trie = trace_store_module.Trie()
+        old_ref = ray.put({"value": "old"})
+        new_ref = ray.put({"value": "new"})
+        trie.insert("turn", {"expert_key": old_ref})
+
+        with patch.object(ray.internal, "free") as free:
+            trie.insert("turn", {"expert_key": new_ref})
+
+        free.assert_not_called()
+        # The borrower keeps its own handle: dropping the trie's handle must
+        # not invalidate the object.
+        self.assertEqual(ray.get(old_ref), {"value": "old"})
+        _, nodes = trie.search("turn", filter_none=True)
+        self.assertEqual(ray.get(nodes[-1].value["expert_key"]), {"value": "new"})
+
+    def test_trie_release_frees_each_ref_once_across_shared_subtrees(self):
+        """Refs shared between trie values are freed exactly once at session
+        release."""
+        trie = trace_store_module.Trie()
+        left_ref = ray.put({"value": "left"})
+        right_ref = ray.put({"value": "right"})
+        shared_ref = ray.put({"value": "shared"})
+        trie.insert("turn-a", {"expert_key": left_ref, "keep": shared_ref})
+        trie.insert("turn-b", {"expert_key": right_ref, "keep": shared_ref})
+
+        freed = []
+
+        def record_free(refs, **kwargs):
+            freed.extend(refs)
+
+        with patch.object(ray.internal, "free", side_effect=record_free):
+            trie.release()
+
+        self.assertEqual(len(freed), len({ref.hex() for ref in freed}))
+        self.assertEqual(
+            {ref.hex() for ref in freed},
+            {left_ref.hex(), right_ref.hex(), shared_ref.hex()},
+        )
 
     def test_release_existing_sessions_stably_deduplicates_before_rpc(self):
         release_remote = AsyncMock(return_value=["one"])
