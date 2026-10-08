@@ -19,7 +19,7 @@ TestGlm53TextMoEForwardBackward
 TestGlm53TextMoEWeightMapping
     test_real_checkpoint_weight_coverage                     真实 checkpoint 权重全覆盖
 TestGlm53TextMoEAccuracy
-    test_fsdp_accuracy                                       FSDP 下 loss 曲线与 HF 对齐
+    test_fsdp_accuracy                                       FSDP 文本/图文 loss 和 logits 与 HF 对齐
 TestGlm53TextMoEGradientParity
     test_full_crop_fsdp_gradients_match_hf                   五层真实权重 FSDP 梯度与 HF 对齐
 TestNoPEDSAMLAConfigValidatesAssignment
@@ -28,20 +28,23 @@ TestNoPEDSAMLAConfigValidatesAssignment
 
 import os
 import re
+from pathlib import Path
 
 import parametrize
 import pytest
 import torch
+from PIL import Image
 from pydantic import ValidationError
 from torch.distributed.tensor import DTensor
 from torch.testing._internal.common_distributed import DistributedTestBase
 
-from transformers import AutoTokenizer, Glm5NextForConditionalGeneration
+from transformers import AutoProcessor, AutoTokenizer, Glm5NextForConditionalGeneration
 from xtuner._testing import DeterministicDDPTestCase
 from xtuner._testing.logits import check_logits
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.loss.ce_loss import CELossConfig
+from xtuner.v1.model.compose.glm53 import Glm53BaseConfig
 from xtuner.v1.model.moe.glm53.glm53 import Glm53TextMoEConfig
 from xtuner.v1.model.moe.glm53.nope_dsa_mla import NoPEDSAMLAConfig
 from xtuner.v1.module.attention.kda import KDAConfig
@@ -313,7 +316,7 @@ class TestGlm53TextMoEWeightMapping:
 
 
 class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
-    """验收 1: `Glm53TextMoE` forward loss vs real `transformers.Glm5NextForConditionalGeneration`
+    """验收 1: text + image compose-model forward loss/logits vs real `transformers.Glm5NextForConditionalGeneration`
     on the F0 25B cropped checkpoint (GLM_5_3_FLASH_PATH).
 
     Installed transformers (pinned 5.17.0) does not implement MTP forward for
@@ -337,7 +340,7 @@ class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
         ],
     )
     def test_fsdp_accuracy(self, dispatcher, ep_size):
-        # FSDP 下的 loss 曲线必须与真实 transformers 实现对齐。
+        # Four original text cases and two image cases share the same accuracy loop.
         if not os.path.isdir(GLM_5_3_FLASH_PATH):
             pytest.skip(f"GLM_5_3_FLASH_PATH not found: {GLM_5_3_FLASH_PATH}")
         self.create_pg("cuda")
@@ -349,6 +352,8 @@ class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
             GLM_5_3_FLASH_PATH,
             dtype=torch.bfloat16,
             device_map="cuda",
+            # HF 5.17 vision rejects FA2; XT vision uses its production FlashAttention backend.
+            attn_implementation="eager",
         )
 
         text_list = [
@@ -358,28 +363,66 @@ class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
             "就像老树拥抱归巢的鸟儿，内存管理应该给予每个对象足够的安全感",
         ]
         tokenizer = AutoTokenizer.from_pretrained(GLM_5_3_FLASH_PATH)
+        cases = [(f"text-{i}", dict(tokenizer(text, return_tensors="pt"))) for i, text in enumerate(text_list)]
+        processor = AutoProcessor.from_pretrained(GLM_5_3_FLASH_PATH)
+        image_path = Path(__file__).resolve().parents[1] / "resource/mscoco_twocat_000000039769.jpg"
+        with Image.open(image_path) as source:
+            image = source.convert("RGB").resize((224, 224))
+        # A single image and two distinct images exercise both placeholder spans.
+        for name, images in [
+            ("image", [image]),
+            ("two-images", [image, image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)]),
+        ]:
+            messages = [
+                {
+                    "role": "user",
+                    "content": [{"type": "image"} for _ in images]
+                    + [{"type": "text", "text": "Describe the cats in the image(s)."}],
+                },
+                {"role": "assistant", "content": [{"type": "text", "text": "Two cats are resting on a sofa."}]},
+            ]
+            prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+            batch = dict(processor(text=prompt, images=images, return_tensors="pt"))
+            assert len(batch["image_grid_thw"]) == len(images)
+            expected_tokens = int((batch["image_grid_thw"].prod(-1) // processor.image_processor.merge_size**2).sum())
+            assert int((batch["mm_token_type_ids"] == 1).sum()) == expected_tokens
+            cases.append((name, batch))
+        # Construct labels/positions once; HF and XT receive identical media and supervision.
+        for _, batch in cases:
+            batch["labels"] = batch["input_ids"].clone()
+            if "mm_token_type_ids" in batch:
+                batch["labels"][batch["mm_token_type_ids"] != 0] = -100
+            batch["positions"] = torch.nonzero(batch["labels"][0, 1:] != -100).flatten()[-8:]
+            assert batch["positions"].numel() > 0
         hf_model.eval()
         expected_losses = []
         expected_logits = []
-        for text in text_list:
-            input_ids = tokenizer(text, return_tensors="pt").input_ids.to("cuda")
+        for _, batch in cases:
+            input_ids = batch["input_ids"].to("cuda")
+            media = {
+                k: batch[k].to("cuda", dtype=torch.bfloat16 if k == "pixel_values" else torch.long)
+                for k in ("pixel_values", "image_grid_thw")
+                if k in batch
+            }
             with torch.no_grad():
-                output = hf_model(input_ids=input_ids, labels=input_ids.clone())
+                output = hf_model(input_ids=input_ids, labels=batch["labels"].to("cuda"), use_cache=False, **media)
             expected_losses.append(output.loss)
             # Last eight next-token positions, including the full vocabulary.
-            expected_logits.append(output.logits[0, :-1][-8:].detach().cpu())
+            expected_logits.append(output.logits[0, batch["positions"].to("cuda")].detach().cpu())
 
         del hf_model
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            cfg = Glm53TextMoEConfig.from_hf(GLM_5_3_FLASH_PATH)
+            cfg = Glm53BaseConfig.from_hf(GLM_5_3_FLASH_PATH)
             cfg.compile_cfg = False
-            cfg.dispatcher = dispatcher
-            cfg.ep_size = ep_size
-            cfg.mtp_config = None
-            cfg.attention.sparse_mla_backend = "torch"
-            cfg.attention.indexer_backend = "torch"
+            cfg.text_config.compile_cfg = False
+            cfg.vision_config.attn_impl = "flash_attention"
+            cfg.text_config.dispatcher = dispatcher
+            cfg.text_config.ep_size = ep_size
+            cfg.text_config.mtp_config = None
+            cfg.text_config.attention.sparse_mla_backend = "torch"
+            cfg.text_config.attention.indexer_backend = "torch"
             model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         fsdp_config = FSDPConfig(ep_size=ep_size, cpu_offload=False)
@@ -388,11 +431,16 @@ class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
 
         model.eval()
         losses = []
-        for sample_index, text in enumerate(text_list):
-            input_ids = tokenizer(text, return_tensors="pt").input_ids.to("cuda")
+        for sample_index, (name, batch) in enumerate(cases):
+            input_ids = batch["input_ids"].to("cuda")
             shift_input_ids = input_ids[:, :-1]
-            shifted_labels = input_ids[:, 1:]
+            shifted_labels = batch["labels"][:, 1:].to("cuda")
             seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to("cuda"),))
+            if "pixel_values" in batch:
+                seq_ctx.pixel_values = batch["pixel_values"].to(dtype=torch.bfloat16)  # model moves CPU media
+                seq_ctx.image_grid_thw = batch["image_grid_thw"].to("cuda")
+                seq_ctx.mm_token_type_ids = batch["mm_token_type_ids"][:, :-1].to("cuda")
+                seq_ctx.num_img_tokens = [[int(seq_ctx.image_grid_thw.prod(-1).sum())]]
             loss_cfg = CELossConfig()
             LossContext = loss_cfg.loss_ctx_cls
             loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=None)
@@ -405,12 +453,16 @@ class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
             # Preserve the public loss path above; additionally exercise inference logits.
             with torch.no_grad():
                 logits = model(seq_ctx=seq_ctx, loss_ctx=None).logits
-            metrics = check_logits(logits[0, -8:], expected_logits[sample_index])
-            print(f"GLM53 text sample={sample_index} logits={metrics}", flush=True)
+            metrics = check_logits(logits[0, batch["positions"].to("cuda")], expected_logits[sample_index])
+            print(f"GLM53 case={name} logits={metrics}", flush=True)
 
-        self._check_loss_curve(
-            losses=torch.tensor(losses), losses_ref=torch.tensor(expected_losses), sim_tol=3e-2, rtol=3e-2
-        )
+        for start, end in ((0, len(text_list)), (len(text_list), len(cases))):
+            self._check_loss_curve(
+                losses=torch.tensor(losses[start:end]),
+                losses_ref=torch.tensor(expected_losses[start:end]),
+                sim_tol=3e-2,
+                rtol=3e-2,
+            )
 
     @property
     def world_size(self) -> int:
