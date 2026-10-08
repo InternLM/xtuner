@@ -64,7 +64,10 @@ def default_init_weights(module: nn.Module) -> set[str]:
         if hasattr(module, "weight") and module.weight is not None:
             weight = cast(torch.Tensor, module.weight)
             if "norm" in name:
-                init_params(weight, nn.init.ones_)
+                if getattr(module, "zero_centered", False):
+                    init_params(weight, nn.init.zeros_)
+                else:
+                    init_params(weight, nn.init.ones_)
             else:
                 init_params(weight, partial(nn.init.normal_, mean=0.0, std=0.02))
             initialized_params.add(clean_param_name(f"{name}.weight"))
