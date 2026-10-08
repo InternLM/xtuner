@@ -1,5 +1,15 @@
 name: unit_test
 on:
+  pull_request:
+    branches:
+      - "main"
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "autotest/**"
+      - ".github/workflows/ete_test_gpu.yaml"
+      - ".github/workflows/ete_test_npu.yaml"
+      - ".github/workflows/lint.yml"
   workflow_dispatch:
 env:
   WORKSPACE_PREFIX: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-5)
