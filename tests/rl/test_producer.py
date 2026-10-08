@@ -54,7 +54,6 @@ def make_rollout_state(
         tokens=[uid],
         response="" if status in (Status.ABORTED, Status.EXPIRED) else f"response {uid}",
         response_ids=[],
-        response_mask=[],
         finish_reason="abort" if status == Status.ABORTED else "stop",
         reward={"score": reward_score} if reward_score is not None else None,
         seq_staleness=seq_staleness,
@@ -279,7 +278,6 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             tokens=[1, 11],
             response="old response",
             response_ids=[11],
-            response_mask=[1],
             response_model_steps=[3],
             logprobs=[0.1],
             finish_reason="stop",
@@ -761,14 +759,12 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         expired.response = "expired response"
         expired.response_ids = [11]
         expired.response_model_steps = [0]
-        expired.response_mask = None
         expired.reward = {"score": 0.1}
         fresh = make_rollout_state(901)
         fresh.group_id = expired.group_id
         fresh.response = "fresh response"
         fresh.response_ids = [21]
         fresh.response_model_steps = [5]
-        fresh.response_mask = None
         fresh.logprobs = [-0.2]
         fresh.reward = {"score": 0.9}
 
