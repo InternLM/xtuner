@@ -1508,6 +1508,18 @@ class Trainer:
         set_random_seed(seed)
 
     def _try_bind_numa(self):
+        # NPU: per-rank CPU pinning via npu_cpu_binder (8-core NUMA-local slice).
+        # Gated by XTUNER_NPU_CPU_BIND (default on).
+        if str(DEVICE).split(":")[0] == "npu":
+            if os.environ.get("XTUNER_NPU_CPU_BIND", "1") == "1":
+                try:
+                    from xtuner.v1.utils import npu_cpu_binder
+
+                    npu_cpu_binder.run(self.rank)
+                    logger.info(f"Rank: {self.rank} bound to NPU cpu slice via npu_cpu_binder.")
+                except Exception as e:
+                    logger.info(f"Rank: {self.rank} npu_cpu_binder failed: {e}")
+            return
         if str(DEVICE) != "cuda":
             log_rank0.info("Current device is not cuda, skip numa binding.")
             return
