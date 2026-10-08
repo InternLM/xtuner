@@ -126,10 +126,18 @@ class Glm53DenseDecoderLayer(DenseDecoderLayer):
         assert self.mhc_cfg is not None
 
         # ---- attention site: hidden_states is [B, S, hc_mult, hidden_size]
+        # HF uses the text RMS epsilon when normalizing flattened mHC streams.
         fn, scale, base = _unshard_hc_site(self, "attn")
         residual = hidden_states
         x, post, comb = hc_pre(
-            hidden_states, fn, scale, base, self.mhc_cfg.hc_mult, self.mhc_cfg.hc_sinkhorn_iters, self.mhc_cfg.hc_eps
+            hidden_states,
+            fn,
+            scale,
+            base,
+            self.mhc_cfg.hc_mult,
+            self.mhc_cfg.hc_sinkhorn_iters,
+            self.mhc_cfg.hc_eps,
+            norm_eps=self.input_layernorm.variance_epsilon,
         )
         attn_outputs: AttnOutputs = self.self_attn(
             hidden_states=self.input_layernorm(x), position_embeddings=position_embeddings, seq_ctx=seq_ctx
@@ -140,7 +148,14 @@ class Glm53DenseDecoderLayer(DenseDecoderLayer):
         fn, scale, base = _unshard_hc_site(self, "ffn")
         residual = hidden_states
         x, post, comb = hc_pre(
-            hidden_states, fn, scale, base, self.mhc_cfg.hc_mult, self.mhc_cfg.hc_sinkhorn_iters, self.mhc_cfg.hc_eps
+            hidden_states,
+            fn,
+            scale,
+            base,
+            self.mhc_cfg.hc_mult,
+            self.mhc_cfg.hc_sinkhorn_iters,
+            self.mhc_cfg.hc_eps,
+            norm_eps=self.post_attention_layernorm.variance_epsilon,
         )
         ffn_out = self.mlp(self.post_attention_layernorm(x))
         hidden_states = hc_post(ffn_out, residual, post, comb)
@@ -200,7 +215,14 @@ class Glm53MoEDecoderLayer(MoEDecoderLayer):
         fn, scale, base = _unshard_hc_site(self, "attn")
         attn_residual = hidden_states
         x, post, comb = hc_pre(
-            hidden_states, fn, scale, base, self.mhc_cfg.hc_mult, self.mhc_cfg.hc_sinkhorn_iters, self.mhc_cfg.hc_eps
+            hidden_states,
+            fn,
+            scale,
+            base,
+            self.mhc_cfg.hc_mult,
+            self.mhc_cfg.hc_sinkhorn_iters,
+            self.mhc_cfg.hc_eps,
+            norm_eps=self.input_layernorm.variance_epsilon,
         )
         attention_forward = cast(Callable[..., AttnOutputs], self.self_attn)
         attn_outputs = attention_forward(
@@ -215,7 +237,14 @@ class Glm53MoEDecoderLayer(MoEDecoderLayer):
         fn, scale, base = _unshard_hc_site(self, "ffn")
         ffn_residual = hidden_states
         x, post, comb = hc_pre(
-            hidden_states, fn, scale, base, self.mhc_cfg.hc_mult, self.mhc_cfg.hc_sinkhorn_iters, self.mhc_cfg.hc_eps
+            hidden_states,
+            fn,
+            scale,
+            base,
+            self.mhc_cfg.hc_mult,
+            self.mhc_cfg.hc_sinkhorn_iters,
+            self.mhc_cfg.hc_eps,
+            norm_eps=self.post_attention_layernorm.variance_epsilon,
         )
         hidden_states = self.post_attention_layernorm(x)
 
