@@ -87,9 +87,6 @@ from xtuner.v1.rl.utils import AcceleratorResourcesConfig, CPUResourcesConfig
 from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
 def _env_path(env_name: str) -> Path | None:
     value = os.environ.get(env_name)
     return Path(value) if value else None
@@ -101,7 +98,7 @@ def _env_path(env_name: str) -> Path | None:
 STUDENT_MODEL_PATH = _env_path("QWEN3_VL_2B_PATH")
 GSM8K_TEACHER_MODEL_PATH = _env_path("QWEN3_4B_PATH")
 GEO3K_TEACHER_MODEL_PATH = _env_path("QWEN3_VL_DENSE_PATH")
-DATA_PATH = REPO_ROOT / "recipe/on_policy_distillation/data/gsm8k_geo3k_train.json"
+DATA_PATH = _env_path("OPD_DATA_PATH")
 
 TRAIN_BATCH_SIZE = 128
 TOTAL_TRAIN_STEPS = 2
@@ -466,14 +463,13 @@ class _BaseOpdTwoStepAccuracyTest(unittest.TestCase):
             "QWEN3_VL_2B_PATH": STUDENT_MODEL_PATH,
             "QWEN3_4B_PATH": GSM8K_TEACHER_MODEL_PATH,
             "QWEN3_VL_DENSE_PATH": GEO3K_TEACHER_MODEL_PATH,
+            "OPD_DATA_PATH": DATA_PATH,
         }
         for env_name, path in required_paths.items():
             if path is None:
                 raise unittest.SkipTest(f"{env_name} is not set; source ci/scripts/CI_ENV.sh before running this test")
             if not path.exists():
                 raise unittest.SkipTest(f"{env_name} does not exist: {path}")
-        if not DATA_PATH.exists():
-            raise unittest.SkipTest(f"data file does not exist: {DATA_PATH}")
         visible_gpus = torch.cuda.device_count()
         if visible_gpus < self.num_total_gpus:
             raise unittest.SkipTest(f"requires {self.num_total_gpus} GPUs, found {visible_gpus}")
