@@ -37,6 +37,87 @@ default_config:
 
 case: 
    
+    qwen3-2b-vl-opd-k1:
+        -
+            type: rl
+            parameters:
+                config: autotest/config/rl_qwen3_2B_vl_opd_k1.py
+                infer_backend: lmdeploy
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-2B-Instruct
+                    - GSM8K_TEACHER_MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-4B-Instruct-2507
+                    - GEO3K_TEACHER_MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-4B-Instruct
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/opd_train_meta.json
+                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/opd_eval_meta.json
+                    - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-2b-vl-opd-k1/tracker.jsonl
+                check_metrics:
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.3
+                       method: relative
+                       operator: <
+                       aggregate: 80
+                    -
+                       metric: time/step
+                       threshold: 0.3
+                       method: relative
+                       operator: <
+                       aggregate: 80
+            timeout: 7200
+
+    qwen3-2b-vl-opd-topk:
+        -
+            type: rl
+            parameters:
+                config: autotest/config/rl_qwen3_2B_vl_opd_topk.py
+                infer_backend: lmdeploy
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 2
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-2B-Instruct
+                    - GSM8K_TEACHER_MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-4B-Instruct-2507
+                    - GEO3K_TEACHER_MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-4B-Instruct
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/opd_train_meta.json
+                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/opd_eval_meta.json
+                    - XTUNER_RL_NUM_WORKERS=16
+                    - TOTAL_TRAIN_STEPS=5
+                    - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-2b-vl-opd-topk/tracker.jsonl
+                check_metrics:
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.3
+                       method: relative
+                       operator: <
+                       aggregate: 80
+                    -
+                       metric: time/step
+                       threshold: 0.3
+                       method: relative
+                       operator: <
+                       aggregate: 80
+            timeout: 10800
+   
     glm5-2-sft-30B-recompute:
         -
             type: sft
