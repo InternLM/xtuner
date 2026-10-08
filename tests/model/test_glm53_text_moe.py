@@ -38,6 +38,7 @@ from torch.testing._internal.common_distributed import DistributedTestBase
 
 from transformers import AutoTokenizer, Glm5NextForConditionalGeneration
 from xtuner._testing import DeterministicDDPTestCase
+from xtuner._testing.logits import check_logits
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.loss.ce_loss import CELossConfig
@@ -357,12 +358,16 @@ class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
             "就像老树拥抱归巢的鸟儿，内存管理应该给予每个对象足够的安全感",
         ]
         tokenizer = AutoTokenizer.from_pretrained(GLM_5_3_FLASH_PATH)
+        hf_model.eval()
         expected_losses = []
+        expected_logits = []
         for text in text_list:
             input_ids = tokenizer(text, return_tensors="pt").input_ids.to("cuda")
             with torch.no_grad():
                 output = hf_model(input_ids=input_ids, labels=input_ids.clone())
             expected_losses.append(output.loss)
+            # Last eight next-token positions, including the full vocabulary.
+            expected_logits.append(output.logits[0, :-1][-8:].detach().cpu())
 
         del hf_model
         torch.cuda.empty_cache()
@@ -381,8 +386,9 @@ class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
         model.fully_shard(fsdp_config=fsdp_config)
         model.from_hf(GLM_5_3_FLASH_PATH, strict=False)
 
+        model.eval()
         losses = []
-        for text in text_list:
+        for sample_index, text in enumerate(text_list):
             input_ids = tokenizer(text, return_tensors="pt").input_ids.to("cuda")
             shift_input_ids = input_ids[:, :-1]
             shifted_labels = input_ids[:, 1:]
@@ -396,6 +402,11 @@ class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
             with torch.no_grad():
                 output = model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
             losses.append(output["loss"])
+            # Preserve the public loss path above; additionally exercise inference logits.
+            with torch.no_grad():
+                logits = model(seq_ctx=seq_ctx, loss_ctx=None).logits
+            metrics = check_logits(logits[0, -8:], expected_logits[sample_index])
+            print(f"GLM53 text sample={sample_index} logits={metrics}", flush=True)
 
         self._check_loss_curve(
             losses=torch.tensor(losses), losses_ref=torch.tensor(expected_losses), sim_tol=3e-2, rtol=3e-2
