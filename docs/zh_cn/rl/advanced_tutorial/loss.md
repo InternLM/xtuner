@@ -68,11 +68,57 @@ class GRPOLossConfig(BaseRLLossConfig):
     loss_reduction: Literal["token", "sample", "square"] = "token"
 ```
 
-- `policy_loss_cfg` 配置 policy loss。当前内置 `loss_type="vanilla"`，对应 `xtuner/v1/rl/loss/loss_fn.py` 中注册的 policy gradient loss；也可以通过完整导入路径注册自定义 loss 函数。
+- `policy_loss_cfg` 配置 policy loss。`loss_type` 选择下面两种内置实现，也可以写成 `模块.函数` 的导入路径来挂自定义函数。
 - `use_kl_loss`、`kl_loss_coef` 和 `kl_loss_type` 控制是否叠加 KL loss。开启 KL loss 时，训练 worker 需要提供参考模型产生的 `ref_logprobs`。
 - `rollout_is` 是 rollout importance sampling 配置，用于根据 rollout 阶段和训练阶段的 logprob 差异过滤或重加权样本。
 - `ignore_idx` 表示不参与 loss 的 label id，默认是 `-100`。
 - `mode` 和 `chunk_size` 控制 loss 的计算方式。RL 训练中常用 `mode="chunk"` 来降低显存占用。
+
+### Policy Loss
+
+`policy_loss_cfg["loss_type"]` 从 `xtuner/v1/rl/loss/loss_fn.py` 取出策略损失。GRPO、OREAL 和蒸馏共用这一组实现，未写 `loss_type` 时默认是 `vanilla`。两种实现的输入都是当前策略 `log_prob`、旧策略 `old_log_prob`、token `advantages` 和 token `loss_weights`。返回值是加权后的标量，权重已经包含 loss context 里的全局校准。
+
+两种损失共用这些配置：
+
+| 字段 | 是否必填 | 默认值 | 含义 |
+| --- | --- | --- | --- |
+| `cliprange_low` | 是 |  | 重要性比的下截断 |
+| `cliprange_high` | 是 |  | 重要性比的上截断 |
+| `clip_ratio_c` | 否 | `3.0` | `vanilla` 的负优势封顶常数，也是 `pg_mask` 的阈值 |
+| `log_prob_diff_min` | 否 | `-20.0` | log 重要性比的下界 |
+| `log_prob_diff_max` | 否 | `20.0` | log 重要性比的上界 |
+
+两种损失都先得到重要性比，再把它截断：
+
+```text
+ratio = exp(clamp(log_prob - old_log_prob, log_prob_diff_min, log_prob_diff_max))
+clipped_ratio = clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)
+```
+
+#### `vanilla`
+
+`vanilla` 是 PPO clipped surrogate，并在负优势上做 dual-clip。
+
+```text
+pg_losses1 = -ratio * advantages
+pg_losses2 = -clipped_ratio * advantages
+clip_pg_losses1 = max(pg_losses1, pg_losses2)
+pg_losses3 = -clip_ratio_c * advantages
+clip_pg_losses2 = min(pg_losses3, clip_pg_losses1)
+pg_losses = clip_pg_losses2 if advantages < 0 else clip_pg_losses1
+loss = sum(pg_losses * loss_weights)
+```
+
+`advantages >= 0` 时，损失等于 `-min(ratio, clipped_ratio) * advantages`。重要性比超过 `1 + cliprange_high` 后不再继续增大更新。`advantages < 0` 且 `ratio` 很大时，普通 PPO 的损失会随 `ratio` 一直变大；dual-clip 把它限制在 `clip_ratio_c * abs(advantages)`。
+
+#### `mask_pg`
+
+`mask_pg` 用截断后的重要性比给当前 logprob 加权。`ratio > clip_ratio_c` 的 token 由 `pg_mask` 排除，不计入损失。
+
+```text
+pg_mask = 1[ratio <= clip_ratio_c]
+loss = sum(-loss_weights * advantages * clipped_ratio * log_prob * pg_mask)
+```
 
 ### GRPOLossContext
 

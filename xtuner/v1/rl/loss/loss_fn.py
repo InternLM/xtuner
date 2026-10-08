@@ -84,6 +84,48 @@ def pg_loss_fn(
     return loss
 
 
+@register_policy_loss("mask_pg")
+def mask_pg_loss_fn(
+    log_prob: torch.Tensor,
+    old_log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    loss_weights: torch.Tensor,
+    policy_loss_cfg: dict,
+) -> torch.Tensor:
+    """Compute the ``mask_pg`` policy loss.
+
+        ratio = exp(clamp(log_prob - old_log_prob, log_prob_diff_min, log_prob_diff_max))
+        clipped_ratio = clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)
+        pg_mask = 1[ratio <= clip_ratio_c]
+        loss = sum(-loss_weights * advantages * clipped_ratio * log_prob * pg_mask)
+
+    Args:
+        log_prob (torch.Tensor): Current-policy log probabilities.
+        old_log_prob (torch.Tensor): Rollout-policy log probabilities.
+        advantages (torch.Tensor): Token advantages.
+        loss_weights (torch.Tensor): Per-token loss weights.
+        policy_loss_cfg (dict): Must contain ``cliprange_low`` and
+            ``cliprange_high``. Optional keys are ``clip_ratio_c``,
+            ``log_prob_diff_min``, and ``log_prob_diff_max``.
+
+    Returns:
+        torch.Tensor: Scalar loss.
+    """
+    check_config(["cliprange_low", "cliprange_high"], policy_loss_cfg)
+    cliprange_low = policy_loss_cfg["cliprange_low"]
+    cliprange_high = policy_loss_cfg["cliprange_high"]
+    clip_ratio_c = policy_loss_cfg.get("clip_ratio_c", 3.0)
+    log_prob_diff_min = policy_loss_cfg.get("log_prob_diff_min", -20.0)
+    log_prob_diff_max = policy_loss_cfg.get("log_prob_diff_max", 20.0)
+    advantages = advantages.to(log_prob.dtype)
+    negative_approx_kl = log_prob.detach() - old_log_prob.detach()
+    negative_approx_kl = torch.clamp(negative_approx_kl, min=log_prob_diff_min, max=log_prob_diff_max)
+    ratio = torch.exp(negative_approx_kl)
+    mask = torch.where(ratio > clip_ratio_c, 0, 1)
+    pg_losses = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high) * log_prob * mask
+    return (pg_losses * loss_weights.to(pg_losses.dtype)).sum()
+
+
 def sft_loss_fn(
     logits: torch.Tensor,  # [1, seq_len, vocab_size]
     shifted_labels: torch.Tensor,  # [1, seq_len]
