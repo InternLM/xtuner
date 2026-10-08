@@ -23,37 +23,25 @@ jobs:
   detect_changes:
     runs-on: ubuntu-latest
     outputs:
-      only_rl: ${{ steps.filter.outputs.only_rl }}
+      only_rl: ${{ steps.plan.outputs.only_rl }}
+      test_target: ${{ steps.plan.outputs.test_target }}
+      pytest_cmd: ${{ steps.plan.outputs.pytest_cmd }}
+      gpus_per_task: ${{ steps.plan.outputs.gpus_per_task }}
+      cpus_per_task: ${{ steps.plan.outputs.cpus_per_task }}
+      memory_per_task: ${{ steps.plan.outputs.memory_per_task }}
     steps:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
-      - id: filter
-        name: Detect changed paths
+      - id: plan
+        name: Plan unit-test scope and resources
         run: |
           if ! changed_files="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" 2>/dev/null)"; then
             changed_files="$(git diff --name-only HEAD^1 HEAD)"
           fi
-          only_rl=true
-
-          if [ -z "$changed_files" ]; then
-            only_rl=false
-          else
-            while IFS= read -r file; do
-              case "$file" in
-                tests/rl/*|xtuner/v1/rl/*)
-                  ;;
-                *)
-                  only_rl=false
-                  break
-                  ;;
-              esac
-            done <<< "$changed_files"
-          fi
-
+          echo "Changed files:"
           echo "$changed_files"
-          echo "only_rl=$only_rl"
-          echo "only_rl=$only_rl" >> "$GITHUB_OUTPUT"
+          echo "$changed_files" | python ci/scripts/unittest_plan.py --github-output
 
   lint:
     runs-on: ubuntu-latest
@@ -81,7 +69,6 @@ jobs:
     runs-on: [h_cluster]
     needs:
       - detect_changes
-      - lint
     steps:
     - name: mask env
       run: |
@@ -93,10 +80,12 @@ jobs:
     - name: unit-test
       run: |
         export PYTHONPYCACHEPREFIX=/tmp
-        if [ "${{ needs.detect_changes.outputs.only_rl }}" = "true" ]; then
-          test_target="tests/rl"
-        else
-          test_target="tests"
-        fi
-        echo "test_target=$test_target"
-        python ci/scripts/xtuner_unittest.py "$IMAGE_INNER/$IMAGE" "source ${{env.WORKSPACE_PREFIX}}/BASE_ENV.sh;source ci/scripts/CI_ENV.sh" "pytest $test_target"
+        echo "test_target=${{ needs.detect_changes.outputs.test_target }}"
+        echo "pytest_cmd=${{ needs.detect_changes.outputs.pytest_cmd }}"
+        python ci/scripts/xtuner_unittest.py \
+          "$IMAGE_INNER/$IMAGE" \
+          "source ${{env.WORKSPACE_PREFIX}}/BASE_ENV.sh;source ci/scripts/CI_ENV.sh" \
+          "${{ needs.detect_changes.outputs.pytest_cmd }}" \
+          --gpus-per-task "${{ needs.detect_changes.outputs.gpus_per_task }}" \
+          --cpus-per-task "${{ needs.detect_changes.outputs.cpus_per_task }}" \
+          --memory-per-task "${{ needs.detect_changes.outputs.memory_per_task }}"

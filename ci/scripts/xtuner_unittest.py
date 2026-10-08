@@ -25,6 +25,24 @@ def parse_args():
     parser.add_argument("env", type=str)
     parser.add_argument("cmd", type=str)
     parser.add_argument("--nodes", type=int, default=1)
+    parser.add_argument(
+        "--gpus-per-task",
+        type=int,
+        default=None,
+        help="GPUs per node (default: CI_UNITTEST_GPUS or 8)",
+    )
+    parser.add_argument(
+        "--cpus-per-task",
+        type=int,
+        default=None,
+        help="CPUs per node (default: CI_UNITTEST_CPUS or 120)",
+    )
+    parser.add_argument(
+        "--memory-per-task",
+        type=str,
+        default=None,
+        help='Memory per node in GB, e.g. "800" (default: CI_UNITTEST_MEMORY_GB or 800)',
+    )
     return parser.parse_args()
 
 
@@ -56,14 +74,23 @@ def main():
     # 清理分支名中的非法字符，避免Kubernetes标签错误
     commit_branch = commit_branch.replace("/", "-").replace("\\", "-").replace("_", "-")
 
-    # Yidian特定的资源配置（基于test_clusterx_sft.py的成功经验）
+    gpus_per_task = args.gpus_per_task
+    if gpus_per_task is None:
+        gpus_per_task = int(os.environ.get("CI_UNITTEST_GPUS", "8"))
+    cpus_per_task = args.cpus_per_task
+    if cpus_per_task is None:
+        cpus_per_task = int(os.environ.get("CI_UNITTEST_CPUS", "120"))
+    memory_per_task = args.memory_per_task
+    if memory_per_task is None:
+        memory_per_task = os.environ.get("CI_UNITTEST_MEMORY_GB", "800")
+
     params = params_cls(
         job_name=f"xtuner-ci-{job_id}-{commit_id}",
         image=args.image,
         cmd=cmd,
-        gpus_per_task=8,  # Yidian使用16个GPU per node
-        cpus_per_task=120,  # 更多CPU资源（基于test_clusterx_sft.py）
-        memory_per_task="800",  # 更大内存（基于test_clusterx_sft.py的1800G配置）
+        gpus_per_task=gpus_per_task,
+        cpus_per_task=cpus_per_task,
+        memory_per_task=str(memory_per_task),
         num_nodes=args.nodes,
         no_env=True,  # 不继承环境变量，使用自定义环境
     )

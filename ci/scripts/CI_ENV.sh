@@ -34,6 +34,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONPYCACHEPREFIX=/tmp
 export TRITON_CACHE_DIR=/tmp/.triton
 export PYTEST_ADDOPTS='-o cache_dir=/tmp/.pytest_cache'
+# Default pytest reporting; workflow may append -ra --durations=25 in pytest_cmd.
 
 # Some DDP test will cost more than 300s, set it to 600 avoid timeout error.
 export DISTRIBUTED_TESTS_DEFAULT_TIMEOUT=600
