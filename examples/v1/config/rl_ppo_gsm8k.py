@@ -65,8 +65,8 @@ trainer = RLColocateTrainerConfig(
     total_train_steps=total_train_steps,
     train_batch_size=train_batch_size,
     advantage_estimator_config=GAEAdvantageConfig(
-        gamma=1.0,
-        lam=0.95,
+        gae_gamma=1.0,
+        gae_lambda=0.95,
         reward_scope="segment",
     ),
     enable_evaluate=True,

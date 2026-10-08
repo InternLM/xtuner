@@ -17,6 +17,7 @@ from xtuner.v1.rl.loss import CriticLossConfig, CriticLossContext
 from xtuner.v1.utils import get_device, get_torch_device_module
 
 from .pack import DPRankPackIndices
+from .schedule import build_lr_scheduler, optimizer_step_succeeds, partition_indices, pass_order
 from .worker import TrainBatchAttr, WorkerLogItem, WorkerTrainLogItem
 
 
@@ -43,6 +44,9 @@ class CriticWorkerConfig(BaseModel):
     fsdp_cfg: FSDPConfig
     load_from: str | Path
     optimizer_steps: int = 1
+    num_passes: int = 1
+    optimizer_steps_per_pass: int | None = None
+    scheduler_steps: int = 1_000_000
     sp_size: int = 1
     seed: int | None = None
 
@@ -60,10 +64,16 @@ class CriticWorker:
         self.config = worker_cfg
         self.host = host
         self.sp_mesh = host.sp_mesh if host is not None else None
+        if worker_cfg.num_passes <= 0:
+            raise ValueError("num_passes must be positive.")
+        if worker_cfg.optimizer_steps_per_pass is not None and worker_cfg.optimizer_steps_per_pass <= 0:
+            raise ValueError("optimizer_steps_per_pass must be positive.")
         model_cfg = worker_cfg.model_cfg
         head_cfg = model_cfg.text_config if isinstance(model_cfg, BaseComposeConfig) else model_cfg
         if getattr(head_cfg, "head_type", "lm_head") != "value_head":
             raise ValueError("CriticWorker requires model_cfg.head_type='value_head'")
+        if not worker_cfg.fsdp_cfg.torch_compile:
+            worker_cfg.model_cfg.compile_cfg = False
         self._engine = TrainEngine(
             optim_cfg=worker_cfg.optim_cfg,
             fsdp_cfg=worker_cfg.fsdp_cfg,
@@ -71,6 +81,9 @@ class CriticWorker:
         )
         self._engine.from_hf(worker_cfg.load_from)
         self._optimizer_steps = worker_cfg.optimizer_steps
+        self._num_passes = worker_cfg.num_passes
+        self._optimizer_steps_per_pass = worker_cfg.optimizer_steps_per_pass
+        self._scheduler = build_lr_scheduler(self._engine.optimizer, worker_cfg.lr_cfg, worker_cfg.scheduler_steps)
 
     def _require_host(self) -> "TrainingWorker":
         if self.host is None:
@@ -151,7 +164,7 @@ class CriticWorker:
         old_values: torch.Tensor | None,
     ) -> tuple[SequenceContext, CriticLossContext]:
         host = self._require_host()
-        seq_ctx = host._prepare_forward_seq_ctx(seq_ctx)
+        seq_ctx = host._prepare_forward_seq_ctx(seq_ctx, need_routed_experts=False)
         shifted_labels = shifted_labels.to(DEVICE)
         returns = returns.to(DEVICE)
         if self.sp_mesh is not None and self.sp_mesh.size() > 1:
@@ -204,26 +217,24 @@ class CriticWorker:
         for step in pack_plan:
             packed.append([(pack, *self._pack_one([samples[i] for i in pack], batch_attr)[:2]) for pack in step])
         torch.distributed.barrier()
-        self._engine.put_model_to_device(DEVICE)
         values: list[list[float] | None] = [None] * len(samples)
-        try:
-            for packed_step in packed:
-                for indices, forward_ctx, _shifted_labels in packed_step:
-                    forward_ctx = host._prepare_forward_seq_ctx(forward_ctx, sequence_parallel=False)
-                    raw = self._forward_values(forward_ctx).detach().float().reshape(-1)
-                    offset = 0
-                    for index in indices:
-                        length = samples[index][1].size(1)
-                        values[index] = raw[offset : offset + length].cpu().tolist()
-                        offset += length
-            collected: list[list[float]] = []
-            for item in values:
-                if item is None:
-                    raise RuntimeError("pack plan did not cover every local sample")
-                collected.append(item)
-            return collected
-        finally:
-            self._engine.put_model_to_device("cpu")
+        for packed_step in packed:
+            for indices, forward_ctx, _shifted_labels in packed_step:
+                forward_ctx = host._prepare_forward_seq_ctx(
+                    forward_ctx, sequence_parallel=False, need_routed_experts=False
+                )
+                raw = self._forward_values(forward_ctx).detach().float().reshape(-1)
+                offset = 0
+                for index in indices:
+                    length = samples[index][1].size(1)
+                    values[index] = raw[offset : offset + length].cpu().tolist()
+                    offset += length
+        collected: list[list[float]] = []
+        for item in values:
+            if item is None:
+                raise RuntimeError("pack plan did not cover every local sample")
+            collected.append(item)
+        return collected
 
     def forward_only(
         self,
@@ -236,15 +247,15 @@ class CriticWorker:
         """Return old value predictions for the packed plan without a loss."""
         del advantages, kwargs
         packed = self._materialize(rollout_item_refs, pack_plan, batch_attr)
-        self._engine.put_model_to_device(DEVICE)
-        try:
-            values: list[torch.Tensor] = []
-            for step in packed:
-                for seq_ctx, _, _, _ in step:
-                    values.append(self._forward_values(self._require_host()._prepare_forward_seq_ctx(seq_ctx)))
-            return values
-        finally:
-            self._engine.put_model_to_device("cpu")
+        values: list[torch.Tensor] = []
+        for step in packed:
+            for seq_ctx, _, _, _ in step:
+                values.append(
+                    self._forward_values(
+                        self._require_host()._prepare_forward_seq_ctx(seq_ctx, need_routed_experts=False)
+                    )
+                )
+        return values
 
     def _materialize(
         self,
@@ -293,8 +304,9 @@ class CriticWorker:
         token_values: list[list[float]] | None = None,
         **kwargs,
     ) -> WorkerLogItem:
-        """Train the clipped value head on the controller's packed plan."""
-        del advantages, kwargs, rollout_idx
+        """Train the clipped value head for ``num_passes`` over the packed
+        plan."""
+        del advantages, kwargs
         step_batches = self._materialize(
             rollout_item_refs,
             pack_plan,
@@ -302,82 +314,77 @@ class CriticWorker:
             token_returns=token_returns,
             token_values=token_values,
         )
-        num_optimizer_steps = len(step_batches)
-        if num_optimizer_steps > self._optimizer_steps:
-            raise ValueError(
-                f"Pack plan optimizer steps {num_optimizer_steps} exceed configured "
-                f"optimizer_steps {self._optimizer_steps}"
-            )
-
-        self._engine.put_model_to_device(DEVICE)
-        self._engine.put_optimizer_to_device(DEVICE)
+        updates = self._critic_updates(step_batches, rollout_idx)
         worker_log_item: WorkerLogItem = {"train_entropy": 0.0, "train_metrics": []}
-        try:
-            for step in step_batches:
-                prepared = [self._prepare_loss(*pack) for pack in step]
-                batch_loss_ctx = cast(
-                    list[CriticLossContext],
-                    CriticLossContext.build_batches([loss_ctx for _, loss_ctx in prepared]),
-                )
-                engine_input = [
-                    ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
-                    for (seq_ctx, _), loss_ctx in zip(prepared, batch_loss_ctx)
-                ]
-                train_step_info = self._engine.train_step(engine_input)
-                grad_norm = self._engine.clip_grad_norm()
-                self._engine.step_optimizer(grad_norm)
-                logs_info = cast(dict[str, float], train_step_info["logs_info"])
-                worker_log_item["train_metrics"].append(
-                    cast(WorkerTrainLogItem, {**logs_info, "grad_norm": grad_norm.item()})
-                )
-        finally:
-            self._engine.put_optimizer_to_device("cpu")
-            self._engine.put_model_to_device("cpu")
+
+        for step in updates:
+            if self._masked_token_count(step) == 0:
+                continue
+            prepared = [self._prepare_loss(*pack) for pack in step]
+            batch_loss_ctx = cast(
+                list[CriticLossContext],
+                CriticLossContext.build_batches([loss_ctx for _, loss_ctx in prepared]),
+            )
+            engine_input = [
+                ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
+                for (seq_ctx, _), loss_ctx in zip(prepared, batch_loss_ctx)
+            ]
+            train_step_info = self._engine.train_step(engine_input)
+            grad_norm = self._engine.clip_grad_norm()
+            stepped = optimizer_step_succeeds(self._engine, grad_norm)
+            self._engine.step_optimizer(grad_norm)
+            if stepped:
+                self._scheduler.step()
+            logs_info = cast(dict[str, float], train_step_info["logs_info"])
+            worker_log_item["train_metrics"].append(
+                cast(WorkerTrainLogItem, {**logs_info, "grad_norm": grad_norm.item()})
+            )
         return worker_log_item
+
+    def _critic_updates(
+        self,
+        step_batches: list[list[tuple[SequenceContext, torch.Tensor, torch.Tensor, torch.Tensor | None]]],
+        rollout_idx: int,
+    ) -> list[list[tuple[SequenceContext, torch.Tensor, torch.Tensor, torch.Tensor | None]]]:
+        """Repeat the local packs for each critic pass.
+
+        Without ``optimizer_steps_per_pass``, one pass follows the actor pack plan.
+        Otherwise every pass flattens those packs, shuffles after the first pass,
+        and splits them into ``optimizer_steps_per_pass`` optimizer updates.
+        """
+        if self._optimizer_steps_per_pass is None:
+            if len(step_batches) > self._optimizer_steps:
+                raise ValueError(
+                    f"Pack plan optimizer steps {len(step_batches)} exceed configured "
+                    f"optimizer_steps {self._optimizer_steps}"
+                )
+            return step_batches
+
+        packs = [pack for step in step_batches for pack in step]
+        host = self._require_host()
+        seed = int(host.config.seed or 0)
+        updates: list[list[tuple[SequenceContext, torch.Tensor, torch.Tensor, torch.Tensor | None]]] = []
+        for pass_index in range(self._num_passes):
+            order = pass_order(len(packs), rollout_idx, pass_index, seed)
+            for indices in partition_indices(order, self._optimizer_steps_per_pass):
+                updates.append([packs[index] for index in indices])
+        return updates
+
+    def _masked_token_count(
+        self,
+        step: list[tuple[SequenceContext, torch.Tensor, torch.Tensor, torch.Tensor | None]],
+    ) -> int:
+        local_tokens = sum(int((labels != -100).sum().item()) for _, labels, _, _ in step)
+        total = torch.tensor(float(local_tokens), device=DEVICE)
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(total, op=torch.distributed.ReduceOp.SUM)
+        return int(total.item())
 
     def onload(self) -> None:
         self._engine.put_optimizer_to_device(DEVICE)
         self._engine.put_model_to_device(DEVICE)
 
-        # model_moved = self._engine.put_model_to_device(DEVICE)
-        # if not model_moved:
-        #     self.logger.info("Skip model onload because model placement is unchanged.")
-
-        # optimizer_moved = self._engine.put_optimizer_to_device(DEVICE)
-        # if not optimizer_moved:
-        #     if getattr(self.config.optim_cfg, "swap_optimizer", False):
-        #         self.logger.info(
-        #             "Skip optimizer onload because swap_optimizer=True; optimizer states stay on CPU and are swapped per step."
-        #         )
-        #     else:
-        #         self.logger.info("Skip optimizer onload because optimizer state is empty.")
-
     def offload(self) -> None:
-        # model_moved = self._engine.put_model_to_device("cpu")
-        # DEVICE_MODULE.empty_cache()
-        # self._clear_cublas_workspaces()
-        # if not model_moved:
-        #     self.logger.info("Skip model offload because model placement is unchanged.")
-        #     return
-        # self.logger.info(
-        #     f"Offloaded model to CPU. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
-        # )
-        # """Offload the optimizer of the training worker."""
-        # optimizer_moved = self._engine.put_optimizer_to_device("cpu")
-        # DEVICE_MODULE.empty_cache()
-        # if not optimizer_moved:
-        #     if getattr(self.config.optim_cfg, "swap_optimizer", False):
-        #         self.logger.info(
-        #             "Skip optimizer offload because swap_optimizer=True; optimizer states are already CPU-resident."
-        #         )
-        #     else:
-        #         self.logger.info("Skip optimizer offload because optimizer state is empty.")
-        #     return
-        # self.logger.info(
-        #     f"Offloaded optimizer to CPU. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, "
-        #     f"reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
-        # )
-
         self._engine.put_optimizer_to_device("cpu")
         self._engine.put_model_to_device("cpu")
 
