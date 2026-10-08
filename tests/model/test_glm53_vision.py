@@ -68,6 +68,17 @@ class TestGlm53VisionMetaBuild:
         assert len(vision.blocks) == 24
         assert projector.merger.gate_proj.out_features == 10240
 
+    def test_meta_build_preserves_nonpersistent_rope_frequencies(self):
+        # checkpoint 不保存 inv_freq；meta 构造后必须仍有可用的 FP32 常量。
+        with torch.device("meta"):
+            vision = Glm53VisionConfig(attn_impl="eager_attention", fully_shard=False).build()
+        vision._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
+        expected = 1.0 / (10000.0 ** (torch.arange(0, 32, 2, dtype=torch.float32) / 32))
+        assert vision.rotary_pos_emb.inv_freq.device.type == "cpu"
+        assert vision.rotary_pos_emb.inv_freq.dtype == torch.float32
+        assert "rotary_pos_emb.inv_freq" not in vision.state_dict()
+        torch.testing.assert_close(vision.rotary_pos_emb.inv_freq, expected, rtol=0, atol=0)
+
 
 class TestGlm53VisionFp32Params:
     def test_vision_side_pins_nothing_to_fp32(self):
@@ -100,6 +111,9 @@ class TestGlm53VisionWeightMapping:
         assert not missing_p and not unloaded_p
         assert not any(p.is_meta for p in vision.parameters())
         assert not any(p.is_meta for p in projector.parameters())
+
+        expected = 1.0 / (10000.0 ** (torch.arange(0, 32, 2, dtype=torch.float32) / 32))
+        torch.testing.assert_close(vision.rotary_pos_emb.inv_freq.cpu(), expected, rtol=0, atol=0)
 
         num_vision_params = sum(1 for _ in vision.named_parameters())
         num_projector_params = sum(1 for _ in projector.named_parameters())
