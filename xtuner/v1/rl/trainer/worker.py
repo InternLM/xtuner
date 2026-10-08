@@ -78,6 +78,7 @@ from xtuner.v1.utils.nccl_process_group import resume_nccl_process_groups, suspe
 
 from ..rollout_is import merge_rollout_is_metrics
 from .pack import DPRankPackIndices
+from .schedule import build_lr_scheduler, optimizer_step_succeeds
 
 
 DEVICE = get_device()
@@ -248,6 +249,7 @@ class WorkerConfig(BaseModel):
     fsdp_cfg: FSDPConfig
     load_from: str | Path  # TODO: 把 actor 和 ref 配置分离
     optimizer_steps: int = 1
+    scheduler_steps: int | None = None
     sp_size: int = 1
     pack_max_length: int
     ref_load_from: str | Path | None = None
@@ -399,6 +401,11 @@ class TrainingWorker(SingleAcceleratorWorker):
         if not worker_cfg.fsdp_cfg.torch_compile:
             worker_cfg.model_cfg.compile_cfg = False
         self._engine = self._build_engine(worker_cfg)
+        self._lr_scheduler = None
+        if worker_cfg.scheduler_steps is not None:
+            self._lr_scheduler = build_lr_scheduler(
+                self._engine.optimizer, worker_cfg.lr_cfg, worker_cfg.scheduler_steps
+            )
 
         self._has_ref = False
         if isinstance(worker_cfg.loss_cfg, BaseRLLossConfig) and worker_cfg.loss_cfg.use_kl_loss:
@@ -1091,7 +1098,13 @@ class TrainingWorker(SingleAcceleratorWorker):
             return torch.zeros(1, padding_len, top_k, dtype=torch.long)
         raise ValueError(f"Unknown pack loss input key: {key}")
 
-    def _prepare_forward_seq_ctx(self, seq_ctx: SequenceContext, *, sequence_parallel: bool = True) -> SequenceContext:
+    def _prepare_forward_seq_ctx(
+        self,
+        seq_ctx: SequenceContext,
+        *,
+        sequence_parallel: bool = True,
+        need_routed_experts: bool = True,
+    ) -> SequenceContext:
         """Resolve multimodal refs, move to device, and sequence-parallel
         split."""
         pixel_values = seq_ctx.pixel_values
@@ -1108,8 +1121,11 @@ class TrainingWorker(SingleAcceleratorWorker):
                 raise NotImplementedError("The case where pixel_values is a numpy array is not implemented yet.")
 
         rollout_routed_experts = seq_ctx.rollout_routed_experts
-        if rollout_routed_experts is not None:
+        if need_routed_experts and rollout_routed_experts is not None:
             self._add_rollout_routed_experts(seq_ctx, rollout_routed_experts)
+        elif not need_routed_experts:
+            # Drop unresolved refs so the critic forward routes on its own.
+            seq_ctx.rollout_routed_experts = None
 
         seq_ctx.offload_rollout_routed_experts = self.config.offload_rollout_routed_experts
         seq_ctx = seq_ctx.to(DEVICE)
@@ -1399,7 +1415,10 @@ class TrainingWorker(SingleAcceleratorWorker):
                     "mtp_grad_parameter_coverage": present_grad_count / len(self._mtp_trainable_parameters),
                 }
             grad_norm = self._engine.clip_grad_norm()
+            stepped = optimizer_step_succeeds(self._engine, grad_norm)
             self._engine.step_optimizer(grad_norm)
+            if stepped and self._lr_scheduler is not None:
+                self._lr_scheduler.step()
 
             # The current group will not be revisited in this fit call.
             # Release its old-logprob references after backward and the

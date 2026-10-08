@@ -457,16 +457,16 @@ class TrainingController:
         pack_plan: _PackPlan,
         value_lists: list[list[list[float]]],
         data_replicate_size: int,
+        rollout_idx: int,
     ) -> tuple[list[list[float]], list[list[float]]]:
-        """Build per-sample token advantages and returns from critic values."""
+        """Build split actor advantages and critic returns from critic
+        values."""
         from xtuner.v1.rl.advantage.gae import GAEEstimator
 
         estimator = self.advantage_estimator
         if not isinstance(estimator, GAEEstimator):
             raise RuntimeError("Critic training requires a GAE advantage estimator")
-        token_advantages: list[list[float]] = [[] for _ in rollout_items]
-        token_returns: list[list[float]] = [[] for _ in rollout_items]
-        supervised_advantages: list[float] = []
+        dense_values: list[list[float] | None] = [None] * len(rollout_items)
         for dp_rank, dispatch in pack_plan["dp_dispatches"].items():
             local_values = value_lists[dp_rank * data_replicate_size]
             sample_indices = dispatch["sample_indices"]
@@ -476,39 +476,14 @@ class TrainingController:
                     f"{len(local_values)} vs {len(sample_indices)}"
                 )
             for local_index, global_index in enumerate(sample_indices):
-                state = rollout_items[global_index]
-                labels = state.labels or []
-                mask = [label != -100 for label in labels[1:]]
-                reward = 0.0
-                if state.reward is not None and "score" in state.reward:
-                    reward = float(state.reward["score"])
-                advantages, returns = estimator.compute_token_gae(local_values[local_index], mask, reward)
-                token_advantages[global_index] = advantages
-                token_returns[global_index] = returns
-                supervised_advantages.extend(adv for adv, supervised in zip(advantages, mask) if supervised)
-
-        if supervised_advantages:
-            mean = sum(supervised_advantages) / len(supervised_advantages)
-            variance = sum((adv - mean) ** 2 for adv in supervised_advantages) / len(supervised_advantages)
-            scale = variance**0.5 + 1e-8
-            for advantages, state in zip(token_advantages, rollout_items):
-                mask = [label != -100 for label in (state.labels or [])[1:]]
-                for index, supervised in enumerate(mask):
-                    if supervised:
-                        advantages[index] = (advantages[index] - mean) / scale
-        return token_advantages, token_returns
-
-    @staticmethod
-    def _slice_advantages(advantages: list[float], sample_indices: list[int]) -> list[float]:
-        return [advantages[index] for index in sample_indices]
-
-    @staticmethod
-    def _mean_supervised_advantage(advantages: list[float], state: RolloutState) -> float:
-        mask = [label != -100 for label in (state.labels or [])[1:]]
-        supervised = [advantage for advantage, keep in zip(advantages, mask) if keep]
-        if not supervised:
-            return 0.0
-        return sum(supervised) / len(supervised)
+                dense_values[global_index] = local_values[local_index]
+        if any(sample_values is None for sample_values in dense_values):
+            raise RuntimeError("Critic values do not cover every training sample")
+        return estimator.compute_gae(
+            rollout_items,
+            cast(list[list[float]], dense_values),
+            rollout_idx,
+        )
 
     def fit(
         self,
@@ -565,12 +540,19 @@ class TrainingController:
                     )
                 value_lists = ray.get(value_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
                 token_advantages, token_returns = self._compute_ppo_targets(
-                    rollout_items, pack_plan, value_lists, data_replicate_size
+                    rollout_items, pack_plan, value_lists, data_replicate_size, rollout_idx
                 )
-                prepared["advantages"] = [
-                    self._mean_supervised_advantage(advantages, state)
-                    for advantages, state in zip(token_advantages, rollout_items)
-                ]
+                sample_means: list[float] = []
+                for state, sample_advantages in zip(rollout_items, token_advantages):
+                    labels = state.labels or []
+                    mask = [label != -100 for label in labels[1:]]
+                    if len(mask) != len(sample_advantages):
+                        raise ValueError(
+                            f"shifted label length {len(mask)} does not match advantage length {len(sample_advantages)}"
+                        )
+                    supervised = [advantage for advantage, keep in zip(sample_advantages, mask) if keep]
+                    sample_means.append(sum(supervised) / len(supervised) if supervised else 0.0)
+                prepared["advantages"] = sample_means
                 critic_handles = []
                 for worker_idx, worker in enumerate(self.workers):
                     dp_rank = worker_idx // data_replicate_size
@@ -581,7 +563,7 @@ class TrainingController:
                             "critic",
                             "fit",
                             rollout_item_refs=item_refs_by_dp[dp_rank],
-                            advantages=self._slice_advantages(prepared["advantages"], local_indices),
+                            advantages=[prepared["advantages"][index] for index in local_indices],
                             pack_plan=dp_dispatch["plan"],
                             batch_attr=prepared["batch_attr"],
                             rollout_idx=rollout_idx,

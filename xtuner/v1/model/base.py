@@ -6,7 +6,7 @@ import pydoc
 import re
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from functools import reduce
+from functools import partial, reduce
 from importlib import import_module
 from itertools import chain
 from math import prod
@@ -707,22 +707,25 @@ class BaseModel(nn.Module):
 
         Randomly initialize when head_type is value_head and the HF index does
         not contain the remapped value-head weight (value_head.weight, or
-        language_model.value_head.weight on InternVL).
+        language_model.value_head.weight on InternVL). The weight is drawn from
+        ``Normal(0, 1 / (hidden_size + 1))``.
 
         Returns:
             True if ValueHead was randomly initialized, False otherwise.
         """
         lm_head = getattr(self, "lm_head", None)
-        if getattr(self.config, "head_type", "lm_head") != "value_head" or not isinstance(lm_head, nn.Module):
+        if getattr(self.config, "head_type", "lm_head") != "value_head" or not isinstance(lm_head, nn.Linear):
             return False
         if any(checkpoint_loader.is_key_exist(key) for key in self._to_hf_key_list("lm_head.weight")):
             return False
-        from xtuner.v1.utils import default_init_weights
+        from xtuner.v1.utils import init_params
 
-        default_init_weights(lm_head)
+        value_head_std = 1.0 / (self.config.hidden_size + 1)
+        init_params(lm_head.weight, partial(nn.init.normal_, mean=0.0, std=value_head_std))
         log_rank0.info(
-            "Value head (runtime module lm_head) is randomly initialized because the checkpoint "
-            "has no value_head weights; the rest of the model is loaded from the checkpoint."
+            "Value head (runtime module lm_head) is initialized with "
+            f"Normal(mean=0, std={value_head_std:.6g}) because the checkpoint has no value_head weights; "
+            "the rest of the model is loaded from the checkpoint."
         )
         return True
 

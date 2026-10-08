@@ -10,4 +10,5 @@
    rl_trainer.md
    judger.md
    loss.md
+   ppo.md
    on_policy_distillation.md
