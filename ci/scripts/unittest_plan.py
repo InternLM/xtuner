@@ -129,7 +129,8 @@ def _pytest_ignores(changed: list[str], test_target: str) -> str:
     return " ".join(parts)
 
 
-def _gpus_for_targets(test_target: str) -> int:
+def _logical_gpus_for_targets(test_target: str) -> int:
+    """GPUs a single pytest process needs if not using on-node sharding."""
     parts = test_target.split()
     if test_target == "tests" or "tests/rl" in parts:
         return 8
@@ -140,6 +141,42 @@ def _gpus_for_targets(test_target: str) -> int:
     if all(p in ("tests/datasets", "tests/utils", "tests/chat_template", "tests/patch", "tests/profiler") for p in parts):
         return 2
     return 2
+
+
+# On-node: 8-GPU job, 4 workers × 2 GPUs (0,1 / 2,3 / 4,5 / 6,7).
+_GPU_SHARD_WORKERS = 4
+_GPUS_PER_SHARD_WORKER = 2
+_CLUSTER_GPUS_WHEN_SHARDING = _GPU_SHARD_WORKERS * _GPUS_PER_SHARD_WORKER
+
+# Only directories whose tests respect XTUNER_TEST_WORLD_SIZE (per worker).
+_GPU_SHARD_ELIGIBLE_DIRS = frozenset(
+    {
+        "tests/autotest",
+        "tests/chat_template",
+        "tests/patch",
+        "tests/profiler",
+        "tests/utils",
+        # tests/datasets: test_dataloader.py hard-codes world_size=4 — not 2-GPU-safe yet.
+    }
+)
+
+
+def _use_gpu_sharding(test_target: str) -> bool:
+    if _logical_gpus_for_targets(test_target) != 2:
+        return False
+    parts = test_target.split()
+    if not parts:
+        return False
+    return all(p in _GPU_SHARD_ELIGIBLE_DIRS for p in parts)
+
+
+def _wrap_pytest_gpu_shards(pytest_cmd: str) -> str:
+    return (
+        f"python ci/scripts/run_pytest_gpu_shards.py "
+        f"--workers {_GPU_SHARD_WORKERS} "
+        f"--gpus-per-worker {_GPUS_PER_SHARD_WORKER} "
+        f"-- {pytest_cmd}"
+    )
 
 
 def _cpus_memory(gpus: int) -> tuple[int, str]:
@@ -161,7 +198,8 @@ def plan(changed_files: list[str]) -> dict[str, str]:
         test_target = "tests" if not targets else " ".join(sorted(targets))
 
     ignores = _pytest_ignores(changed, test_target)
-    gpus = _gpus_for_targets(test_target)
+    shard = _use_gpu_sharding(test_target)
+    gpus = _CLUSTER_GPUS_WHEN_SHARDING if shard else _logical_gpus_for_targets(test_target)
     cpus, memory = _cpus_memory(gpus)
 
     pytest_opts = "-ra --durations=25"
@@ -170,9 +208,13 @@ def plan(changed_files: list[str]) -> dict[str, str]:
     else:
         pytest_cmd = f"pytest {pytest_opts} {test_target}"
 
+    if shard:
+        pytest_cmd = _wrap_pytest_gpu_shards(pytest_cmd)
+
     return {
         "only_rl": "true" if only_rl else "false",
         "test_target": test_target,
+        "gpu_sharding": "true" if shard else "false",
         "gpus_per_task": str(gpus),
         "cpus_per_task": str(cpus),
         "memory_per_task": memory,

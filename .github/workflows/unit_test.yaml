@@ -1,4 +1,12 @@
 name: unit_test
+run-name: >-
+  unit_test-${{
+    github.event_name == 'workflow_dispatch'
+    && format('manual-{0}{1}',
+      inputs.repo_ref != '' && inputs.repo_ref || github.ref_name,
+      inputs.simulate_changed_files != '' && '-simulate' || '')
+    || format('pr-{0}', github.event.pull_request.number)
+  }}
 on:
   pull_request:
     branches:
@@ -10,6 +18,35 @@ on:
       - ".github/workflows/ete_test_gpu.yaml"
       - ".github/workflows/ete_test_npu.yaml"
       - ".github/workflows/lint.yml"
+  workflow_dispatch:
+    inputs:
+      repo_ref:
+        required: false
+        description: >-
+          Branch, tag, or commit SHA to checkout for lint / unit_test / unittest_plan.
+          Empty uses the ref chosen in the Run workflow dropdown (github.ref).
+        type: string
+        default: ""
+      simulate_changed_files:
+        required: false
+        description: >-
+          Pretend these paths changed (one per line or comma-separated).
+          Example: xtuner/v1/datasets/foo.py or xtuner/v1/chat_template/x.py
+          Empty on manual run falls back to git diff HEAD^1..HEAD.
+        type: string
+        default: ""
+      skip_lint:
+        required: false
+        description: Manual run only — skip lint job (faster plan-only checks).
+        type: boolean
+        default: false
+      skip_cluster_ut:
+        required: false
+        description: >-
+          Manual run only — run detect_changes (unittest_plan) but do not submit
+          the h_cluster unit_test job.
+        type: boolean
+        default: false
 env:
   WORKSPACE_PREFIX: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-5)
   WORKSPACE_PREFIX_SHORT: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-3)
@@ -29,25 +66,69 @@ jobs:
       gpus_per_task: ${{ steps.plan.outputs.gpus_per_task }}
       cpus_per_task: ${{ steps.plan.outputs.cpus_per_task }}
       memory_per_task: ${{ steps.plan.outputs.memory_per_task }}
+      gpu_sharding: ${{ steps.plan.outputs.gpu_sharding }}
     steps:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
+          ref: >-
+            ${{
+              github.event_name == 'workflow_dispatch' && inputs.repo_ref != ''
+              && inputs.repo_ref
+              || github.ref
+            }}
       - id: plan
         name: Plan unit-test scope and resources
+        env:
+          SIMULATE_CHANGED_FILES: ${{ github.event_name == 'workflow_dispatch' && inputs.simulate_changed_files || '' }}
         run: |
-          if ! changed_files="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" 2>/dev/null)"; then
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${SIMULATE_CHANGED_FILES}" ]; then
+            echo "Using simulated changed_files (workflow_dispatch)"
+            changed_files="$(printf '%s\n' "${SIMULATE_CHANGED_FILES}" | tr ',' '\n' | sed '/^[[:space:]]*$/d')"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            if ! changed_files="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" 2>/dev/null)"; then
+              changed_files="$(git diff --name-only HEAD^1 HEAD)"
+            fi
+          else
             changed_files="$(git diff --name-only HEAD^1 HEAD)"
           fi
           echo "Changed files:"
           echo "$changed_files"
           echo "$changed_files" | python ci/scripts/unittest_plan.py --github-output
+      - name: Plan summary (manual / debug)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          {
+            echo "### unittest_plan (workflow_dispatch)"
+            echo ""
+            echo "- checkout ref: \`${{ github.event_name == 'workflow_dispatch' && inputs.repo_ref != '' && inputs.repo_ref || github.ref }}\`"
+            echo ""
+            echo "| key | value |"
+            echo "| --- | --- |"
+            echo "| only_rl | \`${{ steps.plan.outputs.only_rl }}\` |"
+            echo "| test_target | \`${{ steps.plan.outputs.test_target }}\` |"
+            echo "| gpu_sharding | \`${{ steps.plan.outputs.gpu_sharding }}\` |"
+            echo "| gpus_per_task | \`${{ steps.plan.outputs.gpus_per_task }}\` |"
+            echo "| cpus_per_task | \`${{ steps.plan.outputs.cpus_per_task }}\` |"
+            echo "| memory_per_task | \`${{ steps.plan.outputs.memory_per_task }}\` |"
+            echo "| pytest_cmd | \`${{ steps.plan.outputs.pytest_cmd }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   lint:
+    if: github.event_name != 'workflow_dispatch' || inputs.skip_lint != true
     runs-on: ubuntu-latest
     needs: detect_changes
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          ref: >-
+            ${{
+              github.event_name == 'workflow_dispatch' && inputs.repo_ref != ''
+              && inputs.repo_ref
+              || github.ref
+            }}
       - name: Set up Python 3.12
         uses: actions/setup-python@v2
         with:
@@ -66,9 +147,14 @@ jobs:
           pre-commit run --files $(find "$lint_target" -type f)
 
   unit_test:
+    if: >-
+      (github.event_name != 'workflow_dispatch' || inputs.skip_cluster_ut != true) &&
+      always() && needs.detect_changes.result == 'success' &&
+      (needs.lint.result == 'success' || needs.lint.result == 'skipped')
     runs-on: [h_cluster]
     needs:
       - detect_changes
+      - lint
     steps:
     - name: mask env
       run: |
@@ -76,11 +162,20 @@ jobs:
         echo "::add-mask::${{env.WORKSPACE_PREFIX_SHORT}}"
         sudo git clean -ffdx
     - uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+        ref: >-
+          ${{
+            github.event_name == 'workflow_dispatch' && inputs.repo_ref != ''
+            && inputs.repo_ref
+            || github.ref
+          }}
 
     - name: unit-test
       run: |
         export PYTHONPYCACHEPREFIX=/tmp
         echo "test_target=${{ needs.detect_changes.outputs.test_target }}"
+        echo "gpu_sharding=${{ needs.detect_changes.outputs.gpu_sharding }}"
         echo "pytest_cmd=${{ needs.detect_changes.outputs.pytest_cmd }}"
         python ci/scripts/xtuner_unittest.py \
           "$IMAGE_INNER/$IMAGE" \
