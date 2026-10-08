@@ -45,7 +45,7 @@ def patch_hf_rms_norm(module: nn.Module) -> None:
     replacements = []
     for name, submodule in module.named_modules():
         if "RMSNorm" in submodule.__class__.__name__ and isinstance(submodule, nn.Module):
-            dim = submodule.weight.shape
+            dim = submodule.weight.shape[0]
             device = submodule.weight.device
             eps = submodule.variance_epsilon
             new_submodule = RMSNorm(hidden_size=dim, eps=eps).to(device)
