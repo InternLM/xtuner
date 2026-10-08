@@ -15,10 +15,13 @@ TestGlm53TextMoEFp32Params
 TestGlm53TextMoEForwardBackward
     test_forward_backward_all_trainable_params_get_gradient  除冻结 indexer 外都有梯度
     test_mtp_block_builds_and_forwards                       MTP block 可构造并前向
+    test_optimizer_step_updates_text_model                   CE 反传和 AdamW 更新
 TestGlm53TextMoEWeightMapping
     test_real_checkpoint_weight_coverage                     真实 checkpoint 权重全覆盖
 TestGlm53TextMoEAccuracy
     test_fsdp_accuracy                                       FSDP 下 loss 曲线与 HF 对齐
+TestGlm53TextMoEGradientParity
+    test_full_crop_fsdp_gradients_match_hf                   五层真实权重 FSDP 梯度与 HF 对齐
 TestNoPEDSAMLAConfigValidatesAssignment
     test_backend_assignment_is_validated                     构造后赋值仍走校验
 """
@@ -30,6 +33,8 @@ import parametrize
 import pytest
 import torch
 from pydantic import ValidationError
+from torch.distributed.tensor import DTensor
+from torch.testing._internal.common_distributed import DistributedTestBase
 
 from transformers import AutoTokenizer, Glm5NextForConditionalGeneration
 from xtuner._testing import DeterministicDDPTestCase
@@ -261,6 +266,30 @@ class TestGlm53TextMoEForwardBackward:
         out = model(seq_ctx=seq_ctx, loss_ctx=None)
         assert torch.isfinite(out.logits).all()
 
+    def test_optimizer_step_updates_text_model(self):
+        # Drive the public training path through CE loss, backward, and AdamW.
+        torch.manual_seed(0)
+        model = _tiny_cfg().build().cuda().to(torch.bfloat16)
+        model.init_weights()
+        input_ids = torch.randint(2, 200, (1, 128), device="cuda")
+        seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cuda")
+        data = {"seq_ctx": seq_ctx, "shifted_labels": input_ids.roll(-1, dims=1)}
+        loss_ctx = model.build_loss_ctx_batch([data], sp_mesh=None)[0]
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
+        tracked = model.layers["0"].self_attn.q_proj.weight
+        before = tracked.detach().clone()
+
+        loss = model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)["loss"]
+        assert torch.isfinite(loss)
+        loss.backward()
+        assert tracked.grad is not None and torch.isfinite(tracked.grad).all()
+        assert tracked.grad.abs().sum() > 0
+        optimizer.step()
+
+        assert torch.isfinite(tracked).all()
+        assert not torch.equal(tracked, before)
+        assert optimizer.state[tracked]["step"] == 1
+
 
 class TestGlm53TextMoEWeightMapping:
     def test_real_checkpoint_weight_coverage(self):
@@ -377,6 +406,81 @@ class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
         return int(os.getenv("XTUNER_TEST_WORLD_SIZE", "8"))
 
 
+class TestGlm53TextMoEGradientParity(DistributedTestBase):
+    @pytest.mark.gpu
+    def test_full_crop_fsdp_gradients_match_hf(self, device="cuda"):
+        # Real five-layer weights: compare both ends of the KDA/mHC stack after LM backward.
+        if not os.path.isdir(GLM_5_3_FLASH_PATH):
+            pytest.skip(f"GLM_5_3_FLASH_PATH not found: {GLM_5_3_FLASH_PATH}")
+        self.create_pg(device)
+        torch.manual_seed(1234)
+        tokens = torch.randint(2, 1000, (1, 81), device=device)
+
+        hf_model = Glm5NextForConditionalGeneration.from_pretrained(
+            GLM_5_3_FLASH_PATH, dtype=torch.bfloat16, device_map=f"cuda:{torch.cuda.current_device()}"
+        )
+        hf_model.requires_grad_(False)
+        hf_first = hf_model.model.language_model.layers[0]
+        hf_last = hf_model.model.language_model.layers[4]
+        hf_params = {
+            "first_q_proj": hf_first.self_attn.q_proj.weight,
+            "first_A_log": hf_first.self_attn.forget_gate.A_log,
+            "first_hc_attn_base": hf_first.attn_hc.base,
+            "last_q_proj": hf_last.self_attn.q_proj.weight,
+            "last_A_log": hf_last.self_attn.forget_gate.A_log,
+            "last_hc_attn_base": hf_last.attn_hc.base,
+            "final_norm": hf_model.model.language_model.norm.weight,
+        }
+        for param in hf_params.values():
+            param.requires_grad_(True)
+        hf_loss = hf_model(input_ids=tokens, labels=tokens, use_cache=False).loss
+        hf_loss.backward()
+        reference_loss = hf_loss.detach().cpu()
+        reference_grads = {name: param.grad.detach().float().cpu() for name, param in hf_params.items()}
+        del hf_loss, hf_model, hf_first, hf_last, hf_params
+        torch.cuda.empty_cache()
+
+        with torch.device("meta"):
+            cfg = Glm53TextMoEConfig.from_hf(GLM_5_3_FLASH_PATH)
+            cfg.compile_cfg = False
+            cfg.dispatcher = None
+            cfg.ep_size = 1
+            cfg.mtp_config = None
+            cfg.attention.sparse_mla_backend = "torch"
+            cfg.attention.indexer_backend = "torch"
+            model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
+        model.fully_shard(FSDPConfig(ep_size=1))
+        model.from_hf(GLM_5_3_FLASH_PATH, strict=False)
+        first, last = model.layers["0"], model.layers["4"]
+        xtuner_params = {
+            "first_q_proj": first.self_attn.q_proj.weight,
+            "first_A_log": first.self_attn.A_log,
+            "first_hc_attn_base": first.hc_attn_base,
+            "last_q_proj": last.self_attn.q_proj.weight,
+            "last_A_log": last.self_attn.A_log,
+            "last_hc_attn_base": last.hc_attn_base,
+            "final_norm": model.norm.weight,
+        }
+        seq_ctx = SequenceContext.from_input_ids((tokens[:, :-1],), device=device)
+        loss_ctx = model.build_loss_ctx_batch([{"seq_ctx": seq_ctx, "shifted_labels": tokens[:, 1:]}], sp_mesh=None)[0]
+        loss = model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)["loss"]
+        torch.testing.assert_close(loss.detach().cpu(), reference_loss, atol=1e-2, rtol=0)
+        loss.backward()
+        model.scale_and_reduce_grad()
+
+        for name, param in xtuner_params.items():
+            assert param.grad is not None, name
+            grad = param.grad.full_tensor() if isinstance(param.grad, DTensor) else param.grad
+            actual = grad.detach().float().cpu()
+            expected = reference_grads[name]
+            relative_error = (actual - expected).norm() / expected.norm().clamp_min(1e-12)
+            assert relative_error < 0.06, f"{name}: relative gradient error {relative_error.item():.4g}"
+
+    @property
+    def world_size(self) -> int:
+        return 2
+
+
 class TestNoPEDSAMLAConfigValidatesAssignment:
     def test_backend_assignment_is_validated(self):
         """`examples/v1/config/sft_glm53.py` sets the backend from an env var *after*
@@ -397,4 +501,3 @@ class TestNoPEDSAMLAConfigValidatesAssignment:
             cfg.sparse_mla_backend = "tilelang"
         cfg.sparse_mla_backend = "torch"
         assert cfg.sparse_mla_backend == "torch"
-
