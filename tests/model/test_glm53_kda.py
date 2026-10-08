@@ -7,6 +7,7 @@ TestKDAGate
     test_fused_kda_gate_matches_naive_reference           融合 gate 与朴素实现一致
 TestKDAModuleParity
     test_kda_module_matches_hf_single_document            单文档下与 HF 实现一致
+    test_kda_chunk_backward_matches_hf                     chunk 前向和全部梯度与 HF 对齐
     test_kda_module_packed_multi_document_matches_concatenated_single_document_forwards
                                                           packed 多文档等价于逐文档前向
 TestKDASequenceParallel
@@ -14,6 +15,7 @@ TestKDASequenceParallel
 """
 
 import inspect
+import math
 
 import pytest
 import torch
@@ -41,7 +43,15 @@ def _hf_glm53_kda(**overrides):
     )
     kwargs.update(overrides)
     config = Glm5NextTextConfig(**kwargs)
-    return Glm5NextTextLinearAttention(config, layer_idx=0), config
+    module = Glm5NextTextLinearAttention(config, layer_idx=0)
+    # A directly constructed HF attention module has not run PreTrainedModel.post_init().
+    with torch.no_grad():
+        module.forget_gate.A_log.zero_()
+        module.forget_gate.dt_bias.uniform_(math.log(1e-3), math.log(1e-1))
+        dt = module.forget_gate.dt_bias.exp().clamp_min(1e-4)
+        module.forget_gate.dt_bias.copy_(dt + torch.log(-torch.expm1(-dt)))
+        module.o_norm.weight.fill_(1)
+    return module, config
 
 
 def _build_xtuner_kda(hidden_size=64, num_heads=4, head_dim=16, conv_kernel_size=4):
@@ -130,6 +140,39 @@ class TestKDAModuleParity:
             xtuner_out = xtuner_module(hidden_states, seq_ctx)["projected_output"]
 
         torch.testing.assert_close(xtuner_out, hf_out, atol=2e-2, rtol=2e-2)
+
+    @pytest.mark.gpu
+    def test_kda_chunk_backward_matches_hf(self):
+        # HF uses chunked KDA for prefill; compare its public output and all gradients.
+        seq_len = 80
+        torch.manual_seed(0)
+        hf_module, _ = _hf_glm53_kda()
+        hf_module = hf_module.cuda()
+        xtuner_module = _build_xtuner_kda().cuda()
+        _copy_hf_weights_into_xtuner(hf_module, xtuner_module)
+
+        hf_hidden = torch.randn(1, seq_len, 64, device="cuda", requires_grad=True)
+        xtuner_hidden = hf_hidden.detach().clone().requires_grad_()
+        seq_ctx = SequenceContext.from_input_ids((torch.zeros(1, seq_len, dtype=torch.long),), device="cuda")
+        hf_out = hf_module(hf_hidden)
+        xtuner_out = xtuner_module(xtuner_hidden, seq_ctx)["projected_output"]
+        upstream = torch.randn_like(hf_out)
+        hf_out.backward(upstream)
+        xtuner_out.backward(upstream)
+
+        torch.testing.assert_close(xtuner_out, hf_out, atol=2e-2, rtol=2e-2)
+        torch.testing.assert_close(xtuner_hidden.grad, hf_hidden.grad, atol=2e-2, rtol=2e-2)
+        # HF fuses the three causal convolutions; XTuner stores them separately.
+        hf_grads = {name: param.grad for name, param in hf_module.named_parameters()}
+        xtuner_grads = {name: param.grad for name, param in xtuner_module.named_parameters()}
+        qkv_dim = hf_module.qkv_dim
+        conv_grads = hf_grads.pop("conv1d.weight").split(qkv_dim, dim=0)
+        for name, grad in zip(("q_conv1d.weight", "k_conv1d.weight", "v_conv1d.weight"), conv_grads):
+            torch.testing.assert_close(xtuner_grads.pop(name), grad, atol=2e-2, rtol=2e-2)
+        for name, grad in hf_grads.items():
+            xtuner_name = name.removeprefix("forget_gate.")
+            torch.testing.assert_close(xtuner_grads.pop(xtuner_name), grad, atol=5e-2, rtol=2e-2, msg=name)
+        assert not xtuner_grads
 
     @pytest.mark.gpu
     def test_kda_module_packed_multi_document_matches_concatenated_single_document_forwards(self):
