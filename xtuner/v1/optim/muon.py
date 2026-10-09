@@ -383,6 +383,9 @@ class Muon(Optimizer):
         self._muon_split_sizes = muon_split_sizes or {}
         self.register_state_dict_post_hook(self._remove_clip_grad_policy)
         self.register_load_state_dict_pre_hook(self._restore_clip_grad_policy)
+        # DCP loads a checkpoint into the keys of the current state_dict, and `lr_ratio` below makes the state look
+        # initialized to torch's `_init_optim_state`: materialize the lazy states so that a resume restores them.
+        self.register_state_dict_pre_hook(self._initialize_states)
 
         # Pre-compute lr adjustment ratios for each Muon parameter based on global shape.
         # This must happen at init time because DTensor.shape here is guaranteed to be
@@ -442,6 +445,13 @@ class Muon(Optimizer):
         for group in state_dict["param_groups"]:
             group.pop("clip_grad", None)
         return state_dict
+
+    @staticmethod
+    def _initialize_states(optimizer: Optimizer) -> None:
+        muon = cast(Muon, optimizer)
+        for group in muon.param_groups:
+            for p in group["params"]:
+                muon._get_or_initialize_state(p, group["algorithm"])
 
     @staticmethod
     def _restore_clip_grad_policy(optimizer: Optimizer, state_dict: dict[str, Any]) -> dict[str, Any]:
