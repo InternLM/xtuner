@@ -146,8 +146,6 @@ class TrainingController:
             if not self._roles:
                 raise KeyError(f"role is not available in actor-only stage: {role}")
             raise KeyError(f"role is not registered: {role}")
-        if role == "actor" and not self._roles:
-            return
         handles = [self._invoke(worker, "switch_role_modules", role) for worker in self.workers]
         self._resolve(handles)
 
@@ -572,7 +570,7 @@ class TrainingController:
                         )
                     )
                 critic_log_infos = ray.get(critic_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
-                self.switch_role_modules("actor")
+            self.switch_role_modules("actor")
 
             for dispatch in pack_plan["dp_dispatches"].values():
                 indices = dispatch["sample_indices"]

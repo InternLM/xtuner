@@ -932,7 +932,7 @@ class BaseRLTrainer:
         step_timer_dict: dict,
         *,
         offload_rollout_before_train: bool = False,
-        onload_train_before_train: bool = False,
+        resume_train_nccl_before_train: bool = False,
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
     ) -> TrainInfo:
@@ -945,18 +945,16 @@ class BaseRLTrainer:
         self._save_trajectories(train_batch, train_trajectory_path)
         self.logger.info(f"Train step {train_step} train trajectories saved to {train_trajectory_path}")
 
-        # 共卡训练前切换资源：检查 rollout -> offload rollout -> onload train。
+        # 共卡训练前切换资源：检查 rollout -> offload rollout
         if offload_rollout_before_train:
             ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
-        if onload_train_before_train:
+        if resume_train_nccl_before_train:
             if getattr(self, "_train_nccl_suspended", False):
                 with timer("resume_train_nccl", step_timer_dict):
                     self.train_controller.resume_train_nccl_process_groups()
                 self._train_nccl_suspended = False
-            with timer("onload", step_timer_dict):
-                self.train_controller.onload(target="all")
-                self.logger.info("Training controller loaded")
 
+        # fit内部再做worker的onload，ppo onload critic, 其他的onload actor
         with timer("training", step_timer_dict):
             workers_log_item, data_info = self.train_controller.fit(
                 train_batch,
@@ -1522,7 +1520,7 @@ class RLColocateTrainer(BaseRLTrainer):
                         train_step,
                         step_timer_dict,
                         offload_rollout_before_train=True,
-                        onload_train_before_train=True,
+                        resume_train_nccl_before_train=True,
                         raw_rewards_sum=produce_result.raw_rewards_sum,
                         raw_rewards_count=produce_result.raw_rewards_count,
                     )
@@ -1562,7 +1560,7 @@ class RLColocateTrainer(BaseRLTrainer):
                     train_step,
                     step_timer_dict,
                     offload_rollout_before_train=False,
-                    onload_train_before_train=False,
+                    resume_train_nccl_before_train=False,
                 )
                 eval_log_info: dict[str, float] = {}
                 produce_result = ProduceBatchResult(rollout_states=train_batch)
