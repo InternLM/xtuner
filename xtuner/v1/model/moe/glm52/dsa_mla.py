@@ -1,28 +1,77 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Literal, cast
+from typing import Literal, TypedDict, cast
 
 import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
+from typing_extensions import NotRequired, overload
 
 from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
+from xtuner.v1.model.utils import reuse_during_recompute
+from xtuner.v1.module.attention.attn_outputs import AttnOutputs
+from xtuner.v1.module.attention.mla import MLAConfig, MultiLatentAttention, mla_apply_rotary_pos_emb
+from xtuner.v1.module.linear import build_linear
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm import gather_for_sequence_parallel
 from xtuner.v1.ops.sparse_mla import (
+    DSAIndexerBackend,
     DSATopKIndicesProtocol,
+    SparseMLABackend,
     SparseMLAProtocol,
     ensure_cudnn_dsa_runtime_available,
+    ensure_cute_dsl_runtime_available,
+    ensure_deep_select_runtime_available,
+    ensure_flash_mla_runtime_available,
     ensure_tilelang_runtime_available,
     get_dsa_topk_indices,
     get_sparse_mla,
 )
 
-from ..linear import build_linear
-from .attn_outputs import AttnOutputs
-from .dsa_topk_sharing import build_dsa_topk_release_plan, dsa_topk_source_layer, get_dsa_topk_sharing_runtime
-from .mla import MLAConfig, MultiLatentAttention, mla_apply_rotary_pos_emb
+from .dsa_topk_sharing import dsa_topk_source_layer
+
+
+class GLM52AttnOutputs(AttnOutputs):
+    """GLM-5.2 attention outputs with explicit cross-layer DSA IDs."""
+
+    dsa_topk_ids: torch.Tensor
+
+
+class DSAIndexerOutput(TypedDict):
+    """Frozen indexer result; logits are reserved for a future trainable
+    path."""
+
+    dsa_topk_ids: torch.Tensor
+    dsa_topk_logits: NotRequired[torch.Tensor]
+
+
+def _validate_indexer_backend_config(
+    indexer_backend: DSAIndexerBackend,
+    *,
+    index_head_dim: int,
+    index_n_heads: int,
+) -> None:
+    """Validate the DeepGEMM FP8 Indexer contract."""
+
+    if indexer_backend != "deep_gemm_fp8":
+        return
+    if index_head_dim != 128:
+        raise ValueError(f"deep_gemm_fp8 GLM-5.2 Indexer requires index_head_dim=128, got {index_head_dim}")
+    from xtuner.v1.ops.sparse_mla.lmdeploy_fp8_index import DEEPGEMM_MQA_SUPPORTED_HEADS
+
+    if index_n_heads not in DEEPGEMM_MQA_SUPPORTED_HEADS:
+        raise ValueError(
+            "deep_gemm_fp8 Indexer requires a head count supported by DeepGEMM's contiguous MQA "
+            f"({sorted(DEEPGEMM_MQA_SUPPORTED_HEADS)}), got {index_n_heads}"
+        )
+
+
+def _validate_query_chunk_size(value: int | None, backend: str, *, field_name: str) -> None:
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
+        raise ValueError(f"{field_name} must be a positive integer, got {value!r}")
+    if value is not None and backend not in ("tilelang", "cudnn_dsa", "flash_mla", "tilelang_deepselect"):
+        raise ValueError("query-chunk Indexer selection requires a TileLang selector")
 
 
 class LayerNorm(nn.Module):
@@ -67,7 +116,8 @@ class DSAIndexer(nn.Module):
         index_head_dim: int,
         index_n_heads: int,
         index_topk: int,
-        indexer_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch",
+        indexer_backend: DSAIndexerBackend = "torch",
+        topk_query_chunk_size: int | None = None,
     ):
         super().__init__()
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -75,6 +125,8 @@ class DSAIndexer(nn.Module):
         self.index_n_heads = index_n_heads
         self.index_topk = index_topk
         self.indexer_backend = indexer_backend
+        _validate_query_chunk_size(topk_query_chunk_size, indexer_backend, field_name="topk_query_chunk_size")
+        self.topk_query_chunk_size = topk_query_chunk_size
         self.dsa_topk_indices_func: DSATopKIndicesProtocol = get_dsa_topk_indices(indexer_backend)
         # wq_b.weight: [index_n_heads * index_head_dim, q_lora_rank]
         self.wq_b = build_linear(q_lora_rank, index_n_heads * index_head_dim, bias=False)
@@ -83,18 +135,14 @@ class DSAIndexer(nn.Module):
         self.k_norm = LayerNorm(index_head_dim, eps=1e-6)
         # weights_proj.weight: [index_n_heads, hidden_size]
         self.weights_proj = build_linear(hidden_size, index_n_heads, bias=False)
-        # The indexer only produces integer DSA top-k IDs under no_grad, so its
-        # parameters must not be registered with the training optimizer.
-        self.requires_grad_(False)
 
-    @torch.no_grad()
     def forward(
         self,
         hidden_states: torch.Tensor,
         q_resid: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
-    ) -> torch.Tensor:
+    ) -> DSAIndexerOutput:
         """Compute DSA top-k indices for each local query token.
 
         Shapes use ``S`` for the local sequence length and ``S_g`` for the
@@ -142,29 +190,23 @@ class DSAIndexer(nn.Module):
         q = torch.cat([q_pe, q_nope], dim=-1)
         k = torch.cat([k_pe, k_nope], dim=-1)
         # weights: [bsz, S, Ni]
-        weights = self.weights_proj(hidden_states).float() * (self.index_n_heads**-0.5)
+        weights = self.weights_proj(hidden_states).float()
 
-        # Top-k 索引是整数，不需要梯度，所以整个 indexer 都放在 no_grad 下。
-        # 这解释了 Case 1 为什么只在 compile 下显错：
-        #   eager COMPUTE: indexer 不产生槽位 -> SparseMLA 保存 [A, B, C]
-        #   eager REUSE:   cache read 不产生槽位 -> SparseMLA 保存 [A, B, C]
-        # original/replay 虽然走了不同分支，但 checkpoint 看到的保存清单仍能对齐。
-        # compile 会把 indexer 周围的可求导计算按 compiled block 打包；COMPUTE 与
-        # REUSE 经过不同 graph break 后，可能分别保存 [A, B, C, D] 和
-        # [A, X, C, D]，同一槽位的 metadata 不同才触发 CheckpointError。
-        # 这里的字母只表示保存槽位，不表示真实变量或 Tensor 数值。
         # Index Q 按 query token 保持分片，只有 K 需要全局 gather。
         # k: [bsz, S_g, Di]
         k = gather_for_sequence_parallel(k, dim=1, sp_mesh=seq_ctx.sequence_parallel_mesh)
         # returns topk_indices: [S, 1, K]
-        return self.dsa_topk_indices_func(
+        dsa_topk_ids = self.dsa_topk_indices_func(
             q,
             k,
             weights,
             seq_ctx,
             index_head_dim=self.index_head_dim,
             index_topk=self.index_topk,
+            query_chunk_size=self.topk_query_chunk_size,
         )
+        dsa_topk_ids = dsa_topk_ids.to(torch.int32).contiguous()
+        return {"dsa_topk_ids": dsa_topk_ids}
 
 
 class DSAMLAConfig(MLAConfig):
@@ -175,7 +217,11 @@ class DSAMLAConfig(MLAConfig):
     index_skip_topk_offset: int = 0
     indexer_rope_interleave: bool = True
     indexer_types: list[str] | None = None
-    sparse_mla_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch"
+    sparse_mla_backend: SparseMLABackend = "torch"
+    # ``deep_gemm_fp8`` selects the DeepGEMM FP8 MQA score path.
+    indexer_backend: DSAIndexerBackend | None = None
+    freeze_dsa_indexer: bool = True
+    indexer_topk_query_chunk_size: int | None = None
 
     def build(
         self,
@@ -186,10 +232,33 @@ class DSAMLAConfig(MLAConfig):
         generate_config: GenerateConfig | None = None,
         float8_cfg: Float8Config | None = None,
     ) -> "DSAMultiLatentAttention":
-        if self.sparse_mla_backend in ("tilelang", "cudnn_dsa"):
+        if not self.freeze_dsa_indexer:
+            raise ValueError("freeze_dsa_indexer=False is not supported until the indexer has a differentiable output")
+        indexer_backend = self.indexer_backend or self.sparse_mla_backend
+        _validate_indexer_backend_config(
+            indexer_backend,
+            index_head_dim=self.index_head_dim,
+            index_n_heads=self.index_n_heads,
+        )
+        _validate_query_chunk_size(
+            self.indexer_topk_query_chunk_size,
+            indexer_backend,
+            field_name="indexer_topk_query_chunk_size",
+        )
+        if indexer_backend in ("tilelang", "tilelang_deepselect") or self.sparse_mla_backend in (
+            "tilelang",
+            "cudnn_dsa",
+            "flash_mla",
+        ):
             ensure_tilelang_runtime_available()
+        if indexer_backend == "tilelang_deepselect":
+            ensure_deep_select_runtime_available()
+        if indexer_backend == "cute_dsl":
+            ensure_cute_dsl_runtime_available()
         if self.sparse_mla_backend == "cudnn_dsa":
             ensure_cudnn_dsa_runtime_available()
+        if self.sparse_mla_backend == "flash_mla":
+            ensure_flash_mla_runtime_available()
 
         return DSAMultiLatentAttention(
             **self.model_dump(),
@@ -213,7 +282,10 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         index_skip_topk_offset: int = 0,
         indexer_rope_interleave: bool = True,
         indexer_types: list[str] | None = None,
-        sparse_mla_backend: Literal["torch", "tilelang", "cudnn_dsa"] = "torch",
+        sparse_mla_backend: SparseMLABackend = "torch",
+        indexer_backend: DSAIndexerBackend | None = None,
+        freeze_dsa_indexer: bool = True,
+        indexer_topk_query_chunk_size: int | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -240,19 +312,15 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         self.indexer_rope_interleave = indexer_rope_interleave
         self.indexer_types = indexer_types
         self.sparse_mla_backend = sparse_mla_backend
+        self.indexer_backend = indexer_backend or sparse_mla_backend
+        self.freeze_dsa_indexer = freeze_dsa_indexer
+        _validate_query_chunk_size(
+            indexer_topk_query_chunk_size,
+            self.indexer_backend,
+            field_name="indexer_topk_query_chunk_size",
+        )
+        self.indexer_topk_query_chunk_size = indexer_topk_query_chunk_size
         self.sparse_mla_func: SparseMLAProtocol = get_sparse_mla(sparse_mla_backend)
-        if indexer_types is None:
-            self.dsa_topk_last_use, self.dsa_topk_recompute_release = {}, {}
-        else:
-            release_plan = build_dsa_topk_release_plan(
-                num_main_layers=len(indexer_types),
-                num_mtp_layers=0,
-                indexer_types=indexer_types,
-                index_skip_topk_offset=index_skip_topk_offset,
-                index_topk_freq=index_topk_freq,
-            )
-            self.dsa_topk_last_use = release_plan.forward_last_use
-            self.dsa_topk_recompute_release = release_plan.recompute_release
 
         if self.q_lora_rank is None:
             raise ValueError("DSA MLA requires q_lora_rank because the indexer consumes q_a_layernorm output.")
@@ -273,8 +341,11 @@ class DSAMultiLatentAttention(MultiLatentAttention):
             index_head_dim=self.index_head_dim,
             index_n_heads=self.index_n_heads,
             index_topk=self.index_topk,
-            indexer_backend=self.sparse_mla_backend,
+            indexer_backend=self.indexer_backend,
+            topk_query_chunk_size=self.indexer_topk_query_chunk_size,
         )
+        if self.freeze_dsa_indexer:
+            self.indexer.requires_grad_(False)
 
     def get_muon_split_sizes(self) -> dict[nn.Parameter, tuple[int, ...]]:
         """Return the logical row blocks used by GLM MuonSplit."""
@@ -291,7 +362,8 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
-    ) -> AttnOutputs:
+        dsa_topk_ids: torch.Tensor | None = None,
+    ) -> GLM52AttnOutputs:
         """Absorbed DSA-MLA forward for packed training (``bsz == 1``).
 
         Shapes use ``S`` for the local sequence length and ``S_g`` for the
@@ -348,10 +420,8 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         # w_kc: [N, Dn, Rkv]; w_vc: [N, Dv, Rkv]
         w_kc, w_vc = torch.split(wkv_b, [self.qk_nope_head_dim, self.v_head_dim], dim=1)
 
-        # q_nope: [bsz, N, S, Rkv]
-        q_nope = torch.einsum("bhsd,hdm->bhsm", q_nope, w_kc)
-        # query_states: [S, N, Rkv + Dr]
-        query_states = torch.cat([q_nope, q_pe], dim=-1).squeeze(0).transpose(0, 1).contiguous()
+        # query_states: [S, N, Rkv + Dr] = [absorb(q_nope, w_kc), q_pe]
+        query_states = _absorbed_query(q_nope.squeeze(0).transpose(0, 1), q_pe.squeeze(0).transpose(0, 1), w_kc)
         # key_states: [bsz, S, Rkv + Dr] -> [S, 1, Rkv + Dr]
         key_states = torch.cat([kv_compressed, k_pe.transpose(1, 2).squeeze(2)], dim=-1)
         key_states = key_states.squeeze(0).unsqueeze(1).contiguous()
@@ -365,21 +435,35 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         # key_states: [S_g, 1, Rkv + Dr]
         key_states = gather_for_sequence_parallel(key_states, dim=0, sp_mesh=seq_ctx.sequence_parallel_mesh)
 
-        # topk_indices: [S, 1, K]
-        topk_indices = get_dsa_topk_sharing_runtime().get_or_compute(
-            layer=self,
-            seq_ctx=seq_ctx,
-            compute_source_topk=lambda: self.indexer(
-                hidden_states,
-                q_resid,
-                position_embeddings,
-                seq_ctx,
-            ),
-        )
+        # A source layer computes IDs once; shared layers receive the same
+        # explicit tensor reference from the GLM decoder stack.
+        if dsa_topk_ids is None:
+            if not hasattr(self, "indexer"):
+                raise RuntimeError(f"DSA shared layer {self.layer_idx} requires dsa_topk_ids.")
+            if self.freeze_dsa_indexer:
+                with torch.no_grad():
+                    indexer_output = reuse_during_recompute(
+                        self.indexer,
+                        hidden_states,
+                        q_resid,
+                        position_embeddings,
+                        seq_ctx,
+                    )
+            else:
+                indexer_output = self.indexer(
+                    hidden_states,
+                    q_resid,
+                    position_embeddings,
+                    seq_ctx,
+                )
+            dsa_topk_ids = indexer_output["dsa_topk_ids"]
+        elif dsa_topk_ids.dtype != torch.int32 or not dsa_topk_ids.is_contiguous():
+            raise RuntimeError("dsa_topk_ids must be a contiguous torch.int32 tensor.")
+
         sparse_mla_outputs = self.sparse_mla_func(
             query_states,
             key_states,
-            topk_indices,
+            dsa_topk_ids,
             self.softmax_scale,
             value_dim=self.kv_lora_rank,
         )
@@ -396,4 +480,65 @@ class DSAMultiLatentAttention(MultiLatentAttention):
             "raw_output": raw_output,
             "projected_output": projected_output,
             "softmax_lse": softmax_lse,
+            "dsa_topk_ids": dsa_topk_ids,
         }
+
+    @overload  # type: ignore
+    def __call__(  # type: ignore
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        seq_ctx: SequenceContext,
+        dsa_topk_ids: torch.Tensor | None = None,
+    ) -> GLM52AttnOutputs: ...
+
+    __call__ = nn.Module.__call__
+
+
+# The absorbed query is written by opaque custom ops: under torch.compile a strided ``bmm(out=...)`` would be
+# functionalized into a GEMM plus a copy, which is exactly the transpose this path avoids.
+@torch.library.custom_op("glm52::absorbed_query", mutates_args=())
+def _absorbed_query(q_nope: torch.Tensor, q_pe: torch.Tensor, w_kc: torch.Tensor) -> torch.Tensor:
+    # q_nope: [S, N, Dn] (a view of q_b_proj's output); q_pe: [S, N, Dr]; w_kc: [N, Dn, Rkv] -> [S, N, Rkv + Dr]
+    rank = w_kc.shape[-1]
+    query = q_nope.new_empty(q_nope.shape[0], q_nope.shape[1], rank + q_pe.shape[-1])
+    # cuBLAS reads each head of q_nope in place and writes it into the attention layout. The einsum + cat path wrote
+    # [N, S, Rkv] and then transposed the whole 4.8 GB query at 512K/SP8 (11.2 ms per call, ~1.6 ms this way).
+    torch.bmm(q_nope.transpose(0, 1), w_kc, out=query[..., :rank].transpose(0, 1))
+    query[..., rank:] = q_pe
+    return query
+
+
+@_absorbed_query.register_fake
+def _(q_nope: torch.Tensor, q_pe: torch.Tensor, w_kc: torch.Tensor) -> torch.Tensor:
+    return q_nope.new_empty(q_nope.shape[0], q_nope.shape[1], w_kc.shape[-1] + q_pe.shape[-1])
+
+
+@torch.library.custom_op("glm52::absorbed_query_backward", mutates_args=())
+def _absorbed_query_backward(
+    grad_query: torch.Tensor, q_nope: torch.Tensor, w_kc: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    grad_absorbed = grad_query[..., : w_kc.shape[-1]].transpose(0, 1)  # [N, S, Rkv]
+    grad_q_nope = q_nope.new_empty(q_nope.shape)
+    torch.bmm(grad_absorbed, w_kc.transpose(1, 2), out=grad_q_nope.transpose(0, 1))
+    grad_w_kc = torch.bmm(q_nope.transpose(0, 1).transpose(1, 2), grad_absorbed)
+    return grad_q_nope, grad_w_kc
+
+
+@_absorbed_query_backward.register_fake
+def _(grad_query: torch.Tensor, q_nope: torch.Tensor, w_kc: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    return q_nope.new_empty(q_nope.shape), w_kc.new_empty(w_kc.shape)
+
+
+def _setup_absorbed_query_context(ctx, inputs, output) -> None:
+    q_nope, _, w_kc = inputs
+    ctx.save_for_backward(q_nope, w_kc)
+
+
+def _absorbed_query_grad(ctx, grad_query: torch.Tensor):
+    q_nope, w_kc = ctx.saved_tensors
+    grad_q_nope, grad_w_kc = _absorbed_query_backward(grad_query, q_nope, w_kc)
+    return grad_q_nope, grad_query[..., w_kc.shape[-1] :], grad_w_kc
+
+
+_absorbed_query.register_autograd(_absorbed_query_grad, setup_context=_setup_absorbed_query_context)

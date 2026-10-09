@@ -185,6 +185,16 @@ class GatedDeltaNet(nn.Module):
         self.in_proj_b = build_linear(self.hidden_size, self.num_v_heads, bias=False)
         self.in_proj_a = build_linear(self.hidden_size, self.num_v_heads, bias=False)
 
+    def get_muon_split_sizes(self) -> dict[nn.Parameter, tuple[int, ...]]:
+        """Return the logical Q, K, and V row blocks for MuonSplit."""
+        return {
+            cast(nn.Parameter, self.in_proj_qkv.weight): (
+                self.key_dim,
+                self.key_dim,
+                self.value_dim,
+            )
+        }
+
     def forward_for_sp(
         self,
         hidden_states: torch.Tensor,

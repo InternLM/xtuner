@@ -20,7 +20,6 @@ _LIGHTWEIGHT_TEST_FILES = {
     "test_cpu_pg.py",
     "test_multi_task_agent_loop_manager.py",
     "test_pending_tasks.py",
-    "test_prepare_train_data.py",
     "test_produce_progress.py",
     "test_producer.py",
     "test_replay_buffer.py",

@@ -85,22 +85,35 @@ def get_low_latency_buffer(
     if _buffer is None:
         # NOTES: for best performance, the QP number **must** be equal to the number of the local experts
         assert num_experts % group.size() == 0
-        # _buffer = Buffer(group, num_nvl_bytes, num_rdma_bytes)
+        num_qps_per_rank = max(num_experts // group.size(), Buffer.num_sms // 2)
         _buffer = Buffer(
             group,
             num_nvl_bytes,
             num_rdma_bytes,
             low_latency_mode=True,
-            num_qps_per_rank=max(num_experts // group.size(), Buffer.num_sms // 2),
+            num_qps_per_rank=num_qps_per_rank,
         )
         logger.info(
-            f"{num_nvl_bytes}, {_buffer.num_nvl_bytes}, {num_max_dispatch_tokens_per_rank}, {hidden}, {num_experts}, {group.size()}"
+            "[DeepEP low-latency] allocated buffer: "
+            f"num_nvl_bytes={num_nvl_bytes} (allocated={_buffer.num_nvl_bytes}), "
+            f"num_rdma_bytes={num_rdma_bytes} (allocated={_buffer.num_rdma_bytes}), "
+            f"num_max_dispatch_tokens_per_rank={num_max_dispatch_tokens_per_rank}, "
+            f"hidden={hidden}, num_experts={num_experts}, ep_group_size={group.size()}, "
+            f"num_qps_per_rank={num_qps_per_rank}"
         )
     else:
         assert num_nvl_bytes <= _buffer.num_nvl_bytes, (
-            f"{num_nvl_bytes}, {_buffer.num_nvl_bytes}, {num_max_dispatch_tokens_per_rank}, {hidden}, {num_experts}, {group.size()}"
+            "[DeepEP low-latency] NVL buffer too small: "
+            f"required={num_nvl_bytes}, allocated={_buffer.num_nvl_bytes}, "
+            f"num_max_dispatch_tokens_per_rank={num_max_dispatch_tokens_per_rank}, "
+            f"hidden={hidden}, num_experts={num_experts}, ep_group_size={group.size()}"
         )
-        assert num_rdma_bytes <= _buffer.num_rdma_bytes
+        assert num_rdma_bytes <= _buffer.num_rdma_bytes, (
+            "[DeepEP low-latency] RDMA buffer too small: "
+            f"required={num_rdma_bytes}, allocated={_buffer.num_rdma_bytes}, "
+            f"num_max_dispatch_tokens_per_rank={num_max_dispatch_tokens_per_rank}, "
+            f"hidden={hidden}, num_experts={num_experts}, ep_group_size={group.size()}"
+        )
     return _buffer
 
 
@@ -150,6 +163,7 @@ def dispatch_forward(
     num_experts: int,
     group: dist.ProcessGroup,
     previous_event: Optional[EventOverlap] = None,
+    async_finish: bool = True,
 ) -> Tuple[
     Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
     torch.Tensor,
@@ -161,6 +175,12 @@ def dispatch_forward(
     # NOTES: an optional `previous_event` means a CUDA event captured that you want to make it as a dependency
     # of the dispatch kernel, it may be useful with communication-computation overlap. For more information, please
     # refer to the docs of `Buffer.dispatch`
+    # `async_finish=False` makes DeepEP itself order the current stream after the communication kernels instead of
+    # `record_stream`-ing every input and output on the communication stream. A recorded tensor freed on the host stays
+    # pending in the caching allocator until its communication event completes on the GPU; with the host running
+    # ahead, multi-GiB dispatch/combine buffers are then unusable exactly when the next large allocation needs them,
+    # and near the device memory limit that forces a device-wide `release_cached_blocks`. Synchronous callers wait
+    # for the communication right after the call anyway, so they should pass `async_finish=False`.
     # _buffer = get_buffer(group, get_hidden_bytes(x))
     if isinstance(x, torch.Tensor):
         hidden_size = x.shape[-1]
@@ -180,8 +200,8 @@ def dispatch_forward(
         topk_idx,
         num_experts,
         previous_event=previous_event,
-        async_finish=True,
-        allocate_on_comm_stream=previous_event is not None,
+        async_finish=async_finish,
+        allocate_on_comm_stream=async_finish and previous_event is not None,
     )
     # Do MoE dispatch
     # NOTES: the CPU will wait for GPU's signal to arrive, so this is not compatible with CUDA graph
@@ -202,8 +222,8 @@ def dispatch_forward(
         is_token_in_rank=is_token_in_rank,
         num_tokens_per_expert=num_tokens_per_expert,
         previous_event=previous_event,
-        async_finish=True,
-        allocate_on_comm_stream=True,
+        async_finish=async_finish,
+        allocate_on_comm_stream=async_finish,
     )
     # For event management, please refer to the docs of the `EventOverlap` class
 
@@ -230,6 +250,7 @@ def dispatch_backward(
     handle: Tuple,
     group: dist.ProcessGroup,
     previous_event: Optional[EventOverlap] = None,
+    async_finish: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
     hidden_size = grad_recv_x.shape[-1]
     _buffer = get_low_latency_buffer(group, hidden=hidden_size, num_experts=num_experts)
@@ -240,9 +261,9 @@ def dispatch_backward(
         grad_recv_x,
         handle,
         topk_weights=grad_recv_topk_weights,
-        async_finish=True,
+        async_finish=async_finish,
         previous_event=previous_event,
-        allocate_on_comm_stream=previous_event is not None,
+        allocate_on_comm_stream=async_finish and previous_event is not None,
     )
 
     # For event management, please refer to the docs of the `EventOverlap` class
@@ -255,6 +276,7 @@ def combine_forward(
     handle: Tuple,
     group: dist.ProcessGroup,
     previous_event: Optional[EventOverlap] = None,
+    async_finish: bool = True,
 ) -> Tuple[torch.Tensor, EventOverlap]:
     hidden_size = x.shape[-1]
     _buffer = get_low_latency_buffer(group, hidden=hidden_size, num_experts=num_experts)
@@ -264,9 +286,9 @@ def combine_forward(
     combined_x, _, event = _buffer.combine(
         x,
         handle,
-        async_finish=True,
+        async_finish=async_finish,
         previous_event=previous_event,
-        allocate_on_comm_stream=previous_event is not None,
+        allocate_on_comm_stream=async_finish and previous_event is not None,
     )
 
     # For event management, please refer to the docs of the `EventOverlap` class
@@ -279,6 +301,7 @@ def combine_backward(
     handle: Tuple,
     group: dist.ProcessGroup,
     previous_event: Optional[EventOverlap] = None,
+    async_finish: bool = True,
 ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], EventOverlap]:
     hidden_size = grad_combined_x[0].shape[-1] if isinstance(grad_combined_x, tuple) else grad_combined_x.shape[-1]
     _buffer = get_low_latency_buffer(group, num_experts=num_experts, hidden=hidden_size)
@@ -288,9 +311,9 @@ def combine_backward(
     grad_x, _, _, _, _, event = _buffer.dispatch(
         grad_combined_x,
         handle=handle,
-        async_finish=True,
+        async_finish=async_finish,
         previous_event=previous_event,
-        allocate_on_comm_stream=previous_event is not None,
+        allocate_on_comm_stream=async_finish and previous_event is not None,
     )
 
     # For event management, please refer to the docs of the `EventOverlap` class

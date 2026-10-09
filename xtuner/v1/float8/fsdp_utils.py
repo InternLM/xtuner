@@ -1,4 +1,5 @@
 import math
+import os
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 import torch
@@ -20,6 +21,8 @@ from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, may
 logger = get_logger()
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
+
+_RL_FP8_QUANTIZE_IN_BF16_ENV = "XTUNER_RL_FP8_QUANTIZE_IN_BF16"
 
 
 def tensor_to_per_block_fp8_devided_64_scales(
@@ -160,6 +163,9 @@ def precompute_tilewise_float8_scale_for_fsdp(
                 f"Currently only reduce_mesh.ndim should equal to 1, got reduce_mesh.ndim = {reduce_mesh.ndim} for local_shape {local_shape}"
             )
         weights_same_shape_stack = torch.stack(weights_same_shape, dim=0)  # type: ignore
+        # 因为当前RL用bf16参数传输到推理引擎，这里为了训推一致性做类似处理
+        if os.environ.get(_RL_FP8_QUANTIZE_IN_BF16_ENV, "0") == "1":
+            weights_same_shape_stack = weights_same_shape_stack.bfloat16().float()
         if dim >= 128 and dim % 128 == 64:
             assert reduce_mesh_devided_64 is not None, (
                 f"reduce_mesh_devided_64 should not be None for local_shape {local_shape}."
@@ -385,9 +391,13 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
                 return (self._precomputed_w,), (self._precomputed_scale,)
             return (self._precomputed_w, self._precomputed_scale), None
         assert self._precomputed_scale is not None
+        quant_source = self._tensor
+        # 因为当前RL用bf16参数传输到推理引擎，这里为了训推一致性做类似处理
+        if os.environ.get(_RL_FP8_QUANTIZE_IN_BF16_ENV, "0") == "1":
+            quant_source = quant_source.bfloat16().float()
         if self._tensor.shape[0] >= 128 and self._tensor.shape[0] % 128 == 64:
             w_fp8_data = cast_to_per_block_fp8_devided_64_with_scales(
-                tensor=self._tensor,
+                tensor=quant_source,
                 scales=self._precomputed_scale,
                 fsdp_mesh=mesh,
                 block_size=128,
@@ -395,7 +405,7 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
             )
         else:
             w_fp8_data = cast_to_per_block_fp8_with_scales(
-                tensor=self._tensor,
+                tensor=quant_source,
                 scales=self._precomputed_scale,
                 block_size=128,
                 float8_dtype=self._dtype,

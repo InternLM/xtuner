@@ -20,7 +20,7 @@ from xtuner.v1.rl.rollout.chat_template import canonicalize_messages_for_chat_te
 from xtuner.v1.rl.rollout.trace_store import get_store
 from xtuner.v1.rl.utils import create_task
 
-from ..agent_loop import AgentLoop, AgentLoopConfig
+from ..agent_loop import AgentLoop, AgentLoopConfig, maybe_filter_invalid_sample
 
 
 def _import_from_path(path: str) -> Any:
@@ -136,9 +136,12 @@ class AgentInLocalhostLoop(AgentLoop):
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         async def generate_one(state: RolloutState) -> RolloutState:
             if self._sample_semaphore is None:
-                return await self.generate_sample(state, **kwargs)
-            async with self._sample_semaphore:
-                return await self.generate_sample(state, **kwargs)
+                state = await self.generate_sample(state, **kwargs)
+            else:
+                async with self._sample_semaphore:
+                    state = await self.generate_sample(state, **kwargs)
+            state = await self._teacher_scorer.on_sample_ready(state)
+            return state
 
         tasks: list[asyncio.Task[RolloutState]] = []
         for state in rollout_state:
@@ -147,7 +150,9 @@ class AgentInLocalhostLoop(AgentLoop):
             tasks.append(task)
 
         samples = await asyncio.gather(*tasks)
-        return _drop_failed_train_samples(samples, self.mode)
+        samples = _drop_failed_train_samples(samples, self.mode)
+        samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
+        return await self._teacher_scorer.on_group_ready(samples)
 
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
         try:

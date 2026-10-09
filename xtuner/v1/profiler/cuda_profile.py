@@ -91,6 +91,12 @@ class MemoryProfiler:
         torch.cuda.memory._record_memory_history(max_entries=MEMORY_SNAPSHOT_MAX_ENTRIES, stacks="python")
         self.profile_dir = profile_dir
 
+    def close(self):
+        try:
+            torch.cuda.memory._record_memory_history(enabled=None)
+        except TypeError:
+            torch.cuda.memory._record_memory_history(False)
+
     def step(self, exit_ctx: bool = False):
         if dist.is_initialized():
             rank = torch.distributed.get_rank()
@@ -125,8 +131,15 @@ def profiling_memory(profile_dir: Path):
         yield
         return
     profiler = MemoryProfiler(profile_dir)
-    yield
     try:
-        profiler.step(exit_ctx=False)
-    except torch.OutOfMemoryError:
-        profiler.step(exit_ctx=True)
+        try:
+            yield
+        except torch.OutOfMemoryError:
+            profiler.step(exit_ctx=True)
+            raise
+        else:
+            profiler.step(exit_ctx=False)
+    finally:
+        # close() flushes and releases profiler resources on all exit paths.
+        # Without it, consecutive memory profiling runs may overwrite each other's output.
+        profiler.close()

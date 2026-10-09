@@ -277,19 +277,22 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             assert "loss" in output
 
     @parametrize.parametrize(
-        "device,dispatcher,ep_size",
+        "device,dispatcher,ep_size,expert_tp_size",
         [
-            ("cuda", None, 1),
-            ("cuda", "all2all", 4),
-            ("cuda", "all2all", 8),
+            ("cuda", None, 1, 1),
+            ("cuda", "all2all", 4, 1),
+            ("cuda", "all2all", 8, 1),
+            # 覆盖 post-FSDP 的 EP + expert TP HF load/save 路径。
+            ("cuda", "all2all", 2, 2),
         ],
     )
-    def test_save_hf(self, device, dispatcher, ep_size):
+    def test_save_hf(self, device, dispatcher, ep_size, expert_tp_size):
         self.create_pg(device)
         with torch.device("meta"):
             cfg = Qwen3MoE30BA3Config()
             cfg.dispatcher = dispatcher
             cfg.ep_size = ep_size
+            cfg.expert_tp_size = expert_tp_size
             qwen_model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         fsdp_config = FSDPConfig(

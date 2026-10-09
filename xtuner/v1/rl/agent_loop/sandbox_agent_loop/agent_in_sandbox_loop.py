@@ -17,7 +17,7 @@ from xtuner.v1.rl.utils import create_task
 
 from ...rollout.chat_template import canonicalize_messages_for_chat_template
 from ...rollout.trace_store import get_store
-from ..agent_loop import AgentLoop, AgentLoopConfig
+from ..agent_loop import AgentLoop, AgentLoopConfig, maybe_filter_invalid_sample
 from .schemas import AgentRolloutItem, RolloutStatus
 
 
@@ -231,9 +231,12 @@ class AgentInSandboxLoop(AgentLoop):
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         async def generate_one(state: RolloutState) -> list[RolloutState]:
             if self._sample_semaphore is None:
-                return await self.generate_sample(state)
-            async with self._sample_semaphore:
-                return await self.generate_sample(state)
+                samples = await self.generate_sample(state)
+            else:
+                async with self._sample_semaphore:
+                    samples = await self.generate_sample(state)
+            samples = [await self._teacher_scorer.on_sample_ready(sample) for sample in samples]
+            return samples
 
         pending_tasks = []
         for state in rollout_state:
@@ -243,7 +246,9 @@ class AgentInSandboxLoop(AgentLoop):
         generated_samples = asyncio.gather(*pending_tasks)
         sample_groups = await generated_samples
         samples = [sample for sample_group in sample_groups for sample in sample_group]
-        return _drop_failed_train_samples(samples, self.mode)
+        samples = _drop_failed_train_samples(samples, self.mode)
+        samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
+        return await self._teacher_scorer.on_group_ready(samples)
 
     # NOTE: A single sandbox session may yield multiple trainable segments, so this returns a list
     # rather than the base class's single RolloutState. The base contract is never exercised for
@@ -287,12 +292,12 @@ class AgentInSandboxLoop(AgentLoop):
             response_message.get("finish_reason") or ("stop" if item.status == RolloutStatus.COMPLETED else "error")
         )
         rollout_state.reward = _extract_reward_payload(item)
+        rollout_state.extra_fields["origin_data_source"] = item.data_source
         rollout_state.extra_fields["agent_status"] = item.status.value
         selected_agent = _selected_agent(item)
         if selected_agent is not None:
             rollout_state.extra_fields["agent_name"] = selected_agent.get("name")
             rollout_state.extra_fields["agent_selected"] = _to_json_safe(selected_agent)
-        rollout_state.extra_fields["agent_artifacts"] = _to_json_safe(item.artifacts)
         rollout_state.extra_fields["agent_judgers"] = {
             name: record.model_dump(mode="json") for name, record in item.judgers.items()
         }
@@ -302,6 +307,7 @@ class AgentInSandboxLoop(AgentLoop):
         if item.error is not None:
             rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"
         if item.status != RolloutStatus.COMPLETED:
+            rollout_state.extra_fields["agent_artifacts"] = _to_json_safe(item.artifacts)
             return [rollout_state]
 
         segments = _load_train_trace_segments(item.artifacts)
@@ -350,6 +356,7 @@ class AgentInSandboxLoop(AgentLoop):
                 segment_state.response = _response_text(response_message)
             rollout_states.append(segment_state)
 
+        rollout_states[0].extra_fields["agent_artifacts"] = _to_json_safe(item.artifacts)
         return rollout_states
 
     def _fill_eval_rollout_state(self, rollout_state: RolloutState, item: AgentRolloutItem) -> None:
@@ -365,6 +372,7 @@ class AgentInSandboxLoop(AgentLoop):
         rollout_state.routed_experts = None
         rollout_state.response_mask = None
         rollout_state.response_model_steps = None
+        rollout_state.extra_fields["origin_data_source"] = item.data_source
         rollout_state.extra_fields["agent_status"] = item.status.value
         selected_agent = _selected_agent(item)
         if selected_agent is not None:

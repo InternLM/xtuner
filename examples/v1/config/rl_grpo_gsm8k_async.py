@@ -50,7 +50,8 @@ resources = AcceleratorResourcesConfig(
     accelerator="GPU",
     num_workers=8 * NNODE,
     num_cpus_per_worker=12,
-    cpu_memory_per_worker=16 * 1024**3,  # 16 GB
+    # 32 GB. Increased from 16 GB because checkpoint-engine shards use pinned memory.
+    cpu_memory_per_worker=32 * 1024**3,
 )
 
 # 2. rollout
@@ -64,6 +65,7 @@ rollout_config = RolloutConfig(
     gpu_memory_utilization=0.8,
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=(enable_return_routed_experts == "1"),
+    weight_transport_type="ipc"
 )
 
 # 3. judger

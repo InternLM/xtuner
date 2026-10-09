@@ -3,6 +3,8 @@ from pathlib import Path
 import tempfile
 import shutil
 import time
+from unittest.mock import patch
+
 from torch.distributed.device_mesh import init_device_mesh
 import parametrize
 import torch
@@ -13,7 +15,7 @@ from transformers import AutoTokenizer
 from collections import defaultdict
 
 from xtuner.v1.model.moe.moe import SequenceContext
-from xtuner.v1.model.base import ModelItem
+from xtuner.v1.model.base import HFSaveCfg, ModelItem
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoEConfig
 from xtuner.v1.config import FSDPConfig, LRConfig, AdamWConfig
@@ -34,21 +36,29 @@ DEVICE = get_device()
 
 
 class TestMoEEngine(DeterministicDDPTestCase):
-    @parametrize.parametrize(
-        "device,ep_size,sp_size",
-        [
-            ("cuda", 1, 1),
-            ("cuda", 2, 2),
-        ],
-    )
-    def test_moe_engine_train(self, device, ep_size, sp_size):
+    def test_moe_engine_train(self) -> None:
+        self._run_moe_engine_train_case("cuda", ep_size=2, sp_size=2, save_hf=False)
+
+    def test_moe_engine_train_and_save_hf(self) -> None:
+        self._run_moe_engine_train_case("cuda", ep_size=1, sp_size=1, save_hf=True)
+
+    def _run_moe_engine_train_case(
+        self,
+        device: str,
+        ep_size: int,
+        sp_size: int,
+        *,
+        save_hf: bool,
+    ) -> None:
         pg = self.create_pg(device)
 
+        hf_save_cfg = HFSaveCfg(bucket_size=8 * 1024**3) if save_hf else HFSaveCfg()
         moe_cfg = Qwen3MoE30BA3Config(
             ep_size=ep_size,
             balancing_loss_cfg=BalancingLossConfig(),
             z_loss_cfg=ZLossConfig(),
             compile_cfg=False,
+            hf_save_cfg=hf_save_cfg,
         )
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig()
@@ -108,6 +118,18 @@ class TestMoEEngine(DeterministicDDPTestCase):
         losses_ref = torch.tensor([2.44, 2.44, 2.42, 2.41, 2.34, 2.33, 2.16, 2.13, 1.71, 1.55])
         losses = torch.tensor(losses)
         self._check_loss_curve(losses, losses_ref)
+
+        if save_hf:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                save_dir = [tmpdir]
+                dist.broadcast_object_list(save_dir, src=0)
+                # On 8 ranks, an 8 GiB reconstruction bucket matches the faulty
+                # 16-rank/default-4-GiB batch size from the production OOM.
+                # Safetensors writing is external to the CUDA reconstruction
+                # under test and would otherwise write roughly 60 GB.
+                with patch("xtuner.v1.model.base.save_file"):
+                    engine.save_hf(save_dir[0])
+                dist.barrier()
 
         torch.cuda.empty_cache()
         try:

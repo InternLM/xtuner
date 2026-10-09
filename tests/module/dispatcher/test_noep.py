@@ -48,6 +48,7 @@ class TestNoEPDispatcher(TestCase):
         pre_dispatched = self.dispatcher.dispatch_preprocess(
             hidden_states=hidden_states,
             topk_ids=topk_ids,
+            topk_weights=topk_weights,
         )
         dispatched = self.dispatcher.dispatch(
             pre_dispatched=pre_dispatched,

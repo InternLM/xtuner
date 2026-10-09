@@ -7,13 +7,13 @@ export FLASH_ATTN_URL=https://github.com/Dao-AILab/flash-attention@060c9188beec3
 export ADAPTIVE_GEMM_URL=https://github.com/InternLM/AdaptiveGEMM@10411e08b182e853d0f3ecec4c68bf90c90e309f # fix fp8 dw k_grouped_gemm bug
 export GROUPED_GEMM_URL=https://github.com/InternLM/GroupedGEMM@aa5ffb21cb626d6cd61d99fc42958127b0b99be7
 export DEEP_EP_URL=https://github.com/deepseek-ai/DeepEP@9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee # v1.2.1
-export DEEP_GEMM_URL=https://github.com/deepseek-ai/DeepGEMM@c9f8b34dcdacc20aa746b786f983492c51072870 # v2.1.1.post3
+export DEEP_GEMM_URL=https://github.com/deepseek-ai/DeepGEMM@88965b078186ee7510ab9fc4f1d5ebc19adfa8d1 # v2.6.1 88965b0
 export CAUSAL_CONV1D_URL=https://github.com/Dao-AILab/causal-conv1d@da6dbaa9fd5a919967f14d3fd031da1288ad5025 # v1.6.0
 export FLA_URL="${FLA_URL-https://github.com/HAOCHENYE/flash-linear-attention@tmp-tensor-cache}"
 
 export TORCH_VERSION=${TORCH_VERSION:-"2.9.1"}
-export LMDEPLOY_URL="${LMDEPLOY_URL:-https://github.com/RunningLeon/lmdeploy@c14f389e9b2346f9835954ed90aefc0a0aac7ad4}"
-# export LMDEPLOY_VERSION="0.15.0"
+export LMDEPLOY_VERSION="${LMDEPLOY_VERSION:-0.17.0}"
+# export LMDEPLOY_URL="${LMDEPLOY_URL:-https://github.com/InternLM/lmdeploy@a52688dc6cc08a79d6998aa8331b8b15e469b4c4}"
 export PPA_SOURCE="https://mirrors.aliyun.com"
 export DEFAULT_PYPI_URL=${DEFAULT_PYPI_URL:-"https://mirrors.aliyun.com/pypi/simple"}
 # mirror https://download.pytorch.org/whl
@@ -40,6 +40,7 @@ docker build . \
   --build-arg DEEP_GEMM_URL=$DEEP_GEMM_URL \
   --build-arg XTUNER_URL=$XTUNER_URL \
   --build-arg XTUNER_COMMIT=$XTUNER_COMMIT \
+  --build-arg LMDEPLOY_VERSION="$LMDEPLOY_VERSION" \
   --build-arg LMDEPLOY_URL="$LMDEPLOY_URL" \
   --progress=plain \
   --label "BASE_IMAGE=$BASE_IMAGE" \
@@ -52,6 +53,7 @@ docker build . \
   --label "FLA_URL=${FLA_URL/@/\/tree\/}" \
   --label "DEEP_EP_URL=${DEEP_EP_URL/@/\/tree\/}" \
   --label "DEEP_GEMM_URL=${DEEP_GEMM_URL/@/\/tree\/}" \
+  --label "LMDEPLOY_VERSION=${LMDEPLOY_VERSION}" \
   --label "LMDEPLOY_URL=${LMDEPLOY_URL/@/\/tree\/}"
 
 echo "===== pip list in ${image_name}:${image_tag} ====="

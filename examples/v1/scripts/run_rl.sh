@@ -102,7 +102,11 @@ fi
 # 根据 NODE_COUNT 分配 num_cpus, 防止内存OOM
 node_count=${NODE_COUNT:-1}
 expected_accelerator_count=$((node_count * accelerator_per_node))
-export XTUNER_RL_NUM_WORKERS=${XTUNER_RL_NUM_WORKERS:-$expected_accelerator_count}
+# OPD launchers may assign a different number of Student GPUs to each node
+# after placing Teacher replicas.  Use their already-computed cluster total
+# for readiness; the local GPU count is only used to start this Ray node.
+expected_accelerator_count=${XTUNER_RL_NUM_WORKERS:-$expected_accelerator_count}
+export XTUNER_RL_NUM_WORKERS=${expected_accelerator_count}
 
 WORK_DIR=$(realpath "$WORK_DIR")
 if [ "$RAY_RANK" -eq 0 ]; then

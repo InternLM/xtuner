@@ -14,12 +14,12 @@ from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     Status,
     calculate_group_effective_response_masks,
-    discard_rollout_state,
     get_group_status,
     refresh_seq_staleness,
     reset_rollout_response,
     update_sample_version,
 )
+from xtuner.v1.rl.rollout.trace_store import release_and_discard_rollout_groups
 from xtuner.v1.rl.utils import (
     BetweenNode,
     ConditionNode,
@@ -488,10 +488,21 @@ class ReplayBuffer:
                     reset_rollout_response(item)
         else:
             for item in group:
-                discard_rollout_state(item)
                 item.status = Status.EXPIRED
 
         return Status.EXPIRED
+
+    @staticmethod
+    async def _discard_non_retryable_expired_groups(groups: list[list[RolloutState]]) -> None:
+        """Release non-retryable trace sessions in one RPC, then discard
+        groups."""
+        if not groups:
+            return
+
+        await release_and_discard_rollout_groups(groups)
+        for group in groups:
+            for item in group:
+                item.status = Status.EXPIRED
 
     async def put(
         self,
@@ -518,6 +529,7 @@ class ReplayBuffer:
         )
         staleness = max(item.seq_staleness for item in items)
         if status == Status.EXPIRED and not expired_groups_retryable:
+            await self._discard_non_retryable_expired_groups([items])
             return
         storage_item = StorageItem(
             item=items,
@@ -558,6 +570,7 @@ class ReplayBuffer:
         expired_counts: dict[str, int] = {}
         retryable_by_task = expired_groups_retryable_by_task or {}
         token_stale_thresholds = task_token_stale_thresholds or {}
+        non_retryable_expired_groups: list[list[RolloutState]] = []
         async with self._lock:
             updated_records: list[StorageItem] = []
             deleted_uids: list[int] = []
@@ -583,12 +596,14 @@ class ReplayBuffer:
                     if status == Status.EXPIRED:
                         expired_count += 1
                         if not retryable:
+                            non_retryable_expired_groups.append(record.item)
                             deleted_uids.append(record.uid)
                             continue
                     updated_records.append(replace(record, status=status, staleness=staleness))
                 expired_counts[task_name] = expired_count
             await self._storage.delete(deleted_uids)
             await self._storage.update(updated_records)
+        await self._discard_non_retryable_expired_groups(non_retryable_expired_groups)
         return expired_counts
 
     async def is_ready(

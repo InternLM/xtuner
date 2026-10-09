@@ -1,7 +1,6 @@
-from .sequence_context import DSATopKCacheState, SequenceContext
+from .sequence_context import SequenceContext
 
 
 __all__ = [
-    "DSATopKCacheState",
     "SequenceContext",
 ]

@@ -24,6 +24,8 @@ from xtuner.v1.model.base import (
     DEVICE_MODULE,
     AsyncHFSaveHandle,
     BatchForwardInfo,
+    DataBatchInfo,
+    ModelItem,
     ModelOutputs,
     XTunerBaseModelConfig,
 )
@@ -288,6 +290,9 @@ class BaseComposeModel(BaseModel):
                     raise RuntimeError(f"Missing cached async HF tensor for key: {name}")
                 tensors[name] = cached_tensor
             module._write_hf_save_plan({"hf_dir": hf_dir, "save_tasks": [(filename, tensors)]})
+
+    def pre_micro_batch_forward(self, data_batches: Sequence[ModelItem]) -> DataBatchInfo:
+        return self.language_model.pre_micro_batch_forward(data_batches)
 
     def post_micro_batch_forward(self, batch_outputs: Sequence[ModelOutputs]) -> BatchForwardInfo:
         return self.language_model.post_micro_batch_forward(batch_outputs)

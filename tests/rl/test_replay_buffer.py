@@ -21,9 +21,11 @@
 # 11. save/resume 保留 Ray ObjectRef：直接 ObjectRef 和 dict(dict(ObjectRef)) 嵌套结构恢复后，
 #     解引用得到的内容都应与保存前一致。
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import numpy as np
 import ray
@@ -41,6 +43,7 @@ REPLAY_BUFFER_CONFIGS = [
 def make_rollout_state(
     uid: int,
     *,
+    session_id: int | None = None,
     status: Status = Status.COMPLETED,
     seq_staleness: int = 0,
     prompt_ids: list[int] | None = None,
@@ -66,6 +69,7 @@ def make_rollout_state(
         group_id=uid,
         message=[{"role": "user", "content": f"prompt {uid}"}],
         prompt_ids=prompt_ids,
+        session_id=session_id,
         tokens=list(tokens) if tokens is not None else list(prompt_ids),
         response=response if response is not None else f"response {uid}",
         response_ids=response_ids,
@@ -193,6 +197,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 replay_buffer = replay_buffer_config_cls().build()
                 stale = make_rollout_state(
                     1,
+                    session_id=101,
                     prompt_ids=[101, 102],
                     tokens=[999],
                     response="stale response",
@@ -205,14 +210,19 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                     extra_fields={"train_prompt_ids": [101, 102]},
                 )
 
-                await replay_buffer.put(
-                    [stale],
-                    "task",
-                    current_train_step=5,
-                    stale_threshold=3,
-                    expired_groups_retryable=False,
-                )
+                with patch(
+                    "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
+                    new=AsyncMock(return_value={"101"}),
+                ) as release_sessions:
+                    await replay_buffer.put(
+                        [stale],
+                        "task",
+                        current_train_step=5,
+                        stale_threshold=3,
+                        expired_groups_retryable=False,
+                    )
 
+                release_sessions.assert_awaited_once_with(["101"])
                 assert stale.status == Status.EXPIRED
                 assert stale.prompt_ids is None
                 assert stale.tokens is None
@@ -230,6 +240,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 pixel_values = np.ones((2, 3), dtype=np.float32)
                 stale = make_rollout_state(
                     1,
+                    session_id=102,
                     prompt_ids=[101, 102],
                     tokens=[999],
                     response="stale response",
@@ -243,13 +254,18 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                     extra_fields={"train_prompt_ids": [101, 102]},
                 )
 
-                await replay_buffer.put(
-                    [stale],
-                    "task",
-                    current_train_step=5,
-                    stale_threshold=3,
-                )
+                with patch(
+                    "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
+                    new=AsyncMock(),
+                ) as release_sessions:
+                    await replay_buffer.put(
+                        [stale],
+                        "task",
+                        current_train_step=5,
+                        stale_threshold=3,
+                    )
 
+                release_sessions.assert_not_awaited()
                 expired = await replay_buffer.get(1, "task", Status.EXPIRED)
                 reusable = expired[0][0]
                 assert reusable.status == Status.EXPIRED
@@ -412,46 +428,98 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(group[1].response_ids, [12])
                 self.assertEqual(group[1].reward, {"score": 0.9})
 
-    async def test_common_refresh_staleness_drops_only_terminal_expired_groups(self):
-        # 同一轮 refresh 仍统计两类过期；只删除 terminal EXPIRED，保留 tail batch 可重试项。
+    async def test_common_refresh_staleness_drops_only_non_retryable_expired_groups(self):
+        # 同一轮 refresh 仍统计两类过期；只删除 non-retryable EXPIRED，保留 tail batch 可重试项。
         for config_name, replay_buffer_config_cls in REPLAY_BUFFER_CONFIGS:
             with self.subTest(replay_buffer_config=config_name):
                 replay_buffer = replay_buffer_config_cls().build()
-                terminal_stale = make_rollout_state(
+                non_retryable_stale = make_rollout_state(
                     1,
+                    session_id=201,
                     response_model_steps=[1],
                     mm_info={"pixel_values": np.ones((2, 3), dtype=np.float32)},
                 )
                 retryable_stale = make_rollout_state(
                     2,
+                    session_id=202,
                     response_model_steps=[1],
                     mm_info={"pixel_values": np.ones((2, 3), dtype=np.float32)},
                 )
-                await replay_buffer.put([terminal_stale], "terminal_task")
+                await replay_buffer.put([non_retryable_stale], "non_retryable_task")
                 await replay_buffer.put([retryable_stale], "retryable_task")
                 assert len(replay_buffer) == 2
 
-                expired_counts = await replay_buffer.refresh_staleness(
-                    task_stale_thresholds={"terminal_task": 2, "retryable_task": 2},
-                    expired_groups_retryable_by_task={
-                        "terminal_task": False,
-                        "retryable_task": True,
-                    },
-                    current_train_step=4,
-                )
+                with patch(
+                    "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
+                    new=AsyncMock(return_value={"201"}),
+                ) as release_sessions:
+                    expired_counts = await replay_buffer.refresh_staleness(
+                        task_stale_thresholds={"non_retryable_task": 2, "retryable_task": 2},
+                        expired_groups_retryable_by_task={
+                            "non_retryable_task": False,
+                            "retryable_task": True,
+                        },
+                        current_train_step=4,
+                    )
 
-                assert expired_counts == {"terminal_task": 1, "retryable_task": 1}
-                assert terminal_stale.status == Status.EXPIRED
-                assert terminal_stale.prompt_ids is None
-                assert terminal_stale.mm_info is None
+                release_sessions.assert_awaited_once_with(["201"])
+                assert expired_counts == {"non_retryable_task": 1, "retryable_task": 1}
+                assert non_retryable_stale.status == Status.EXPIRED
+                assert non_retryable_stale.prompt_ids is None
+                assert non_retryable_stale.mm_info is None
                 assert retryable_stale.status == Status.EXPIRED
                 assert retryable_stale.prompt_ids == [2, 1002]
                 assert retryable_stale.mm_info is not None
-                assert await replay_buffer.count("terminal_task", Status.COMPLETED) == 0
-                assert await replay_buffer.count("terminal_task", Status.EXPIRED) == 0
+                assert await replay_buffer.count("non_retryable_task", Status.COMPLETED) == 0
+                assert await replay_buffer.count("non_retryable_task", Status.EXPIRED) == 0
                 assert await replay_buffer.count("retryable_task", Status.EXPIRED) == 1
                 assert len(replay_buffer) == 1
-                assert await replay_buffer.get(1, "terminal_task", Status.EXPIRED) == []
+                assert await replay_buffer.get(1, "non_retryable_task", Status.EXPIRED) == []
+
+    async def test_refresh_staleness_batches_non_retryable_release_outside_lock(self):
+        replay_buffer = AsyncReplayBufferConfig().build()
+        first = make_rollout_state(1, session_id=301, response_model_steps=[1])
+        second = make_rollout_state(2, session_id=302, response_model_steps=[1])
+        await replay_buffer.put([first], "non_retryable_task")
+        await replay_buffer.put([second], "non_retryable_task")
+
+        release_started = asyncio.Event()
+        allow_release = asyncio.Event()
+
+        async def delayed_release(session_ids):
+            release_started.set()
+            await allow_release.wait()
+            return set(session_ids)
+
+        with patch(
+            "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
+            new=AsyncMock(side_effect=delayed_release),
+        ) as release_sessions:
+            refresh_task = asyncio.create_task(
+                replay_buffer.refresh_staleness(
+                    task_stale_thresholds={"non_retryable_task": 2},
+                    expired_groups_retryable_by_task={"non_retryable_task": False},
+                    current_train_step=4,
+                )
+            )
+            await asyncio.wait_for(release_started.wait(), timeout=1.0)
+            try:
+                # The non-retryable records are already removed and the buffer lock is
+                # available while the trace-store RPC is still blocked.
+                count = await asyncio.wait_for(
+                    replay_buffer.count("non_retryable_task", Status.COMPLETED),
+                    timeout=1.0,
+                )
+                assert count == 0
+            finally:
+                allow_release.set()
+            expired_counts = await refresh_task
+
+        release_sessions.assert_awaited_once_with(["301", "302"])
+        assert expired_counts == {"non_retryable_task": 2}
+        assert first.status == Status.EXPIRED
+        assert second.status == Status.EXPIRED
+        assert len(replay_buffer) == 0
 
     async def test_common_refresh_staleness_contract(self):
         # refresh_staleness 同时覆盖默认刷新 completed/aborted，以及 status filter 只刷新指定状态。

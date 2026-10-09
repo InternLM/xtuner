@@ -150,5 +150,5 @@ class VerlToolAgentLoop(AgentLoop):
         # judge rollout_state
         if self.judger is not None:
             rollout_state = await self.judger.judge(rollout_state)
-
+        
         return rollout_state

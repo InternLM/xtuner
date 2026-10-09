@@ -1,19 +1,21 @@
-import os
-from functools import wraps
-import torch.distributed as dist
-from safetensors import safe_open
 import json
+import os
+import tempfile
+from functools import wraps
+from pathlib import Path
 
 import parametrize
 import torch
+import torch.distributed as dist
+from safetensors import safe_open
+
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from xtuner._testing import DeterministicDDPTestCase, patch_hf_rms_norm
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
-import tempfile
-from pathlib import Path
-from xtuner.v1.model.moe.moe import SequenceContext
-from xtuner.v1.model.moe.gpt_oss import GptOss21BA3P6Config
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.loss.ce_loss import CELossConfig
+from xtuner.v1.model.moe.gpt_oss import GptOss21BA3P6Config
+from xtuner.v1.model.moe.moe import SequenceContext
+
 
 GPT_OSS_MINI_PATH = os.environ["GPT_OSS_MINI_PATH"]
 
@@ -94,13 +96,16 @@ class TestGptOss(DeterministicDDPTestCase):
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
 
     @parametrize.parametrize(
-        "device,dispatcher,ep_size",
+        "device,dispatcher,ep_size,expert_tp_size",
         [
-            ("cuda", "all2all", 4),
-            ("cuda", None, 1),
+            ("cuda", "all2all", 4, 1),
+            ("cuda", None, 1, 1),
+            # Packed expert weights and biases must be canonicalized before
+            # applying the FSDP + EP + Expert TP ownership map.
+            ("cuda", "all2all", 2, 2),
         ],
     )
-    def test_fsdp_accuracy(self, device, dispatcher, ep_size):
+    def test_fsdp_accuracy(self, device, dispatcher, ep_size, expert_tp_size):
         self.create_pg(device)
 
         hf_config = AutoConfig.from_pretrained(GPT_OSS_MINI_PATH)
@@ -128,6 +133,7 @@ class TestGptOss(DeterministicDDPTestCase):
         with torch.device("meta"):
             cfg = GptOss21BA3P6Config(compile_cfg=False)
             cfg.ep_size = ep_size
+            cfg.expert_tp_size = expert_tp_size
             cfg.dispatcher = dispatcher
             gpt_oss_model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
@@ -159,18 +165,20 @@ class TestGptOss(DeterministicDDPTestCase):
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=5e-2, rtol=5e-2))
 
     @parametrize.parametrize(
-        "device,dispatcher,ep_size",
+        "device,dispatcher,ep_size,expert_tp_size",
         [
-            ("cuda", None, 1),
-            ("cuda", "all2all", 4),
+            ("cuda", None, 1, 1),
+            ("cuda", "all2all", 4, 1),
+            ("cuda", "all2all", 2, 2),
         ],
     )
-    def test_save_hf(self, device, dispatcher, ep_size):
+    def test_save_hf(self, device, dispatcher, ep_size, expert_tp_size):
         self.create_pg(device)
         with torch.device("meta"):
             cfg = GptOss21BA3P6Config()
             cfg.dispatcher = dispatcher
             cfg.ep_size = ep_size
+            cfg.expert_tp_size = expert_tp_size
             gpt_oss_model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         fsdp_config = FSDPConfig(
