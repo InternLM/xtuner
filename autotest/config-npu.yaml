@@ -26,6 +26,438 @@ default_config:
                 - HF_HUB_OFFLINE=1
 
 case: 
+    qwen3-5-sft-vl-moe:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_qwen3_5_35B_sft_vl.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - MEDIA_ROOT=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-qwen3-5-sft-vl-moe/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    qwen3-5-sft-recompute:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_qwen3_5_recompute.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                num_nodes: 2
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - CACHE_DIR=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/.cache_qwen3_5
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - TORCH_HCCL_ZERO_COPY=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-qwen3-5-sft-recompute/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.02
+                    loss/local_loss: 0.0002
+                    loss/reduced_balancing_loss: 0.0002
+                    loss/reduced_llm_loss: 0.0002
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    qwen3-5-sft-tp2:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_qwen3_5_moe_30BA3_tp2.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-qwen3-5-sft-tp2/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.05
+                    loss/local_loss: 0.0004
+                    loss/reduced_balancing_loss: 0.0004
+                    loss/reduced_llm_loss: 0.0004
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    qwen3-5-sft-sp4-resume:
+        -
+            type: sft
+            phase: first
+            parameters:
+                config: autotest/config/npu_qwen3_5_moe_30BA3_sp4.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_GC_ENABLE=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-qwen3-5-sft-sp4-resume/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.09
+                    loss/local_loss: 0.0004
+                    loss/reduced_balancing_loss: 0.0005
+                    loss/reduced_llm_loss: 0.0004
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+        -
+            type: sft
+            phase: resume
+            pre_action:
+                command: 'python ./autotest/utils/update_meta.py /mnt/hwfile/llmrazor/qa-llm-cicd/test_output qwen3-5-sft-sp4-resume sft'
+            parameters:
+                config: autotest/config/npu_qwen3_5_moe_30BA3_sp4.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_GC_ENABLE=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-qwen3-5-sft-sp4-resume/tracker-resume.jsonl
+                check_metrics:
+                    grad_norm: 0.02
+                    loss/local_loss: 0.0004
+                    loss/reduced_balancing_loss: 0.0004
+                    loss/reduced_llm_loss: 0.0004
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    qwen3-5-sft-tp2-vl:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_qwen3_5_tp2_vl.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - MEDIA_ROOT=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-qwen3-5-sft-tp2-vl/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    qwen3-5-sft-sp4-resume-vl:
+        -
+            type: sft
+            phase: first
+            parameters:
+                config: autotest/config/npu_qwen3_5_moe_30BA3_sp4_vl.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - MEDIA_ROOT=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_GC_ENABLE=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-qwen3-5-sft-sp4-resume-vl/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+        -
+            type: sft
+            phase: resume
+            pre_action:
+                command: 'python ./autotest/utils/update_meta.py /mnt/hwfile/llmrazor/qa-llm-cicd/test_output qwen3-5-sft-sp4-resume-vl sft'
+            parameters:
+                config: autotest/config/npu_qwen3_5_moe_30BA3_sp4_vl.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - MEDIA_ROOT=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - XTUNER_GC_ENABLE=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-qwen3-5-sft-sp4-resume-vl/tracker-resume.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    qwen3-5-sft-mtp:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_qwen3_5_mtp.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-qwen3-5-sft-mtp/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.05
+                    loss/local_loss: 0.0004
+                    loss/reduced_balancing_loss: 0.0005
+                    loss/reduced_llm_loss: 0.0004
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    qwen3-5-vs-gpu:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_qwen3_5_mtp.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                num_nodes: 1
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-qwen3-5-vs-gpu/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.02
+                    loss/reduced_llm_loss: 0.01
+                    lr: 0.01
+            timeout: 10800
+
+    qwen3-5-sft-mtp-vl:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_qwen3_5_mtp_vl.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - MEDIA_ROOT=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-qwen3-5-sft-mtp-vl/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    qwen3-5-sft-ep2-mtp4-vl:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_qwen3_5_ep2_mtp4_vl.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                num_nodes: 2
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - MEDIA_ROOT=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/ci_vl
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-qwen3-5-sft-ep2-mtp4-vl/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.12
+                    loss/local_loss: 0.001
+                    loss/reduced_balancing_loss: 0.001
+                    loss/reduced_llm_loss: 0.001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    qwen3-5-sft-pretrain:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_qwen3_5_pretrain.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:cann852-qwen35-0610
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca_pretrain
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - MULTI_STREAM_MEMORY_REUSE=2
+                    - TRITON_ALL_BLOCKS_PARALLEL=1
+                    - TORCH_NPU_USE_HCCL=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+                    - RANK=0
+                    - PYTORCH_NPU_ALLOC_CONF=expandable_segments:True,segment_size_mb:128
+            assert_info:
+                base_metric: qwen3-5-sft-pretrain/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
     qwen3:
         -
             type: sft
