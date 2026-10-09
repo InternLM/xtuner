@@ -1154,12 +1154,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         optimizer_moved = self._engine.put_optimizer_to_device("cpu")
         DEVICE_MODULE.empty_cache()
         if not optimizer_moved:
-            if getattr(self.config.optim_cfg, "swap_optimizer", False):
-                self.logger.info(
-                    "Skip optimizer offload because swap_optimizer=True; optimizer states are already CPU-resident."
-                )
-            else:
-                self.logger.info("Skip optimizer offload because optimizer state is empty.")
+            self.logger.info("Skip optimizer offload because no optimizer state needs to be moved.")
             return
         self.logger.info(
             f"Offloaded optimizer to CPU. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, "
@@ -1176,12 +1171,7 @@ class TrainingWorker(SingleAcceleratorWorker):
     def onload_optimizer(self):
         optimizer_moved = self._engine.put_optimizer_to_device(DEVICE)
         if not optimizer_moved:
-            if getattr(self.config.optim_cfg, "swap_optimizer", False):
-                self.logger.info(
-                    "Skip optimizer onload because swap_optimizer=True; optimizer states stay on CPU and are swapped per step."
-                )
-            else:
-                self.logger.info("Skip optimizer onload because optimizer state is empty.")
+            self.logger.info("Skip optimizer onload because no optimizer state needs to be moved.")
 
     @ray_method
     def save(self, checkpoint_path: Path | str, no_save_optimizer: bool = False):
