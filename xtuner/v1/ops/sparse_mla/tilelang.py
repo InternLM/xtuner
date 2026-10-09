@@ -198,7 +198,7 @@ def tilelang_dsa_topk_indices(
     weights = (weights * (index_head_dim**-0.5)).contiguous()
     starts, ends = seq_ctx.packed_causal_query_ranges(q.shape[0], q.device)
     return tilelang_indexer_topk_from_ranges(
-        q, k, weights, starts, ends, index_topk, query_chunk_size=query_chunk_size
+        q, k, weights, starts, ends, index_topk, query_chunk_size=query_chunk_size, selector=selector
     )
 
 
@@ -211,6 +211,7 @@ def tilelang_indexer_topk_from_ranges(
     index_topk: int,
     *,
     query_chunk_size: int | None = None,
+    selector: Literal["torch", "deep_select"] = "torch",
 ) -> torch.Tensor:
     """Run the TileLang selector over explicit causal ranges.
 
@@ -231,6 +232,8 @@ def tilelang_indexer_topk_from_ranges(
         ends (torch.Tensor): Exclusive range end per query, int32.
         index_topk (int): Maximum number of IDs to select per query.
         query_chunk_size (int | None): Maximum query rows per launch; ``None`` for one launch.
+        selector (Literal["torch", "deep_select"]): Top-K kernel applied to the TileLang logits;
+            ``"deep_select"`` replaces ``torch.topk`` with DeepSelect's radix-select kernel.
 
     Returns:
         torch.Tensor: Contiguous int32 IDs shaped ``(S, 1, min(index_topk, S_k))``.

@@ -8,8 +8,13 @@ TestNoPEDSAMultiLatentAttentionFloat8
 TestNoPEDSAMLAConfigIndexerChunking
     test_config_reaches_the_indexer                        分块配置真正传到 indexer
     test_defaults_to_a_single_launch                       默认单次 launch，不改既有行为
+TestNoPEDSAMLAConfigGuards
+    test_rejects_unfreezing_the_indexer                    freeze_dsa_indexer=False 拒绝（同 GLM-5.2）
+    test_rejects_misaligned_heads_for_flash_mla_cudnn      FlashMLA 头对齐提前到 config 校验
+    test_allows_misaligned_heads_for_torch_backend         torch 参考后端无该对齐要求
 """
 
+import pytest
 import torch
 
 from xtuner.v1.data_proto import SequenceContext
@@ -224,3 +229,41 @@ class TestNoPEDSAMLAConfigIndexerChunking:
     def test_defaults_to_a_single_launch(self):
         # 不配置时保持单次 launch，不改变既有行为。
         assert _xtuner_module().indexer.topk_query_chunk_size is None
+
+
+class TestNoPEDSAMLAConfigGuards:
+    """与 GLM-5.2 对齐的两条 config 期守卫（review 发现 #1/#3）。"""
+
+    _BASE_KWARGS = dict(
+        q_lora_rank=Q_LORA_RANK,
+        kv_lora_rank=KV_LORA_RANK,
+        qk_nope_head_dim=QK_NOPE_HEAD_DIM,
+        qk_rope_head_dim=0,
+        v_head_dim=V_HEAD_DIM,
+        num_attention_heads=NUM_HEADS,
+        head_dim=0,
+        index_topk=INDEX_TOPK,
+        index_head_dim=INDEX_HEAD_DIM,
+        index_n_heads=INDEX_N_HEADS,
+        index_kpool=INDEX_KPOOL,
+        sparse_mla_backend="torch",
+        indexer_backend="torch",
+    )
+
+    def test_rejects_unfreezing_the_indexer(self):
+        # indexer 只返回 int32 索引，梯度已在 no_grad 处截断；设 False 不会真的训练
+        # indexer，只会让参数 requires_grad=True 白占优化器状态与激活显存，且无任何报错。
+        # 与 GLM-5.2（glm52/dsa_mla.py build）同款守卫。
+        cfg = NoPEDSAMLAConfig(**self._BASE_KWARGS, freeze_dsa_indexer=False)
+        with pytest.raises(ValueError, match="freeze_dsa_indexer=False is not supported"):
+            cfg.build(hidden_size=HIDDEN, layer_idx=0)
+
+    def test_rejects_misaligned_heads_for_flash_mla_cudnn(self):
+        # FlashMLA 前向要求 query 头数对齐 64（flash_mla_cudnn.py 原本只在首个 forward
+        # 运行时检查）；提前到 config 校验，失败点从"训到一半"变为"配置即报"。
+        with pytest.raises(ValueError, match="divisible by 64"):
+            NoPEDSAMLAConfig(**{**self._BASE_KWARGS, "sparse_mla_backend": "flash_mla_cudnn"})
+
+    def test_allows_misaligned_heads_for_torch_backend(self):
+        # 对齐要求只属于 FlashMLA kernel；torch 参考后端不应被误伤。
+        NoPEDSAMLAConfig(**{**self._BASE_KWARGS, "sparse_mla_backend": "torch"})

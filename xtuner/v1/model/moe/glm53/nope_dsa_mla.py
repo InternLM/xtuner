@@ -35,6 +35,7 @@ from xtuner.v1.ops.sparse_mla import (
     get_kpool_topk_indices,
     get_sparse_mla,
 )
+from xtuner.v1.ops.sparse_mla.flash_mla import _FLASH_MLA_HEAD_ALIGNMENT
 from xtuner.v1.utils.dtensor import materialize_full
 from xtuner.v1.utils.init_weight import init_params
 
@@ -178,6 +179,11 @@ class NoPEDSAMLAConfig(MLAConfig):
                 "doc 3.5.2), which is not implemented yet. Use 'flash_mla_cudnn' (production) or "
                 "'torch' (reference)."
             )
+        if self.sparse_mla_backend == "flash_mla_cudnn" and self.num_attention_heads % _FLASH_MLA_HEAD_ALIGNMENT != 0:
+            raise ValueError(
+                "sparse_mla_backend='flash_mla_cudnn' (FlashMLA forward) requires num_attention_heads "
+                f"to be divisible by {_FLASH_MLA_HEAD_ALIGNMENT}, got {self.num_attention_heads}."
+            )
         return self
 
     def build(
@@ -189,6 +195,8 @@ class NoPEDSAMLAConfig(MLAConfig):
         generate_config: GenerateConfig | None = None,
         float8_cfg: Float8Config | None = None,
     ) -> "NoPEDSAMultiLatentAttention":
+        if not self.freeze_dsa_indexer:
+            raise ValueError("freeze_dsa_indexer=False is not supported until the indexer has a differentiable output")
         del layer_type, rope_scaling_cfg, generate_config  # NoPE: no rotary, unused.
         return NoPEDSAMultiLatentAttention(
             **self.model_dump(), hidden_size=hidden_size, layer_idx=layer_idx, float8_cfg=float8_cfg
