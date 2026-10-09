@@ -19,7 +19,14 @@ def npu_flash_varlen_attn(
     deterministic=False,
     return_attn_probs=False,
     block_table=None,
+    cu_seqlens_q_list: list[int] | None = None,
+    cu_seqlens_k_list: list[int] | None = None,
 ):
+    if cu_seqlens_q_list is None:
+        cu_seqlens_q_list = cu_seqlens_q.tolist() if isinstance(cu_seqlens_q, torch.Tensor) else cu_seqlens_q
+    if cu_seqlens_k_list is None:
+        cu_seqlens_k_list = cu_seqlens_k.tolist() if isinstance(cu_seqlens_k, torch.Tensor) else cu_seqlens_k
+
     if not causal:
         fa_out = torch_npu.npu_fusion_attention(
             q,
@@ -31,8 +38,8 @@ def npu_flash_varlen_attn(
             scale=q.shape[-1] ** -0.5,
             keep_prob=1 - dropout_p,
             input_layout="TND",
-            actual_seq_qlen=tuple(cu_seqlens_q[1:].tolist()),
-            actual_seq_kvlen=tuple(cu_seqlens_k[1:].tolist()),
+            actual_seq_qlen=tuple(cu_seqlens_q_list[1:]),
+            actual_seq_kvlen=tuple(cu_seqlens_k_list[1:]),
         )[0]
     else:
         fa_out = torch_npu.npu_fusion_attention(
@@ -45,8 +52,8 @@ def npu_flash_varlen_attn(
             scale=q.shape[-1] ** -0.5,
             keep_prob=1 - dropout_p,
             input_layout="TND",
-            actual_seq_qlen=tuple(cu_seqlens_q[1:].tolist()),
-            actual_seq_kvlen=tuple(cu_seqlens_k[1:].tolist()),
+            actual_seq_qlen=tuple(cu_seqlens_q_list[1:]),
+            actual_seq_kvlen=tuple(cu_seqlens_k_list[1:]),
             sparse_mode=3,
         )[0]
     return fa_out

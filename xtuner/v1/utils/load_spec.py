@@ -6,10 +6,9 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from pydantic import BaseModel, ConfigDict, Field, computed_field
-from torch.distributed.tensor import DTensor, Shard
+from torch.distributed.tensor import DTensor
 
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
-from xtuner.v1.utils.device import get_device
 from xtuner.v1.utils.interleaved_shard import RuntimeLayout
 
 
@@ -45,14 +44,23 @@ class ShardDescriptor(BaseModel):
         assert rank >= 0, "ShardDescriptor process group must contain the current rank"
 
         if self.interleave_factor == 1:
-            # XTuner may initialize modules while the default device is meta. PyTorch's
-            # placement helper inherits that default for temporary shape arithmetic.
-            with torch.device(get_device()):
-                local_size, offset = Shard(self.dim)._local_shard_size_and_offset(  # type: ignore[attr-defined]
-                    dim_size,
-                    world_size,
-                    rank,
-                )
+            # Match PyTorch Shard's uneven torch.chunk semantics without depending
+            # on its private placement helpers, whose names vary across versions.
+            # Reference: PyTorch v2.9.1 Shard._local_shard_size_and_offset
+            # https://github.com/pytorch/pytorch/blob/v2.9.1/torch/distributed/tensor/placement_types.py#L114-L146
+            if dim_size % world_size == 0:
+                full_chunk_size = dim_size // world_size
+                local_size = full_chunk_size
+                offset = full_chunk_size * rank
+            else:
+                full_chunk_size = (dim_size + world_size - 1) // world_size
+                shard_starting_idx = full_chunk_size * rank
+                if dim_size < shard_starting_idx:
+                    local_size = 0
+                    offset = dim_size
+                else:
+                    local_size = min(dim_size, shard_starting_idx + full_chunk_size) - shard_starting_idx
+                    offset = shard_starting_idx
             return [(offset, offset + local_size)] if local_size else []
 
         split_count = world_size * self.interleave_factor

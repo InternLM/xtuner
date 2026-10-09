@@ -1,13 +1,14 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from xtuner.v1.utils.env_check import (
     check_torch_accelerator_available,
+    check_triton_ascend_available,
     check_triton_available,
     get_env_not_available_func,
 )
 
 
-if check_torch_accelerator_available() and check_triton_available():
-    # Import Triton kernels only if torch.accelerator is available and Triton is installed
+if check_torch_accelerator_available() and check_triton_available() and not check_triton_ascend_available():
+    # These kernels contain CUDA-specific device queries and are not compatible with Triton-Ascend.
     from .per_block_dequant_gemm import per_block_dequant_gemm
     from .per_block_quant_gemm import per_block_quant_gemm
     from .per_tile_quant import per_tile_quant

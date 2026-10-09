@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from dataclasses import dataclass
 from typing import cast
 
 import torch
@@ -6,6 +7,60 @@ from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
 from .utils import gather_for_sequence_parallel, pad_to_multiple_of, split_for_sequence_parallel
+
+
+@dataclass(slots=True)
+class GatedDeltaNetMetadata:
+    """Metadata cached in SequenceContext and unpacked before operator
+    calls."""
+
+    seq_idx: torch.Tensor | None = None
+    cu_seqlens_int64: torch.Tensor | None = None
+    chunk_indices: dict[str, torch.Tensor] | None = None
+    chunk_indices_list: dict[str, list[int]] | None = None
+
+
+class DSATopKCacheState:
+    """Mutable DSA cross-layer top-k cache, scoped to one microbatch.
+
+    For example, if source layer 2 provides top-k indices to layers 2, 3, and 4,
+    its original forward stores ``indices[2]``. After layer 4's no-grad
+    checkpoint forward, ``checkpoint_active`` becomes true and top-k offload may
+    replace that entry with ``offloaded[2]``. Backward then replays layers 4, 3,
+    and 2; layer 2 removes the cache and adds 2 to ``released_sources``. If one
+    physical MTP source is reused at two logical depths, both MTP counters start
+    at 2 so the cache is transferred and released only after the second use in
+    each phase.
+    """
+
+    indices: dict[int, torch.Tensor]  # GPU-resident top-k, keyed by source layer.
+    offloaded: dict[int, str]  # OffloadManager key for each CPU-resident source.
+    released_sources: set[int]  # Sources whose backward replay lifetime has ended.
+    checkpoint_active: bool  # Whether checkpoint forward retained this cache for replay.
+    offload_slot: int  # Stable offload slot among concurrently active microbatches.
+    mtp_forward_uses_remaining: dict[int, int]  # Original-forward MTP uses left per shared source.
+    mtp_replays_remaining: dict[int, int]  # Backward MTP replays left per shared source.
+
+    def __init__(
+        self,
+        *,
+        indices: dict[int, torch.Tensor] | None = None,
+        offloaded: dict[int, str] | None = None,
+        released_sources: set[int] | None = None,
+        checkpoint_active: bool = False,
+        offload_slot: int = 0,
+        mtp_forward_uses_remaining: dict[int, int] | None = None,
+        mtp_replays_remaining: dict[int, int] | None = None,
+    ) -> None:
+        # topk_indices format: {source_layer_idx: [seq_len, kv_group, topk]}.
+        # Invalid/padded sparse slots are represented by -1.
+        self.indices = {} if indices is None else indices
+        self.offloaded = {} if offloaded is None else offloaded
+        self.released_sources = set() if released_sources is None else released_sources
+        self.checkpoint_active = checkpoint_active
+        self.offload_slot = offload_slot
+        self.mtp_forward_uses_remaining = {} if mtp_forward_uses_remaining is None else mtp_forward_uses_remaining
+        self.mtp_replays_remaining = {} if mtp_replays_remaining is None else mtp_replays_remaining
 
 
 # Avoid using dataclass decorator here to get rid of extra ops called in pytorch 2.8 and above
@@ -28,15 +83,19 @@ class SequenceContext:
 
     input_ids: torch.LongTensor | None  # shape (1, seq_len)
     cu_seq_lens_q: torch.IntTensor
+    cu_seq_lens_q_list: list[int]
     cu_seq_lens_k: torch.IntTensor
+    cu_seq_lens_k_list: list[int]
     max_length_q: torch.Tensor
     max_length_k: torch.Tensor
-    num_padding: int
+    _num_padding: int
+    _nonpad_indices: torch.LongTensor | None
+    _pad_indices: torch.LongTensor | None
     sequence_parallel_mesh: DeviceMesh | None
     block_table: torch.Tensor | None
     device: str | torch.device  # TODO: 这个地方有点乱，到处是 device
     position_ids: torch.LongTensor | None
-    seq_idx: torch.IntTensor | None
+    gdn_metadata: "GatedDeltaNetMetadata | None"
 
     # Qwen3VL
     image_grid_thw: torch.Tensor | None
@@ -84,12 +143,17 @@ class SequenceContext:
         raw_inputs_embeds: torch.FloatTensor | None = None,
         shard_start: int = 0,
         shard_size: int = 0,
+        cu_seq_lens_q_list: list[int] | None = None,
+        cu_seq_lens_k_list: list[int] | None = None,
+        gdn_metadata: "GatedDeltaNetMetadata | None" = None,
     ):
         # Only to distinguish parameters accepted by the constructor from attributes. For example, for `max_length_q`,
         # the argument can be an int, but as an attribute it can only be a tensor
         self.input_ids = input_ids
         self.cu_seq_lens_q = cu_seq_lens_q
+        self.cu_seq_lens_q_list = cu_seq_lens_q.tolist() if cu_seq_lens_q_list is None else cu_seq_lens_q_list.copy()
         self.cu_seq_lens_k = cu_seq_lens_k
+        self.cu_seq_lens_k_list = cu_seq_lens_k.tolist() if cu_seq_lens_k_list is None else cu_seq_lens_k_list.copy()
         # force max_length_q and max_length_k be cpu tensors to avoid cuda synchronization
         # max_length_q and max_length_k should be unpacked to int in attention implementation
         if isinstance(max_length_q, int):
@@ -100,6 +164,8 @@ class SequenceContext:
             self.max_length_k = torch.tensor(max_length_k, device="cpu")
         else:
             self.max_length_k = max_length_k
+        self._nonpad_indices = None
+        self._pad_indices = None
         self.num_padding = num_padding
         self.sequence_parallel_mesh = sequence_parallel_mesh
         self.block_table = block_table
@@ -117,7 +183,7 @@ class SequenceContext:
         self._raw_inputs_embeds = raw_inputs_embeds
         self._shard_start = shard_start
         self._shard_size = shard_size
-        self.seq_idx = None
+        self.gdn_metadata = gdn_metadata
 
         # `DeviceMesh.get_local_rank` is not compatible with `torch.compile`, we calculate `_sp_rank` in
         # `SequenceContext`
@@ -171,22 +237,27 @@ class SequenceContext:
         for ids in input_ids:
             assert ids.shape[0] == 1, "input_ids must have batch size of 1"
         num_tokens = [x.numel() for x in input_ids]
+        cu_seq_lens_cpu = torch.cumsum(torch.LongTensor([0] + num_tokens), dim=0)
+        cu_seq_lens_list = cu_seq_lens_cpu.tolist()
 
-        cu_seq_lens = cast(torch.IntTensor, torch.cumsum(torch.LongTensor([0] + num_tokens), dim=0).to(device).int())
+        cu_seq_lens = cast(torch.IntTensor, cu_seq_lens_cpu.to(device).int())
         return cls(
             input_ids=cast(torch.LongTensor, torch.cat(input_ids, dim=1).to(device)),
             cu_seq_lens_k=cu_seq_lens,
             cu_seq_lens_q=cu_seq_lens,
-            max_length_q=cast(int, (cu_seq_lens[1:] - cu_seq_lens[:-1]).max().item()),
-            max_length_k=cast(int, (cu_seq_lens[1:] - cu_seq_lens[:-1]).max().item()),
+            max_length_q=max(num_tokens),
+            max_length_k=max(num_tokens),
             block_table=block_table,
             sequence_parallel_mesh=sp_mesh,
             device=device,
+            cu_seq_lens_q_list=cu_seq_lens_list,
+            cu_seq_lens_k_list=cu_seq_lens_list,
         )
 
     def split(self, sequence_parallel_mesh: DeviceMesh | None = None) -> Self:
         if sequence_parallel_mesh is None:
             sequence_parallel_mesh = self.sequence_parallel_mesh
+        self.gdn_metadata = None
         self.sequence_parallel_mesh = sequence_parallel_mesh
 
         if sequence_parallel_mesh is None:
@@ -194,6 +265,9 @@ class SequenceContext:
 
         multiple_of = sequence_parallel_mesh.size()
         if self.input_ids is not None:
+            if self.cu_seq_lens_q_list != self.cu_seq_lens_k_list:
+                raise NotImplementedError("SequenceContext.split requires identical query and key sequence boundaries")
+
             pad_input_ids = pad_to_multiple_of(self.input_ids, 0, multiple_of, 1)
             sp_input_ids = cast(
                 torch.LongTensor, split_for_sequence_parallel(pad_input_ids, dim=1, sp_mesh=sequence_parallel_mesh)
@@ -203,12 +277,19 @@ class SequenceContext:
                 if self.num_padding > 0:
                     new_cu_seq_lens = self.cu_seq_lens_q.clone()
                     new_cu_seq_lens[-1] += new_padding
+                    new_cu_seq_lens_list = self.cu_seq_lens_q_list.copy()
+                    new_cu_seq_lens_list[-1] += new_padding
                 else:
                     new_cu_seq_lens = torch.ones(self.cu_seq_lens_q.numel() + 1, dtype=torch.int32, device=self.device)
                     new_cu_seq_lens[: self.cu_seq_lens_q.numel()] = self.cu_seq_lens_q.clone()
                     new_cu_seq_lens[-1] = self.cu_seq_lens_q[-1] + new_padding
+                    new_cu_seq_lens_list = [
+                        *self.cu_seq_lens_q_list,
+                        self.cu_seq_lens_q_list[-1] + new_padding,
+                    ]
             else:
                 new_cu_seq_lens = self.cu_seq_lens_q.clone()
+                new_cu_seq_lens_list = self.cu_seq_lens_q_list.copy()
             new_cu_seq_lens = cast(torch.IntTensor, new_cu_seq_lens)
             new_max_length = cast(int, max(self.seq_lens_q.max().item(), new_padding))
             num_non_padding = self.input_ids.shape[1] - self.num_padding
@@ -256,6 +337,8 @@ class SequenceContext:
                 raw_input_ids=cast(torch.LongTensor, pad_input_ids),
                 shard_start=start,
                 shard_size=shard_size,
+                cu_seq_lens_q_list=new_cu_seq_lens_list,
+                cu_seq_lens_k_list=new_cu_seq_lens_list,
             )
             return sp_seq_ctx
         else:
@@ -357,6 +440,53 @@ class SequenceContext:
         if self.num_padding > 0:
             mask[..., -self.num_padding :] = False
         return mask
+
+    def _invalidate_padding_indices(self) -> None:
+        self._nonpad_indices = None
+        self._pad_indices = None
+
+    def _cache_padding_indices(self) -> None:
+        if self.input_ids is not None:
+            seq_len = self.input_ids.shape[1]
+            device = self.input_ids.device
+        else:
+            assert self.inputs_embeds is not None, "input_ids or inputs_embeds must be provided"
+            seq_len = self.inputs_embeds.shape[1]
+            device = self.inputs_embeds.device
+
+        # SequenceContext.mask only represents a contiguous padding suffix, so slicing a
+        # single arange is equivalent to running nonzero on mask and ~mask, without the
+        # mask allocation and two nonzero kernels. If arbitrary-position padding is
+        # supported in the future, derive both index tensors from mask instead.
+        num_non_padding = seq_len if self.num_padding <= 0 else max(seq_len - self.num_padding, 0)
+        token_indices = torch.arange(seq_len, dtype=torch.long, device=device)
+        self._nonpad_indices = cast(torch.LongTensor, token_indices[:num_non_padding])
+        self._pad_indices = cast(torch.LongTensor, token_indices[num_non_padding:])
+
+    @property
+    def num_padding(self) -> int:
+        return self._num_padding
+
+    @num_padding.setter
+    def num_padding(self, value: int) -> None:
+        self._num_padding = value
+        self._invalidate_padding_indices()
+
+    @property
+    def nonpad_indices(self) -> torch.LongTensor:
+        """Indices of non-padding tokens, cached for reuse across decoder
+        layers."""
+        if self._nonpad_indices is None:
+            self._cache_padding_indices()
+        return cast(torch.LongTensor, self._nonpad_indices)
+
+    @property
+    def pad_indices(self) -> torch.LongTensor:
+        """Indices of padding tokens, cached for reuse across decoder
+        layers."""
+        if self._pad_indices is None:
+            self._cache_padding_indices()
+        return cast(torch.LongTensor, self._pad_indices)
 
     @property
     def seq_lens_q(self) -> torch.LongTensor:
@@ -466,6 +596,7 @@ class SequenceContext:
 
     def set_sp_mesh(self, sp_mesh: DeviceMesh) -> Self:
         """Set the sequence parallel mesh."""
+        self.gdn_metadata = None
         self.sequence_parallel_mesh = sp_mesh
         self._sp_rank = sp_mesh.get_local_rank()
         return self
@@ -480,6 +611,19 @@ class SequenceContext:
         Returns:
             Self: A new SequenceContext instance with copied attributes.
         """
+        metadata_dependencies = {
+            "cu_seq_lens_q",
+            "cu_seq_lens_q_list",
+            "device",
+            "sequence_parallel_mesh",
+        }
+        if "gdn_metadata" in overrides:
+            gdn_metadata = overrides["gdn_metadata"]
+        elif metadata_dependencies.intersection(overrides):
+            gdn_metadata = None
+        else:
+            gdn_metadata = self.gdn_metadata
+
         return self.__class__(
             input_ids=overrides.get("input_ids", self.input_ids),
             cu_seq_lens_q=overrides.get("cu_seq_lens_q", self.cu_seq_lens_q),
@@ -505,6 +649,15 @@ class SequenceContext:
             raw_inputs_embeds=overrides.get("raw_inputs_embeds", self._raw_inputs_embeds),
             shard_start=overrides.get("shard_start", self._shard_start),
             shard_size=overrides.get("shard_size", self._shard_size),
+            cu_seq_lens_q_list=overrides.get(
+                "cu_seq_lens_q_list",
+                None if "cu_seq_lens_q" in overrides else self.cu_seq_lens_q_list,
+            ),
+            cu_seq_lens_k_list=overrides.get(
+                "cu_seq_lens_k_list",
+                None if "cu_seq_lens_k" in overrides else self.cu_seq_lens_k_list,
+            ),
+            gdn_metadata=gdn_metadata,
         )
 
     def to(self, device: torch.device | str):
@@ -516,13 +669,12 @@ class SequenceContext:
         Returns:
             Self: The context with tensors moved to the target device.
         """
+        # GatedDeltaNet metadata contains device tensors. It is prepared again at
+        # model-forward entry after SequenceContext reaches its final device.
+        self.gdn_metadata = None
         self.input_ids = self.input_ids.to(device)  # type: ignore
-        if device == "npu" or isinstance(device, torch.device) and device.type == "npu":
-            self.cu_seq_lens_q = self.cu_seq_lens_q.cpu()  # type: ignore
-            self.cu_seq_lens_k = self.cu_seq_lens_k.cpu()  # type: ignore
-        else:
-            self.cu_seq_lens_q = self.cu_seq_lens_q.to(device)  # type: ignore
-            self.cu_seq_lens_k = self.cu_seq_lens_k.to(device)  # type: ignore
+        self.cu_seq_lens_q = self.cu_seq_lens_q.to(device)  # type: ignore
+        self.cu_seq_lens_k = self.cu_seq_lens_k.to(device)  # type: ignore
 
         if self.position_ids is not None and hasattr(self.position_ids, "to"):
             self.position_ids = self.position_ids.to(device)  # type: ignore
@@ -562,6 +714,7 @@ class SequenceContext:
         ):
             self.rollout_routed_experts = self.rollout_routed_experts.to(device)  # type: ignore
 
+        self._invalidate_padding_indices()
         self.device = device
 
         return self
