@@ -9,7 +9,7 @@ class RouterResults(TypedDict):
     router_weights: torch.Tensor
     topk_weights: torch.Tensor
     topk_ids: torch.Tensor
-    topkens_per_expert: torch.Tensor
+    tokens_per_expert: torch.Tensor
 
 
 class RouterProtocol(Protocol):

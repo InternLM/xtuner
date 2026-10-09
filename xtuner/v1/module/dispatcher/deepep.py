@@ -1,4 +1,4 @@
-from typing import Literal, TypeAlias, cast
+from typing import TypeAlias, cast
 
 import torch
 import torch.distributed as dist
@@ -20,6 +20,7 @@ from . import XTUNER_DISPATCHER_DEBUG
 from .base import (
     CombineResult,
     DispatchResult,
+    ExpertWeightLayout,
     GenericDispatcher,
     PostCombineResult,
     PostDispatchResult,
@@ -269,8 +270,6 @@ class DeepEPDispatcher(
         n_routed_experts: int,
         process_group: torch.distributed.ProcessGroup,
         tp_size: int = 1,
-        training_dtype: Literal["fp8", "bf16"] = "bf16",
-        generate_dtype: Literal["fp8", "bf16"] = "bf16",
     ):
         """DeepEP-backed MoE dispatcher.
 
@@ -299,8 +298,6 @@ class DeepEPDispatcher(
         super().__init__(
             n_routed_experts=n_routed_experts,
             process_group=process_group,
-            training_dtype=training_dtype,
-            generate_dtype=generate_dtype,
         )
         assert self._process_group is not None, (
             "Process group must be provided for `DeepEPDispatcher`. "
@@ -329,8 +326,11 @@ class DeepEPDispatcher(
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+        layer_state: object | None = None,
         async_op: bool = False,
     ) -> DeepEPPreDispatchResult:
+        del tokens_per_expert, layer_state
         if async_op:
             backward_previous_event = EventOverlap(None)
             if hidden_states.grad_fn is not None:
@@ -503,6 +503,7 @@ class DeepEPDispatcher(
                 hidden_states=permuted_hidden_states,
                 row_ids_map=row_ids_map,
                 tokens_per_expert=tokens_per_expert,
+                expert_weight_layout=ExpertWeightLayout(),
             )
 
     @override
