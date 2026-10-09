@@ -16,8 +16,10 @@ TestGlm53MixedMediaAndTruncation
     test_glm53_visual_truncation_is_dropped         截断会切断视觉跨度时 cache 阶段就丢弃
 TestGlm53CacheInvalidation
     test_glm53_cache_invalidates_on_processor_or_pack_change  processor/pack 变化使缓存失效
+    test_glm53_hash_covers_every_init_parameter  逐参数 hash 失效 + __init__ 参数分类完备性
 """
 
+import inspect
 import os
 
 import numpy as np
@@ -27,7 +29,7 @@ from PIL import Image
 
 from transformers import AutoProcessor, AutoTokenizer
 from transformers.video_utils import VideoMetadata
-from xtuner.v1.datasets.mllm_tokenize_fn import Glm53VLTokenizeFnConfig
+from xtuner.v1.datasets.mllm_tokenize_fn import Glm53VLTokenizeFnConfig, Glm53VLTokenizeFunction
 
 
 GLM_5_3_FLASH_PATH = os.environ.get(
@@ -267,3 +269,69 @@ class TestGlm53CacheInvalidation:
         assert base.hash() != changed_pixels.hash()
         assert base.hash() != changed_fps.hash()
         assert base.hash() != changed_weight.hash()
+
+    def test_glm53_hash_covers_every_init_parameter(self, ckpt_path, tokenizer):
+        params = set(inspect.signature(Glm53VLTokenizeFunction.__init__).parameters) - {"self"}
+        classified = _HASH_PARAMS | _NON_HASH_PARAMS
+        assert params == classified, (
+            f"Glm53VLTokenizeFunction.__init__ params {sorted(params)} != classified "
+            f"{sorted(classified)}; unclassified: {sorted(params ^ classified)}. If a new param "
+            "can change cache output (num_tokens), add it to _hash_str and _HASH_PARAMS; "
+            "otherwise add it to _NON_HASH_PARAMS with a reason."
+        )
+        assert set(_ALT_VALUES) == _HASH_PARAMS - {"processor_path"}
+
+        for name, override in _ALT_VALUES.items():
+            base = Glm53VLTokenizeFnConfig(processor_path=ckpt_path).build(tokenizer, anno_name="test")
+            variant = Glm53VLTokenizeFnConfig(processor_path=ckpt_path, **override).build(tokenizer, anno_name="test")
+            assert base.hash() != variant.hash(), f"{name} changed but hash() did not -- stale cache entry"
+
+
+# __init__ 参数中影响 cache 输出（每条样本 num_tokens）的，必须进 _hash_str。processor_path
+# 也在 _hash_str 里，但换一个值需要磁盘上真实存在另一个 checkpoint，这里不实际变它。
+_HASH_PARAMS = {
+    "processor_path",
+    "min_pixels",
+    "max_pixels",
+    "fps",
+    "max_frames",
+    "system_message",
+    "max_length",
+    "llm_pack_weight",
+    "visual_pack_weight",
+    "add_generation_prompt",
+    "enable_thinking",
+    "reasoning_effort",
+}
+
+# 不影响 cache 输出的参数：
+#   tokenizer           -- 身份由基类 hash() 里的 tokenizer_xxhash 单独覆盖
+#   anno_name           -- 数据文件本身；cache 目录按数据文件隔离，不跨文件共享
+#   tokenizer_hash/hash -- 对 hash 结果的显式覆盖
+#   debug / oss_time_log_thr / trim_memory_interval -- 运行期开关，不改变 token 数
+_NON_HASH_PARAMS = {
+    "tokenizer",
+    "anno_name",
+    "tokenizer_hash",
+    "hash",
+    "debug",
+    "oss_time_log_thr",
+    "trim_memory_interval",
+}
+
+# _HASH_PARAMS（除 processor_path）逐参数构造变体用的 override。取值必须避开 processor 默认值
+# （min=16 / max=8000 / fps=2 / max_frames=2048）和其他测试残留进共享 processor 的值
+# （max_pixels=1000、fps=4.0）。
+_ALT_VALUES = {
+    "min_pixels": {"min_pixels": 1000},
+    "max_pixels": {"max_pixels": 2000},
+    "fps": {"fps": 8.0},
+    "max_frames": {"max_frames": 8},
+    "system_message": {"system_message": "You are a helpful assistant."},
+    "max_length": {"max_length": 64},
+    "llm_pack_weight": {"llm_pack_weight": 0.5},
+    "visual_pack_weight": {"visual_pack_weight": 0.5},
+    "add_generation_prompt": {"add_generation_prompt": True},
+    "enable_thinking": {"enable_thinking": False},
+    "reasoning_effort": {"reasoning_effort": "low"},
+}

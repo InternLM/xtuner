@@ -173,11 +173,18 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         self.system_message = system_message
         self.data_name = os.path.basename(anno_name)
 
+        # Every __init__ parameter that affects cache-path output (per-sample num_tokens) must be
+        # encoded here -- hash() is the only invalidation guard of the on-disk length cache, and a
+        # missing entry means stale lengths survive a config change (packer budgets by old lengths
+        # while runtime truncates by new ones). max_length is read from the local variable because
+        # super().__init__ (which stores it as self.max_length) runs after this string is built.
         _hash_str = (
             f"{self.image_processor.min_image_tokens}_{self.image_processor.max_image_tokens}_"
             f"{self.video_processor.fps}_{self.video_processor.max_frames}_{self.merge_unit}_"
             f"processor_path:{processor_path}_llm_pack_weight:{llm_pack_weight}_"
-            f"visual_pack_weight:{visual_pack_weight}"
+            f"visual_pack_weight:{visual_pack_weight}_max_length:{max_length}_"
+            f"system_message:{system_message}_add_generation_prompt:{add_generation_prompt}_"
+            f"enable_thinking:{enable_thinking}_reasoning_effort:{reasoning_effort}"
         )
 
         super().__init__(
