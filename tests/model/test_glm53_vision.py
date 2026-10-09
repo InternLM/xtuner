@@ -36,11 +36,7 @@ from xtuner.v1.model.compose.glm53 import (
 from xtuner.v1.utils.test_utils import init_data_mesh
 
 
-GLM_5_3_FLASH_PATH = os.environ.get(
-    "GLM_5_3_FLASH_PATH",
-    "/mnt/shared-storage-gpfs2/gpfs2-shared-public/huggingface/hub/models--zai-org--GLM-5.3-Flash/"
-    "snapshots/3f1971b7b5f7a528c9c4ef6212c8785298a8c24a",
-)
+GLM_5_3_FLASH_PATH = os.environ["GLM_5_3_FLASH_PATH"]
 
 
 class TestFlattenVideoGridThw:
@@ -96,7 +92,7 @@ class TestGlm53VisionFp32Params:
 class TestGlm53VisionWeightMapping:
     def test_vision_weight_mapping_bitwise(self):
         if not os.path.isdir(GLM_5_3_FLASH_PATH):
-            pytest.skip(f"GLM_5_3_FLASH_PATH not found: {GLM_5_3_FLASH_PATH}")
+            pytest.fail(f"GLM_5_3_FLASH_PATH not found: {GLM_5_3_FLASH_PATH}")
 
         with torch.device("meta"):
             vision = Glm53VisionConfig(attn_impl="eager_attention", fully_shard=False).build()
