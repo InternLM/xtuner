@@ -53,9 +53,7 @@ from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 
 
-GLM_5_3_FLASH_PATH = os.environ.get(
-    "GLM_5_3_FLASH_PATH", "/mnt/shared-storage-user/zhaopenghao/model/GLM-5.3-Flash-25B"
-)
+GLM_5_3_FLASH_PATH = os.environ["GLM_5_3_FLASH_PATH"]
 
 
 class TestGlm53TextMoEConfig:
@@ -299,7 +297,7 @@ class TestGlm53TextMoEWeightMapping:
     def test_real_checkpoint_weight_coverage(self):
         # 真实 checkpoint 的权重要全部映射上，不能有 missing/unloaded。
         if not os.path.isdir(GLM_5_3_FLASH_PATH):
-            pytest.skip(f"GLM_5_3_FLASH_PATH not found: {GLM_5_3_FLASH_PATH}")
+            pytest.fail(f"GLM_5_3_FLASH_PATH not found: {GLM_5_3_FLASH_PATH}")
         if not torch.cuda.is_available():
             pytest.skip("GPU required to materialize a 25B-parameter checkpoint")
 
@@ -342,7 +340,7 @@ class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
     def test_fsdp_accuracy(self, dispatcher, ep_size):
         # Four original text cases and two image cases share the same accuracy loop.
         if not os.path.isdir(GLM_5_3_FLASH_PATH):
-            pytest.skip(f"GLM_5_3_FLASH_PATH not found: {GLM_5_3_FLASH_PATH}")
+            pytest.fail(f"GLM_5_3_FLASH_PATH not found: {GLM_5_3_FLASH_PATH}")
         self.create_pg("cuda")
 
         # `Glm5NextForConditionalGeneration` isn't registered under `AutoModelForCausalLM`
@@ -474,7 +472,7 @@ class TestGlm53TextMoEGradientParity(DistributedTestBase):
     def test_full_crop_fsdp_gradients_match_hf(self, device="cuda"):
         # Real five-layer weights: compare both ends of the KDA/mHC stack after LM backward.
         if not os.path.isdir(GLM_5_3_FLASH_PATH):
-            pytest.skip(f"GLM_5_3_FLASH_PATH not found: {GLM_5_3_FLASH_PATH}")
+            pytest.fail(f"GLM_5_3_FLASH_PATH not found: {GLM_5_3_FLASH_PATH}")
         self.create_pg(device)
         torch.manual_seed(1234)
         tokens = torch.randint(2, 1000, (1, 81), device=device)
