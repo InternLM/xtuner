@@ -124,11 +124,11 @@ async def batch_judge(self, rollout_states: list[RolloutState]) -> list[RolloutS
 
 在预置 `SingleTurnAgentLoop` 中，进入 Judger 前的 `RolloutState` 通常已经包含：
 
-- `prompt_ids`：prompt token，后续 `_prepare_train_data()` 会用它拼接训练输入。
+- `prompt_ids`：prompt token，后续训练 controller 会用它拼接训练输入。
 - `response_ids`：模型生成的 response token，后续训练数据直接依赖它。
 - `response`：模型生成的文本，`NativeJudger` 会用它计算 reward。
 - `logprobs`：response token 的 rollout logprob。如果存在，长度必须和 `response_ids` 一致。
-- `response_mask`：哪些 response token 参与训练。为空时，`_prepare_train_data()` 默认所有 response token 都参与训练。
+- `labels`：监督目标（labels 是唯一监督载体，语义上不参与训练的位置为 `-100`）。prompt+response 型样本由 loop 侧 `canonicalize_train_fields()` 兜底构造。
 - `reward_model["ground_truth"]`：标准答案或标签，预置 rule-based Judger 通常依赖这个字段。
 
 `NativeJudger` 传给 `reward_handler` 的字段更窄：
@@ -154,13 +154,13 @@ rollout_state.reward = {
 }
 ```
 
-如果这批数据后续要进入 `_prepare_train_data()`，必须满足：
+如果这批数据后续要进入训练 controller，必须满足：
 
 - `reward` 不能为 `None`。
-- `reward` 必须包含数值型 `score` 字段，因为 `_prepare_train_data()` 会直接读取 `data.reward["score"]` 来计算 advantage。
+- `reward` 必须包含数值型 `score` 字段，因为 controller 会直接读取 `data.reward["score"]` 来计算 advantage。
 - `status` 不能是 `ABORTED`、`FILTERED` 或 `FAILED`。
 - `response` 和 `response_ids` 都不能为空。
-- 如果提供 `response_mask`，长度必须和 `response_ids` 一致。mask 为 `0` 的 token 会在训练 label 中变成 `-100`，对应 advantage 也会置为 `0.0`。
+- labels 中 `-100` 的位置不参与训练，对应 advantage 也会置为 `0.0`。
 - 如果提供 `logprobs`，长度必须和 `response_ids` 一致。
 
 其他 reward 字段可以按任务需要扩展，例如 `acc`、`format`、`tool_ok`、`reason` 等。

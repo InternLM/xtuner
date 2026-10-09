@@ -211,7 +211,7 @@ class TestRLTrainerCheckpoint(unittest.TestCase):
             build_pg.built = getattr(build_pg, "built", []) + [name]
             return SimpleNamespace(id=f"pg-{idx}", bundle_specs=[])
 
-        def build_train_controller(worker_cfg, placement_group):
+        def build_train_controller(worker_cfg, placement_group, advantage_estimator=None, distillation=None):
             controller = _FakeTrainController()
             runtime.train_controllers.append(controller)
             return controller

@@ -459,7 +459,7 @@ class ReplayBuffer:
 
         # 1. update seq-level staleness
         refresh_seq_staleness(group, current_train_step)
-        # 2. calculate token-level staleness
+        # 2. Token-level effective masks drive expiry decisions; labels are baked at take_train_batch.
         token_level_effective_masks = calculate_group_effective_response_masks(
             group,
             current_train_step=current_train_step,

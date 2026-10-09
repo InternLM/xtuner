@@ -32,6 +32,7 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
             rollout_id=7,
             session_id=12345678901234567890,
             message=[{"role": "user", "content": "test"}],
+            prompt_ids=[1],
             num_tokens=1,
             extra_fields={},
         )
