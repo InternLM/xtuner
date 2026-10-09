@@ -26,6 +26,17 @@ pip install -e .
 pip install git+https://github.com/InternLM/GroupedGEMM.git@main
 ```
 
+如果需要 MoE 的 Transformer Engine grouped-GEMM 后端（`XTUNER_GROUP_GEMM=te`），请安装 `TEGroupedGEMM`。
+```{code-block} shell
+:caption: 安装 TEGroupedGEMM
+
+pip install --no-build-isolation --no-deps git+https://github.com/ShilohYu/TEGroupedGEMM.git@8661ef18465241439b9c61470cf2445844d52dfc
+
+通过 `XTUNER_GROUP_GEMM=te|triton|triton_dual|cutlass` 选择 MoE grouped-GEMM 后端。
+默认后端为 `triton`；设置 `XTUNER_GROUP_GEMM=te` 可启用 TEGroupedGEMM。
+旧变量 `XTUNER_USE_CUTLASS_GROUP_GEMM=1` 暂时兼容，但已废弃。
+```
+
 如果需要训练 `FP8 MoE` 模型，除了安装上述 `GroupedGEMM` 外需要额外安装 `AdaptiveGEMM`。
 ```{code-block} shell
 :caption: 安装 AdaptiveGEMM

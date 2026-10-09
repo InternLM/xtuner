@@ -7,7 +7,7 @@ from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tenso
 
 from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 from xtuner.v1.float8.float8_gmm_tile_wise import TileWiseFloat8GroupedLinear
-from xtuner.v1.ops import group_gemm
+from xtuner.v1.ops.moe import GroupGemmProtocol, get_group_gemm
 from xtuner.v1.utils.interleaved_shard import InterleavedShard
 
 
@@ -27,8 +27,10 @@ class GroupedLinear(nn.Module):
         parallel_style: GroupedLinearParallelStyle | None = None,
         ep_tp_mesh: DeviceMesh | None = None,
         num_fused_projections: int = 1,
+        group_gemm: GroupGemmProtocol | None = None,
     ):
         super().__init__()
+        self.group_gemm = group_gemm or get_group_gemm()
         self.in_features = in_features
         self.out_features = out_features
         self.num_routed_experts = num_routed_experts
@@ -114,6 +116,10 @@ class GroupedLinear(nn.Module):
                 self.weight = nn.Parameter(weight)
 
         self.moe_bias = moe_bias
+        self._ultra_ep_replica_weight: torch.Tensor | None = None
+        self._ultra_ep_replica_grad: torch.Tensor | None = None
+        self._ultra_ep_replica_weight_slots: torch.Tensor | None = None
+        self._ultra_ep_replica_grad_slots: torch.Tensor | None = None
         if self.moe_bias:
             if self.parallel_style == "column":
                 # Keep column-parallel bias flattened like the weight's output dimension. This lets EP and Expert TP
@@ -159,10 +165,80 @@ class GroupedLinear(nn.Module):
                 else:
                     self.bias = nn.Parameter(bias)
 
-    def forward(self, x: torch.Tensor, tokens_per_expert: torch.Tensor, decoding: bool = False):
-        weight = self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
-        weight = weight.view(-1, self.local_out_features, self.local_in_features)
-        out = group_gemm(x, weight, tokens_per_expert)
+    def configure_ultra_ep_buffers(
+        self,
+        replica_weight: torch.Tensor,
+        replica_grad: torch.Tensor,
+    ) -> None:
+        """Attach Manager-owned replica buffers without registering
+        parameters."""
+        from xtuner.v1.ops.moe import selected_group_gemm_backend
+
+        backend = selected_group_gemm_backend()
+        if backend not in {"triton", "triton_dual", "te"}:
+            raise RuntimeError(f"UltraEP requires the Triton dual-base or TE grouped GEMM backend, got {backend!r}")
+        if self.moe_bias:
+            raise NotImplementedError("UltraEP does not currently support grouped expert bias")
+        # Native UltraEP exposes one leading dimension per in-flight
+        # micro-batch: [num_slots, replicas, out_features, in_features].
+        # A single-microbatch caller uses the same representation with
+        # num_slots == 1; keeping one shape avoids hidden aliasing/fallback
+        # state in the grouped-linear module.
+        if replica_weight.ndim != 4 or replica_weight.shape[2:] != (self.out_features, self.in_features):
+            raise ValueError(
+                "Unexpected UltraEP replica weight shape: "
+                f"expected [S, R, {self.out_features}, {self.in_features}], got {tuple(replica_weight.shape)}"
+            )
+        # Native UltraEP uses BF16 replica-grad storage so that the GR_EP
+        # kernel can reduce directly into the runtime-owned buffer.  Keep
+        # accepting FP32 here for compatibility with older non-FSDP callers;
+        # the FSDP/UltraEP runtime itself always provisions BF16 buffers.
+        if replica_grad.shape != replica_weight.shape or replica_grad.dtype not in (
+            torch.bfloat16,
+            torch.float32,
+        ):
+            raise ValueError("UltraEP replica grad must be an FP32 or BF16 tensor matching replica weight shape")
+        # Tensor attributes are intentionally plain references: Manager owns
+        # their storage and they must stay out of state_dict()/parameters().
+        self._ultra_ep_replica_weight_slots = replica_weight
+        self._ultra_ep_replica_grad_slots = replica_grad
+        self.select_ultra_ep_slot(0)
+
+    def select_ultra_ep_slot(self, slot: int) -> None:
+        """Bind the grouped GEMM to one Manager-owned micro-batch slice."""
+        if self._ultra_ep_replica_weight_slots is None or self._ultra_ep_replica_grad_slots is None:
+            raise RuntimeError("UltraEP buffers must be configured before selecting a slot")
+        if slot < 0 or slot >= self._ultra_ep_replica_weight_slots.shape[0]:
+            raise IndexError(
+                f"UltraEP micro-batch slot {slot} is outside the configured range "
+                f"[0, {self._ultra_ep_replica_weight_slots.shape[0]})"
+            )
+        self._ultra_ep_replica_weight = self._ultra_ep_replica_weight_slots[slot]
+        self._ultra_ep_replica_grad = self._ultra_ep_replica_grad_slots[slot]
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+        decoding: bool = False,
+        tokens_per_expert_cpu: torch.Tensor | None = None,
+        *,
+        trainable_weight: torch.Tensor | None = None,
+    ):
+        if trainable_weight is None:
+            weight = self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
+            weight = weight.view(-1, self.local_out_features, self.local_in_features)
+        else:
+            weight = trainable_weight
+
+        out = self.group_gemm(
+            x,
+            weight,
+            tokens_per_expert,
+            tokens_per_expert_cpu=tokens_per_expert_cpu,
+            replica_weight=self._ultra_ep_replica_weight,
+            replica_grad=self._ultra_ep_replica_grad,
+        )
 
         if self.moe_bias:
             bias = self.bias.to_local() if isinstance(self.bias, DTensor) else self.bias

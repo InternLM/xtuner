@@ -26,6 +26,17 @@ It is recommended to additionally install `GroupedGEMM` for training `MoE` model
 pip install git+https://github.com/InternLM/GroupedGEMM.git@main
 ```
 
+If you need the Transformer Engine grouped-GEMM backend for MoE (`XTUNER_GROUP_GEMM=te`), install `TEGroupedGEMM`.
+```{code-block} shell
+:caption: Install TEGroupedGEMM
+
+pip install --no-build-isolation --no-deps git+https://github.com/ShilohYu/TEGroupedGEMM.git@8661ef18465241439b9c61470cf2445844d52dfc
+
+Select the MoE grouped-GEMM backend with `XTUNER_GROUP_GEMM=te|triton|triton_dual|cutlass`.
+The default is `triton`; set `XTUNER_GROUP_GEMM=te` to use TEGroupedGEMM.
+The legacy `XTUNER_USE_CUTLASS_GROUP_GEMM=1` variable is supported temporarily and is deprecated.
+```
+
 If you need to train `FP8 MoE` models, in addition to installing the above `GroupedGEMM`, you need to additionally install `AdaptiveGEMM`.
 ```{code-block} shell
 :caption: Install AdaptiveGEMM
