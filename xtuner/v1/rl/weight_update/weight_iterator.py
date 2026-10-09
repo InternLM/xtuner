@@ -139,12 +139,16 @@ class WeightIterator:
             else:
                 dtype = torch.bfloat16
 
-        def get_params(tensor_list, name_list, save_dtype):
+        def get_params(owner, tensor_list, name_list, save_dtype):
+            # Gather with the module that owns the parameters, not with the outer model. A
+            # compose model is wrapped on the world mesh, while its language tower may be
+            # sharded on its own meshes (EP, `dp_shard`, `efsdp`, HSDP shard); only the owner
+            # knows which shards are FSDP shards to gather and which EP shards to keep local.
             _tensor_list, _spec_list = list(zip(*tensor_list))
-            fsdp_unshard_tensor_list = model._fsdp_foreach_allgather(_tensor_list, _spec_list)
+            fsdp_unshard_tensor_list = owner._fsdp_foreach_allgather(_tensor_list, _spec_list)
             if save_dtype == torch.float8_e4m3fn:
                 runtime_is_float8_list = [is_float8_weight(tensor) for tensor in _tensor_list]
-                fsdp_unshard_tensor_list, name_list = model._to_float8(
+                fsdp_unshard_tensor_list, name_list = owner._to_float8(
                     fsdp_unshard_tensor_list,
                     name_list,
                     runtime_is_float8_list,
@@ -191,7 +195,7 @@ class WeightIterator:
                     name = name.replace(".gate.", ".mlp.gate.")
                 name_list.append(name)
                 tensor_list.append((local_tensor, load_spec))
-            fsdp_unshard_tensor_list, name_list = get_params(tensor_list, name_list, dtype)
+            fsdp_unshard_tensor_list, name_list = get_params(language_model, tensor_list, name_list, dtype)
             state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
             yield WeightUpdateBatch(state_dict)
 
@@ -200,7 +204,10 @@ class WeightIterator:
                 continue
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
             local_tensor = local_tensor.bfloat16()
-            load_spec = model.load_spec_mapping.get(name)
+            owner, owner_name = self._param_owner(model, name)
+            load_spec = owner.load_spec_mapping.get(owner._clean_param_name(owner_name))
+            if load_spec is None:
+                raise ValueError(f"Internal Error. Parameter {name} not found in load_spec_mapping.")
 
             if isinstance(model.config, BaseComposeConfig):
                 if "vision_tower." in name:
@@ -220,7 +227,7 @@ class WeightIterator:
                     name = "model.embed_tokens.weight"
             tensor_list = [(local_tensor, load_spec)]
             name_list = [name]
-            fsdp_unshard_tensor_list, name_list = get_params(tensor_list, name_list, dtype)
+            fsdp_unshard_tensor_list, name_list = get_params(owner, tensor_list, name_list, dtype)
             state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
             yield WeightUpdateBatch(state_dict)
 
@@ -228,3 +235,15 @@ class WeightIterator:
             yield WeightUpdateBatch({}, finished=True)
 
         DEVICE_MODULE.empty_cache()
+
+    @staticmethod
+    def _param_owner(model: Any, name: str) -> tuple[Any, str]:
+        # Map a `model.state_dict()` key to the submodule that owns the parameter and to the
+        # key relative to that submodule, which is how each owner's `load_spec_mapping` is keyed.
+        # Compose models never build a `load_spec_mapping` of their own; their children do.
+        if isinstance(model.config, BaseComposeConfig):
+            for submodule in ("language_model", "vision_tower", "multi_modal_projector"):
+                prefix = f"{submodule}."
+                if name.startswith(prefix):
+                    return getattr(model, submodule), name[len(prefix) :]
+        return model, name

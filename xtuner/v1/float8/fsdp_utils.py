@@ -124,13 +124,17 @@ def precompute_tilewise_float8_scale_for_fsdp(
     module: nn.Module,
     reduce_mesh_mapping: Dict[Tuple[int, int], DeviceMesh],  # absmax need to be reduced in this group
     reduce_mesh_devided_64: Optional[DeviceMesh] = None,  # All params share the same reduce mesh
+    module_types: Optional[Tuple[type, ...]] = None,  # restrict to these fp8 module classes (default: all)
 ) -> None:
     from xtuner.v1.float8 import TileWiseFloat8GroupedLinear, TileWiseFloat8Linear
+
+    if module_types is None:
+        module_types = (TileWiseFloat8Linear, TileWiseFloat8GroupedLinear)
 
     weights: List[WeightWithDynamicTilewiseFloat8CastTensor] = []
     for m in module.modules():
         if (
-            isinstance(m, (TileWiseFloat8Linear, TileWiseFloat8GroupedLinear))
+            isinstance(m, module_types)
             and isinstance(m.weight, DTensor)
             and isinstance(m.weight._local_tensor, WeightWithDynamicTilewiseFloat8CastTensor)
         ):
