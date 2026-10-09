@@ -36,15 +36,13 @@ from xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn import BaseMLLMTo
 from xtuner.v1.datasets.mllm_tokenize_fn.qwen3_vl_utils import sort_frames
 
 
-GLM_5_3_FLASH_PATH = os.environ.get(
-    "GLM_5_3_FLASH_PATH", "/mnt/shared-storage-user/zhaopenghao/model/GLM-5.3-Flash-25B"
-)
+GLM_5_3_FLASH_PATH = os.environ["GLM_5_3_FLASH_PATH"]
 
 
 @pytest.fixture(scope="module")
 def ckpt_path():
     if not os.path.isdir(GLM_5_3_FLASH_PATH):
-        pytest.skip(f"GLM_5_3_FLASH_PATH not found: {GLM_5_3_FLASH_PATH}")
+        pytest.fail(f"GLM_5_3_FLASH_PATH not found: {GLM_5_3_FLASH_PATH}")
     return GLM_5_3_FLASH_PATH
 
 
