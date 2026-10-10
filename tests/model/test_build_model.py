@@ -41,6 +41,7 @@ class TestBuildModel(TestCase):
             hidden_factor=1.0,
             moe_intermediate_size=768,
             router=router_config,
+            compile_cfg=False,  # This case checks construction, not process-global compile targets.
         )
         model = config.build()
         self.assertIsInstance(model, Qwen3MoE)
