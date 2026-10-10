@@ -927,9 +927,10 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             num_frames = len(image_list)
 
             # 前面保证了一定可以被 merge_size 整除，因此内部一定不会额外 padding
-            video_result = self.video_processor._preprocess(
+            # Frames were sampled above; use the public API without sampling them again.
+            video_result = self.video_processor.preprocess(
                 [video_data],
-                size=self.size,
+                do_sample_frames=False,
                 image_mean=tuple(self.video_processor.image_mean),
                 image_std=tuple(self.video_processor.image_std),
                 patch_size=self.video_processor.patch_size,

@@ -12,6 +12,8 @@ switch between fast / fused paths and HF-exact paths. Under `XTUNER_HF_IMPL=true
   with ``seq_idx=None`` (HF's non-packed convention), and transposes back. XTuner's own wrap
   binds the channel-last/seq_idx convention together via an internal transpose, which gives a
   different backward op graph from HF's call pattern even though forward is bitwise.
+* The gated RMSNorm module follows HF's explicit cast and multiplication order so bf16
+  forward and backward comparisons use the same rounding points.
 
 These switches are only meant for the bitwise-parity tests. Production / training stays on the
 XTuner path (compile-friendly custom_op wraps + seq_idx-aware kernel dispatch).
