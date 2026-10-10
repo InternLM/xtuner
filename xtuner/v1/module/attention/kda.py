@@ -71,10 +71,10 @@ _fla_kda_import_error: BaseException | None = None
 try:
     from fla.modules import FusedRMSNormGated as _FLAFusedRMSNormGated
     from fla.modules import ShortConvolution as _FLAShortConvolution
-    from fla.ops.kda import chunk_kda as _chunk_kda
     from fla.ops.kda import fused_recurrent_kda as _fused_recurrent_kda
 
     from xtuner.v1.ops.kda.causal_conv1d import causal_conv1d as _kda_causal_conv1d
+    from xtuner.v1.ops.kda.chunk_kda import chunk_kda as _chunk_kda
     from xtuner.v1.ops.kda.fused_kda_gate import fused_kda_gate as _fused_kda_gate
 
     class FusedRMSNormGated(_FLAFusedRMSNormGated):

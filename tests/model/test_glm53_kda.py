@@ -28,7 +28,7 @@ from torch.testing._internal.common_distributed import DistributedTestBase
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.model.utils.checkpointing import apply_activation_checkpointing
-from xtuner.v1.module.attention.kda import KDAConfig, chunk_kda, fused_kda_gate
+from xtuner.v1.module.attention.kda import KDAConfig, fused_kda_gate
 from xtuner.v1.utils.test_utils import init_data_mesh
 
 
@@ -114,7 +114,9 @@ class TestKDAGate:
         silently double-apply the gate transform instead of raising. Catch that regression by
         asserting these names stay absent from the kernel's signature."""
         # 钉住 fla 的 chunk_kda 签名：它不接受 A_log/dt_bias，传进去会被静默吞掉。
-        params = set(inspect.signature(chunk_kda).parameters)
+        from fla.ops.kda import chunk_kda as fla_chunk_kda
+
+        params = set(inspect.signature(fla_chunk_kda).parameters)
         assert "A_log" not in params
         assert "dt_bias" not in params
         assert "use_beta_sigmoid_in_kernel" not in params
