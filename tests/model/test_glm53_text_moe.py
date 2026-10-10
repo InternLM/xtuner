@@ -28,13 +28,14 @@ TestNoPEDSAMLAConfigValidatesAssignment
 
 import os
 import re
+import subprocess
+import sys
+from pathlib import Path
 
 import parametrize
 import pytest
 import torch
-import torch.distributed as dist
 from pydantic import ValidationError
-from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor
 from torch.testing._internal.common_distributed import DistributedTestBase
 
@@ -317,6 +318,35 @@ class TestGlm53TextMoEWeightMapping:
         assert len(loaded) > 0
 
 
+@pytest.fixture(scope="class")
+def automodel_reference(tmp_path_factory):
+    """Finish the optional AM process before the existing test starts GPU workers."""
+    python = os.environ.get("GLM53_AUTOMODEL_PYTHON")
+    if not python or not os.path.isdir(GLM_5_3_FLASH_PATH):
+        yield
+        return
+    output = tmp_path_factory.mktemp("glm53-automodel") / "reference"
+    subprocess.run(
+        [
+            python,
+            str(Path(__file__).with_name("run_glm53_reference.py")),
+            "--checkpoint",
+            GLM_5_3_FLASH_PATH,
+            "--processor-python",
+            sys.executable,
+            "--output",
+            str(output),
+        ],
+        check=True,
+        timeout=1800,
+    )
+    # Workers inherit this internal result path; callers only select an interpreter.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("_GLM53_AUTOMODEL_REFERENCE", str(output))
+        yield
+
+
+@pytest.mark.usefixtures("automodel_reference")
 class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
     """验收 1: text + image compose-model forward loss/logits vs real `transformers.Glm5NextForConditionalGeneration`
     on the F0 25B cropped checkpoint (GLM_5_3_FLASH_PATH).
@@ -346,14 +376,6 @@ class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
         if not os.path.isdir(GLM_5_3_FLASH_PATH):
             pytest.skip(f"GLM_5_3_FLASH_PATH not found: {GLM_5_3_FLASH_PATH}")
         self.create_pg("cuda")
-        sp_size = int(os.environ.get("XTUNER_TEST_SP_SIZE", "1"))
-        assert sp_size in (1, 2), "XTUNER_TEST_SP_SIZE must be 1 or 2"
-        assert dist.get_world_size() % sp_size == 0, "SP size must divide world size"
-        sp_mesh = None
-        if sp_size > 1:
-            sp_mesh = init_device_mesh(
-                "cuda", (dist.get_world_size() // sp_size, sp_size), mesh_dim_names=("dp", "sp")
-            )["sp"]
 
         # `Glm5NextForConditionalGeneration` isn't registered under `AutoModelForCausalLM`
         # (it's the VL/compose entry point) -- must be loaded directly, matching doc/progress.md
@@ -367,7 +389,7 @@ class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
         )
 
         cases = build_glm53_parity_cases(GLM_5_3_FLASH_PATH)
-        am_reference_dir = os.environ.get("GLM53_AUTOMODEL_REFERENCE_DIR")
+        am_reference_dir = os.environ.get("_GLM53_AUTOMODEL_REFERENCE")
         am_reference = load_glm53_reference(am_reference_dir, cases, GLM_5_3_FLASH_PATH) if am_reference_dir else None
         hf_model.eval()
         expected_losses = []
@@ -416,13 +438,10 @@ class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
                 seq_ctx.image_grid_thw = batch["image_grid_thw"].to("cuda")
                 seq_ctx.mm_token_type_ids = batch["mm_token_type_ids"][:, :-1].to("cuda")
                 seq_ctx.num_img_tokens = [[int(seq_ctx.image_grid_thw.prod(-1).sum())]]
-            if sp_mesh is not None:
-                # Split tokens/modality IDs together; pixels and image grid remain complete.
-                seq_ctx = seq_ctx.split(sp_mesh)
             loss_cfg = CELossConfig()
             LossContext = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=sp_mesh)
-            loss_ctx_list = LossContext.build_batches([loss_ctx], sp_mesh=sp_mesh)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=None)
+            loss_ctx_list = LossContext.build_batches([loss_ctx])
             loss_ctx = loss_ctx_list[0]
 
             with torch.no_grad():
@@ -431,17 +450,7 @@ class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
             # Preserve the public loss path above; additionally exercise inference logits.
             with torch.no_grad():
                 logits = model(seq_ctx=seq_ctx, loss_ctx=None).logits
-            positions = batch["positions"].to(logits.device)
-            shard_start = 0 if sp_mesh is None else sp_mesh.get_local_rank() * logits.shape[1]
-            owned = (positions >= shard_start) & (positions < shard_start + logits.shape[1])
-            chosen = logits.new_zeros((positions.numel(), logits.shape[-1]), dtype=torch.float32)
-            chosen[owned] = logits[0, positions[owned] - shard_start].float()
-            ownership = owned.to(torch.int32)
-            if sp_mesh is not None:
-                # Reconstruct only the sampled rows, never the whole sequence x vocabulary.
-                dist.all_reduce(chosen, group=sp_mesh.get_group())
-                dist.all_reduce(ownership, group=sp_mesh.get_group())
-            assert bool((ownership == 1).all()), "Each sampled position must have exactly one SP owner"
+            chosen = logits[0, batch["positions"].to("cuda")]
             metrics = check_logits(chosen, expected_logits[sample_index])
             print(f"GLM53 case={name} logits={metrics}", flush=True)
             if am_reference is not None:

@@ -109,13 +109,7 @@ def load_glm53_reference(directory, cases, checkpoint):
     native_class = model_class.startswith("nemo_automodel.") and model_class.endswith(
         ".Glm5NextForConditionalGeneration"
     )
-    # FSDP2 creates its dynamic subclass in torch's module, not the model's module.
-    wrapped_native_class = (
-        model_class.startswith("torch.distributed.fsdp.")
-        and model_class.endswith(".FSDPGlm5NextForConditionalGeneration")
-        and Path(metadata.get("source", {}).get("file", "")).parent.name == "nemo_automodel"
-    )
-    if metadata.get("backend_name") != "automodel" or not (native_class or wrapped_native_class):
+    if metadata.get("backend_name") != "automodel" or not native_class:
         raise ValueError("Reference must use the native AutoModel GLM model, not the HF fallback")
     # This local shared-checkpoint contract deliberately rejects relocated checkpoints.
     if Path(metadata.get("checkpoint", "")).resolve() != Path(checkpoint).resolve():

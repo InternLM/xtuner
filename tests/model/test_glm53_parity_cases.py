@@ -53,16 +53,6 @@ class TestGlm53ParityContracts(unittest.TestCase):
         self.assertEqual(result[0][0], 1.25)
         torch.testing.assert_close(result[0][1], torch.ones(2, 8))
 
-    def test_accepts_fsdp_native_wrapper_and_rejects_foreign_source(self):
-        self.metadata["model_class"] = "torch.distributed.fsdp._fully_shard.FSDPGlm5NextForConditionalGeneration"
-        self.metadata["source"] = {"file": "/src/nemo_automodel/__init__.py"}
-        self.write_metadata()
-        self.assertEqual(len(load_glm53_reference(self.directory, self.cases, self.checkpoint)), 1)
-        self.metadata["source"] = {"file": "/src/transformers/__init__.py"}
-        self.write_metadata()
-        with self.assertRaises(ValueError):
-            load_glm53_reference(self.directory, self.cases, self.checkpoint)
-
     def test_rejects_preprocessing_or_supervision_changes(self):
         for key in self.batch:
             with self.subTest(key=key):
