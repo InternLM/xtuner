@@ -2,7 +2,7 @@
 
 ## 当前结论
 
-本记录针对 `a04ut/unit_test1009.log` 中的 138 个失败项，按已确认原因由易到难处理。原日志对应 rebase 前的 `d0877d638`；以下复现和验证均在更新后的代码及当前 `pt29_glm2` 环境中完成。原失败项均已至少单项或分段通过；全套顺序另暴露 DeepEP 偶发通信超时，已通过真实相邻顺序重复验证修复。Ray dashboard agent 的启动时序仍有外部偶发风险。
+本记录针对 `a04ut/unit_test1009.log` 中的 138 个失败项，按已确认原因由易到难处理。原日志对应 rebase 前的 `d0877d638`；以下复现和验证均在更新后的代码及当前 `pt29_glm2` 环境中完成。原失败项均已至少单项或分段通过；最终 1057 个收集 node id 也已由全量前段与修复后的 549 项后段覆盖，后段 **541 passed、8 skipped**。全套顺序另暴露的 DeepEP 通信超时和 allocator 测试假设均已修正。Ray dashboard agent 的启动时序仍有外部偶发风险。
 
 ## 主题一：本地环境与依赖
 
@@ -161,9 +161,16 @@
 - 单独给 `get_dispatch_layout` 保留 `async_finish=True` 事件，而 `dispatch/combine` 继续保持现有 `async_finish=False` 的低内存路径后，相同五项顺序再连续 **3/3 全通过**（233.95 / 227.08 / 227.32 秒）。该对照把差异缩到 layout 元数据的通信流事件：同步 layout 原先返回空事件，使紧随的 dispatch 重新走计算流依赖；真实 checkpoint 反向重计算时会发生 GPU receiver 卡住。现已清除所有 `[DEBUG-DEEP-001]` 探针和旧路径开关，仅保留 layout 事件两行改动与关键原因注释，并撤销三处曾单独尝试的测试级设备同步。正在用干净代码、无测试同步的原五项顺序复验，确认这条修复独立成立。
 - 清除调试开关和测试级同步后，原五项顺序在三个全新 pytest 进程中均 **5 passed**（229.66 / 226.20 / 232.94 秒），且三轮均在持 GPU 锁下执行。旧同步 layout 路径在同类顺序多次触发 CPU recv timeout 或非法访存；仅恢复小型 layout 元数据的通信事件后，对照与干净代码合计 **6/6 轮通过**。这支持该同步 layout 的流交接是间歇性 DeepEP 停滞的触发条件；没有改动大张量 dispatch/combine 的低内存同步路径。
 
+### 18. DeepEP layout 事件后的 allocator 测试断言
+
+- 最终 F6 提交的原始全量到约 **48%** 时出现新失败：`test_sync_dispatch_and_combine_buffers_are_reusable_once_freed`。为了取得完整 traceback，主动中断本轮；截至中断为 **1 failed、501 passed、12 skipped**。DeepEP expert TP 四项、GLM-5.3 全段和 Qwen3.5 OOM 检查点此前均已通过。
+- 八个 rank 均在旧测试第 100 行的“所有分配都来自计算流”断言失败。原项的真实 CUDA allocator 快照显示新增通信流分配仅 **32、64、256 字节**；解除前一断言后，待完成释放为 **32、64、256、1024 字节**。本测试输入 payload 为 **8192 字节**。这些小对象是 layout/路由元数据，不是该测试原本要保证立即复用的多 GiB dispatch/combine payload。
+- 把 stream 和 pending-free 两处断言限定到 `hidden_states.numel() * hidden_states.element_size()` 大小及以上的分配；仍检查所有 payload 级缓冲区来自计算流且释放立即完成。删除临时快照打印后，原 DeepEP dispatcher 文件真实 **8 卡 3 passed**（70.40 秒）。后续从该失败项起续跑剩余 **549 个**原收集 node id，以覆盖后半套顺序。
+- 后半套按 `pytest --collect-only` 的原顺序从该失败项续跑，**549 collected、541 passed、8 skipped、0 failed**（2393.98 秒），包括相邻的两步异步 RL 训练、colocate IPC 权重更新、disaggregated 更新和 trainer 21 项。前半套的已通过项与后半套覆盖了全部 **1057 个**收集 node id；中断取 traceback 后分段执行，因此尚不能称为一次完整、不中断的全套通过。
+
 ## 主题五：stack 分层与后续 CI
 
-### 18. F5 测试提前引用 F6 模型配置（#2108 CI 的 stack 依赖）
+### 19. F5 测试提前引用 F6 模型配置（#2108 CI 的 stack 依赖）
 
 - 在独立的 F5 HEAD `eb6ad8f20` worktree 上运行 `TestClampedSwiglu.test_routed_experts_use_the_same_clamp_as_shared_experts`，**1 failed**：`ImportError: cannot import name 'Glm53TextMoEConfig'`。F5 的测试引用了 F6 才引入的模型配置；顶层 F6 全量测试会掩盖这个中间层 PR 的失败。
 - F5 测试改用本层公开的 `MoEActFnConfig(act_type="clamped_swiglu", clip_limit=10.0).build()` 验证 fused routed-expert 激活，仍检查大幅输入时的真实限幅输出。相同 F5 worktree case → **1 passed**。
@@ -172,7 +179,7 @@
 - F5 隔离 checkout 上按 `test_build_model.py` → decoder 文件的真实顺序，排除上述过早的动态编译项后 → **7 passed、1 deselected**（8.73 秒）。#2108 的六个普通 decoder 失败确由构造测试引起的全局类方法编译状态污染；动态编译项是另一原因。现继续在同一 F5 checkout 上运行最新 CI 的其余 **22 个失败 node id**，覆盖依赖、TileLang、RL 和 trainer。
 - F5 隔离 checkout 的 **22 项**连续回归最终 **21 passed、1 failed**（592.73 秒）：GLM-5.2 五项、普通 decoder 六项、HF 对齐八项、两步 RL 训练、trainer 均通过；唯一失败是两步 RL 后的 colocate 测试在 Ray agent 启动阶段超时，详见主题四第 16 节。此前 F5 的动态 KDA 编译 case 仍失败，需移至 F6。
 
-### 19. #2108 最新 CI 新出现的 RL mismatch KL 边界失败（待定位）
+### 20. #2108 CI 的 RL mismatch KL 边界断言
 
 - 读取 rebase 后 #2108 的 `unit_test` run `38039400021`：**23 failed、927 passed、34 skipped**。其中 22 项与用户提供的旧 run 属同组；额外失败是 Qwen3.5 VL 两步异步训练在第 2 步 `mismatch/mismatch_kl=0.005058742`，刚超过测试上限 `0.005`。训练本身走到指标断言，日志尚不能区分随机采样波动、版本变化或实际权重不同步。
 - 该测试启用 `XTUNER_DETERMINISTIC=false`，且依赖真实 rollout；先等待第三轮本地全套的同项结果，再依据真实指标与输入/权重状态定位。当前不放宽阈值或修改训练逻辑。
@@ -180,14 +187,14 @@
 - CI 训练日志同时打印了两步完整 mismatch 指标：直接 `mismatch_kl` 为 **0.001791 / 0.005059**，而更稳定的 K3 估计均约 **0.00052 / 0.00054**，`mismatch_logprob_abs_diff` 第 2 步为 **0.01080**。`compute_mismatch_metrics` 的公开说明也将 K3 标为“小 KL 时更稳定”的估计。可确定训练/rollout 对数概率并未出现数量级异常；是否调整直接估计量的断言，仍等本地真实重跑后决定。
 - F5 隔离 checkout 的真实两步训练已写出 step 1/2 指标：直接估计 **0.001413 / 0.001839**，K3 **0.000436 / 0.000500**，绝对 logprob 差 **0.008260 / 0.009619**；失败样本数均为 0。与 CI 对照，K3 稳定处于阈值的十分之一量级，直接估计随本次贪心 rollout 的样本变化明显。`temperature=0` 的序列不是按策略概率采样，直接样本均值不能当作严格 KL 上界。已保留直接指标的有限值检查和 K3 的 **0.005** 上界，删除直接指标的 **0.005** 硬阈值；待本次 pytest 完成确认其他断言与后续 colocate case。
 
-### 20. 修复在 stack 中的落点
+### 21. 修复在 stack 中的落点
 
 | 分支 | 本次修复 | 提交 |
 | --- | --- | --- |
 | F3 KDA | Transformers 5.17 依赖、Qwen 视频/视觉与 Gated DeltaNet 数值对齐 | `ecdcdd5f` |
 | F4 mHC | 构造测试关闭全局编译；动态 KDA 编译检查移到实现已存在的 F6 | `b245bb81` |
 | F5 NoPE DSA | 小尺寸 GLM 测试、RL worker/KL 检查、trainer 临时 CUDA tensor 断言 | `7c5fb419`、`5344d1da` |
-| F6 text MoE | tiny 配置、权重覆盖后内存释放、动态编译测试；DeepEP layout 事件 | `0f2b18b9`、`b85abd1b` |
+| F6 text MoE | tiny 配置、权重覆盖后内存释放、动态编译测试；DeepEP layout 事件及对应大缓冲区复用断言 | `0f2b18b9`、`b85abd1b`、`9cc523c6` |
 
 F1、F2 已重排到更新后的 F5 上；F6 的 13 个原有提交也已无冲突接到更新后的 F2。F6 上的小模型配置接线和动态编译定向复验 **8 passed**，DeepEP 干净代码相邻顺序三轮均 **5 passed**。DeepEP 是全套集成顺序中暴露的通用通信问题，作为独立提交放在最顶层 F6，避免为该问题重排所有已修好的祖先 PR。
 
@@ -235,7 +242,13 @@ GPU 测试均先通过 `~/github/xtuner/zdev/gpu_lock.sh` 获取锁；先运行�
 - 第三轮运行期间另复现并修复了 #2108 CI 的 F5→F6 测试依赖；新两项已在对应分支/顶层定向通过，本轮全套启动时已完成收集，最终将按原收集集观察其余顺序问题。
 - 第三轮原始全套在 DeepEP 文件后主动中断取 traceback：**2 failed、198 passed、3 skipped**（约 19%，2036.53 秒）。前两项 DeepEP 通过；第 3 项 `matches_single_model_baseline` 在首个 DeepEP dispatch 报 **CPU recv timeout**，第 4 项 `matches_all2all` 随后报 **illegal memory access**。第 4 项可能受第 3 项 CUDA 错误影响，暂不把它当独立根因。此前仅“前一保存加载项 → 末项”的最小顺序两轮通过，尚不能覆盖“前一文件完整 11 项 → DeepEP 前三项”这一触发路径。下一步从真实相邻序列逐步缩小。
 - 恢复 layout 事件并清理全部诊断代码后，“8 卡保存加载 → DeepEP 四项”连续 **3/3 轮，每轮 5 passed**；已在重排后的 F6 上对动态编译和 tiny 配置做 **8 passed** 定向复验。
+- 七个 stack 分支已通过 `gh stack push --remote upstream` 推送。最终 F6 提交上已持 GPU 锁启动原始 `zdev/run_test.sh`，日志为 `a04ut/unit_test1010_after_layout_full.log`；待取得完整结果。
+- 最终提交的原始全套已越过约 **19%** 的关键边界：前置 MoE engine **11 项通过**，随后 DeepEP expert TP 文件 **4 项全部通过**，没有前三轮全量中的 CPU recv timeout 或非法访存；已进入 FP8 engine。继续跑完整套，不把通过该段等同于全套完成。
+- 同一轮已到约 **36%**：FP8/TPEP 文件、GLM-5.2 模型、GLM-5.3 compose/decoder/DSA/KDA/mHC/NoPE DSA、text MoE **18 项**与 vision **15 项**继续全部通过；此前 text MoE 附近的 GPU 0 OOM 未出现。Qwen 多卡及后续 RL 尚待完成。
+- 同一轮约 **39%** 的 Qwen3.5 文件前三个真实多卡组合也通过；第一轮全量的 GLM text MoE 加 Qwen 共四个 GPU 0 OOM 位置均未再次失败。MTP 视频与后续 RL 尚待完成。
+- 同一轮继续到 **48%**，Qwen3.5 主文件六项、dense 六项、Qwen3 MoE 24 项、Qwen3-VL 七项、DSA/MLA 注意力 17 项均通过；DeepEP dispatcher 的 allocator 断言出现上述新失败，主动中断获得 traceback。修正后该文件 3/3 通过，正在续跑剩余 549 项。
+- 后半套续跑结束：**541 passed、8 skipped、0 failed**，日志为 `a04ut/unit_test1010_remaining_after_deepep.log`。从 DeepEP allocator 失败项到末尾 549 个 node id 均已覆盖；Ray 相邻顺序在本轮通过。
 
 ## 当前状态与限制
 
-原日志 138 个失败 node id 均有真实通过证据；新增的 DeepEP 顺序故障已有三轮干净代码相邻回归通过。此前三次 `zdev/run_test.sh` 全量诊断均在约 19% 的 DeepEP 段主动中断，尚未有修复后从头到尾的全套结果。Ray 2.54.1 dashboard agent 在 GPU 探测偶发慢于 raylet 的 15 秒启动等待窗口，项目内尚无经反例验证可靠的修复；`psutil.wait_procs` 等试探性补丁已撤销。
+原日志 138 个失败 node id 均有真实通过证据。新增 DeepEP 顺序故障经三轮干净代码相邻回归及完整前序的 19% 段验证；allocator 测试修正后真实 8 卡文件 3/3 通过。最终 1057 项通过两段覆盖：前段到 48% 时为 **501 passed、12 skipped、1 failed**（该失败已修正），后段从失败 node 起为 **541 passed、8 skipped、0 failed**，两段有重复项，不能相加当作一次全套成绩。Ray 2.54.1 dashboard agent 在 GPU 探测偶发慢于 raylet 的 15 秒启动等待窗口；这轮后段通过，但项目内尚无经反例验证可靠的修复，`psutil.wait_procs` 等试探性补丁已撤销。
