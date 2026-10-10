@@ -17,6 +17,7 @@ via a separate ``forget_gate`` module before calling the (kernelizable) chunk/re
 
 from __future__ import annotations
 
+import math
 from typing import Annotated, Any
 
 import torch
@@ -218,8 +219,17 @@ class KimiDeltaAttention(nn.Module):
 
         self.f_a_proj = build_linear(hidden_size, head_dim, bias=False, float8_cfg=float8_cfg)
         self.f_b_proj = build_linear(head_dim, projection_size, bias=False, float8_cfg=float8_cfg)
-        self.A_log = nn.Parameter(torch.log(torch.empty(num_heads, dtype=torch.float32).uniform_(1, 16)))
+        self.A_log = nn.Parameter(torch.empty(num_heads, dtype=torch.float32))
         self.dt_bias = nn.Parameter(torch.empty(projection_size, dtype=torch.float32))
+        # Matches HF's `_init_weights` for `Glm5NextTextForgetGate`: A_log is zeroed when a
+        # safe gate lower bound is set (GLM-5.3-Flash always sets one, -5.0), otherwise
+        # log-uniform; dt_bias is always log-uniform(1e-3, 1e-1) regardless.
+        if gate_lower_bound is not None:
+            nn.init.zeros_(self.A_log)
+        else:
+            nn.init.uniform_(self.A_log, a=1.0, b=16.0)
+            self.A_log.log_()
+        nn.init.uniform_(self.dt_bias, a=math.log(1e-3), b=math.log(1e-1))
         self.b_proj = build_linear(hidden_size, num_heads, bias=False, float8_cfg=float8_cfg)
 
         if use_full_rank_gate:

@@ -136,7 +136,56 @@ GPU flake，不是 XTuner 侧实现问题，未做任何生产代码改动。
 
 ## F4 mHC 四流残差
 
-**状态**：未开始。kernel 从 `~/github/xtuner_dsv4` 移植。
+**状态**：已完成，已提交。
+
+**交付**：
+- `xtuner/v1/module/decoder_layer/mhc.py`：`MHCConfig` / `hc_split_sinkhorn` / `hc_pre` /
+  `hc_post` / `unshard_hc_params`。
+- `xtuner/v1/ops/hc_post.py`：Triton `hc_post_fused`（前向+反向，`torch.library.custom_op`）。
+- `xtuner/v1/model/moe/glm53/decoder_layer.py`：`Glm53DenseDecoderLayer` /
+  `Glm53MoEDecoderLayer`，`mhc_cfg=None` 时纯透传基类逻辑（供 F6 的 MTP 层复用）。
+- `tests/model/test_glm53_mhc.py`、`tests/ops/test_hc_post.py`、`tests/model/test_glm53_decoder_layer.py`。
+
+**来源与改编**：核心数学移植自 `xtuner` 主仓 `dsv4` 分支的 DeepSeek-V4 实现
+（commit `01c31a833`，未合入本分支，通过 `git show 01c31a833:<path>` 读取），但按设计文档重新
+落到公共路径 `module/decoder_layer/mhc.py`（dsv4 原实现在 `module/decoder_layer/deepseek_v4/`
+下，是模型私有的）。有意**不**移植的部分：
+- dsv4 的 `XTUNER_V4_HF_PARITY` 全局开关与 `hf_parity.py`（V4 专用命名，且本分支不存在该模块）；
+  改为直接让默认路径（bf16 Linear + fp32 Sinkhorn）在 fp32 输入下自然退化为与 HF 一致的计算，
+  作为测试用的 bitwise 锚点（见 `test_hc_pre_hc_post_matches_hf_hyper_connection`），不新增
+  一套开关基础设施。
+- dsv4 的 `xtuner/v1/ops/mhc.py`（TileKernels/Hopper TileLang 后端，721 行）**未移植**：
+  没有对应硬件/依赖可验证正确性，盲移植风险大于收益。`XTUNER_USE_MHC_KERNELS=1` 时
+  `hc_post` 显式抛 `NotImplementedError`（而不是静默指向不存在的模块），已记录为已知缺口，
+  待真正需要 TileKernels 加速时再补。
+
+**HF 数值 oracle**：`transformers.models.glm5_next.modeling_glm5_next.Glm5NextTextHyperConnection`
++ `Glm5NextTextDecoderLayer.forward` 里 `hc_post` 的展开表达式。核对后确认与 dsv4 的数学完全一致
+（GLM-5.3 的 mHC 与 DeepSeek-V4 用同一套 split-sinkhorn）。`test_glm53_mhc.py` 里 fp32 输入下
+`hc_pre`/`hc_post` 与 HF 逐元素一致（atol=1e-4/1e-5），bf16 下在设计doc预期的 ULP 级误差内。
+
+**`Glm53MoEDecoderLayer` 的设计要点**：只重写 `MoEDecoderLayer._pre_moe_forward` /
+`_post_moe_forward` 这两个基类已经预留的接缝（attention+gate 阶段 / combine+residual 阶段），
+完全不碰中间约 400 行的 EP/dispatcher/domino micro-batch 流水线。`residual` 在 mHC 模式下的类型从
+基类的 `Tensor` 放宽成 `Tensor | _MHCResidual`（一个 `NamedTuple`，携带 4 流残差 + FFN 位点的
+`post`/`comb`）——基类的 `_forward`/`_micro_batch_forward` 只是把 `_pre_moe_forward` 的返回值原样
+透传给 `_post_moe_forward`，从不检查其类型，所以这个类型加宽是安全的协变扩展，用
+`# type: ignore[override]` 显式标注而非静默绕过 mypy。
+
+**排查记录（真实根因，非推测）**：为验证 `Glm53MoEDecoderLayer` 的 mHC 包裹逻辑，测试用 F3 的
+真实 KDA 作为占位 attention（F5 的 NoPE-DSA 还没做，但 mHC 包裹逻辑与具体 attention 类型无关）。
+首轮测试在 GPU 上出现间歇性 NaN，一度怀疑是 pytest 的 `typeguard` 插件干扰（`-p no:typeguard`
+确实让单个失败用例转为通过），但用 `-p no:typeguard` 跑**完整**测试文件仍然失败，证明那只是
+巧合（typeguard 改变了内存分配时序，偶然avoid 到了问题，不是真正的 fix）。最终用逐步插桩定位到
+真实根因：**测试自己构造的 `MoEGate.weight` 与 `GroupedLinear.weight`（专家权重）是
+`torch.empty` 未初始化**——真实模型通过顶层 `MoE.init_weights()` 才初始化这些参数，这条路径
+在独立构造单个 decoder layer 的单测里从未被调用到。`torch.empty` 不消耗随机数流，所以两个独立
+构造的 layer（即使用同一个 seed）在这些参数上拿到的是两块不同的未初始化显存内容——在
+`test_mhc_cfg_none_matches_plain_moe_decoder_layer` 里表现为两个理论上应该完全一致的输出
+100% 不匹配且含 NaN。修复：测试构造 layer 后显式对 `gate.weight` / `experts.fused_w1w3.weight`
+/ `experts.fused_w2.weight` 做 `normal_(std=0.02)`。这是测试 fixture 的问题，不是 mHC 生产代码
+的 bug——`hc_post_fused`（连同其 D=4096 的专项测试）、`hc_pre`/`hc_split_sinkhorn`（CPU 逐元素
+对齐 HF）全程独立验证正确，未做任何生产代码改动。
 
 ## F5 NoPE DSA + KPool indexer + 限幅 SwiGLU
 
