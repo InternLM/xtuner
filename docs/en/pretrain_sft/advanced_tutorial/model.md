@@ -34,6 +34,8 @@ The following table lists the **concrete model configs** that inherit from the b
 | `Qwen3MoEFoPEConfig` | `Qwen3MoEConfig` | MoE | FoPE (Frequency-based Position Embedding) variant |
 | `Qwen3VLTextMoE30BA3Config` | `Qwen3MoEConfig` | MoE (VL backbone) | ~30B total, for multimodal |
 | `Qwen3VLTextMoE235BA22Config` | `Qwen3MoEConfig` | MoE (VL backbone) | ~235B total, for multimodal |
+| `Qwen3_5_VLTextDense4BConfig` | `Qwen3_5_VLTextDenseConfig` | Dense (VL backbone) | ~4B parameters, for multimodal |
+| `Qwen3_5_VLTextDense27BConfig` | `Qwen3_5_VLTextDenseConfig` | Dense (VL backbone) | ~27B parameters, for multimodal |
 | `Qwen3_5_VLTextMoE35BA3BConfig` | `Qwen3_5_VLTextMoEConfig` | MoE (VL backbone) | ~35B total / ~3B activated, for multimodal |
 
 ## Compose Models
@@ -56,6 +58,8 @@ In addition to pure text models, XTuner also supports **multimodal compose model
 | `Qwen3VLMoE235BA22Config` | `Qwen3VLBaseConfig` | `Qwen3VLTextMoE235BA22Config` | ~235B total, MoE VL |
 | `Qwen3VLDense4BConfig` | `Qwen3VLBaseConfig` | `Qwen3VLTextDense4BConfig` | ~4B parameters, Dense VL |
 | `Qwen3VLDense8BConfig` | `Qwen3VLBaseConfig` | `Qwen3VLTextDense8BConfig` | ~8B parameters, Dense VL |
+| `Qwen3_5_VLDense4BConfig` | `Qwen3_5_BaseConfig` | `Qwen3_5_VLTextDense4BConfig` | ~4B parameters, Dense VL |
+| `Qwen3_5_VLDense27BConfig` | `Qwen3_5_BaseConfig` | `Qwen3_5_VLTextDense27BConfig` | ~27B parameters, Dense VL |
 | `Qwen3_5_VLMoE35BA3Config` | `Qwen3_5_BaseConfig` | `Qwen3_5_VLTextMoE35BA3BConfig` | ~35B total / ~3B activated, MoE VL |
 | `InternVL3P5Dense8BConfig` | `InternVLBaseConfig` | `Qwen3Dense8BConfig` | ~8B parameters, Dense VL |
 | `InternVL3P5MoE30BA3Config` | `InternVLBaseConfig` | `Qwen3MoE30BA3Config` | ~30B total, MoE VL |
@@ -73,12 +77,15 @@ XTunerBaseModelConfig
 │   ├── Dense Models
 │   │   ├── Qwen2DenseConfig
 │   │   │   └── Qwen2Dense7BConfig
-│   │   └── Qwen3DenseConfig
-│   │       ├── Qwen3Dense8BConfig
-│   │       │   └── Qwen3VLTextDense8BConfig
-│   │       ├── Qwen3Dense4BConfig
-│   │       │   └── Qwen3VLTextDense4BConfig
-│   │       └── Qwen3Dense0P6BConfig
+│   │   ├── Qwen3DenseConfig
+│   │   │   ├── Qwen3Dense8BConfig
+│   │   │   │   └── Qwen3VLTextDense8BConfig
+│   │   │   ├── Qwen3Dense4BConfig
+│   │   │   │   └── Qwen3VLTextDense4BConfig
+│   │   │   └── Qwen3Dense0P6BConfig
+│   │   └── Qwen3_5_VLTextDenseConfig
+│   │       ├── Qwen3_5_VLTextDense4BConfig
+│   │       └── Qwen3_5_VLTextDense27BConfig
 │   └── MoE Models (via MoEConfig)
 │       ├── DeepSeekV3Config
 │       ├── GptOssConfig
@@ -99,6 +106,8 @@ XTunerBaseModelConfig
     │   ├── Qwen3VLDense4BConfig
     │   ├── Qwen3VLDense8BConfig
     │   └── Qwen3_5_BaseConfig
+    │       ├── Qwen3_5_VLDense4BConfig
+    │       ├── Qwen3_5_VLDense27BConfig
     │       └── Qwen3_5_VLMoE35BA3Config
     ├── InternVLBaseConfig
     │   ├── InternVL3P5Dense8BConfig

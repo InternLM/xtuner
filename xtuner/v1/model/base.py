@@ -45,6 +45,7 @@ from xtuner.v1.float8.fsdp_utils import (
 )
 from xtuner.v1.loss import BaseLossConfig, BaseLossContext, CELossConfig
 from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig, MLAConfig
+from xtuner.v1.module.mtp.config import MTPConfig
 from xtuner.v1.module.rope import RopeParametersConfig, RopeScalingConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, log_rank0, profile_time_and_memory
 from xtuner.v1.utils.compile import MaybeCompile, is_compiled_function, maybe_compile
@@ -234,6 +235,7 @@ class TransformerConfig(XTunerBaseModelConfig):
     mesh_prefix: Annotated[str, Parameter(help="Prefix for device mesh configuration in distributed training")] = (
         "default"
     )
+    mtp_config: MTPConfig | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -406,6 +408,7 @@ class ModelOutputs(PydanticBaseModel):
     logits: torch.Tensor | None = None
     loss: torch.Tensor | None = None  # TODO: `forward_only` mode for RL
     extra_info: ModelForwardExtraLogInfo | dict | None = None  # TODO: `forward_only` mode for RL
+    mtp_loss: torch.Tensor | None = None
 
     def free_nongrad_feature(self):
         """Release large intermediate tensors not needed for backward or
