@@ -914,7 +914,7 @@ checkpoint 里 `layers.45` 有 `enorm` / `hnorm` / `eh_proj` / `shared_head.norm
 
 | 能力 | 处理 |
 |---|---|
-| SP（Ulysses） | 三条独立路径：KDA head-shard all-to-all（F3）；NoPE-DSA query 分片 + pool all-gather（F5）；Vision SP 走 merge-aligned padding + Ulysses + local projector（F2 阶段 5）。注意 Vision SP 与 LLM SP 是两类切分，compose 层需在 projector 输出后按 LLM visual mask 重分布（视觉设计文档 §9.1/§9.8） |
+| SP（Ulysses） | 三条独立路径：KDA head-shard all-to-all（F3）；NoPE-DSA query 分片 + indexer key/gate all-gather（F5，pool 必须在全局序列上构建，见 `kpool.py` 模块 docstring）；Vision SP 走 merge-aligned padding + Ulysses + local projector（F2 阶段 5）。注意 Vision SP 与 LLM SP 是两类切分，compose 层需在 projector 输出后按 LLM visual mask 重分布（视觉设计文档 §9.1/§9.8） |
 | EP / ExpertTP | 288 experts 走通用 `MoEBlock` + dispatcher，无需改动；EP 要求 `288 % ep_size == 0`（8/4/2 均可） |
 | `XTUNER_ACTIVATION_OFFLOAD` | offload 对象改为每层入口的 4 流张量 `[B,S,4,D]`；`offload_block_idx` 仍按 `layer_idx >= first_k_dense_replace` 计数，与 GLM-5.2 同构 |
 | `torch.compile` | 边界：`hc_pre` / `hc_post` 必须在内（否则 5D 中间量爆显存）、`MoEBlock.forward` fullgraph、`KimiDeltaAttention.forward`、`NoPEDSAMultiLatentAttention.forward` non-fullgraph；EP 时按 GLM-5.2 惯例摘掉整层边界 |

@@ -61,7 +61,7 @@ def _tiny_glm52_config() -> Glm52MoEConfig:
             qk_rope_head_dim=4,
             v_head_dim=4,
             index_topk=4,
-            index_head_dim=4,
+            index_head_dim=16,  # TileLang's BF16 MMA path needs a K dimension of at least 16.
             index_n_heads=2,
             indexer_types=["full", "shared", "shared", "full"],
             sparse_mla_backend="torch",
