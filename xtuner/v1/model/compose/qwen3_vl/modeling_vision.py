@@ -91,8 +91,9 @@ class Qwen3VLVisionRotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def forward(self, seqlen: int) -> torch.Tensor:
-        seq = torch.arange(seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
-        freqs = torch.outer(seq, self.inv_freq).to(DEVICE)
+        # Keep RoPE angles in fp32 when model.to(bfloat16) casts the nonpersistent buffer.
+        seq = torch.arange(seqlen, device=self.inv_freq.device, dtype=torch.float32)
+        freqs = torch.outer(seq, self.inv_freq.float()).to(DEVICE)
         return freqs
 
 
