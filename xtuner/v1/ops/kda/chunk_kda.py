@@ -313,12 +313,17 @@ def chunk_kda(
             "xtuner's compile-friendly chunk_kda always L2-norms q/k; use fla.ops.kda.chunk_kda "
             "directly if a caller needs it disabled."
         )
-    for unsupported in ("initial_state", "output_final_state", "cp_context", "A_log", "dt_bias"):
-        if kwargs.get(unsupported):
+    for unsupported in ("initial_state", "cp_context", "A_log", "dt_bias"):
+        if kwargs.get(unsupported) is not None:
             raise NotImplementedError(
                 f"xtuner's compile-friendly chunk_kda does not support {unsupported!r}; use "
                 "fla.ops.kda.chunk_kda directly."
             )
+    if kwargs.get("output_final_state") is not None and kwargs["output_final_state"] is not False:
+        raise NotImplementedError(
+            "xtuner's compile-friendly chunk_kda does not support 'output_final_state'; use "
+            "fla.ops.kda.chunk_kda directly."
+        )
     if scale is None:
         scale = q.shape[-1] ** -0.5
     return ChunkKDAFunction.apply(q, k, v, g, beta, scale, cu_seqlens, safe_gate, lower_bound, transpose_state_layout)

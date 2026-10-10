@@ -29,6 +29,7 @@ from copy import deepcopy
 import pytest
 import torch
 from torch.testing._internal.common_distributed import DistributedTestBase
+from torch.utils.checkpoint import checkpoint
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.model.utils.checkpointing import apply_activation_checkpointing
@@ -169,7 +170,8 @@ class TestKDAKernelDispatch:
     @pytest.mark.gpu
     @pytest.mark.parametrize("seq_len", [37, 64, 65])
     @pytest.mark.parametrize("training", [True, False], ids=["train", "eval"])
-    def test_no_grad_matches_hf_at_kernel_boundary(self, seq_len: int, training: bool) -> None:
+    @pytest.mark.parametrize("inference", [False, True], ids=["no-grad", "inference-mode"])
+    def test_no_grad_matches_hf_at_kernel_boundary(self, seq_len: int, training: bool, inference: bool) -> None:
         # 通过完整模块输出核验推理行为，不依赖内部 kernel 的具体分派或调用次数。
         torch.manual_seed(0)
         hf_module, _ = _hf_glm53_kda()
@@ -179,7 +181,7 @@ class TestKDAKernelDispatch:
         hidden_states = torch.randn(1, seq_len, 64, device="cuda")
         seq_ctx = SequenceContext.from_input_ids((torch.zeros(1, seq_len, dtype=torch.long),), device="cuda")
 
-        with torch.no_grad():
+        with torch.inference_mode() if inference else torch.no_grad():
             expected = hf_module(hidden_states)
             output = module(hidden_states, seq_ctx)["projected_output"]
 
@@ -190,20 +192,30 @@ class TestKDAKernelDispatch:
 
     @pytest.mark.gpu
     @pytest.mark.parametrize("seq_len", [37, 64, 65])
-    def test_activation_checkpointing_matches_plain_training(self, seq_len: int) -> None:
-        # 使用实际 reentrant 包装器：首次 no_grad 前向与有梯度重算必须采用一致的计算。
+    @pytest.mark.parametrize("training", [True, False], ids=["train", "eval"])
+    @pytest.mark.parametrize("checkpoint_api", ["xtuner", "torch-reentrant", "torch-nonreentrant"])
+    def test_activation_checkpointing_matches_plain_training(
+        self, seq_len: int, training: bool, checkpoint_api: str
+    ) -> None:
+        # Eval mode must preserve the same computation in a checkpoint's first pass and replay.
         torch.manual_seed(0)
-        plain_module = _build_xtuner_kda().cuda().train()
+        plain_module = _build_xtuner_kda().cuda().train(training)
         replay_module = deepcopy(plain_module)
-        checkpointed_module = apply_activation_checkpointing(replay_module)
         hidden_states = torch.randn(1, seq_len, 64, device="cuda", requires_grad=True)
         checkpointed_hidden = hidden_states.detach().clone().requires_grad_()
         seq_ctx = SequenceContext.from_input_ids((torch.zeros(1, seq_len, dtype=torch.long),), device="cuda")
 
         expected = plain_module(hidden_states, seq_ctx)["projected_output"]
-        output = checkpointed_module(checkpointed_hidden, seq_ctx)["projected_output"]
+        if checkpoint_api == "xtuner":
+            output = apply_activation_checkpointing(replay_module)(checkpointed_hidden, seq_ctx)["projected_output"]
+        else:
+            output = checkpoint(
+                lambda x: replay_module(x, seq_ctx)["projected_output"],
+                checkpointed_hidden,
+                use_reentrant=checkpoint_api == "torch-reentrant",
+            )
         torch.testing.assert_close(output, expected, atol=1e-6, rtol=1e-5)
-        # 非线性目标使上游梯度依赖首次前向值，避免常量输出梯度掩盖错误重计算。
+        # A nonlinear objective makes upstream gradients depend on the original forward values.
         expected.square().sum().backward()
         output.square().sum().backward()
 
@@ -501,6 +513,48 @@ class TestKDAFLASequenceParallel(DistributedTestBase):
                     _assert_fla_sp_parity(
                         parameter.grad, target, dtype, f"{dtype} {lengths} width={conv_width} {name}"
                     )
+
+    @pytest.mark.gpu
+    def test_checkpointed_forward_and_backward(self, device="cuda"):
+        """Checkpoint replay preserves compiled boundary communication and all gradients."""
+        self.create_pg(device)
+        sp_mesh = init_data_mesh(device, self.world_size)["sp"]
+        rank = sp_mesh.get_local_rank()
+        ctx = SequenceContext.from_input_ids((torch.zeros(1, 256, dtype=torch.long),), device=device).split(sp_mesh)
+        local_length = 256 // self.world_size
+        for training in (True, False):
+            for compile_module in (False, True):
+                torch.manual_seed(1234)
+                module = _build_xtuner_kda(sp_impl="fla").to(device).train(training)
+                with torch.no_grad():
+                    module.A_log.zero_()
+                    module.dt_bias.fill_(-6)
+                    for conv in (module.q_conv1d, module.k_conv1d, module.v_conv1d):
+                        conv.weight.fill_(0.25)
+                replay_module = deepcopy(module)
+                forward_module = torch.compile(replay_module, fullgraph=True) if compile_module else replay_module
+                checkpointed = apply_activation_checkpointing(forward_module)
+                hidden = torch.randn(1, local_length, 64, device=device, requires_grad=True)
+                replay_hidden = hidden.detach().clone().requires_grad_()
+                expected = module(hidden, ctx)["projected_output"]
+                actual = checkpointed(replay_hidden, ctx)["projected_output"]
+                _assert_fla_sp_parity(actual, expected, hidden.dtype, "checkpointed output")
+                # A loss on the last rank must still differentiate through earlier boundary states.
+                expected_loss = expected.square().sum()
+                actual_loss = actual.square().sum()
+                if rank != self.world_size - 1:
+                    expected_loss = expected_loss * 0
+                    actual_loss = actual_loss * 0
+                expected_loss.backward()
+                actual_loss.backward()
+                assert replay_hidden.grad is not None
+                _assert_fla_sp_parity(replay_hidden.grad, hidden.grad, hidden.dtype, "checkpointed input gradient")
+                assert replay_hidden.grad.abs().sum() > 0, "Missing checkpointed boundary gradient"
+                for name, parameter in module.named_parameters():
+                    gradient = replay_module.get_parameter(name).grad
+                    assert gradient is not None and parameter.grad is not None, name
+                    assert torch.isfinite(gradient).all(), name
+                    _assert_fla_sp_parity(gradient, parameter.grad, hidden.dtype, "checkpointed " + name)
 
     @pytest.mark.gpu
     def test_compiled_forward_and_backward(self, device="cuda"):

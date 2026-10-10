@@ -157,10 +157,15 @@ def causal_conv1d(
         tuple[torch.Tensor, None]: The convolved tensor, and ``None`` for the final state, which
         this entry point does not produce.
     """
-    for unsupported in ("residual", "initial_state", "output_final_state", "cp_context"):
-        if kwargs.get(unsupported):
+    for unsupported in ("residual", "initial_state", "cp_context"):
+        if kwargs.get(unsupported) is not None:
             raise NotImplementedError(
                 f"xtuner's compile-friendly causal_conv1d does not support {unsupported!r}; use "
                 "fla.modules.conv.causal_conv1d directly."
             )
+    if kwargs.get("output_final_state") is not None and kwargs["output_final_state"] is not False:
+        raise NotImplementedError(
+            "xtuner's compile-friendly causal_conv1d does not support 'output_final_state'; use "
+            "fla.modules.conv.causal_conv1d directly."
+        )
     return CausalConv1dFunction.apply(x, weight, bias, activation, cu_seqlens), None
