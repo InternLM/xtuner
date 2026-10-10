@@ -63,7 +63,7 @@ def _to_local(param: torch.Tensor) -> torch.Tensor:
     return param.to_local() if isinstance(param, DTensor) else param
 
 
-# Sequences at or below this length use the recurrent kernel (matches Automodel's dispatch).
+# Eval-mode inference sequences at or below this length use the recurrent kernel.
 _CHUNK_KERNEL_MIN_SEQ_LEN = 64
 
 _fla_kda_import_error: BaseException | None = None
@@ -232,9 +232,9 @@ class KimiDeltaAttention(nn.Module):
         self.o_proj = build_linear(projection_size, hidden_size, bias=False, float8_cfg=float8_cfg)
 
     def _select_kernel(self, seq_len: int, cp_context: Any | None):
-        # Automodel's dispatch: short (unpacked) sequences use the recurrent kernel; long
-        # sequences, or anything running under context parallel, use the chunked kernel.
-        if cp_context is not None or seq_len > _CHUNK_KERNEL_MIN_SEQ_LEN:
+        # Reentrant checkpointing disables gradients in the first training forward; use the
+        # same kernel during replay. Eval mode alone does not disable gradients either.
+        if self.training or torch.is_grad_enabled() or cp_context is not None or seq_len > _CHUNK_KERNEL_MIN_SEQ_LEN:
             return chunk_kda
         return fused_recurrent_kda
 
