@@ -16,6 +16,7 @@ TestGlm53MixedMediaAndTruncation
     test_glm53_visual_truncation_is_dropped         截断会切断视觉跨度时 cache 阶段就丢弃
 TestGlm53CacheInvalidation
     test_glm53_cache_invalidates_on_processor_or_pack_change  processor/pack 变化使缓存失效
+    test_glm53_processor_settings_are_instance_local       不同配置的处理器预算互不污染
 """
 
 import os
@@ -254,6 +255,22 @@ class TestGlm53MixedMediaAndTruncation:
 
 
 class TestGlm53CacheInvalidation:
+    def test_glm53_processor_settings_are_instance_local(self, ckpt_path, tokenizer):
+        # 同一路径的两个数据集使用不同预算时，先构建的实例仍按自己的预算处理图像。
+        item = _image_item("unused.jpg", width=1344, height=1344)
+        large = Glm53VLTokenizeFnConfig(processor_path=ckpt_path, max_pixels=8000).build(
+            tokenizer, anno_name="large"
+        )
+        large.state = "cache"
+        original_tokens = large(item)["num_tokens"]
+        small = Glm53VLTokenizeFnConfig(processor_path=ckpt_path, max_pixels=1000).build(
+            tokenizer, anno_name="small"
+        )
+        small.state = "cache"
+
+        assert large(item)["num_tokens"] == original_tokens
+        assert small(item)["num_tokens"] < original_tokens
+
     def test_glm53_cache_invalidates_on_processor_or_pack_change(self, ckpt_path, tokenizer):
         base = Glm53VLTokenizeFnConfig(processor_path=ckpt_path).build(tokenizer, anno_name="test")
         changed_pixels = Glm53VLTokenizeFnConfig(processor_path=ckpt_path, max_pixels=1000).build(

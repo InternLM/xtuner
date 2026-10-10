@@ -20,6 +20,7 @@ preprocessing path makes internally. Verified bitwise-equal to the real processo
 ``video_grid_thw`` output for a synthetic 4-frame video in this repo's development scratch.
 """
 
+import copy
 import os
 from typing import Any, Literal
 
@@ -48,7 +49,7 @@ from .base_mllm_tokenize_fn import (
 
 logger = get_logger()
 
-# Shared across datasets that use the same processor_path, mirroring qwen3_vl_tokenize_fn.py.
+# Cache the loaded defaults; each tokenize function owns its mutable processor settings.
 _PROCESSOR_CACHE: dict[str, Any] = {}
 
 # `replace_image_token`/`replace_video_token` (HF) only replace the single INNER placeholder
@@ -145,7 +146,9 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
     ):
         if processor_path not in _PROCESSOR_CACHE:
             _PROCESSOR_CACHE[processor_path] = AutoProcessor.from_pretrained(processor_path, trust_remote_code=True)
-        self.processor = _PROCESSOR_CACHE[processor_path]
+        self.processor = copy.copy(_PROCESSOR_CACHE[processor_path])
+        self.processor.image_processor = copy.copy(self.processor.image_processor)
+        self.processor.video_processor = copy.copy(self.processor.video_processor)
         self.image_processor = self.processor.image_processor
         self.video_processor = self.processor.video_processor
 
