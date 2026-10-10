@@ -15,16 +15,14 @@ from xtuner.v1.data_proto.messages import Glm53ChatMessages
 from xtuner.v1.data_proto.messages.glm53_chat import glm53_tokenize_fn_slowspeed
 
 
-GLM_5_3_FLASH_PATH = os.environ.get(
-    "GLM_5_3_FLASH_PATH", "/mnt/shared-storage-user/zhaopenghao/model/GLM-5.3-Flash-25B"
-)
+GLM_5_3_FLASH_PATH = os.environ["GLM_5_3_FLASH_PATH"]
 GLM53_TEMPLATE_DEFAULTS = {"enable_thinking": True, "reasoning_effort": "max", "clear_thinking": False}
 
 
 @pytest.fixture(scope="module")
 def tokenizer():
     if not os.path.isdir(GLM_5_3_FLASH_PATH):
-        pytest.skip(f"GLM_5_3_FLASH_PATH not found: {GLM_5_3_FLASH_PATH}")
+        pytest.fail(f"GLM_5_3_FLASH_PATH not found: {GLM_5_3_FLASH_PATH}")
     return AutoTokenizer.from_pretrained(GLM_5_3_FLASH_PATH, trust_remote_code=True)
 
 
