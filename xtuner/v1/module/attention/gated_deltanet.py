@@ -15,7 +15,7 @@ from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import get_logger
 
-from ...ops.gated_deltanet import get_causal_conv1d_fn, get_chunk_gated_delta_rule_fn
+from ...ops.gated_deltanet import _hf_impl_enabled, get_causal_conv1d_fn, get_chunk_gated_delta_rule_fn
 from ...ops.gated_deltanet.gen_seq_idx import gen_seq_idx
 from ..linear import build_linear
 from .attn_outputs import AttnOutputs
@@ -57,6 +57,20 @@ try:
             weight = self.weight
             if isinstance(weight, DTensor):
                 weight = weight.to_local()
+
+            if (
+                _hf_impl_enabled()
+                and self.activation in ("silu", "swish")
+                and self.bias is None
+                and residual is None
+                and not prenorm
+            ):
+                # HF rounds the normalized value to the input dtype before multiplying by weight and gate.
+                input_dtype = x.dtype
+                x = x.float()
+                x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+                x = weight * x.to(input_dtype)
+                return (x * F.silu(g.float())).to(input_dtype)
 
             return rms_norm_gated(
                 x,

@@ -40,7 +40,7 @@ dependencies = [
   "nvidia-cutlass-dsl==4.5.2",
   "torch>=2.6.0",
   "torchvision",
-  "transformers==5.14.1",
+  "transformers==5.17.0",
   "cyclopts",
   "transformers_stream_generator",
   "opencv-python-headless<=4.12.0.88",
