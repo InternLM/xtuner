@@ -2,6 +2,7 @@
 
 TestGlm53TextMoEConfig
     test_default_layer_schedule_matches_checkpoint_pattern  默认层调度与 checkpoint 一致
+    test_routed_experts_use_clamped_swiglu                默认 routed expert 激活含限幅
     test_layer_schedule_length_mismatch_is_caught_at_build  层数与调度长度不符时构造期报错
     test_mtp_layer_has_no_mhc                               MTP 层不带 hc_* 参数
 TestGlm53TextMoEInitWeights
@@ -26,6 +27,7 @@ TestNoPEDSAMLAConfigValidatesAssignment
     test_backend_assignment_is_validated                     构造后赋值仍走校验
 """
 
+import gc
 import os
 import re
 from pathlib import Path
@@ -64,6 +66,13 @@ class TestGlm53TextMoEConfig:
         # [KDA, KDA, KDA, DSA] x 11 + final KDA (real checkpoint text_config.layer_types).
         expected = (["linear_attention"] * 3 + ["full_attention"]) * 11 + ["linear_attention"]
         assert cfg.layers_type == expected
+
+    def test_routed_experts_use_clamped_swiglu(self):
+        # F6 wires the fused routed-expert activation; F5 only supplies the activation itself.
+        act = Glm53TextMoEConfig().moe_act_fn_cfg.build()
+        fused = torch.tensor([[100.0, -100.0]])
+        expected = torch.nn.functional.silu(torch.tensor(10.0)) * torch.tensor(-10.0)
+        torch.testing.assert_close(act(fused, split_dim=-1), expected.reshape(1, 1))
 
     def test_layer_schedule_length_mismatch_is_caught_at_build(self):
         # 层数与调度长度不一致要在构造期报错，而不是前向时越界。
@@ -108,7 +117,6 @@ def _tiny_cfg(**overrides):
             index_kpool=2,
             sparse_mla_backend="torch",
             indexer_backend="torch",
-            freeze_dsa_indexer=False,
         ),
         # head_dim=16 (not 8) deliberately: FLA's chunked KDA Triton kernel requires the
         # tl.dot K dimension >= 16; below that, forward silently runs but backward drops
@@ -311,6 +319,11 @@ class TestGlm53TextMoEWeightMapping:
         assert not unloaded, f"unloaded keys: {sorted(unloaded)[:10]}"
         assert not any(p.is_meta for p in model.parameters())
         assert len(loaded) > 0
+
+        # This test runs in the pytest parent; release the full checkpoint before spawned GPU tests.
+        del model
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
 class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
@@ -557,6 +570,7 @@ class TestNoPEDSAMLAConfigValidatesAssignment:
             qk_rope_head_dim=0,
             qk_nope_head_dim=8,
             v_head_dim=8,
+            sparse_mla_backend="torch",
         )
         with pytest.raises((NotImplementedError, ValidationError)):
             cfg.sparse_mla_backend = "tilelang"
