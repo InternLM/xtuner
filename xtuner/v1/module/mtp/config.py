@@ -40,7 +40,7 @@ class MTPConfig(BaseModel):
             materialize only the local SP slice for each prediction depth. All depths
             reuse the unshifted sequence metadata; future tokens are passed explicitly
             via ``future_embeddings``. Token-ID-only inputs keep the rolling path.
-            Default: False.
+            Default: True. Set False to restore the full-sequence rolling path.
 
     Example:
         >>> # In model config
@@ -63,4 +63,4 @@ class MTPConfig(BaseModel):
     loss_scaling_factor: Annotated[float, Parameter(group="model")] = 0.1
     loss_type: Annotated[Literal["ce", "e2e_tv"], Parameter(group="model")] = "ce"
     tv_loss_chunk_size: Annotated[int, Parameter(group="model")] = 128
-    use_local_future_embeddings: Annotated[bool, Parameter(group="model")] = False
+    use_local_future_embeddings: Annotated[bool, Parameter(group="model")] = True
