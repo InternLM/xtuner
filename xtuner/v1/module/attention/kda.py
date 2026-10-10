@@ -78,7 +78,8 @@ try:
     from xtuner.v1.ops.kda.fused_kda_gate import fused_kda_gate as _fused_kda_gate
 
     class FusedRMSNormGated(_FLAFusedRMSNormGated):
-        """Use XTuner's existing norm custom ops for compiled FLA sequence SP."""
+        """Use XTuner's existing norm custom ops for compiled FLA sequence
+        SP."""
 
         compile_friendly: bool = False
 
@@ -89,7 +90,7 @@ try:
             residual: torch.Tensor | None = None,
             prenorm: bool = False,
             residual_in_fp32: bool = False,
-        ) -> torch.Tensor:
+        ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
             if not self.compile_friendly:
                 return super().forward(x, g, residual, prenorm, residual_in_fp32)
             from xtuner.v1.ops.gated_deltanet.rms_norm_gated import rms_norm_gated
@@ -344,10 +345,11 @@ class KimiDeltaAttention(nn.Module):
         return self._forward_for_ulysses_sp(hidden_states, seq_ctx)
 
     def _forward_for_fla_sp(self, hidden_states: torch.Tensor, seq_ctx: SequenceContext) -> AttnOutputs:
-        """Keep all heads on the local sequence shard and exchange FLA boundary states.
+        """Keep all heads on the local sequence shard and exchange FLA boundary
+        states.
 
-        Convolution histories and recurrent states, including their backward gradients, use
-        the existing SP process group. Global packed offsets delimit independent documents.
+        Convolution histories and recurrent states, including their backward gradients, use the existing SP process
+        group. Global packed offsets delimit independent documents.
         """
         from xtuner.v1.ops.kda.sequence_parallel import sequence_causal_conv1d, sequence_chunk_kda
 
@@ -371,11 +373,13 @@ class KimiDeltaAttention(nn.Module):
             qkv.append(x.view(batch_size, seq_len, self.num_heads, self.head_dim))
         gate, beta = self._compute_gate_and_beta(hidden_states)
         o = sequence_chunk_kda(
-            *qkv,
-            gate,
-            beta,
-            cu_seqlens,
-            group_name,
+            q=qkv[0],
+            k=qkv[1],
+            v=qkv[2],
+            g=gate,
+            beta=beta,
+            cu_seqlens=cu_seqlens,
+            group_name=group_name,
             safe_gate=self.gate_lower_bound is not None,
             transpose_state_layout=True,
         )

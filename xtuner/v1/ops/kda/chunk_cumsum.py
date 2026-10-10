@@ -46,7 +46,8 @@ def chunk_cumsum(
     chunk_indices: torch.Tensor | None,
     scale: float,
 ) -> torch.Tensor:
-    """Compute FP32 prefixes without selecting a new scan layout for each head count.
+    """Compute FP32 prefixes without selecting a new scan layout for each head
+    count.
 
     Args:
         g (torch.Tensor): Contiguous log gates of shape ``[B, T, H, K]``.

@@ -2,10 +2,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 """FLA 0.4.2 KDA backward with corrected sequence-parallel gate addresses.
 
-The merged backward summary must read the current document and head's gate.
-This local orchestration keeps that correction scoped to XTuner KDA sequence SP;
-the installed FLA module and its other consumers are never patched. All other
-FLA backward kernels and collective/merge implementations are reused unchanged.
+The merged backward summary must read the current document and head's gate. This local orchestration keeps that
+correction scoped to XTuner KDA sequence SP; the installed FLA module and its other consumers are never patched. All
+other FLA backward kernels and collective/merge implementations are reused unchanged.
 """
 
 import torch
@@ -67,8 +66,8 @@ def pre_process_bwd_kernel_merged(
     USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    """
-    Merged backward kernel that computes both dh (K x V) and dm (K x K) in a single kernel.
+    """Merged backward kernel that computes both dh (K x V) and dm (K x K) in a
+    single kernel.
 
     Similar to pre_process_fwd_kernel_merged, this kernel uses a unified grid where:
     - Columns [0, V) are for computing dh (stage 1)
@@ -342,10 +341,11 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     initial_state: torch.Tensor | None = None,
     context: FLACPContext | None = None,
     transpose_state_layout: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     if context is None or context.group is None:
         return dht, initial_state
     assert dht is None, "When enable CP, the provided dht must be None."
+    assert cu_seqlens is not None, "FLA context parallelism requires packed sequence offsets."
     rank = dist.get_rank(context.group)
 
     B, T, H, K, V = *q.shape, do.shape[-1]
@@ -393,10 +393,10 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
 
     if not context.is_last_rank:
 
-        def grid(meta):
+        def merge_grid(meta):
             return (triton.cdiv(V, meta["BV"]), H)
 
-        merge_fwd_bwd_kernel[grid](
+        merge_fwd_bwd_kernel[merge_grid](
             h=dht[-1],
             ag_hm=ag_dhm,
             pre_or_post_num_ranks=context.post_num_ranks,
@@ -428,9 +428,9 @@ def chunk_kda_bwd(
     Aqk: torch.Tensor,
     Akk: torch.Tensor,
     scale: float,
-    initial_state: torch.Tensor,
+    initial_state: torch.Tensor | None,
     do: torch.Tensor,
-    dht: torch.Tensor,
+    dht: torch.Tensor | None,
     g: torch.Tensor | None = None,
     g_org: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
