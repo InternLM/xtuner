@@ -243,6 +243,7 @@ def _visible_tail_tokens(seq_ctx: SequenceContext, query_len: int, index_kpool: 
     return tail_ids.masked_fill(~tail_valid, -1).to(torch.int32)
 
 
+@torch.compile
 @torch.no_grad()
 def expand_pools_and_tail(
     selected_pool_ids: Tensor,
