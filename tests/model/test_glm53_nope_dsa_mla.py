@@ -223,15 +223,40 @@ class TestNoPEDSAMLAConfigIndexerChunking:
             sparse_mla_backend="torch",
             indexer_backend="torch",
             indexer_topk_query_chunk_size=64,
+            indexer_balance_sp=False,
+            indexer_sp_full_pool_work_ratio=0.25,
         )
-        assert cfg.build(hidden_size=HIDDEN, layer_idx=0).indexer.topk_query_chunk_size == 64
+        indexer = cfg.build(hidden_size=HIDDEN, layer_idx=0).indexer
+        assert indexer.topk_query_chunk_size == 64
+        assert indexer.balance_sp is False
+        assert indexer.sp_full_pool_work_ratio == 0.25
+        captured = {}
+
+        def selector(*args, **kwargs):
+            captured.update(kwargs)
+            return torch.full((4, 1, 8), -1, dtype=torch.int32)
+
+        indexer._topk_indices_fn = selector
+        ctx = SequenceContext.from_input_ids((torch.zeros(1, 4, dtype=torch.long),), device="cpu")
+        indexer(torch.randn(1, 4, HIDDEN), torch.randn(1, 4, Q_LORA_RANK), ctx)
+        assert captured["balance_sp"] is False
+        assert captured["sp_full_pool_work_ratio"] == 0.25
 
     def test_defaults_to_1024_query_chunks(self):
         assert _xtuner_module().indexer.topk_query_chunk_size == 1024
         kwargs = {k: v for k, v in TestNoPEDSAMLAConfigGuards._BASE_KWARGS.items() if k != "indexer_backend"}
         cfg = NoPEDSAMLAConfig(**kwargs)
         assert cfg.indexer_backend == "tilelang_cooperative"
-        assert cfg.build(hidden_size=HIDDEN).indexer.indexer_backend == "tilelang_cooperative"
+        indexer = cfg.build(hidden_size=HIDDEN).indexer
+        assert indexer.indexer_backend == "tilelang_cooperative"
+        assert indexer.balance_sp is True
+        assert indexer.sp_full_pool_work_ratio == 0.5
+
+    @pytest.mark.parametrize("ratio", [-1, float("inf"), float("nan")])
+    def test_rejects_invalid_sp_work_ratio(self, ratio):
+        cfg = NoPEDSAMLAConfig(**TestNoPEDSAMLAConfigGuards._BASE_KWARGS)
+        with pytest.raises(ValueError):
+            cfg.indexer_sp_full_pool_work_ratio = ratio
 
 
 class TestNoPEDSAMLAConfigGuards:

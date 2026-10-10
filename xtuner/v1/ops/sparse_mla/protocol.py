@@ -97,4 +97,6 @@ class KPoolTopKIndicesProtocol(Protocol):
         always_select_tail: bool = True,
         alignment: int = 512,
         query_chunk_size: int | None = None,
+        balance_sp: bool = False,
+        sp_full_pool_work_ratio: float = 0.5,
     ) -> torch.Tensor: ...

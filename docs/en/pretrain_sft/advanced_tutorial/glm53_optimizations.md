@@ -47,3 +47,22 @@ CUDA_HOME=/path/to/cuda PYTHON=/path/to/python bash tools/run_glm53_indexer_comp
 The cuDNN DSA backward adapter stably compacts valid indices into a prefix. This preserves
 valid tokens following -1 holes, including appended tails, without changing FlashMLA forward
 index ordering. Tests cover holes, duplicates, strided inputs and empty query sets.
+
+## Indexer sequence-parallel work balancing
+
+```python
+attention_cfg.indexer_balance_sp = True
+attention_cfg.indexer_sp_full_pool_work_ratio = 0.5
+```
+
+Attention retains uniform contiguous sequence shards. Only scoring queries and FP32 head
+weights move through neighbor P2P into intervals balanced for causal work. Selected pool IDs
+return to their original owners before canonical sorting, token expansion and tail insertion.
+The fixed work ratio estimates per-query overhead; it does not mean DeepSelect scans every pool.
+Collective eligibility checks fall back uniformly for unsupported layouts or no estimated gain.
+
+Previously measured on eight H200s at 128K: full cooperative indexer 14.992 ms unbalanced
+versus 13.688 ms balanced, an 8.70% latency reduction. The complete block change in that
+experiment was small relative to overlapping sample variation. Regression cases preserve exact
+selected-ID ordering when toggling balancing, including packed/poolless documents and forwarding
+across multiple ranks. Reproduce with `tools/run_glm53_sp_indexer_balance.sh`.
