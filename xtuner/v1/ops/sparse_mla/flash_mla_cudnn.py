@@ -48,7 +48,7 @@ def flash_mla_cudnn_sparse_mla(
     indices = indices.to(torch.int32).contiguous()
     scale = float(scaling) if scaling is not None else q.shape[-1] ** -0.5
 
-    raw_output, softmax_lse, _ = _flash_mla_cudnn_forward(q, kv, indices, scale, value_dim or 512)
+    raw_output, softmax_lse = _flash_mla_cudnn_forward(q, kv, indices, scale, value_dim or 512)
     return SparseMLAOutputs(raw_output=raw_output, softmax_lse=softmax_lse)
 
 
@@ -59,7 +59,7 @@ def _flash_mla_cudnn_forward(
     indices: Tensor,
     scaling: float,
     value_dim: int,
-) -> tuple[Tensor, Tensor, Tensor]:
+) -> tuple[Tensor, Tensor]:
     from flash_mla import flash_mla_sparse_fwd
 
     raw_output, _, softmax_lse = flash_mla_sparse_fwd(
@@ -69,35 +69,34 @@ def _flash_mla_cudnn_forward(
         scaling,
         d_v=value_dim,
     )
-    # FlashMLA returns natural-log LSE; cuDNN's backward (below) expects log2-space LSE,
-    # matching the same contract flash_mla.py uses for its (different) TileLang backward.
-    return raw_output, softmax_lse, softmax_lse * 1.4426950408889634
+    # The cuDNN wrapper takes natural-log LSE and converts it to log2 internally.
+    # TileLang's backward has a different contract and needs an explicit conversion.
+    return raw_output, softmax_lse
 
 
 @_flash_mla_cudnn_forward.register_fake
-def _(q: Tensor, kv: Tensor, indices: Tensor, scaling: float, value_dim: int) -> tuple[Tensor, Tensor, Tensor]:
+def _(q: Tensor, kv: Tensor, indices: Tensor, scaling: float, value_dim: int) -> tuple[Tensor, Tensor]:
     out = q.new_empty((*q.shape[:-1], value_dim))
     softmax_lse = q.new_empty(q.shape[:-1], dtype=torch.float32)
-    lse_log2 = q.new_empty(q.shape[:-1], dtype=torch.float32)
-    return out, softmax_lse, lse_log2
+    return out, softmax_lse
 
 
 def _setup_flash_mla_cudnn_context(ctx, inputs, output) -> None:
     q, kv, indices, scaling, _ = inputs
-    raw_output, _, lse_log2 = output
+    raw_output, softmax_lse = output
     ctx.scaling = scaling
-    ctx.save_for_backward(q, kv, indices, raw_output, lse_log2)
+    ctx.save_for_backward(q, kv, indices, raw_output, softmax_lse)
 
 
-def _flash_mla_cudnn_backward(ctx, grad_output: Tensor, grad_lse: Tensor, grad_lse_log2: Tensor):
-    q, kv, indices, raw_output, lse_log2 = ctx.saved_tensors
+def _flash_mla_cudnn_backward(ctx, grad_output: Tensor, grad_lse: Tensor):
+    q, kv, indices, raw_output, softmax_lse = ctx.saved_tensors
     dq, dkv = _cudnn_dsa_sparse_mla_backward_op(
         q,
         kv,
         raw_output,
         grad_output.contiguous(),
         indices,
-        lse_log2,
+        softmax_lse,
         ctx.scaling,
     )
     return dq, dkv, None, None, None

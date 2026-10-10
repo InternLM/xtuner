@@ -17,16 +17,7 @@ from xtuner.v1.ops.sparse_mla import sparse_mla
 
 BF16_ATOL = 1e-2
 BF16_RTOL = 1.6e-2
-# dKV accumulates gradient contributions from every query that selected a given compressed-KV
-# position; at topk=512 >= seq_len=64 (near-full attention density) every position is selected
-# by every later query, so this is a dense ~64-term reduction whose accumulation order differs
-# between the fp32 torch reference and cuDNN's internal bf16 accumulation. GLM-5.2's own
-# tilelang-vs-cudnn backward test (tests/module/attention/test_dsa_mla.py) already tolerates
-# 1e-1/1e-1 for the same kernel pairing at a sparser density; this NoPE shape (head_dim=512 vs
-# GLM-5.2's 576) needs a bit more headroom for the same reason, not a different bug class --
-# forward, softmax_lse, and dQ all match at the tight BF16_ATOL/RTOL above.
-DKV_ATOL = 3e-1
-DKV_RTOL = 3e-1
+GRAD_REL_L2_TOL = 1e-2
 
 
 def _flash_mla_cudnn_available() -> bool:
@@ -68,7 +59,8 @@ class TestFlashMlaCudnnSparseMLA:
         q_actual = q.detach().clone().requires_grad_()
         kv_actual = kv.detach().clone().requires_grad_()
 
-        expected = sparse_mla(q_ref, kv_ref, indices, scaling=scaling, value_dim=512, backend="torch")
+        # Gather from FP32 KV so repeated indices accumulate gradients in FP32.
+        expected = sparse_mla(q_ref, kv_ref.float(), indices, scaling=scaling, value_dim=512, backend="torch")
         actual = sparse_mla(
             q_actual, kv_actual, indices.to(torch.int32), scaling=scaling, value_dim=512, backend="flash_mla_cudnn"
         )
@@ -80,7 +72,9 @@ class TestFlashMlaCudnnSparseMLA:
         torch.testing.assert_close(actual.raw_output, expected.raw_output, atol=BF16_ATOL, rtol=BF16_RTOL)
         torch.testing.assert_close(actual.softmax_lse, expected.softmax_lse, atol=BF16_ATOL, rtol=BF16_RTOL)
         torch.testing.assert_close(q_actual.grad, q_ref.grad, atol=BF16_ATOL, rtol=BF16_RTOL)
-        torch.testing.assert_close(kv_actual.grad, kv_ref.grad, atol=DKV_ATOL, rtol=DKV_RTOL)
+        for actual_grad, expected_grad in ((q_actual.grad, q_ref.grad), (kv_actual.grad, kv_ref.grad)):
+            relative_error = (actual_grad.float() - expected_grad.float()).norm() / expected_grad.float().norm()
+            assert relative_error.item() < GRAD_REL_L2_TOL
 
     def test_rejects_576_head_dim_without_matching_value_dim(self):
         """(576, 512) is GLM-5.2's whitelist entry; a mismatched value_dim must still fail --
