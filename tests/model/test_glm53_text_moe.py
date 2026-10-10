@@ -28,17 +28,17 @@ TestNoPEDSAMLAConfigValidatesAssignment
 
 import os
 import re
-from pathlib import Path
 
 import parametrize
 import pytest
 import torch
-from PIL import Image
+import torch.distributed as dist
 from pydantic import ValidationError
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor
 from torch.testing._internal.common_distributed import DistributedTestBase
 
-from transformers import AutoProcessor, AutoTokenizer, Glm5NextForConditionalGeneration
+from transformers import Glm5NextForConditionalGeneration
 from xtuner._testing import DeterministicDDPTestCase
 from xtuner._testing.logits import check_logits
 from xtuner.v1.config import FSDPConfig
@@ -51,6 +51,8 @@ from xtuner.v1.module.attention.kda import KDAConfig
 from xtuner.v1.module.decoder_layer.mhc import MHCConfig
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
+
+from .glm53_parity_cases import TEXT_CASE_COUNT, build_glm53_parity_cases, load_glm53_reference
 
 
 GLM_5_3_FLASH_PATH = os.environ.get(
@@ -344,6 +346,14 @@ class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
         if not os.path.isdir(GLM_5_3_FLASH_PATH):
             pytest.skip(f"GLM_5_3_FLASH_PATH not found: {GLM_5_3_FLASH_PATH}")
         self.create_pg("cuda")
+        sp_size = int(os.environ.get("XTUNER_TEST_SP_SIZE", "1"))
+        assert sp_size in (1, 2), "XTUNER_TEST_SP_SIZE must be 1 or 2"
+        assert dist.get_world_size() % sp_size == 0, "SP size must divide world size"
+        sp_mesh = None
+        if sp_size > 1:
+            sp_mesh = init_device_mesh(
+                "cuda", (dist.get_world_size() // sp_size, sp_size), mesh_dim_names=("dp", "sp")
+            )["sp"]
 
         # `Glm5NextForConditionalGeneration` isn't registered under `AutoModelForCausalLM`
         # (it's the VL/compose entry point) -- must be loaded directly, matching doc/progress.md
@@ -356,44 +366,9 @@ class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
             attn_implementation="eager",
         )
 
-        text_list = [
-            "数据应该像山间的清泉，自然地流向它该去的地方",
-            "当异常来临时，就像秋风中飘落的叶子，应该被温柔地接住，而不是粗暴地丢弃",
-            "当函数被调用时，它应该像春天的第一缕阳光，温柔地唤醒沉睡的数据结构",
-            "就像老树拥抱归巢的鸟儿，内存管理应该给予每个对象足够的安全感",
-        ]
-        tokenizer = AutoTokenizer.from_pretrained(GLM_5_3_FLASH_PATH)
-        cases = [(f"text-{i}", dict(tokenizer(text, return_tensors="pt"))) for i, text in enumerate(text_list)]
-        processor = AutoProcessor.from_pretrained(GLM_5_3_FLASH_PATH)
-        image_path = Path(__file__).resolve().parents[1] / "resource/mscoco_twocat_000000039769.jpg"
-        with Image.open(image_path) as source:
-            image = source.convert("RGB").resize((224, 224))
-        # A single image and two distinct images exercise both placeholder spans.
-        for name, images in [
-            ("image", [image]),
-            ("two-images", [image, image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)]),
-        ]:
-            messages = [
-                {
-                    "role": "user",
-                    "content": [{"type": "image"} for _ in images]
-                    + [{"type": "text", "text": "Describe the cats in the image(s)."}],
-                },
-                {"role": "assistant", "content": [{"type": "text", "text": "Two cats are resting on a sofa."}]},
-            ]
-            prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-            batch = dict(processor(text=prompt, images=images, return_tensors="pt"))
-            assert len(batch["image_grid_thw"]) == len(images)
-            expected_tokens = int((batch["image_grid_thw"].prod(-1) // processor.image_processor.merge_size**2).sum())
-            assert int((batch["mm_token_type_ids"] == 1).sum()) == expected_tokens
-            cases.append((name, batch))
-        # Construct labels/positions once; HF and XT receive identical media and supervision.
-        for _, batch in cases:
-            batch["labels"] = batch["input_ids"].clone()
-            if "mm_token_type_ids" in batch:
-                batch["labels"][batch["mm_token_type_ids"] != 0] = -100
-            batch["positions"] = torch.nonzero(batch["labels"][0, 1:] != -100).flatten()[-8:]
-            assert batch["positions"].numel() > 0
+        cases = build_glm53_parity_cases(GLM_5_3_FLASH_PATH)
+        am_reference_dir = os.environ.get("GLM53_AUTOMODEL_REFERENCE_DIR")
+        am_reference = load_glm53_reference(am_reference_dir, cases, GLM_5_3_FLASH_PATH) if am_reference_dir else None
         hf_model.eval()
         expected_losses = []
         expected_logits = []
@@ -441,10 +416,13 @@ class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
                 seq_ctx.image_grid_thw = batch["image_grid_thw"].to("cuda")
                 seq_ctx.mm_token_type_ids = batch["mm_token_type_ids"][:, :-1].to("cuda")
                 seq_ctx.num_img_tokens = [[int(seq_ctx.image_grid_thw.prod(-1).sum())]]
+            if sp_mesh is not None:
+                # Split tokens/modality IDs together; pixels and image grid remain complete.
+                seq_ctx = seq_ctx.split(sp_mesh)
             loss_cfg = CELossConfig()
             LossContext = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=None)
-            loss_ctx_list = LossContext.build_batches([loss_ctx])
+            loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=sp_mesh)
+            loss_ctx_list = LossContext.build_batches([loss_ctx], sp_mesh=sp_mesh)
             loss_ctx = loss_ctx_list[0]
 
             with torch.no_grad():
@@ -453,16 +431,42 @@ class TestGlm53TextMoEAccuracy(DeterministicDDPTestCase):
             # Preserve the public loss path above; additionally exercise inference logits.
             with torch.no_grad():
                 logits = model(seq_ctx=seq_ctx, loss_ctx=None).logits
-            metrics = check_logits(logits[0, batch["positions"].to("cuda")], expected_logits[sample_index])
+            positions = batch["positions"].to(logits.device)
+            shard_start = 0 if sp_mesh is None else sp_mesh.get_local_rank() * logits.shape[1]
+            owned = (positions >= shard_start) & (positions < shard_start + logits.shape[1])
+            chosen = logits.new_zeros((positions.numel(), logits.shape[-1]), dtype=torch.float32)
+            chosen[owned] = logits[0, positions[owned] - shard_start].float()
+            ownership = owned.to(torch.int32)
+            if sp_mesh is not None:
+                # Reconstruct only the sampled rows, never the whole sequence x vocabulary.
+                dist.all_reduce(chosen, group=sp_mesh.get_group())
+                dist.all_reduce(ownership, group=sp_mesh.get_group())
+            assert bool((ownership == 1).all()), "Each sampled position must have exactly one SP owner"
+            metrics = check_logits(chosen, expected_logits[sample_index])
             print(f"GLM53 case={name} logits={metrics}", flush=True)
+            if am_reference is not None:
+                am_logits = am_reference[sample_index][1]
+                print(
+                    f"GLM53 case={name} loss HF={expected_losses[sample_index].item()} "
+                    f"XT={losses[-1].item()} AM={am_reference[sample_index][0]}"
+                )
+                print(f"GLM53 case={name} AM/HF logits={check_logits(am_logits, expected_logits[sample_index])}")
+                print(f"GLM53 case={name} XT/AM logits={check_logits(chosen, am_logits)}")
 
-        for start, end in ((0, len(text_list)), (len(text_list), len(cases))):
+        for start, end in ((0, TEXT_CASE_COUNT), (TEXT_CASE_COUNT, len(cases))):
             self._check_loss_curve(
                 losses=torch.tensor(losses[start:end]),
                 losses_ref=torch.tensor(expected_losses[start:end]),
                 sim_tol=3e-2,
                 rtol=3e-2,
             )
+            if am_reference is not None:
+                am_losses = torch.tensor([item[0] for item in am_reference[start:end]])
+                for actual, reference in (
+                    (am_losses, torch.tensor(expected_losses[start:end])),
+                    (torch.tensor(losses[start:end]), am_losses),
+                ):
+                    self._check_loss_curve(losses=actual, losses_ref=reference, sim_tol=3e-2, rtol=3e-2)
 
     @property
     def world_size(self) -> int:
