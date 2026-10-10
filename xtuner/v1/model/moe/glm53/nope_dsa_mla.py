@@ -70,6 +70,8 @@ class KPoolIndexer(nn.Module):
         indexer_backend: KPoolIndexerBackend,
         alignment: int,
         topk_query_chunk_size: int | None = None,
+        balance_sp: bool = False,
+        sp_full_pool_work_ratio: float = 0.5,
     ):
         super().__init__()
         self.index_head_dim = index_head_dim
@@ -80,6 +82,8 @@ class KPoolIndexer(nn.Module):
         self.indexer_backend = indexer_backend
         self.alignment = alignment
         self.topk_query_chunk_size = topk_query_chunk_size
+        self.balance_sp = balance_sp
+        self.sp_full_pool_work_ratio = sp_full_pool_work_ratio
         # Resolved once here (not per forward call), mirroring GLM-5.2's
         # get_dsa_topk_indices(indexer_backend) precomputation.
         self._topk_indices_fn = get_kpool_topk_indices(indexer_backend)
@@ -125,6 +129,8 @@ class KPoolIndexer(nn.Module):
             always_select_tail=self.always_select_tail,
             alignment=self.alignment,
             query_chunk_size=self.topk_query_chunk_size,
+            balance_sp=self.balance_sp,
+            sp_full_pool_work_ratio=self.sp_full_pool_work_ratio,
         )
         return topk_ids.to(torch.int32).contiguous()
 
@@ -159,6 +165,10 @@ class NoPEDSAMLAConfig(MLAConfig):
     indexer_backend: KPoolIndexerBackend = "tilelang"
     # Bound logits memory with query chunks; cooperative scoring reuses FP32 scratch.
     indexer_topk_query_chunk_size: int | None = Field(default=1024, gt=0)
+    # Enable SP balancing to redistribute causal scoring queries with neighbor P2P.
+    # Selected pool IDs return to their owners; attention keeps uniform sequence shards.
+    indexer_balance_sp: bool = False
+    indexer_sp_full_pool_work_ratio: float = Field(default=0.5, ge=0, allow_inf_nan=False)
     freeze_dsa_indexer: bool = True
 
     @model_validator(mode="after")
@@ -228,6 +238,8 @@ class NoPEDSAMultiLatentAttention(MultiLatentAttention):
         indexer_backend: KPoolIndexerBackend,
         indexer_topk_query_chunk_size: int | None,
         freeze_dsa_indexer: bool,
+        indexer_balance_sp: bool = False,
+        indexer_sp_full_pool_work_ratio: float = 0.5,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -273,6 +285,8 @@ class NoPEDSAMultiLatentAttention(MultiLatentAttention):
             indexer_backend=indexer_backend,
             alignment=self.alignment,
             topk_query_chunk_size=indexer_topk_query_chunk_size,
+            balance_sp=indexer_balance_sp,
+            sp_full_pool_work_ratio=indexer_sp_full_pool_work_ratio,
         )
         if freeze_dsa_indexer:
             self.indexer.requires_grad_(False)
