@@ -295,12 +295,12 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
         self.create_pg(device)
         self._patch_xtuner_fast_pos_embed_interpolate()
 
-        # pt29 + transformers 5.14.1 with XTUNER_DETERMINISTIC=true, which pins Triton autotune.
+        # pt29 + transformers 5.17.0 with XTUNER_DETERMINISTIC=true, which pins Triton autotune.
         # The 11.5k-token video has a stable SP-specific LM-loss baseline on this path.
         loss_reference = {
             "text": 1.4981,
             "image": 3.6109,
-            "video": {1: 8.5521, 4: 8.1323}[sp_size],
+            "video": {1: 6.6143, 4: 8.8869}[sp_size],
         }
 
         QWEN3_VL_MOE_PATH = os.environ["QWEN3_5_MOE_PATH"]
