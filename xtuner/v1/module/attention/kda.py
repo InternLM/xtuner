@@ -71,10 +71,11 @@ _fla_kda_import_error: BaseException | None = None
 try:
     from fla.modules import FusedRMSNormGated as _FLAFusedRMSNormGated
     from fla.modules import ShortConvolution as _FLAShortConvolution
-    from fla.modules.conv.causal_conv1d import causal_conv1d as _fla_causal_conv1d
     from fla.ops.kda import chunk_kda as _chunk_kda
     from fla.ops.kda import fused_recurrent_kda as _fused_recurrent_kda
     from fla.ops.kda.gate import fused_kda_gate as _fused_kda_gate
+
+    from xtuner.v1.ops.kda.causal_conv1d import causal_conv1d as _kda_causal_conv1d
 
     class FusedRMSNormGated(_FLAFusedRMSNormGated):
         pass
@@ -99,7 +100,7 @@ try:
         ) -> tuple[torch.Tensor, torch.Tensor | None]:
             if weight is None:
                 weight, bias = self.materialize_weight_bias()
-            return _fla_causal_conv1d(
+            return _kda_causal_conv1d(
                 x=x,
                 weight=weight,
                 bias=bias,
