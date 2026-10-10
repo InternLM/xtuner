@@ -58,7 +58,7 @@ E 是 stack 新增 GLM-5.3 测试与既有类方法全局编译机制之间的�
 
 初始日志单独无法归因的 L 类，已在真实 Qwen3.5 checkpoint 中定位为 XTuner 视觉 RoPE 以 bf16 而 HF 以 fp32 计算频率，修正后原 4 rank bitwise parity 通过。M 类已由 rebase 带入的 `eb6ad8f2` 修复：FlashMLA 返回的自然对数 LSE 不再错误转为 log2 后传给 cuDNN backward。K 类 DCP 超时在单项和旧失败项顺序中均通过，未找到稳定根因。J 类在长前序后的真实 DeepEP 顺序中复现为 layout 与 dispatch 间的通信事件问题；仅将小型 layout 元数据改回异步事件路径后，前置 8 卡保存加载加 DeepEP 四项的干净代码连续 **3/3 轮、每轮 5 passed**。详细对照和限制见 `02_ut_fix.md`。
 
-#2108 的动态 `cu_seqlens` 编译 case 在隔离 F5 上仍失败，但顶层 F6 已有 KDA custom-op 边界且该项通过，因此测试归属要从 F4 移到 F6。F5 测试提前导入 F6 的 `Glm53TextMoEConfig` 也已在 F5 改为测试本层公开的激活配置，F6 另加默认模型配置接线检查。最新 F5 隔离回归的 22 项中 **21 passed、1 failed**；唯一剩余失败发生于 Ray dashboard agent 的 GPU 探测超过其 15 秒端口文件等待窗口，不是 colocate 权重更新断言。
+#2108 的动态 `cu_seqlens` 编译 case 在隔离 F5 上仍失败，但顶层 F6 已有 KDA custom-op 边界且该项通过，因此测试归属要从 F4 移到 F6。F5 测试提前导入 F6 的 `Glm53TextMoEConfig` 也已在 F5 改为测试本层公开的激活配置，F6 另加默认模型配置接线检查。F5 隔离回归的 22 项中 **21 passed、1 failed**；唯一失败发生于 Ray dashboard agent 的 GPU 探测超过其 15 秒端口文件等待窗口。随后 #2108 的新 GitHub `unit_test` run `38078141589` 在 F5 头 `5344d1da` 上 **success**，`lint` 也通过。
 
 ## 初始建议的验证顺序
 

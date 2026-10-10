@@ -178,6 +178,7 @@
 - #2108 最新 CI 的 7 个 decoder/动态编译失败需在中间层独立复验。隔离 F5 HEAD `eb6ad8f20` 并应用已确认的 F3/F4/F5 补丁后，“`test_build_moe` → dynamic `cu_seqlens`”仍为 **1 passed、1 failed**：失败仍是 FLA `prepare_lens(cu_seqlens)` 的 `ConstraintViolationError`，说明 F4 的全局编译状态修复不足以支持这条显式动态编译测试。F6 已有 KDA `torch.library.custom_op` 封装使顶层原项通过；这条能力断言应随实现放在 F6，而不能提前压在 F4/F5。计划从 F4 移除该方法、在 F6 原位恢复，使最终顶层测试覆盖不减；F5 其余 decoder case 正在独立回归。
 - F5 隔离 checkout 上按 `test_build_model.py` → decoder 文件的真实顺序，排除上述过早的动态编译项后 → **7 passed、1 deselected**（8.73 秒）。#2108 的六个普通 decoder 失败确由构造测试引起的全局类方法编译状态污染；动态编译项是另一原因。现继续在同一 F5 checkout 上运行最新 CI 的其余 **22 个失败 node id**，覆盖依赖、TileLang、RL 和 trainer。
 - F5 隔离 checkout 的 **22 项**连续回归最终 **21 passed、1 failed**（592.73 秒）：GLM-5.2 五项、普通 decoder 六项、HF 对齐八项、两步 RL 训练、trainer 均通过；唯一失败是两步 RL 后的 colocate 测试在 Ray agent 启动阶段超时，详见主题四第 16 节。此前 F5 的动态 KDA 编译 case 仍失败，需移至 F6。
+- 修复推送后，#2108 的 F5 头 `5344d1da` 在 GitHub `unit_test` run `38078141589` **success**，`lint` run `38078141599` **success**。这提供了原用户给出的 #2108 CI 失败组在对应中间 stack 上的完整工作流复验；本地曾出现的 Ray/NVML 时序风险仍按第 16 节保留。
 
 ### 20. #2108 CI 的 RL mismatch KL 边界断言
 
