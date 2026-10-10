@@ -42,6 +42,30 @@ def test_query_tail_padding_uses_an_empty_causal_range():
     assert padded_starts[-1] == padded_ends[-1]
 
 
+@pytest.mark.parametrize("selector", ["torch", "deep_select"])
+def test_range_selector_dispatches(monkeypatch, selector):
+    calls = []
+
+    def fake_selector(q, k, weights, starts, ends, index_topk):
+        calls.append(selector)
+        return torch.zeros((q.shape[0], 1, index_topk), dtype=torch.int32)
+
+    name = "_tilelang_dsa_topk_indices_from_ranges" if selector == "torch" else "_deep_select_dsa_topk_indices_from_ranges"
+    monkeypatch.setattr(tilelang_module, name, fake_selector)
+    q = torch.empty((4, 32, 128), dtype=torch.bfloat16)
+    k = torch.empty((8, 128), dtype=torch.bfloat16)
+    weights = torch.empty((4, 32))
+    starts = torch.zeros(4, dtype=torch.int32)
+    ends = torch.ones(4, dtype=torch.int32)
+
+    result = tilelang_module.tilelang_indexer_topk_from_ranges(
+        q, k, weights, starts, ends, 2, selector=selector
+    )
+
+    assert result.shape == (4, 1, 2)
+    assert calls == [selector]
+
+
 def test_tilelang_selector_rejects_invalid_chunk_before_device_launch():
     q = torch.empty(1, 1, 2, 4, dtype=torch.bfloat16)
     k = torch.empty(1, 2, 4, dtype=torch.bfloat16)
