@@ -92,9 +92,9 @@ class Glm53VisionRotaryEmbedding(nn.Module):
         self.head_dim = head_dim
         self.theta = theta
         spatial_dim = head_dim // 2
-        # 非持久 buffer 不会从 checkpoint 恢复；meta 构造时也必须保留真实频率，
-        # 避免加载阶段 to_empty 将它物化成未初始化数据。
-        inv_freq = 1.0 / (theta ** (torch.arange(0, spatial_dim, 2, dtype=torch.float, device="cpu") / spatial_dim))
+        # Keep this non-persistent buffer real even when parameters are built on meta.
+        # HF loading cannot restore it after to_empty(), since it is absent from the checkpoint.
+        inv_freq = 1.0 / (theta ** (torch.arange(0, spatial_dim, 2, dtype=torch.float32, device="cpu") / spatial_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def forward(self, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
