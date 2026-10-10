@@ -50,9 +50,16 @@ def _nope_sparse_mla_inputs():
 
 class TestFlashMlaCudnnSparseMLA:
     @pytest.mark.skipif(not _flash_mla_cudnn_available(), reason="requires FlashMLA + cuDNN DSA runtimes")
-    def test_forward_backward_matches_torch_reference(self):
+    @pytest.mark.parametrize("padding_layout", ["tail", "holes"])
+    def test_forward_backward_matches_torch_reference(self, padding_layout: str):
         # FlashMLA 前向 + cuDNN 反向的组合必须与纯 torch 参考在 bf16 容差内一致。
         q, kv, indices = _nope_sparse_mla_inputs()
+        if padding_layout == "holes":
+            # KPool appends visible tail tokens after unfilled pool slots.
+            # Valid indices therefore need not form a contiguous prefix.
+            interleaved = torch.full_like(indices, -1)
+            interleaved[..., ::2] = indices[..., : indices.shape[-1] // 2]
+            indices = interleaved
         scaling = 1 / (q.shape[-1] ** 0.5)
         q_ref = q.detach().clone().requires_grad_()
         kv_ref = kv.detach().clone().requires_grad_()

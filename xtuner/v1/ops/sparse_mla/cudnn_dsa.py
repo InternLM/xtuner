@@ -105,10 +105,10 @@ def _cudnn_dsa_sparse_mla_backward_op(
         raise RuntimeError("cuDNN DSA SparseMLA backward currently supports kv_group=1 only.")
 
     indices_2d = indices[:, 0, :]
-    # cuDNN uses a per-query valid length and expects the physical index tensor
-    # to be non-negative. GLM pads invalid tail slots with -1 after top-k.
+    # cuDNN consumes the first topk_length entries. KPool can append visible
+    # tail tokens after unfilled pool slots, so move every -1 behind valid IDs.
     topk_length = (indices_2d != -1).sum(dim=-1, dtype=torch.int32).contiguous()
-    topk_idxs = indices_2d.clamp_min(0).to(torch.int32).contiguous()
+    topk_idxs = indices_2d.sort(dim=-1, descending=True).values.clamp_min(0).to(torch.int32).contiguous()
     attn_sink = torch.full((q.shape[1],), float("-inf"), dtype=torch.float32, device=q.device)
 
     outputs = sparse_attention_backward_wrapper(
