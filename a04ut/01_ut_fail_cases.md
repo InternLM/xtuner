@@ -279,4 +279,4 @@ tests/ops/test_flash_mla_cudnn_sparse_mla.py::TestFlashMlaCudnnSparseMLA::test_f
 
 本地 138 项已逐一映射到上述 13 类。其中 109 项首先由明确的本地环境或资源条件阻断（A–D）；29 项表现为编译状态、测试配置、算子限制、脆弱断言或尚待复现的数值/分布式问题（E–M）。#2108 CI 的 22 项失败只有 16 项与本地测试 ID 重合；应按相同代码提交和依赖环境复验，不能把本地独有的 122 个失败直接归因于 #2108。
 
-后续修复使这 138 个原失败项均至少在单项或分段真实回归中通过；完整 `zdev/run_test.sh` 仍需在最终提交上跑完。另有 Ray 2.54.1 dashboard agent 的 `nvidia-smi` 探测偶发超过 raylet 的 15 秒启动窗口，属于尚未消除的环境时序风险。
+后续修复使这 138 个原失败项均至少在单项或分段真实回归中通过。最终 1057 个收集项也已由全量前段和从 DeepEP allocator 断言处续跑的 549 项后段覆盖；后段 **541 passed、8 skipped**。两段有重复项，不能当作一次不中断的全套通过。另有 Ray 2.54.1 dashboard agent 的 `nvidia-smi` 探测偶发超过 raylet 的 15 秒启动窗口，属于尚未消除的环境时序风险。
