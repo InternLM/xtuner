@@ -7,7 +7,7 @@ TestNoPEDSAMultiLatentAttentionFloat8
     test_kv_b_proj_stays_high_precision_under_fp8          absorbed 折叠所需的投影不量化
 TestNoPEDSAMLAConfigIndexerChunking
     test_config_reaches_the_indexer                        分块配置真正传到 indexer
-    test_defaults_to_a_single_launch                       默认单次 launch，不改既有行为
+    test_defaults_to_1024_query_chunks                       默认 query chunk=1024
 TestNoPEDSAMLAConfigGuards
     test_rejects_unfreezing_the_indexer                    freeze_dsa_indexer=False 拒绝（同 GLM-5.2）
     test_rejects_misaligned_heads_for_flash_mla_cudnn      FlashMLA 头对齐提前到 config 校验
@@ -223,12 +223,40 @@ class TestNoPEDSAMLAConfigIndexerChunking:
             sparse_mla_backend="torch",
             indexer_backend="torch",
             indexer_topk_query_chunk_size=64,
+            indexer_balance_sp=False,
+            indexer_sp_full_pool_work_ratio=0.25,
         )
-        assert cfg.build(hidden_size=HIDDEN, layer_idx=0).indexer.topk_query_chunk_size == 64
+        indexer = cfg.build(hidden_size=HIDDEN, layer_idx=0).indexer
+        assert indexer.topk_query_chunk_size == 64
+        assert indexer.balance_sp is False
+        assert indexer.sp_full_pool_work_ratio == 0.25
+        captured = {}
 
-    def test_defaults_to_a_single_launch(self):
-        # 不配置时保持单次 launch，不改变既有行为。
-        assert _xtuner_module().indexer.topk_query_chunk_size is None
+        def selector(*args, **kwargs):
+            captured.update(kwargs)
+            return torch.full((4, 1, 8), -1, dtype=torch.int32)
+
+        indexer._topk_indices_fn = selector
+        ctx = SequenceContext.from_input_ids((torch.zeros(1, 4, dtype=torch.long),), device="cpu")
+        indexer(torch.randn(1, 4, HIDDEN), torch.randn(1, 4, Q_LORA_RANK), ctx)
+        assert captured["balance_sp"] is False
+        assert captured["sp_full_pool_work_ratio"] == 0.25
+
+    def test_defaults_to_1024_query_chunks(self):
+        assert _xtuner_module().indexer.topk_query_chunk_size == 1024
+        kwargs = {k: v for k, v in TestNoPEDSAMLAConfigGuards._BASE_KWARGS.items() if k != "indexer_backend"}
+        cfg = NoPEDSAMLAConfig(**kwargs)
+        assert cfg.indexer_backend == "tilelang_cooperative"
+        indexer = cfg.build(hidden_size=HIDDEN).indexer
+        assert indexer.indexer_backend == "tilelang_cooperative"
+        assert indexer.balance_sp is True
+        assert indexer.sp_full_pool_work_ratio == 0.5
+
+    @pytest.mark.parametrize("ratio", [-1, float("inf"), float("nan")])
+    def test_rejects_invalid_sp_work_ratio(self, ratio):
+        cfg = NoPEDSAMLAConfig(**TestNoPEDSAMLAConfigGuards._BASE_KWARGS)
+        with pytest.raises(ValueError):
+            cfg.indexer_sp_full_pool_work_ratio = ratio
 
 
 class TestNoPEDSAMLAConfigGuards:

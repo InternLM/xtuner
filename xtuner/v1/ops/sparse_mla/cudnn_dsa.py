@@ -104,11 +104,10 @@ def _cudnn_dsa_sparse_mla_backward_op(
     if kv.shape[1] != 1 or indices.shape[1] != 1:
         raise RuntimeError("cuDNN DSA SparseMLA backward currently supports kv_group=1 only.")
 
-    indices_2d = indices[:, 0, :]
-    # cuDNN uses a per-query valid length and expects the physical index tensor
-    # to be non-negative. GLM pads invalid tail slots with -1 after top-k.
-    topk_length = (indices_2d != -1).sum(dim=-1, dtype=torch.int32).contiguous()
-    topk_idxs = indices_2d.clamp_min(0).to(torch.int32).contiguous()
+    # topk_length limits cuDNN to a physical prefix. KPool can put -1 before
+    # valid pools or between pools and the appended tail, so compact first.
+    # Forward keeps its original order; backward retains every valid duplicate.
+    topk_idxs, topk_length = _compact_cudnn_topk_indices(indices[:, 0, :])
     attn_sink = torch.full((q.shape[1],), float("-inf"), dtype=torch.float32, device=q.device)
 
     outputs = sparse_attention_backward_wrapper(
@@ -136,6 +135,15 @@ def _(
     scaling: float,
 ) -> tuple[Tensor, Tensor]:
     return torch.empty_like(q), torch.empty_like(kv)
+
+
+def _compact_cudnn_topk_indices(indices: Tensor) -> tuple[Tensor, Tensor]:
+    valid = indices != -1
+    topk_length = valid.sum(dim=-1, dtype=torch.int32).contiguous()
+    # Stable partition preserves valid-key order and multiplicity without a host sync.
+    order = torch.argsort((~valid).to(torch.int32), dim=-1, stable=True)
+    topk_idxs = indices.gather(-1, order).clamp_min(0).to(torch.int32).contiguous()
+    return topk_idxs, topk_length
 
 
 def ensure_cudnn_dsa_runtime_available() -> None:
