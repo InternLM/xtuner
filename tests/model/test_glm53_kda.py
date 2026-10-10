@@ -1,6 +1,6 @@
 """GLM-5.3-Flash 的 Kimi Delta Attention，见 doc/xtuner_glm5p3flash_design.md F3。
 
-需要 GPU：FLA 的 Triton kernel 没有 CPU 后端；SP 用例需要 2 卡。
+需要 GPU：FLA 的 Triton kernel 没有 CPU 后端；SP 用例需要 2 卡、4 卡或 8 卡。
 
 TestKDAGate
     test_chunk_kda_signature_has_no_hf_style_gate_kwargs  钉住 fla 的签名，防上游漂移
@@ -16,6 +16,10 @@ TestKDAModuleParity
                                                           packed 多文档等价于逐文档前向
 TestKDASequenceParallel
     test_forward_for_sp_matches_non_sp                    2 卡 SP 与非 SP 结果一致
+TestKDAFLASequenceParallel / TestKDAFLASequenceParallel4 / TestKDAFLASequenceParallel8
+    test_packed_forward_and_backward_match_non_sp          FLA SP 前后向与 SP1 比较
+    test_compiled_forward_and_backward                    FLA SP fullgraph 前后向比较
+    test_layout_validation_and_inference_offsets          分片校验与 inference offsets
 """
 
 import inspect
@@ -28,7 +32,7 @@ from torch.testing._internal.common_distributed import DistributedTestBase
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.model.utils.checkpointing import apply_activation_checkpointing
-from xtuner.v1.module.attention.kda import KDAConfig, fused_kda_gate
+from xtuner.v1.module.attention.kda import KDAConfig, KimiDeltaAttention, fused_kda_gate
 from xtuner.v1.utils.test_utils import init_data_mesh
 
 
@@ -60,7 +64,7 @@ def _hf_glm53_kda(**overrides):
     return module, config
 
 
-def _build_xtuner_kda(hidden_size=64, num_heads=4, head_dim=16, conv_kernel_size=4):
+def _build_xtuner_kda(hidden_size=64, num_heads=4, head_dim=16, conv_kernel_size=4, sp_impl="ulysses"):
     cfg = KDAConfig(
         num_heads=num_heads,
         head_dim=head_dim,
@@ -68,6 +72,7 @@ def _build_xtuner_kda(hidden_size=64, num_heads=4, head_dim=16, conv_kernel_size
         use_full_rank_gate=False,
         gate_lower_bound=-5.0,
         rms_norm_eps=1e-5,
+        sp_impl=sp_impl,
     )
     module = cfg.build(hidden_size=hidden_size, layer_idx=0)
     # F3 constructs dt_bias with torch.empty; initialize standalone test modules explicitly.
@@ -337,3 +342,220 @@ class TestKDASequenceParallel(DistributedTestBase):
     @property
     def world_size(self) -> int:
         return 2
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("head_dim", [16, 128])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_fla_sp_norm_matches_existing_norm(head_dim, dtype):
+    from xtuner.v1.module.attention.kda import FusedRMSNormGated
+
+    torch.manual_seed(1234)
+    norm = FusedRMSNormGated(head_dim, eps=1e-5, activation="sigmoid").cuda().to(dtype)
+    wrapped_norm = deepcopy(norm)
+    wrapped_norm.compile_friendly = True
+    x = torch.randn(1, 37, 3, head_dim, device="cuda", dtype=dtype, requires_grad=True)
+    gate = torch.randn_like(x, requires_grad=True)
+    replay_x = x.detach().clone().requires_grad_()
+    replay_gate = gate.detach().clone().requires_grad_()
+    expected = norm(x, gate)
+    actual = wrapped_norm(replay_x, replay_gate)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    gradient = torch.randn_like(expected)
+    expected.backward(gradient)
+    actual.backward(gradient)
+    for replay, original in (
+        (replay_x.grad, x.grad),
+        (replay_gate.grad, gate.grad),
+        (wrapped_norm.weight.grad, norm.weight.grad),
+    ):
+        torch.testing.assert_close(replay, original, atol=0, rtol=0)
+
+
+def _assert_fla_sp_parity(actual, expected, dtype, name):
+    """Relative budgets cover FLA TF32 transfers and BF16 chunk retiling.
+
+    A tensor norm check avoids an absolute floor hiding small boundary gradients
+    or rejecting cancellation elements near zero. The maximum error is also
+    bounded relative to the tensor maximum. Missing state gradients fail both.
+    """
+    actual, expected = actual.detach().float(), expected.detach().float()
+    difference = actual - expected
+    if not bool(expected.any()):
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0, msg=name)
+        return
+    limit = 3e-3 if dtype == torch.float32 else 2e-2
+    relative_l2 = float(difference.norm() / expected.norm())
+    relative_max = float(difference.abs().max() / expected.abs().max())
+    assert relative_l2 < limit and relative_max < 2 * limit, (
+        f"{name}: relative_l2={relative_l2}, relative_max={relative_max}, "
+        f"max_abs={float(difference.abs().max())}, reference_max={float(expected.abs().max())}"
+    )
+
+
+class TestKDAFLASequenceParallel(DistributedTestBase):
+    parity_dtypes = (torch.float32, torch.bfloat16)
+
+    @pytest.mark.gpu
+    def test_layout_validation_and_inference_offsets(self, device="cuda"):
+        self.create_pg(device)
+        sp_mesh = init_data_mesh(device, self.world_size)["sp"]
+        module = _build_xtuner_kda(sp_impl="fla").to(device)
+        short_ctx = SequenceContext.from_input_ids(
+            (torch.zeros(1, 2 * self.world_size, dtype=torch.long),), device=device
+        ).split(sp_mesh)
+        with pytest.raises(ValueError, match="at least conv_kernel_size - 1"):
+            module(torch.randn(1, 2, 64, device=device), short_ctx)
+        # These offsets do not expose a tensor version counter. Inference must
+        # still build the same FLA local document context and enter collectives.
+        with torch.inference_mode():
+            ctx = SequenceContext.from_input_ids(
+                (torch.zeros(1, 8 * self.world_size, dtype=torch.long),), device=device
+            ).split(sp_mesh)
+            hidden = torch.randn(1, 8, 64, device=device)
+            assert torch.isfinite(module(hidden, ctx)["projected_output"]).all()
+            ctx._shard_size = 7
+            with pytest.raises(ValueError, match="equal contiguous shards"):
+                module(hidden, ctx)
+
+    @pytest.mark.gpu
+    def test_packed_forward_and_backward_match_non_sp(self, device="cuda"):
+        """Late-rank losses must differentiate through earlier conv and recurrent state.
+
+        Packed cases include a document beginning two tokens before a rank boundary,
+        an exact boundary, and padding introduced by SequenceContext.split().
+        """
+        self.create_pg(device)
+        sp_mesh = init_data_mesh(device, self.world_size)["sp"]
+        rank = sp_mesh.get_local_rank()
+        for dtype in self.parity_dtypes:
+            for lengths, conv_width, num_heads, head_dim in (
+                ([512], 4, 4, 16),
+                ([254, 5, 253], 4, 4, 16),
+                ([256, 256], 4, 4, 16),
+                ([37, 472], 4, 4, 16),
+                ([512], 1, 3, 16),
+                ([512], 4, 64, 128),
+            ):
+                # Native FLA's all-FP32 K=128 chunk-state kernel exceeds H200's
+                # shared-memory limit. Production uses BF16 with FP32 masters.
+                if dtype == torch.float32 and head_dim == 128:
+                    continue
+                torch.manual_seed(1234)
+                module = _build_xtuner_kda(
+                    sp_impl="fla", conv_kernel_size=conv_width, num_heads=num_heads, head_dim=head_dim
+                ).to(device=device, dtype=dtype)
+                # Preserve long-range state so missing recurrent boundary gradients cannot
+                # be hidden by fast forget gates; conv weights exercise all history taps.
+                with torch.no_grad():
+                    module.A_log.zero_()
+                    module.dt_bias.fill_(-6)
+                    for conv in (module.q_conv1d, module.k_conv1d, module.v_conv1d):
+                        conv.float()
+                        conv.weight.fill_(0.25)
+                    module.A_log.data = module.A_log.data.float()
+                    module.dt_bias.data = module.dt_bias.data.float()
+                reference = deepcopy(module)
+                seq_ctx = SequenceContext.from_input_ids(
+                    tuple(torch.zeros(1, length, dtype=torch.long) for length in lengths), device=device
+                )
+                local_ctx = seq_ctx.copy().split(sequence_parallel_mesh=sp_mesh)
+                total = int(local_ctx.cu_seq_lens_q[-1])
+                local_length = total // self.world_size
+                # Use the padded global document layout for the SP1 reference too.
+                reference_ctx = SequenceContext.from_input_ids(
+                    tuple(torch.zeros(1, int(length), dtype=torch.long) for length in local_ctx.seq_lens_q),
+                    device=device,
+                )
+                full_hidden = torch.randn(1, total, 64, device=device, dtype=dtype, requires_grad=True)
+                local_hidden = (
+                    full_hidden.detach()[:, rank * local_length : (rank + 1) * local_length].clone().requires_grad_()
+                )
+                expected = reference(full_hidden, reference_ctx)["projected_output"]
+                output = module(local_hidden, local_ctx)["projected_output"]
+                _assert_fla_sp_parity(
+                    output, expected[:, rank * local_length : (rank + 1) * local_length], dtype, "output"
+                )
+                # Only the first few outputs on the last rank receive an upstream gradient.
+                # Earlier ranks still must receive nonzero gradients through both states.
+                gradient = torch.zeros_like(expected)
+                torch.manual_seed(5678)
+                gradient[:, -local_length : -local_length + 8] = torch.randn_like(gradient[:, :8])
+                expected.backward(gradient)
+                output.backward(gradient[:, rank * local_length : (rank + 1) * local_length].contiguous())
+                assert local_hidden.grad is not None
+                _assert_fla_sp_parity(
+                    local_hidden.grad,
+                    full_hidden.grad[:, rank * local_length : (rank + 1) * local_length],
+                    dtype,
+                    f"{dtype} {lengths} width={conv_width} heads={num_heads} dim={head_dim} input gradient",
+                )
+                if lengths == [512] and rank < self.world_size - 1:
+                    assert local_hidden.grad.abs().sum() > 0, "Missing backward gradient across SP segments"
+                # Parameter replicas are synchronized by the trainer, not by attention.
+                for name, parameter in module.named_parameters():
+                    assert parameter.grad is not None, name
+                    torch.distributed.all_reduce(parameter.grad, group=sp_mesh.get_group())
+                    target = reference.get_parameter(name).grad
+                    assert target is not None, name
+                    _assert_fla_sp_parity(
+                        parameter.grad, target, dtype, f"{dtype} {lengths} width={conv_width} {name}"
+                    )
+
+    @pytest.mark.gpu
+    def test_compiled_forward_and_backward(self, device="cuda"):
+        """Fullgraph compilation must keep boundary communication in the custom ops."""
+        self.create_pg(device)
+        sp_mesh = init_data_mesh(device, self.world_size)["sp"]
+        torch.manual_seed(1234)
+        module = _build_xtuner_kda(sp_impl="fla").to(device)
+        compiled = torch.compile(deepcopy(module), fullgraph=True)
+        ctx = SequenceContext.from_input_ids((torch.zeros(1, 256, dtype=torch.long),), device=device).split(sp_mesh)
+        hidden = torch.randn(1, 256 // self.world_size, 64, device=device, requires_grad=True)
+        replay_hidden = hidden.detach().clone().requires_grad_()
+        expected = module(hidden, ctx)["projected_output"]
+        actual = compiled(replay_hidden, ctx)["projected_output"]
+        _assert_fla_sp_parity(actual, expected, hidden.dtype, "compiled output")
+        expected.square().sum().backward()
+        actual.square().sum().backward()
+        _assert_fla_sp_parity(replay_hidden.grad, hidden.grad, hidden.dtype, "compiled input gradient")
+        for name, parameter in module.named_parameters():
+            _assert_fla_sp_parity(compiled.get_parameter("_orig_mod." + name).grad, parameter.grad, hidden.dtype, name)
+
+    @property
+    def world_size(self) -> int:
+        return 2
+
+
+class TestKDAFLASequenceParallel4(TestKDAFLASequenceParallel):
+    # Target the production dtype here. The native-FLA diagnostic separately
+    # measures accumulated all-FP32 transfer error over three rank boundaries.
+    parity_dtypes = (torch.bfloat16,)
+
+    @property
+    def world_size(self) -> int:
+        return 4
+
+
+class TestKDAFLASequenceParallel8(TestKDAFLASequenceParallel4):
+    @property
+    def world_size(self) -> int:
+        return 8
+
+
+class TestKDASequenceSPConfig:
+    @pytest.mark.parametrize("implementation", ["ulysses", "fla"])
+    def test_config_round_trip_and_build(self, implementation):
+        cfg = KDAConfig(num_heads=4, head_dim=16, sp_impl=implementation)
+        rebuilt = KDAConfig.model_validate_json(cfg.model_dump_json())
+        assert rebuilt.build(hidden_size=64).sp_impl == implementation
+
+    def test_default_uses_fla(self):
+        cfg = KDAConfig(num_heads=4, head_dim=16)
+        assert cfg.sp_impl == "fla"
+        assert cfg.build(hidden_size=64).sp_impl == "fla"
+        assert KimiDeltaAttention(hidden_size=64, num_heads=4, head_dim=16).sp_impl == "fla"
+
+    def test_rejects_unknown_backend(self):
+        with pytest.raises(ValueError):
+            KDAConfig(num_heads=4, head_dim=16, sp_impl="unknown")
