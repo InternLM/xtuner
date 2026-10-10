@@ -86,13 +86,11 @@ class TestClampedSwiglu:
 
     def test_routed_experts_use_the_same_clamp_as_shared_experts(self):
         """The 288 routed experts run the fused gate_up path (``MoEBlock.moe_act``), not
-        ``MoEMLP``. HF clamps there too (``Glm5NextTextExperts._apply_gate``), so the model
-        config must select it -- plain SwiGLU diverges only once a pre-activation exceeds the
-        limit, which short-sentence loss oracles rarely trigger."""
-        # routed experts 走 fused gate_up 路径，配置必须把限幅接上去。
-        from xtuner.v1.model.moe.glm53 import Glm53TextMoEConfig
+        ``MoEMLP``. HF clamps there too (``Glm5NextTextExperts._apply_gate``); verify the
+        fused activation here, before the F6 model config wires it into the text model."""
+        from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig
 
-        act = Glm53TextMoEConfig().moe_act_fn_cfg.build()
+        act = MoEActFnConfig(act_type="clamped_swiglu", clip_limit=10.0).build()
         fused = torch.tensor([[100.0, -100.0]])  # gate=100 -> clamp 10; up=-100 -> clamp -10
         expected = torch.nn.functional.silu(torch.tensor(10.0)) * torch.tensor(-10.0)
         torch.testing.assert_close(act(fused, split_dim=-1), expected.reshape(1, 1))
