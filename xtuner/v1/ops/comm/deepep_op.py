@@ -189,7 +189,8 @@ def dispatch_forward(
 
     _buffer = get_low_latency_buffer(group, hidden=hidden_size, num_experts=num_experts)
 
-    # Calculate layout before actual dispatch
+    # Keep a comm-stream event for the small layout tensors. A synchronous layout returns no
+    # event, adding a compute-stream handoff before dispatch that can stall checkpoint recomputation.
     (
         num_tokens_per_rank,
         num_tokens_per_rdma_rank,
@@ -200,8 +201,8 @@ def dispatch_forward(
         topk_idx,
         num_experts,
         previous_event=previous_event,
-        async_finish=async_finish,
-        allocate_on_comm_stream=async_finish and previous_event is not None,
+        async_finish=True,
+        allocate_on_comm_stream=previous_event is not None,
     )
     # Do MoE dispatch
     # NOTES: the CPU will wait for GPU's signal to arrive, so this is not compatible with CUDA graph
