@@ -7,7 +7,7 @@ TestNoPEDSAMultiLatentAttentionFloat8
     test_kv_b_proj_stays_high_precision_under_fp8          absorbed 折叠所需的投影不量化
 TestNoPEDSAMLAConfigIndexerChunking
     test_config_reaches_the_indexer                        分块配置真正传到 indexer
-    test_defaults_to_a_single_launch                       默认单次 launch，不改既有行为
+    test_defaults_to_1024_query_chunks                       默认 query chunk=1024
 TestNoPEDSAMLAConfigGuards
     test_rejects_unfreezing_the_indexer                    freeze_dsa_indexer=False 拒绝（同 GLM-5.2）
     test_rejects_misaligned_heads_for_flash_mla_cudnn      FlashMLA 头对齐提前到 config 校验
@@ -226,9 +226,12 @@ class TestNoPEDSAMLAConfigIndexerChunking:
         )
         assert cfg.build(hidden_size=HIDDEN, layer_idx=0).indexer.topk_query_chunk_size == 64
 
-    def test_defaults_to_a_single_launch(self):
-        # 不配置时保持单次 launch，不改变既有行为。
-        assert _xtuner_module().indexer.topk_query_chunk_size is None
+    def test_defaults_to_1024_query_chunks(self):
+        assert _xtuner_module().indexer.topk_query_chunk_size == 1024
+        kwargs = {k: v for k, v in TestNoPEDSAMLAConfigGuards._BASE_KWARGS.items() if k != "indexer_backend"}
+        cfg = NoPEDSAMLAConfig(**kwargs)
+        assert cfg.indexer_backend == "tilelang_cooperative"
+        assert cfg.build(hidden_size=HIDDEN).indexer.indexer_backend == "tilelang_cooperative"
 
 
 class TestNoPEDSAMLAConfigGuards:

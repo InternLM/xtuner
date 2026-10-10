@@ -35,6 +35,8 @@ token id in this module is global. Concretely that splits the work in two:
   :meth:`SequenceContext.packed_causal_query_ranges`.
 """
 
+from typing import Literal
+
 import torch
 from torch import Tensor
 
@@ -152,12 +154,17 @@ def build_pools(
             - ``pool_complete`` ``[P]`` bool (all ``index_kpool`` slots valid).
     """
     seq_len, device = k.shape[0], k.device
-    global_len = int(seq_ctx.cu_seq_lens_q[-1].item())
-    if seq_len != global_len:
-        raise RuntimeError(
-            f"build_pools needs key features for the whole sequence ({global_len} tokens) but got "
-            f"{seq_len}; gather them across the sequence-parallel mesh before calling."
-        )
+    # Reading `cu_seq_lens_q[-1]` is a host sync, and under `torch.compile` it is also a graph
+    # break in every DSA layer. What it guards against -- a caller that forgot to gather across
+    # the SP mesh -- is a programming error, not a data condition, so eager (which every test and
+    # the first training step exercise) is where it is worth paying for.
+    if not torch.compiler.is_compiling():
+        global_len = int(seq_ctx.cu_seq_lens_q[-1].item())
+        if seq_len != global_len:
+            raise RuntimeError(
+                f"build_pools needs key features for the whole sequence ({global_len} tokens) but "
+                f"got {seq_len}; gather them across the sequence-parallel mesh before calling."
+            )
     pool_index = build_pool_index(seq_ctx, seq_len, index_kpool, device)
 
     valid = pool_index >= 0
@@ -265,7 +272,9 @@ def expand_pools_and_tail(
     width = kpool_output_width(index_topk, index_kpool, alignment)
     out = selected_pool_ids.new_full((seq_len, width), -1, dtype=torch.int32)
 
-    selected = selected_pool_ids.squeeze(1).to(torch.int64)  # [S, index_topk // index_kpool]
+    # Top-k order is not semantic, but changes the sparse attention reduction order.
+    # Canonicalize pools before expansion so identical selections agree across SP sizes.
+    selected = selected_pool_ids.squeeze(1).sort(dim=-1).values.to(torch.int64)
     valid_sel = selected >= 0
     safe_sel = selected.clamp(min=0)
     expanded = pool_index[safe_sel].masked_fill(~valid_sel.unsqueeze(-1), -1)  # [S, select_k, kpool]
@@ -294,9 +303,10 @@ def kpool_topk_indices(
     always_select_tail: bool = True,
     alignment: int = 512,
     query_chunk_size: int | None = None,
+    scorer: Literal["original", "cooperative"] = "original",
 ) -> Tensor:
     """Production KPool indexer top-k: build pools (A), score+top-k over pools by reusing the
-    existing DSA indexer kernel unmodified (B), expand back to token ids + tail (C).
+    original or cooperative DSA scorer/selector (B), expand back to token ids + tail (C).
 
     Args:
         q (Tensor): Index query, shape ``[1, S, index_n_heads, index_head_dim]``, bf16.
@@ -328,22 +338,36 @@ def kpool_topk_indices(
 
     pool_key, pool_index, _ = build_pools(k, gate_scores, kpool_ape, seq_ctx, index_kpool=index_kpool)
 
-    starts, ends = pool_causal_ranges(seq_ctx, pool_index, q.shape[1], q.device)
-
     q_local = q.squeeze(0).contiguous()
     index_n_heads = q_local.shape[1]
     scaled_weights = (weights.squeeze(0) * (index_n_heads**-0.5) * (index_head_dim**-0.5)).contiguous()
-
     select_k = index_topk // index_kpool
-    selected_pool_ids = tilelang_indexer_topk_from_ranges(
-        q_local,
-        pool_key.contiguous(),
-        scaled_weights,
-        starts,
-        ends,
-        select_k,
-        query_chunk_size=query_chunk_size,
-    )
+    if scorer == "cooperative":
+        from .cooperative_kpool import cooperative_kpool_topk
+
+        selected_pool_ids = cooperative_kpool_topk(
+            q_local,
+            pool_key.contiguous(),
+            scaled_weights,
+            seq_ctx.cu_seq_lens_q,
+            seq_ctx.shard_start,
+            index_kpool,
+            select_k,
+            1024 if query_chunk_size is None else query_chunk_size,
+        )
+    elif scorer == "original":
+        starts, ends = pool_causal_ranges(seq_ctx, pool_index, q_local.shape[0], q.device)
+        selected_pool_ids = tilelang_indexer_topk_from_ranges(
+            q_local,
+            pool_key.contiguous(),
+            scaled_weights,
+            starts,
+            ends,
+            select_k,
+            query_chunk_size=query_chunk_size,
+        )
+    else:
+        raise ValueError(f"Unsupported KPool scorer: {scorer}")
 
     return expand_pools_and_tail(
         selected_pool_ids,

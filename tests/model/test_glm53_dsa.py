@@ -32,6 +32,7 @@ from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEMLP
 from xtuner.v1.ops.sparse_mla.kpool import (
     build_pool_index,
     build_pools,
+    expand_pools_and_tail,
     kpool_output_width,
     kpool_topk_indices,
     torch_kpool_topk_indices,
@@ -189,6 +190,15 @@ class TestKpoolPoolLayout:
         assert kpool_output_width(2048, 4, alignment=512) == 2560
         assert kpool_output_width(2048, 4, alignment=64) == 2112
         assert kpool_output_width(2048, 4, alignment=1) == 2051
+
+    def test_unsorted_pool_selection_has_canonical_expansion(self):
+        ctx = _seq_ctx([9]).copy(shard_start=8, shard_size=1)
+        pools = build_pool_index(ctx, seq_len=9, index_kpool=4, device="cpu")
+        kwargs = dict(index_topk=8, index_kpool=4, always_select_tail=True, alignment=1)
+        output = expand_pools_and_tail(torch.tensor([[[1, 0]]], dtype=torch.int32), pools, ctx, **kwargs)
+        control = expand_pools_and_tail(torch.tensor([[[0, 1]]], dtype=torch.int32), pools, ctx, **kwargs)
+        torch.testing.assert_close(output, control, atol=0, rtol=0)
+        torch.testing.assert_close(output[0, 0], torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, -1, -1], dtype=torch.int32))
 
 
 class TestKpoolSelection:
@@ -417,6 +427,13 @@ class TestKpoolSequenceParallelParity(DistributedTestBase):
 
     @pytest.mark.gpu
     def test_kpool_topk_matches_non_sp(self, device="cuda"):
+        self._check_kpool_topk_matches_non_sp(device, scorer="original")
+
+    @pytest.mark.gpu
+    def test_cooperative_kpool_topk_matches_non_sp(self, device="cuda"):
+        self._check_kpool_topk_matches_non_sp(device, scorer="cooperative")
+
+    def _check_kpool_topk_matches_non_sp(self, device, scorer):
         # 2 卡下生产 kernel 的选择结果与非 SP 参考一致（文档长度让池跨接缝）。
         self.create_pg(device)
         torch.manual_seed(7)
@@ -444,6 +461,8 @@ class TestKpoolSequenceParallelParity(DistributedTestBase):
             index_kpool=index_kpool,
             always_select_tail=True,
             alignment=1,
+            scorer=scorer,
+            query_chunk_size=1024,
         )
         input_ids = (torch.zeros(1, len0, dtype=torch.long), torch.zeros(1, len1, dtype=torch.long))
         ref = kpool_topk_indices(

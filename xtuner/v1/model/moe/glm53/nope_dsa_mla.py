@@ -14,7 +14,7 @@ unlike GLM-5.2's ``dsa_topk_source_layer``/``GLM52MTPBlock`` machinery.
 from typing import Literal, cast
 
 import torch
-from pydantic import ConfigDict, model_validator
+from pydantic import ConfigDict, Field, model_validator
 from torch import nn
 from torch.nn import functional as F
 from typing_extensions import overload
@@ -154,12 +154,9 @@ class NoPEDSAMLAConfig(MLAConfig):
     sparse_mla_backend: Literal["torch", "flash_mla_cudnn", "tilelang"] = "flash_mla_cudnn"
     # Independent of `sparse_mla_backend` above, which is `flash_mla_cudnn` here and is not
     # even a valid indexer backend -- inheriting it would never have worked.
-    indexer_backend: KPoolIndexerBackend = "tilelang"
-    # Bounds the transient [query_chunk, num_pools] logits tile the selector materializes.
-    # ``None`` keeps a single launch; set it for long context, where that tile is the
-    # indexer's memory peak. Pool-space keys already make it index_kpool times smaller than
-    # the per-token DSA indexer's.
-    indexer_topk_query_chunk_size: int | None = None
+    indexer_backend: KPoolIndexerBackend = "tilelang_cooperative"
+    # Cooperative scoring reuses aligned FP32 scratch across query chunks.
+    indexer_topk_query_chunk_size: int | None = Field(default=1024, gt=0)
     freeze_dsa_indexer: bool = True
 
     @model_validator(mode="after")
