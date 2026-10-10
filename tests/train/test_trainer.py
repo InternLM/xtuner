@@ -975,9 +975,8 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path, capfd):
         load_artifacts["temporary_state"] = weakref.ref(temporary_state)
 
         if DEVICE == "cuda":
-            temporary_tensor = torch.empty(16 * 1024 * 1024, dtype=torch.uint8, device=DEVICE)
-            del temporary_tensor
-            load_artifacts["reserved_memory"] = torch.cuda.memory_reserved()
+            temporary_state.cuda_tensor = torch.empty(16 * 1024 * 1024, dtype=torch.uint8, device=DEVICE)
+            load_artifacts["temporary_tensor"] = weakref.ref(temporary_state.cuda_tensor)
 
     # 2. operate
     with (
@@ -1010,7 +1009,7 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path, capfd):
         )
         assert load_artifacts["temporary_state"]() is None
         if DEVICE == "cuda":
-            assert torch.cuda.memory_reserved() < load_artifacts["reserved_memory"]
+            assert load_artifacts["temporary_tensor"]() is None
             assert "[Checkpoint Resume Memory]" in capfd.readouterr().err
         assert trainer._engine.optimizer_device_calls == ["cpu"]
         # assert trainer._load_checkpoint_cfg.load_dataset is False

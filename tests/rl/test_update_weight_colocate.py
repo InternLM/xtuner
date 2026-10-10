@@ -119,8 +119,8 @@ class TestUpdateWeightColocate(unittest.TestCase):
             self.temp_dir = None
 
     def init_config(self, *, weight_transport_type: str, extra_rollout_config: dict | None = None):
-        nnodes = int(os.environ.get("WORLD_SIZE", "1"))
-        num_workers = int(os.environ.get("COLOCATE_NUM_WORKERS", str(8 * nnodes)))
+        # WORLD_SIZE can belong to another distributed test; this case defaults to one 8-GPU node.
+        num_workers = int(os.environ.get("COLOCATE_NUM_WORKERS", "8"))
         rollout_tp_size = 4
         rollout_ep_size = 1
 
