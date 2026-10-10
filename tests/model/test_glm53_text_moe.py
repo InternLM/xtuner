@@ -14,7 +14,7 @@ TestGlm53TextMoEFp32Params
     test_only_the_sinkhorn_and_gate_scalars_are_pinned_to_fp32  该 pin 的 pin，fn 刻意不 pin
 TestGlm53TextMoEForwardBackward
     test_forward_backward_all_trainable_params_get_gradient  除冻结 indexer 外都有梯度
-    test_mtp_block_builds_and_forwards                       MTP block 可构造并前向
+    test_mtp_block_builds_and_forwards                       共享 MTP 的 CE 前向、反向与逻辑深度
     test_optimizer_step_updates_text_model                   CE 反传和 AdamW 更新
 TestGlm53TextMoEWeightMapping
     test_real_checkpoint_weight_coverage                     真实 checkpoint 权重全覆盖
@@ -253,22 +253,38 @@ class TestGlm53TextMoEForwardBackward:
             else:
                 assert p.grad is not None and p.grad.abs().sum() > 0, f"{name} got no gradient"
 
-    def test_mtp_block_builds_and_forwards(self):
-        # MTP block 能构造并参与前向。
-        cfg = _tiny_cfg(mtp_config=MTPConfig(num_layers=1, share_weights=True))
+    @pytest.mark.parametrize("mtp_depth", [1, 7])
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="MTP model forward/backward requires CUDA")
+    def test_mtp_block_builds_and_forwards(self, mtp_depth):
+        # Adapted from 87bfd92d: loss_ctx=None skips MTP, so exercise the CE path.
+        torch.manual_seed(0)
+        cfg = _tiny_cfg(mtp_config=MTPConfig(num_layers=mtp_depth, share_weights=True))
+        cfg.attention.freeze_dsa_indexer = True
+        cfg.lm_loss_cfg = CELossConfig(mode="chunk", chunk_size=64)
         model = cfg.build().cuda().to(torch.bfloat16)
         for p in model.parameters():
             if p.is_floating_point():
                 p.data.normal_(mean=0.0, std=0.02)
         assert model.mtp_block is not None
+        assert len(model.mtp_block.layers) == 1
         mtp_decoder = model.mtp_block.layers[0].decoder_layer
         assert mtp_decoder.use_mhc is False  # checkpoint layers.45 has no hc_* params
 
-        seq_len = 128
-        input_ids = torch.randint(2, 200, (1, seq_len)).cuda()
+        input_ids = torch.randint(2, 200, (1, 128), device="cuda")
         seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cuda")
-        out = model(seq_ctx=seq_ctx, loss_ctx=None)
-        assert torch.isfinite(out.logits).all()
+        labels = input_ids.clone()
+        labels[:, :16] = -100
+        labels[:, -1] = -100
+        loss_ctx = model.build_loss_ctx_batch([{"seq_ctx": seq_ctx, "shifted_labels": labels}])[0]
+        assert len(loss_ctx["mtp"]) == mtp_depth
+        out = model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+        assert out.mtp_loss is not None and torch.isfinite(out.mtp_loss) and out.mtp_loss > 0
+        (out.loss + out.mtp_loss + out.balancing_loss).backward()
+        for name, parameter in model.mtp_block.named_parameters():
+            if parameter.requires_grad:
+                assert parameter.grad is not None, name
+                assert torch.isfinite(parameter.grad).all(), name
+                assert parameter.grad.abs().sum() > 0, name
 
     def test_optimizer_step_updates_text_model(self):
         # Drive the public training path through CE loss, backward, and AdamW.
