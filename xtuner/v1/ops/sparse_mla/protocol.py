@@ -13,10 +13,8 @@ DSAIndexerBackend = Literal[
     "torch", "tilelang", "cudnn_dsa", "flash_mla", "deep_gemm_fp8", "cute_dsl", "tilelang_deepselect"
 ]
 
-# GLM-5.3-Flash's KPool indexer (design doc F5.a) only has these two: "torch" is the eager
-# reference path, "tilelang" is the only production kernel today -- unlike GLM-5.2's per-token
-# DSAIndexerBackend, there's no cudnn_dsa/flash_mla/deep_gemm_fp8/cute_dsl KPool kernel.
-KPoolIndexerBackend = Literal["torch", "tilelang"]
+# Cooperative BF16 scoring + DeepSelect retains the original TileLang backend.
+KPoolIndexerBackend = Literal["torch", "tilelang", "tilelang_cooperative"]
 
 
 class SparseMLAOutputs(NamedTuple):
