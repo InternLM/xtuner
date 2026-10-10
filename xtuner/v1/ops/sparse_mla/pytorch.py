@@ -33,7 +33,8 @@ def torch_sparse_mla(
         valid = group_indices != -1
 
         safe_indices = group_indices.clamp(min=0).to(torch.long)
-        gathered_kv = kv[:, group_idx, :][safe_indices]
+        # Repeated indices must accumulate their backward contributions in FP32.
+        gathered_kv = kv[:, group_idx, :].float()[safe_indices]
         q_group = q[:, group_idx * head_kv : (group_idx + 1) * head_kv, :]
 
         scores = torch.einsum("shd,skd->shk", q_group.float(), gathered_kv.float())
