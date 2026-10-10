@@ -680,23 +680,25 @@ class BaseModel(nn.Module):
 
                 for hf_name in hf_name_list:
                     if any(re.search(p, hf_name) for p in patterns):  # type: ignore
-                        if not isinstance(param, DTensor):
-                            dist_param = nn.Parameter(
-                                distribute_tensor(
-                                    param, self.world_mesh, [Replicate() for _ in range(self.world_mesh.ndim)]
-                                ),
-                                requires_grad=param.requires_grad,
-                            )
-                            module.register_parameter(name, dist_param)
-                            ignored_params.add(dist_param)
-                        else:
-                            # param is already a DTensor (e.g. distributed by
-                            # MoE._replicate_other_params on ep_mesh before _fully_shard
-                            # is called). We skip re-distributing on world_mesh and just
-                            # add it to ignored_params so FSDP leaves it alone.
-                            # ASSUMPTION: fp32 distribution always happens AFTER any
-                            # prior EP distribution, so the existing placement is correct.
+                        if isinstance(param, DTensor) and (
+                            param.device_mesh == self.world_mesh
+                            or not all(isinstance(placement, Replicate) for placement in param.placements)
+                        ):
                             ignored_params.add(param)
+                            break
+
+                        # A parameter replicated only on an EP/TP submesh is still
+                        # separate across FSDP rows. FSDP ignores these FP32 params,
+                        # so attach all data-parallel dimensions before training.
+                        local_param = param.to_local().detach() if isinstance(param, DTensor) else param
+                        dist_param = nn.Parameter(
+                            distribute_tensor(
+                                local_param, self.world_mesh, [Replicate() for _ in range(self.world_mesh.ndim)]
+                            ),
+                            requires_grad=param.requires_grad,
+                        )
+                        module.register_parameter(name, dist_param)
+                        ignored_params.add(dist_param)
                         break
 
             for child in module.children():
