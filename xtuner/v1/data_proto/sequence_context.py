@@ -2,6 +2,7 @@
 from typing import cast
 
 import torch
+from torch.distributed._functional_collectives import all_gather_tensor_autograd
 from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
@@ -461,9 +462,10 @@ class SequenceContext:
             return None
         if self.sequence_parallel_mesh is None or self.sequence_parallel_mesh.size() == 1:
             return self.inputs_embeds
-        gathered = gather_for_sequence_parallel(
-            self.inputs_embeds, dim=1, sp_group=self.sequence_parallel_mesh.get_group()
-        )
+        # MTP rolls these embeddings to construct its future-token input. Unlike
+        # integer input_ids, this gather must reduce-scatter gradients back to
+        # their owners, including gradients crossing an SP shard boundary.
+        gathered = all_gather_tensor_autograd(self.inputs_embeds, gather_dim=1, group=self.sequence_parallel_mesh)
         self._raw_inputs_embeds = cast(torch.FloatTensor, gathered)
         return self._raw_inputs_embeds
 
