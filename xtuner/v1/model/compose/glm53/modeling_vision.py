@@ -25,7 +25,7 @@ from xtuner.v1.module import AttnOutputs
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.ops.attn_imp import AttnOpOutputs, get_attn_impl_fn
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
-from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_logger, get_torch_device_module
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_torch_device_module
 from xtuner.v1.utils.init_weight import default_init_weights
 
 from .glm53_config import Glm53VisionConfig
@@ -33,18 +33,11 @@ from .glm53_config import Glm53VisionConfig
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
-logger = get_logger()
-
-# Default: shard raw patches before ``patch_embed`` (lower Conv3D activation memory under SP).
-# Set ``XTUNER_GLM53_VISION_EMBED_BEFORE_SP=1`` for full-sequence embed-then-shard (BF16 parity
-# with no-SP / AutoModel CP; higher per-rank activation).
-_TRUTHY = frozenset({"1", "true", "on", "yes"})
-_WARNED_EMBED_BEFORE_SP = False
 
 
 def _vision_embed_before_sp() -> bool:
-    value = os.getenv("XTUNER_GLM53_VISION_EMBED_BEFORE_SP", "0").strip().lower()
-    return value in _TRUTHY
+    # Default 0: shard-then-embed. Set XTUNER_GLM53_VISION_EMBED_BEFORE_SP=1 for parity.
+    return os.getenv("XTUNER_GLM53_VISION_EMBED_BEFORE_SP", "0") == "1"
 
 # The block forward is the whole ViT layer (norm -> attn -> norm -> clamped-SwiGLU MLP); compiling
 # it is what fuses the clamp/activation elementwise chain. `fullgraph=False`: the attention
@@ -455,14 +448,6 @@ class Glm53VisionModel(BaseModel):
         embed_before_sp = _vision_embed_before_sp()
 
         if embed_before_sp:
-            global _WARNED_EMBED_BEFORE_SP
-            if sp_size > 1 and not _WARNED_EMBED_BEFORE_SP:
-                logger.warning(
-                    "XTUNER_GLM53_VISION_EMBED_BEFORE_SP=1: full-sequence patch_embed before SP "
-                    "split (BF16 parity with no-SP / AutoModel). Raises per-rank Conv3D "
-                    "activation memory versus the default shard-then-embed path."
-                )
-                _WARNED_EMBED_BEFORE_SP = True
             # Full-sequence Conv3D before any SP split matches no-SP / AutoModel CP batch shape.
             # ViT blocks below still run on the local shard only.
             # `SequenceContext` may leave `pixel_values` on CPU; follow the module device.
