@@ -19,17 +19,20 @@ class TestKDAConvPrecision:
     """验证真实卷积入口的 BF16 前向和 FP32 权重/偏置梯度。"""
 
     @pytest.mark.parametrize("activation", [None, "silu"])
-    def test_fp32_parameter_gradients_preserve_bf16_forward(self, activation: str | None) -> None:
+    @pytest.mark.parametrize("packed", [False, True])
+    def test_fp32_parameter_gradients_preserve_bf16_forward(self, activation: str | None, packed: bool) -> None:
         # 前向与原 BF16 算子逐位相同，dw/db 对照不提前舍入的独立公式。
         torch.manual_seed(128)
-        x = torch.randn(1, 2048, 32, device="cuda", dtype=torch.bfloat16).requires_grad_()
+        batch = 1 if packed else 2
+        x = torch.randn(batch, 2048, 32, device="cuda", dtype=torch.bfloat16).requires_grad_()
         w = (torch.randn(32, 4, device="cuda") * 0.1).requires_grad_()
         b = (torch.randn(32, device="cuda") * 0.1).requires_grad_()
-        offsets = torch.tensor([0, 769, 2048], device="cuda", dtype=torch.int32)
+        offsets = torch.tensor([0, 769, 2048], device="cuda", dtype=torch.int32) if packed else None
         dy = torch.randn_like(x)
         y, _ = causal_conv1d(x, w, b, activation=activation, cu_seqlens=offsets)
+        reference_x = x.detach().clone().requires_grad_()
         baseline, _ = fla_causal_conv1d(
-            x.detach(),
+            reference_x,
             w.detach().bfloat16(),
             b.detach().bfloat16(),
             activation=activation,
@@ -38,10 +41,13 @@ class TestKDAConvPrecision:
         )
         torch.testing.assert_close(y, baseline, atol=0, rtol=0)
         y.backward(dy)
+        baseline.backward(dy)
+        torch.testing.assert_close(x.grad, reference_x.grad, atol=0, rtol=0)
 
         dw = torch.zeros_like(w)
         db = torch.zeros_like(b)
-        for start, stop in [(0, 769), (769, 2048)]:
+        dx = torch.zeros_like(x, dtype=torch.float32)
+        for start, stop in [(0, 769), (769, 2048)] if packed else [(0, 2048)]:
             chunk = x.detach()[:, start:stop].float()
             windows = F.pad(chunk.transpose(1, 2), (3, 0)).unfold(-1, 4, 1)
             dz = dy[:, start:stop].float().transpose(1, 2)
@@ -53,23 +59,34 @@ class TestKDAConvPrecision:
                 dz = dz * sigmoid * (1 + z * (1 - sigmoid))
             dw += (windows * dz[..., None]).sum((0, 2))
             db += dz.sum((0, 2))
+            dx_chunk = torch.zeros_like(chunk.transpose(1, 2))
+            for tap in range(4):
+                delay = 3 - tap
+                contribution = dz[..., delay:] * w.detach().bfloat16().float()[None, :, tap, None]
+                dx_chunk += F.pad(contribution, (0, delay))
+            dx[:, start:stop] = dx_chunk.transpose(1, 2)
+        assert x.grad is not None and torch.isfinite(x.grad).all()
+        assert (x.grad.float() - dx).norm() / dx.norm() < 1e-2
         for actual, expected in [(w.grad, dw), (b.grad, db)]:
             assert actual is not None and actual.dtype == torch.float32
             relative_error = (actual - expected).norm() / expected.norm()
             assert relative_error < 2e-5, relative_error
             assert torch.any(actual != actual.bfloat16().float())
 
-    def test_compiled_fp32_parameter_gradients(self) -> None:
+    @pytest.mark.parametrize("packed", [False, True])
+    def test_compiled_fp32_parameter_gradients(self, packed: bool) -> None:
         # fullgraph 编译必须保留 FP32 dw/db，且前反向与 eager 一致。
         torch.manual_seed(129)
         inputs = [
-            torch.randn(1, 128, 32, device="cuda", dtype=torch.bfloat16),
+            torch.randn(1 if packed else 2, 128, 32, device="cuda", dtype=torch.bfloat16),
             torch.randn(32, 4, device="cuda"),
             torch.randn(32, device="cuda"),
         ]
 
+        offsets = torch.tensor([0, 37, 128], device="cuda", dtype=torch.int32) if packed else None
+
         def forward(x: torch.Tensor, w: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-            return causal_conv1d(x, w, b, activation="silu")[0]
+            return causal_conv1d(x, w, b, activation="silu", cu_seqlens=offsets, backend="triton")[0]
 
         eager_inputs = [v.detach().clone().requires_grad_() for v in inputs]
         compiled_inputs = [v.detach().clone().requires_grad_() for v in inputs]

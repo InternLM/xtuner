@@ -315,6 +315,57 @@ class TestKDAModuleParity:
 
 class TestKDASequenceParallel(DistributedTestBase):
     @pytest.mark.gpu
+    def test_packed_backward_and_fullgraph_match_non_sp(self, device="cuda"):
+        """Ulysses preserves local input gradients and head-sliced parameter gradients."""
+        self.create_pg(device)
+        mesh = init_data_mesh(device, self.world_size)["sp"]
+        rank = mesh.get_local_rank()
+        total, local_length = 512, 512 // self.world_size
+        for dtype in (torch.float32, torch.bfloat16):
+            for lengths in ([total], [local_length - 2, 5, total - local_length - 3]):
+                for compiled in (False, True):
+                    torch.manual_seed(1234)
+                    module = _build_xtuner_kda(sp_impl="ulysses").to(device=device, dtype=dtype)
+                    with torch.no_grad():
+                        module.A_log.data = module.A_log.data.float()
+                        module.dt_bias.data = module.dt_bias.data.float()
+                        module.dt_bias.fill_(-6)
+                        for conv in (module.q_conv1d, module.k_conv1d, module.v_conv1d):
+                            conv.float()
+                            conv.weight.fill_(0.25)
+                    reference = deepcopy(module)
+                    if compiled:
+                        torch._dynamo.reset()
+                    runner = torch.compile(module, fullgraph=True) if compiled else module
+                    context = SequenceContext.from_input_ids(
+                        tuple(torch.zeros(1, length, dtype=torch.long) for length in lengths), device=device
+                    )
+                    local_context = context.copy().split(mesh)
+                    hidden = torch.randn(1, total, 64, device=device, dtype=dtype, requires_grad=True)
+                    local_hidden = hidden.detach()[:, rank * local_length : (rank + 1) * local_length].clone()
+                    local_hidden.requires_grad_()
+                    expected = reference(hidden, context)["projected_output"]
+                    actual = runner(local_hidden, local_context)["projected_output"]
+                    selection = slice(rank * local_length, (rank + 1) * local_length)
+                    _assert_fla_sp_parity(actual, expected[:, selection], dtype, "Ulysses output")
+                    torch.manual_seed(5678)
+                    upstream = torch.randn_like(expected)
+                    expected.backward(upstream)
+                    actual.backward(upstream[:, selection].contiguous())
+                    _assert_fla_sp_parity(
+                        local_hidden.grad, hidden.grad[:, selection], dtype, "Ulysses input gradient"
+                    )
+                    for name, parameter in module.named_parameters():
+                        target = reference.get_parameter(name).grad
+                        assert parameter.grad is not None and target is not None, name
+                        if "conv1d" in name or name in ("A_log", "dt_bias"):
+                            size = parameter.shape[0] // self.world_size
+                            part = slice(rank * size, (rank + 1) * size)
+                            _assert_fla_sp_parity(parameter.grad[part], target[part], dtype, name + " head slice")
+                        torch.distributed.all_reduce(parameter.grad, group=mesh.get_group())
+                        _assert_fla_sp_parity(parameter.grad, target, dtype, "Ulysses " + name)
+
+    @pytest.mark.gpu
     def test_forward_for_sp_matches_non_sp(self, device="cuda"):
         # 2 卡 Ulysses SP 的输出与非 SP 一致（head 切分不改变数学）。
         self.create_pg(device)
@@ -361,12 +412,14 @@ class TestKDASequenceParallel(DistributedTestBase):
 @pytest.mark.parametrize("head_dim", [16, 128])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_fla_sp_norm_matches_existing_norm(head_dim, dtype):
+    from fla.modules import FusedRMSNormGated as FLANorm
+
     from xtuner.v1.module.attention.kda import FusedRMSNormGated
 
     torch.manual_seed(1234)
-    norm = FusedRMSNormGated(head_dim, eps=1e-5, activation="sigmoid").cuda().to(dtype)
-    wrapped_norm = deepcopy(norm)
-    wrapped_norm.compile_friendly = True
+    norm = FLANorm(head_dim, eps=1e-5, activation="sigmoid").cuda().to(dtype)
+    wrapped_norm = FusedRMSNormGated(head_dim, eps=1e-5, activation="sigmoid").cuda().to(dtype)
+    wrapped_norm.load_state_dict(norm.state_dict())
     x = torch.randn(1, 37, 3, head_dim, device="cuda", dtype=dtype, requires_grad=True)
     gate = torch.randn_like(x, requires_grad=True)
     replay_x = x.detach().clone().requires_grad_()
@@ -521,41 +574,54 @@ class TestKDAFLASequenceParallel(DistributedTestBase):
         self.create_pg(device)
         sp_mesh = init_data_mesh(device, self.world_size)["sp"]
         rank = sp_mesh.get_local_rank()
-        ctx = SequenceContext.from_input_ids((torch.zeros(1, 256, dtype=torch.long),), device=device).split(sp_mesh)
-        local_length = 256 // self.world_size
-        for training in (True, False):
-            for compile_module in (False, True):
-                torch.manual_seed(1234)
-                module = _build_xtuner_kda(sp_impl="fla").to(device).train(training)
-                with torch.no_grad():
-                    module.A_log.zero_()
-                    module.dt_bias.fill_(-6)
-                    for conv in (module.q_conv1d, module.k_conv1d, module.v_conv1d):
-                        conv.weight.fill_(0.25)
-                replay_module = deepcopy(module)
-                forward_module = torch.compile(replay_module, fullgraph=True) if compile_module else replay_module
-                checkpointed = apply_activation_checkpointing(forward_module)
-                hidden = torch.randn(1, local_length, 64, device=device, requires_grad=True)
-                replay_hidden = hidden.detach().clone().requires_grad_()
-                expected = module(hidden, ctx)["projected_output"]
-                actual = checkpointed(replay_hidden, ctx)["projected_output"]
-                _assert_fla_sp_parity(actual, expected, hidden.dtype, "checkpointed output")
-                # A loss on the last rank must still differentiate through earlier boundary states.
-                expected_loss = expected.square().sum()
-                actual_loss = actual.square().sum()
-                if rank != self.world_size - 1:
-                    expected_loss = expected_loss * 0
-                    actual_loss = actual_loss * 0
-                expected_loss.backward()
-                actual_loss.backward()
-                assert replay_hidden.grad is not None
-                _assert_fla_sp_parity(replay_hidden.grad, hidden.grad, hidden.dtype, "checkpointed input gradient")
-                assert replay_hidden.grad.abs().sum() > 0, "Missing checkpointed boundary gradient"
-                for name, parameter in module.named_parameters():
-                    gradient = replay_module.get_parameter(name).grad
-                    assert gradient is not None and parameter.grad is not None, name
-                    assert torch.isfinite(gradient).all(), name
-                    _assert_fla_sp_parity(gradient, parameter.grad, hidden.dtype, "checkpointed " + name)
+        total, local_length = 256, 256 // self.world_size
+        for dtype in self.parity_dtypes:
+            for lengths in ([total], [local_length - 2, total - local_length + 2]):
+                ctx = SequenceContext.from_input_ids(
+                    tuple(torch.zeros(1, length, dtype=torch.long) for length in lengths), device=device
+                ).split(sp_mesh)
+                for training in (True, False):
+                    for compile_module in (False, True):
+                        torch.manual_seed(1234)
+                        module = _build_xtuner_kda(sp_impl="fla").to(device=device, dtype=dtype).train(training)
+                        with torch.no_grad():
+                            module.A_log.data = module.A_log.data.float()
+                            module.dt_bias.data = module.dt_bias.data.float()
+                            module.A_log.zero_()
+                            module.dt_bias.fill_(-6)
+                            for conv in (module.q_conv1d, module.k_conv1d, module.v_conv1d):
+                                conv.float()
+                                conv.weight.fill_(0.25)
+                        replay_module = deepcopy(module)
+                        if compile_module:
+                            torch._dynamo.reset()
+                        forward_module = (
+                            torch.compile(replay_module, fullgraph=True) if compile_module else replay_module
+                        )
+                        checkpointed = apply_activation_checkpointing(forward_module)
+                        hidden = torch.randn(1, local_length, 64, device=device, dtype=dtype, requires_grad=True)
+                        replay_hidden = hidden.detach().clone().requires_grad_()
+                        expected = module(hidden, ctx)["projected_output"]
+                        actual = checkpointed(replay_hidden, ctx)["projected_output"]
+                        _assert_fla_sp_parity(actual, expected, dtype, "checkpointed output")
+                        # The last document crosses ranks; its last-rank loss must reach earlier states.
+                        expected_loss = expected.float().square().sum()
+                        actual_loss = actual.float().square().sum()
+                        if rank != self.world_size - 1:
+                            expected_loss = expected_loss * 0
+                            actual_loss = actual_loss * 0
+                        expected_loss.backward()
+                        actual_loss.backward()
+                        assert replay_hidden.grad is not None
+                        _assert_fla_sp_parity(replay_hidden.grad, hidden.grad, dtype, "checkpointed input gradient")
+                        assert replay_hidden.grad.abs().sum() > 0, "Missing checkpointed boundary gradient"
+                        if len(lengths) > 1 and rank == 0:
+                            assert torch.count_nonzero(replay_hidden.grad[:, : lengths[0]]) == 0
+                        for name, parameter in module.named_parameters():
+                            gradient = replay_module.get_parameter(name).grad
+                            assert gradient is not None and parameter.grad is not None, name
+                            assert torch.isfinite(gradient).all(), name
+                            _assert_fla_sp_parity(gradient, parameter.grad, dtype, "checkpointed " + name)
 
     @pytest.mark.gpu
     def test_compiled_forward_and_backward(self, device="cuda"):
@@ -604,7 +670,7 @@ class TestKDADTensorParameters(DistributedTestBase):
         """F6's EP-replicated kernel parameters work in eager and compiled KDA."""
         self.create_pg(device)
         mesh = init_data_mesh(device, self.world_size)["sp"]
-        for implementation, compiled in (("ulysses", False), ("fla", False), ("fla", True)):
+        for implementation, compiled in (("ulysses", False), ("ulysses", True), ("fla", False), ("fla", True)):
 
             def check(actual, expected, name):
                 if compiled:
@@ -639,6 +705,8 @@ class TestKDADTensorParameters(DistributedTestBase):
             replay_hidden = hidden.detach().clone().requires_grad_()
             context = SequenceContext.from_input_ids((torch.zeros(1, 37, dtype=torch.long),), device=device)
             expected = reference(hidden, context)["projected_output"]
+            if compiled:
+                torch._dynamo.reset()
             runner = torch.compile(actual, fullgraph=True) if compiled else actual
             output = runner(replay_hidden, context)["projected_output"]
             check(output, expected, "output")

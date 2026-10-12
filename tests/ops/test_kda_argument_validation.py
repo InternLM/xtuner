@@ -47,3 +47,23 @@ def test_null_options_and_false_final_state_keep_default_behavior(entrypoint, fi
     output, state = function(**inputs, **dict.fromkeys(options), cp_context=None, output_final_state=final_state)
     assert output is expected[0]
     assert state is None
+
+
+@pytest.mark.parametrize("backend", ["cuda", "mix", "auto", None])
+def test_conv_rejects_unsupported_backend(monkeypatch, backend):
+    monkeypatch.setattr(CausalConv1dFunction, "apply", lambda *args: pytest.fail("Kernel must not run"))
+    with pytest.raises(NotImplementedError, match="backend"):
+        causal_conv1d(torch.zeros(1, 2, 1), torch.zeros(1, 1), backend=backend)
+
+
+@pytest.mark.parametrize("option", ["backned", "cu_seqlens_cpu", "chunk_indices", "seq_idx"])
+def test_conv_rejects_unknown_options(monkeypatch, option):
+    monkeypatch.setattr(CausalConv1dFunction, "apply", lambda *args: pytest.fail("Kernel must not run"))
+    with pytest.raises(TypeError, match=option):
+        causal_conv1d(torch.zeros(1, 2, 1), torch.zeros(1, 1), **{option: None})
+
+
+def test_conv_rejects_unsupported_activation(monkeypatch):
+    monkeypatch.setattr(CausalConv1dFunction, "apply", lambda *args: pytest.fail("Kernel must not run"))
+    with pytest.raises(ValueError, match="activation"):
+        causal_conv1d(torch.zeros(1, 2, 1), torch.zeros(1, 1), activation="relu")

@@ -68,30 +68,60 @@ class TestKDAForwardPrecision:
             )
             torch.testing.assert_close(actual, partitioned, atol=1e-6, rtol=0)
 
-    def test_forward_and_gradients_match_recurrent_reference(self) -> None:
-        # 独立 PyTorch 逐 token 递推，检查新 prefix 与原 FLA backward 的数学契约。
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+    @pytest.mark.parametrize(
+        "batch,packed,safe_gate,transpose,scale,lower_bound",
+        [
+            (1, True, True, True, None, None),
+            (2, False, False, False, 0.17, None),
+            (2, False, True, True, 0.25, -3.0),
+            (1, True, False, False, 0.17, None),
+            (1, False, False, True, None, None),
+            (1, True, True, False, 0.3, -7.0),
+        ],
+        ids=["default-packed", "batch2-unsafe", "batch2-bounded", "packed-unsafe", "unpacked", "packed-untransposed"],
+    )
+    def test_forward_and_gradients_match_recurrent_reference(
+        self, dtype, batch, packed, safe_gate, transpose, scale, lower_bound
+    ) -> None:
+        """Check supported options against an independent token-by-token recurrence."""
         torch.manual_seed(182)
-        shape = (1, 65, 4, 16)
-        values = [torch.randn(shape, device="cuda", dtype=torch.bfloat16) for _ in range(3)]
-        values += [-torch.rand(shape, device="cuda"), torch.rand(shape[:-1], device="cuda")]
+        shape = (batch, 65, 4, 16)
+        # Rectangular states expose layout mistakes hidden by K == V.
+        values = [torch.randn(shape, device="cuda", dtype=dtype) for _ in range(2)]
+        values += [torch.randn(batch, 65, 4, 24, device="cuda", dtype=dtype)]
+        values += [-torch.rand(shape, device="cuda") * abs(lower_bound or -5.0), torch.rand(shape[:-1], device="cuda")]
         inputs = [v.detach().clone().requires_grad_() for v in values]
         reference_inputs = [v.detach().clone().requires_grad_() for v in values]
-        cu = torch.tensor([0, 37, 65], device="cuda", dtype=torch.int32)
-        actual = chunk_kda(*inputs, cu_seqlens=cu, safe_gate=True, transpose_state_layout=True)[0]
+        cu = torch.tensor([0, 37, 65], device="cuda", dtype=torch.int32) if packed else None
+        actual = chunk_kda(
+            *inputs,
+            cu_seqlens=cu,
+            safe_gate=safe_gate,
+            transpose_state_layout=transpose,
+            scale=scale,
+            lower_bound=lower_bound,
+        )[0]
 
         q, k, v, gate, beta = reference_inputs
         q = F.normalize(q.float(), dim=-1).to(q.dtype).float()
         k = F.normalize(k.float(), dim=-1).to(k.dtype).float()
         outputs = []
-        for start, stop in [(0, 37), (37, 65)]:
-            state = torch.zeros(4, 16, 16, device="cuda")
-            for token in range(start, stop):
-                state = state * gate[0, token].exp().unsqueeze(-1)
-                key = k[0, token]
-                delta = (v[0, token].float() - (state * key.unsqueeze(-1)).sum(-2)) * beta[0, token, :, None]
-                state = state + key.unsqueeze(-1) * delta.unsqueeze(-2)
-                outputs.append((state * q[0, token].unsqueeze(-1)).sum(-2) * 16**-0.5)
-        expected = torch.stack(outputs).unsqueeze(0).to(v.dtype)
+        for sample in range(batch):
+            sample_outputs = []
+            for start, stop in [(0, 37), (37, 65)] if packed else [(0, 65)]:
+                state = torch.zeros(4, 16, 24, device="cuda")
+                for token in range(start, stop):
+                    state = state * gate[sample, token].exp().unsqueeze(-1)
+                    key = k[sample, token]
+                    delta = v[sample, token].float() - (state * key.unsqueeze(-1)).sum(-2)
+                    delta = delta * beta[sample, token, :, None]
+                    state = state + key.unsqueeze(-1) * delta.unsqueeze(-2)
+                    sample_outputs.append(
+                        (state * q[sample, token].unsqueeze(-1)).sum(-2) * (scale if scale is not None else 16**-0.5)
+                    )
+            outputs.append(torch.stack(sample_outputs))
+        expected = torch.stack(outputs).to(v.dtype)
         torch.testing.assert_close(actual, expected, atol=5e-3, rtol=2e-2)
         upstream = torch.randn_like(actual)
         gradients = torch.autograd.grad(actual, inputs, upstream)
@@ -99,22 +129,36 @@ class TestKDAForwardPrecision:
         for name, gradient, reference in zip(("q", "k", "v", "g", "beta"), gradients, reference_gradients):
             assert torch.isfinite(gradient).all(), name
             relative_error = (gradient.float() - reference.float()).norm() / reference.float().norm()
-            assert relative_error < 2e-2, (name, relative_error)
+            assert relative_error < (2e-2 if dtype == torch.bfloat16 else 3e-3), (name, relative_error)
 
-    def test_compiled_forward_and_gradients(self) -> None:
+    @pytest.mark.parametrize("packed", [True, False], ids=["default-packed", "custom-batch2"])
+    def test_compiled_forward_and_gradients(self, packed: bool) -> None:
         # compile 必须复用真实 prefix，且 q/k/v/g/beta 的梯度全部保持一致。
         torch.manual_seed(181)
-        shape = (1, 65, 4, 16)
-        values = [torch.randn(shape, device="cuda", dtype=torch.bfloat16) for _ in range(3)]
+        batch = 1 if packed else 2
+        shape = (batch, 65, 4, 16)
+        values = [torch.randn(shape, device="cuda", dtype=torch.bfloat16) for _ in range(2)]
+        values += [torch.randn(batch, 65, 4, 24, device="cuda", dtype=torch.bfloat16)]
         values += [-torch.rand(shape, device="cuda"), torch.rand(shape[:-1], device="cuda")]
         eager_inputs = [v.detach().clone().requires_grad_() for v in values]
         compiled_inputs = [v.detach().clone().requires_grad_() for v in values]
-        cu = torch.tensor([0, 37, 65], device="cuda", dtype=torch.int32)
+        cu = torch.tensor([0, 37, 65], device="cuda", dtype=torch.int32) if packed else None
 
         def forward(
             q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, g: torch.Tensor, b: torch.Tensor
         ) -> torch.Tensor:
-            return chunk_kda(q, k, v, g, b, cu_seqlens=cu, safe_gate=True, transpose_state_layout=True)[0]
+            return chunk_kda(
+                q,
+                k,
+                v,
+                g,
+                b,
+                cu_seqlens=cu,
+                safe_gate=packed,
+                transpose_state_layout=packed,
+                scale=None if packed else 0.17,
+                lower_bound=None if packed else -3.0,
+            )[0]
 
         expected = forward(*eager_inputs)
         actual = torch.compile(forward, fullgraph=True)(*compiled_inputs)

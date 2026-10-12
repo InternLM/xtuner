@@ -298,8 +298,9 @@ def chunk_kda(
         beta (torch.Tensor): Betas of shape ``[B, T, H]``.
         scale (float | None): Attention scale; defaults to ``K ** -0.5``.
         cu_seqlens (torch.Tensor | None): Packed-sequence offsets, as in the varlen attention API.
-        safe_gate (bool): Clamp the gate against ``lower_bound`` inside the kernel.
-        lower_bound (float | None): The gate lower bound when ``safe_gate`` is set.
+        safe_gate (bool): Use FLA's numerically safe intra-chunk computation for bounded gates.
+        lower_bound (float | None): Forwarded to FLA backward for API compatibility. Gate activation
+            is precomputed by the caller; this argument does not clamp ``g``.
         transpose_state_layout (bool): Use the ``[N, H, V, K]`` state layout.
         use_qk_l2norm_in_kernel (bool): Must stay ``True``; GLM-5.3-Flash always L2-norms q/k, and
             the backward depends on the ``rstd`` that path produces.

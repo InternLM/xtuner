@@ -89,7 +89,6 @@ _fla_kda_import_error: BaseException | None = None
 try:
     from fla.modules import FusedRMSNormGated as _FLAFusedRMSNormGated
     from fla.modules import ShortConvolution as _FLAShortConvolution
-    from fla.modules.fused_norm_gate import rms_norm_gated as _fla_rms_norm_gated
     from fla.ops.kda import fused_recurrent_kda as _fused_recurrent_kda
 
     class FusedRMSNormGated(_FLAFusedRMSNormGated):
@@ -101,8 +100,6 @@ try:
         ``data_ptr()`` and the Triton kernel segfaults. Same fix, applied here instead.
         """
 
-        compile_friendly: bool = False
-
         def forward(  # type: ignore[override]
             self,
             x: torch.Tensor,
@@ -111,10 +108,8 @@ try:
             prenorm: bool = False,
             residual_in_fp32: bool = False,
         ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-            if self.compile_friendly:
-                from xtuner.v1.ops.gated_deltanet.rms_norm_gated import rms_norm_gated
-            else:
-                rms_norm_gated = _fla_rms_norm_gated
+            from xtuner.v1.ops.gated_deltanet.rms_norm_gated import rms_norm_gated
+
             return rms_norm_gated(
                 x,
                 g,
@@ -288,7 +283,6 @@ class KimiDeltaAttention(nn.Module):
             self.g_b_proj = build_linear(head_dim, projection_size, bias=False, float8_cfg=float8_cfg)
 
         self.o_norm = FusedRMSNormGated(head_dim, eps=rms_norm_eps, activation="sigmoid")
-        self.o_norm.compile_friendly = sp_impl == "fla"
         self.o_proj = build_linear(projection_size, hidden_size, bias=False, float8_cfg=float8_cfg)
 
     def init_weights(self) -> None:
