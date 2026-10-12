@@ -161,6 +161,12 @@ class NoPEDSAMLAConfig(MLAConfig):
     # the per-token DSA indexer's.
     indexer_topk_query_chunk_size: int | None = None
     freeze_dsa_indexer: bool = True
+    # Epsilon for the q/kv a-layernorms inside MultiLatentAttention. The published
+    # GLM-5.3-Flash checkpoints carry rms_norm_eps=1e-5 for the whole text stack, and
+    # both HF and Automodel build these two norms from the text config's eps; leaving
+    # them on the RMSNorm class default (1e-6) silently deviates from the checkpoint
+    # definition. The default keeps the old behaviour for callers that have no config.
+    rms_norm_eps: float = 1e-6
 
     @model_validator(mode="after")
     def _check(self) -> "NoPEDSAMLAConfig":
