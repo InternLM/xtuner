@@ -25,7 +25,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Replicate, Shard, distribute_tensor
 
 from xtuner._testing import DeterministicDDPTestCase
-from xtuner.v1.optim.muon import Muon
+from xtuner.v1.optim.muon import Muon, _muon_matrix_shape, muon_update_newton_schulz, zeropower_via_newtonschulz5
 
 
 def _matrix_lr_ratio(rows: int, columns: int, mode: Literal["rms_norm", "spectral_norm", "none"]) -> float:
@@ -43,6 +43,51 @@ class TestMuonConvLayout(DeterministicDDPTestCase):
     @property
     def world_size(self) -> int:
         return 2
+
+    def test_muon_matrix_shape_contract(self) -> None:
+        """Shared shape helper must agree for flatten / batch / expert layouts."""
+        self.create_pg("cuda")
+        # 2D: one matrix (flatten, or plain 2D with num_experts=1)
+        assert _muon_matrix_shape((32, 3, 2, 2), flatten=True, num_experts=1) == (32, 12)
+        assert _muon_matrix_shape((64, 128), flatten=False, num_experts=1) == (64, 128)
+        # 3D: expert batch, or leading-batch with flatten=False
+        assert _muon_matrix_shape((512, 128), flatten=False, num_experts=8) == (8, 64, 128)
+        assert _muon_matrix_shape((2, 3, 4, 5), flatten=False, num_experts=1) == (6, 4, 5)
+        assert _muon_matrix_shape((16, 6, 4), flatten=False, num_experts=1) == (16, 6, 4)
+
+    def test_batched_and_flattened_ns_match_per_matrix(self) -> None:
+        """Batch NS equals stacked per-matrix NS; flatten equals the 2D equivalent."""
+        self.create_pg("cuda")
+        batched = torch.randn(3, 5, 4, device="cuda", dtype=torch.float32)
+        batched_result = muon_update_newton_schulz(
+            batched,
+            newton_schulz_func=zeropower_via_newtonschulz5,
+            flatten=False,
+            epsilon=1e-7,
+            num_experts=1,
+        )
+        per_matrix = torch.stack(
+            [zeropower_via_newtonschulz5(batched[i], epsilon=1e-7) for i in range(batched.size(0))]
+        )
+        torch.testing.assert_close(batched_result, per_matrix, atol=0, rtol=0)
+
+        conv = torch.randn(8, 2, 3, 4, device="cuda", dtype=torch.float32)
+        matrix = conv.reshape(8, -1)
+        conv_result = muon_update_newton_schulz(
+            conv,
+            newton_schulz_func=zeropower_via_newtonschulz5,
+            flatten=True,
+            epsilon=1e-7,
+            num_experts=1,
+        )
+        matrix_result = muon_update_newton_schulz(
+            matrix,
+            newton_schulz_func=zeropower_via_newtonschulz5,
+            flatten=True,
+            epsilon=1e-7,
+            num_experts=1,
+        )
+        torch.testing.assert_close(conv_result.reshape_as(matrix), matrix_result, atol=0, rtol=0)
 
     def test_flattened_convolutions_match_matrix_updates(self) -> None:
         """覆盖两卡分片以及 FP32 ignored 卷积使用的 Replicate/local NS 路径。"""
@@ -92,7 +137,8 @@ class TestMuonConvLayout(DeterministicDDPTestCase):
         mesh = init_device_mesh("cuda", (self.world_size,), mesh_dim_names=("conv.fsdp",))
         for mode in ("rms_norm", "spectral_norm", "none"):
             unflattened = torch.nn.Parameter(distribute_tensor(torch.zeros(16, 6, 4, device="cuda"), mesh, [Shard(0)]))
-            expert = torch.nn.Parameter(distribute_tensor(torch.zeros(16, 6, 4, device="cuda"), mesh, [Shard(0)]))
+            # Experts must be concatenated 2D: [num_experts * rows, cols].
+            expert = torch.nn.Parameter(distribute_tensor(torch.zeros(16, 4, device="cuda"), mesh, [Shard(0)]))
             split = torch.nn.Parameter(distribute_tensor(torch.zeros(8, 4, device="cuda"), mesh, [Shard(0)]))
             optimizer = Muon(
                 [
@@ -107,7 +153,7 @@ class TestMuonConvLayout(DeterministicDDPTestCase):
             optimizer.load_state_dict(copy.deepcopy(optimizer.state_dict()))
             groups = optimizer.param_groups
             assert optimizer._param_lr_ratio(unflattened, groups[0]) == _matrix_lr_ratio(6, 4, mode)
-            assert optimizer._param_lr_ratio(expert, groups[1]) == _matrix_lr_ratio(3, 4, mode)
+            assert optimizer._param_lr_ratio(expert, groups[1]) == _matrix_lr_ratio(8, 4, mode)
             assert optimizer._param_lr_ratio(split, groups[2]) == 1.0
             assert all("lr_ratio" not in state for state in optimizer.state_dict()["state"].values())
 
