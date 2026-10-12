@@ -6,6 +6,7 @@ which XTuner assigns to ``Glm53Projector`` instead (§5.2 module boundary; the H
 mapping in §6.1 confirms this is a deliberate XTuner-side split, not an HF module boundary).
 """
 
+import os
 from typing import Callable, cast
 
 import torch
@@ -24,7 +25,7 @@ from xtuner.v1.module import AttnOutputs
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.ops.attn_imp import AttnOpOutputs, get_attn_impl_fn
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
-from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_torch_device_module
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_logger, get_torch_device_module
 from xtuner.v1.utils.init_weight import default_init_weights
 
 from .glm53_config import Glm53VisionConfig
@@ -32,6 +33,18 @@ from .glm53_config import Glm53VisionConfig
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
+logger = get_logger()
+
+# Default: embed full patches before SP (BF16 Conv3D parity with no-SP / AutoModel CP).
+# Set ``XTUNER_GLM53_VISION_EMBED_BEFORE_SP=0`` to shard raw patches first (lower activation
+# memory; breaks SP↔no-SP and XTuner↔AutoModel vision embedding parity).
+_FALSEY = frozenset({"0", "false", "off", "no"})
+_WARNED_SHARD_BEFORE_EMBED = False
+
+
+def _vision_embed_before_sp() -> bool:
+    value = os.getenv("XTUNER_GLM53_VISION_EMBED_BEFORE_SP", "1").strip().lower()
+    return value not in _FALSEY
 
 # The block forward is the whole ViT layer (norm -> attn -> norm -> clamped-SwiGLU MLP); compiling
 # it is what fuses the clamp/activation elementwise chain. `fullgraph=False`: the attention
@@ -136,8 +149,7 @@ def _shard_patches_for_sequence_parallel(
     spatial_merge_size: int,
     sequence_parallel_mesh: DeviceMesh,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """Split the post-``patch_embed`` sequence across SP ranks on a merge-aligned
-    boundary.
+    """Split a patch sequence across SP ranks on a merge-aligned boundary.
 
     Two constraints drive the layout (design doc F2 §9.3/§9.6):
 
@@ -152,12 +164,14 @@ def _shard_patches_for_sequence_parallel(
       appended silently, which keeps it a separate ``cu_seqlens`` segment: padding patches can
       never attend to, or be attended by, a real image.
 
-    Call this **after** ``patch_embed`` so every SP rank runs the same full-sequence Conv3D as
-    the no-SP path. Sharding raw patches first changes the BF16 Conv3D batch shape and diverges
-    from no-SP (and from AutoModel, which embeds the full vision sequence before any CP split).
+    Default production order (``XTUNER_GLM53_VISION_EMBED_BEFORE_SP=1``) calls this **after**
+    ``patch_embed`` so every rank runs the same full-sequence BF16 Conv3D as no-SP / AutoModel.
+    With ``XTUNER_GLM53_VISION_EMBED_BEFORE_SP=0`` it shards raw patches instead (memory escape
+    hatch; numerics diverge).
 
     Args:
-        hidden_states (torch.Tensor): Embedded patches ``[num_patches, hidden_size]``.
+        hidden_states (torch.Tensor): Embedded patches ``[num_patches, hidden_size]``, or raw
+            patches ``[num_patches, patch_dim]`` when sharding before embed.
         grid_thw (torch.Tensor): Per-image ``[t, h, w]`` rows, already expanded for video.
         spatial_merge_size (int): Projector merge size ``m``; a merge block is ``m ** 2`` patches.
         sequence_parallel_mesh (DeviceMesh): The sequence-parallel mesh.
@@ -439,18 +453,33 @@ class Glm53VisionModel(BaseModel):
         # mixing representations silently changes num_img_tokens/feature-grouping downstream.
         sp_size = sequence_parallel_mesh.size() if sequence_parallel_mesh is not None else 1
         split_size: int | None = None
+        embed_before_sp = _vision_embed_before_sp()
 
-        # Embed the full patch sequence before any SP split. `SequenceContext` may still leave
-        # `pixel_values` on CPU; moving the full tensor here matches the no-SP Conv3D batch shape
-        # (required for BF16 parity). The 24 ViT blocks below still run on the local shard only.
-        # Follows the module's own device so a CPU-resident tower still works.
-        hidden_states = self.patch_embed(hidden_states.to(self.patch_embed.proj.weight.device))
-
-        if sp_size > 1:
-            assert sequence_parallel_mesh is not None
-            hidden_states, grid_thw, split_size = _shard_patches_for_sequence_parallel(
-                hidden_states, grid_thw, self.spatial_merge_size, sequence_parallel_mesh
-            )
+        if embed_before_sp:
+            # Full-sequence Conv3D before any SP split matches no-SP / AutoModel CP batch shape
+            # (BF16 parity). ViT blocks below still run on the local shard only.
+            # `SequenceContext` may leave `pixel_values` on CPU; follow the module device.
+            hidden_states = self.patch_embed(hidden_states.to(self.patch_embed.proj.weight.device))
+            if sp_size > 1:
+                assert sequence_parallel_mesh is not None
+                hidden_states, grid_thw, split_size = _shard_patches_for_sequence_parallel(
+                    hidden_states, grid_thw, self.spatial_merge_size, sequence_parallel_mesh
+                )
+        else:
+            global _WARNED_SHARD_BEFORE_EMBED
+            if sp_size > 1 and not _WARNED_SHARD_BEFORE_EMBED:
+                logger.warning(
+                    "XTUNER_GLM53_VISION_EMBED_BEFORE_SP=0: sharding raw vision patches before "
+                    "patch_embed. Lowers Conv3D activation memory but breaks SP↔no-SP and "
+                    "XTuner↔AutoModel vision embedding parity."
+                )
+                _WARNED_SHARD_BEFORE_EMBED = True
+            if sp_size > 1:
+                assert sequence_parallel_mesh is not None
+                hidden_states, grid_thw, split_size = _shard_patches_for_sequence_parallel(
+                    hidden_states, grid_thw, self.spatial_merge_size, sequence_parallel_mesh
+                )
+            hidden_states = self.patch_embed(hidden_states.to(self.patch_embed.proj.weight.device))
 
         # Both are derived from the padded global grid: position ids are sharded to match the
         # local patches below (RoPE is applied before the attention all-to-all), while cu_seqlens
