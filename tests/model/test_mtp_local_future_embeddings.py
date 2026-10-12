@@ -127,7 +127,7 @@ def _run(optimized, recompute, micro_batches, rank=None, detach=False):
     states = [torch.full_like(source, 0.2 + mb / 10, requires_grad=True) for mb in range(micro_batches)]
     positions = [(torch.empty(0), torch.empty(0)) for _ in contexts]
     with patch(
-        "xtuner.v1.data_proto.sequence_context.gather_for_sequence_parallel",
+        "xtuner.v1.data_proto.sequence_context.all_gather_tensor_autograd",
         return_value=full.detach().clone(),
     ) as gather:
         outputs = block(
@@ -156,7 +156,8 @@ def test_seven_depths_preserve_outputs_and_backward_with_checkpoint(recompute, m
     if rank is None:
         torch.testing.assert_close(source.grad, old_source.grad)
     else:
-        # Existing SP all_gather is not autograd-aware. A1 preserves that behavior.
+        # This fake collective returns a detached tensor; the distributed cases below
+        # check gradients through the real autograd-aware collective.
         assert source.grad is old_source.grad is None
     for depth in range(7):
         for mb in range(micro_batches):
@@ -249,45 +250,30 @@ def _distributed_cache_worker(rank, rendezvous, backend="gloo", reentrant=False)
                 device=device,
             )
 
-            def cpu_gather(tensor, dim, sp_group):
-                # The production helper requires CUDA. Use its same plain all_gather
-                # semantics over two real CPU ranks, without adding an autograd edge.
-                shards = [torch.empty_like(tensor) for _ in range(2)]
-                dist.all_gather(shards, tensor.detach().contiguous(), group=sp_group)
-                return torch.cat(shards, dim=dim).contiguous()
-
-            from xtuner.v1.data_proto.utils import gather_for_sequence_parallel
-
-            # NCCL uses the actual CUDA gather. Only the CPU backend needs a replacement.
-            gather_options = {"wraps": gather_for_sequence_parallel} if cuda else {"side_effect": cpu_gather}
-            with patch(
-                "xtuner.v1.data_proto.sequence_context.gather_for_sequence_parallel", **gather_options
-            ) as gather:
-                outputs = block(
-                    state,
-                    embed_tokens_fn=lambda _: None,
-                    position_embeddings=(torch.empty(0, device=device), torch.empty(0, device=device)),
-                    seq_ctx=ctx,
+            outputs = block(
+                state,
+                embed_tokens_fn=lambda _: None,
+                position_embeddings=(torch.empty(0, device=device), torch.empty(0, device=device)),
+                seq_ctx=ctx,
+            )
+            if cuda:
+                positions = torch.arange(rank * 10, rank * 10 + 10, device=device)
+                ends = boundaries[1:][torch.searchsorted(boundaries[1:], positions, right=True)]
+                weights = ((positions + 7) < ends).float().unsqueeze(0) / 6
+                tv_ctx = MTPE2ETVLossContext(
+                    MTPE2ETVLossConfig(num_steps=7, mode="chunk", chunk_size=4),
+                    MTPE2ETVLossKwargs(
+                        shifted_labels=torch.zeros(1, 10, dtype=torch.long, device=device),
+                        loss_weight=weights,
+                        sp_mesh=mesh,
+                    ),
                 )
-                if cuda:
-                    positions = torch.arange(rank * 10, rank * 10 + 10, device=device)
-                    ends = boundaries[1:][torch.searchsorted(boundaries[1:], positions, right=True)]
-                    weights = ((positions + 7) < ends).float().unsqueeze(0) / 6
-                    tv_ctx = MTPE2ETVLossContext(
-                        MTPE2ETVLossConfig(num_steps=7, mode="chunk", chunk_size=4),
-                        MTPE2ETVLossKwargs(
-                            shifted_labels=torch.zeros(1, 10, dtype=torch.long, device=device),
-                            loss_weight=weights,
-                            sp_mesh=mesh,
-                        ),
-                    )
-                    loss, _ = tv_ctx.forward((state, [out["hidden_states"] for out in outputs]), head)
-                    assert torch.isfinite(loss) and loss.item() > 0
-                else:
-                    loss = sum(out["hidden_states"].square().mean() for out in outputs)
-                loss.backward()
-                assert gather.call_count == 1
-            assert source.grad is None and state.grad is not None
+                loss, _ = tv_ctx.forward((state, [out["hidden_states"] for out in outputs]), head)
+                assert torch.isfinite(loss) and loss.item() > 0
+            else:
+                loss = sum(out["hidden_states"].square().mean() for out in outputs)
+            loss.backward()
+            assert source.grad is not None and source.grad.isfinite().all() and state.grad is not None
             for depth, futures in enumerate(layer.futures, start=1):
                 expected = roll_packed_tensor(full, boundaries, shifts=-depth, dim=1)
                 torch.testing.assert_close(futures[0], expected[:, rank * 10 : rank * 10 + 10], rtol=0, atol=0)
@@ -298,6 +284,7 @@ def _distributed_cache_worker(rank, rendezvous, backend="gloo", reentrant=False)
                     [out["hidden_states"] for out in outputs],
                     loss.detach().clone(),
                     head.grad.clone() if cuda else None,
+                    source.grad.clone(),
                 )
             else:
                 torch.testing.assert_close(loss.detach(), reference[3], rtol=0, atol=0)
@@ -306,6 +293,7 @@ def _distributed_cache_worker(rank, rendezvous, backend="gloo", reentrant=False)
                     torch.testing.assert_close(head.grad, reference[4], rtol=0, atol=0)
                 torch.testing.assert_close(layer.weight.grad, reference[0], rtol=0, atol=0)
                 torch.testing.assert_close(state.grad, reference[1], rtol=0, atol=0)
+                torch.testing.assert_close(source.grad, reference[5], rtol=0, atol=0)
                 for out, old_out in zip(outputs, reference[2]):
                     torch.testing.assert_close(out["hidden_states"], old_out, rtol=0, atol=0)
                 assert all(contexts[0] is ctx for contexts in layer.contexts)
