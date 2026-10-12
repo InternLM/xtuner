@@ -85,7 +85,7 @@ class TestMoEIgnoredGradSync(DeterministicDDPTestCase):
         assert all(isinstance(placement, Replicate) for placement in parameter.placements)
         assert model.world_mesh is not None
         assert model.world_mesh.size() == self.world_size
-        assert parameter.device_mesh.size() == (ep_size if ep_size > 1 else self.world_size)
+        assert parameter.device_mesh == model.world_mesh
         assert any(parameter is p for _, p in model.trainable_parameters())
         with torch.no_grad():
             parameter.to_local().fill_(1.0)
