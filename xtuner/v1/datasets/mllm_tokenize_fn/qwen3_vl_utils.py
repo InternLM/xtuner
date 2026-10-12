@@ -35,7 +35,17 @@ def extract_frame_number(filename):
 
 
 def sort_frames(frame_paths):
-    # Extract filenames from each path and sort by their numeric part
+    # Fail fast instead of silently keeping the storage listing order when a delivery
+    # deviates from the '<prefix>_<frame_number>.jpg' naming convention: mis-ordered
+    # frames are trained on without any error surfacing.
+    keys = [extract_frame_number(os.path.basename(x)) for x in frame_paths]
+    if any(k == -1 for k in keys):
+        bad = [x for x, k in zip(frame_paths, keys) if k == -1][:3]
+        raise ValueError(
+            "Frame files must follow the '<prefix>_<frame_number>.jpg' naming convention for "
+            f"deterministic temporal order; non-conforming name(s), e.g. {bad}. "
+            "Please rename the frames and re-deliver the data."
+        )
     return sorted(frame_paths, key=lambda x: extract_frame_number(os.path.basename(x)))
 
 
