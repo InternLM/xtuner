@@ -20,6 +20,7 @@ preprocessing path makes internally. Verified bitwise-equal to the real processo
 ``video_grid_thw`` output for a synthetic 4-frame video in this repo's development scratch.
 """
 
+import copy
 import os
 from typing import Any, Literal
 
@@ -145,7 +146,7 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
     ):
         if processor_path not in _PROCESSOR_CACHE:
             _PROCESSOR_CACHE[processor_path] = AutoProcessor.from_pretrained(processor_path, trust_remote_code=True)
-        self.processor = _PROCESSOR_CACHE[processor_path]
+        self.processor = copy.deepcopy(_PROCESSOR_CACHE[processor_path])
         self.image_processor = self.processor.image_processor
         self.video_processor = self.processor.video_processor
 
