@@ -13,7 +13,7 @@ from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
 
 from .config import MTPConfig
 from .mtp_layer import MTPLayer
-from .utils import roll_sequence_context
+from .utils import local_packed_future_embeddings, roll_sequence_context
 
 
 MTPDepthOutput = MoEDecoderLayerOutput
@@ -177,15 +177,15 @@ class MTPBlock(nn.Module):
         mtp_outputs: list[MTPDepthOutput] = []
         current_hidden_states = hidden_states.detach() if self.mtp_config.detach_mtp_inputs else hidden_states
         current_seq_ctx = seq_ctx
+        raw_inputs_embeds = self._gather_future_embeddings(seq_ctx)
         previous_layer_results: MTPInternalOutput | None = None
 
         num_steps = self.mtp_config.num_layers
         for step in range(num_steps):
             layer = cast(MTPLayer, self.layers[0] if self.mtp_config.share_weights else self.layers[step])
-            # Roll each packed sequence independently so we get the (i+k)-th token while
-            # respecting per-sequence boundaries inside the packed batch.
-            current_seq_ctx = roll_sequence_context(current_seq_ctx, shifts=-1)
-            future_embeddings = self._embed_future(current_seq_ctx, embed_tokens_fn)
+            current_seq_ctx, future_embeddings = self._next_future_inputs(
+                current_seq_ctx, embed_tokens_fn, depth=step + 1, raw_inputs_embeds=raw_inputs_embeds
+            )
 
             if self.mtp_config.detach_mtp_inputs:
                 future_embeddings = future_embeddings.detach()
@@ -250,14 +250,19 @@ class MTPBlock(nn.Module):
         outputs_per_mb: list[list[MTPDepthOutput]] = [[] for _ in range(n)]
         current_hidden_states_list = list(hidden_states_list)
         current_seq_ctx_list = list(seq_ctx_list)
+        raw_inputs_embeds_list = [self._gather_future_embeddings(ctx) for ctx in seq_ctx_list]
         previous_layer_results: MTPInternalOutput | None = None
 
         num_steps = self.mtp_config.num_layers
         for step in range(num_steps):
             layer = cast(MTPLayer, self.layers[0] if self.mtp_config.share_weights else self.layers[step])
 
-            current_seq_ctx_list = [roll_sequence_context(ctx, shifts=-1) for ctx in current_seq_ctx_list]
-            future_embeddings_list = [self._embed_future(ctx, embed_tokens_fn) for ctx in current_seq_ctx_list]
+            future_inputs = [
+                self._next_future_inputs(ctx, embed_tokens_fn, depth=step + 1, raw_inputs_embeds=raw)
+                for ctx, raw in zip(current_seq_ctx_list, raw_inputs_embeds_list)
+            ]
+            current_seq_ctx_list = [ctx for ctx, _ in future_inputs]
+            future_embeddings_list = [embeds for _, embeds in future_inputs]
 
             layer_results = cast(
                 MoEDecoderLayerMicroBatchOutput,
@@ -285,6 +290,39 @@ class MTPBlock(nn.Module):
             current_hidden_states_list = layer_results["hidden_states"]
 
         return outputs_per_mb
+
+    def _gather_future_embeddings(self, seq_ctx: SequenceContext) -> torch.Tensor | None:
+        if self.mtp_config.use_local_future_embeddings and seq_ctx.inputs_embeds is not None:
+            # Preserve the existing gather semantics. Access once per microbatch;
+            # the shared context retains one full base, never seven rolled bases.
+            return seq_ctx.raw_inputs_embeds
+        return None
+
+    def _next_future_inputs(
+        self,
+        seq_ctx: SequenceContext,
+        embed_tokens_fn: Callable[[torch.Tensor], torch.Tensor],
+        *,
+        depth: int,
+        raw_inputs_embeds: torch.Tensor | None,
+    ) -> tuple[SequenceContext, torch.Tensor]:
+        if raw_inputs_embeds is None:
+            rolled_ctx = roll_sequence_context(seq_ctx, shifts=-1)
+            return rolled_ctx, self._embed_future(rolled_ctx, embed_tokens_fn)
+
+        assert seq_ctx.inputs_embeds is not None
+        mesh = seq_ctx.sequence_parallel_mesh
+        shard_start = seq_ctx._shard_start if mesh is not None and mesh.size() > 1 else 0
+        future = local_packed_future_embeddings(
+            raw_inputs_embeds,
+            seq_ctx.cu_seq_lens_q,
+            depth=depth,
+            shard_start=shard_start,
+            shard_size=seq_ctx.inputs_embeds.shape[1],
+        )
+        # Decoder metadata (pack boundaries, positions, routing) is depth-invariant.
+        # The shifted embedding is an explicit input, so the context stays shared.
+        return seq_ctx, future
 
     @staticmethod
     def _embed_future(
