@@ -35,16 +35,16 @@ DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 logger = get_logger()
 
-# Default: embed full patches before SP (BF16 Conv3D parity with no-SP / AutoModel CP).
-# Set ``XTUNER_GLM53_VISION_EMBED_BEFORE_SP=0`` to shard raw patches first (lower activation
-# memory; breaks SP↔no-SP and XTuner↔AutoModel vision embedding parity).
-_FALSEY = frozenset({"0", "false", "off", "no"})
-_WARNED_SHARD_BEFORE_EMBED = False
+# Default: shard raw patches before ``patch_embed`` (lower Conv3D activation memory under SP).
+# Set ``XTUNER_GLM53_VISION_EMBED_BEFORE_SP=1`` for full-sequence embed-then-shard (BF16 parity
+# with no-SP / AutoModel CP; higher per-rank activation).
+_TRUTHY = frozenset({"1", "true", "on", "yes"})
+_WARNED_EMBED_BEFORE_SP = False
 
 
 def _vision_embed_before_sp() -> bool:
-    value = os.getenv("XTUNER_GLM53_VISION_EMBED_BEFORE_SP", "1").strip().lower()
-    return value not in _FALSEY
+    value = os.getenv("XTUNER_GLM53_VISION_EMBED_BEFORE_SP", "0").strip().lower()
+    return value in _TRUTHY
 
 # The block forward is the whole ViT layer (norm -> attn -> norm -> clamped-SwiGLU MLP); compiling
 # it is what fuses the clamp/activation elementwise chain. `fullgraph=False`: the attention
@@ -164,14 +164,13 @@ def _shard_patches_for_sequence_parallel(
       appended silently, which keeps it a separate ``cu_seqlens`` segment: padding patches can
       never attend to, or be attended by, a real image.
 
-    Default production order (``XTUNER_GLM53_VISION_EMBED_BEFORE_SP=1``) calls this **after**
-    ``patch_embed`` so every rank runs the same full-sequence BF16 Conv3D as no-SP / AutoModel.
-    With ``XTUNER_GLM53_VISION_EMBED_BEFORE_SP=0`` it shards raw patches instead (memory escape
-    hatch; numerics diverge).
+    Default order shards **raw** patches (lower memory). With
+    ``XTUNER_GLM53_VISION_EMBED_BEFORE_SP=1`` call this **after** ``patch_embed`` so every rank
+    runs the same full-sequence BF16 Conv3D as no-SP / AutoModel (parity; higher activation).
 
     Args:
-        hidden_states (torch.Tensor): Embedded patches ``[num_patches, hidden_size]``, or raw
-            patches ``[num_patches, patch_dim]`` when sharding before embed.
+        hidden_states (torch.Tensor): Raw patches ``[num_patches, patch_dim]`` by default, or
+            embedded patches ``[num_patches, hidden_size]`` when embed-before-SP is enabled.
         grid_thw (torch.Tensor): Per-image ``[t, h, w]`` rows, already expanded for video.
         spatial_merge_size (int): Projector merge size ``m``; a merge block is ``m ** 2`` patches.
         sequence_parallel_mesh (DeviceMesh): The sequence-parallel mesh.
@@ -456,8 +455,16 @@ class Glm53VisionModel(BaseModel):
         embed_before_sp = _vision_embed_before_sp()
 
         if embed_before_sp:
-            # Full-sequence Conv3D before any SP split matches no-SP / AutoModel CP batch shape
-            # (BF16 parity). ViT blocks below still run on the local shard only.
+            global _WARNED_EMBED_BEFORE_SP
+            if sp_size > 1 and not _WARNED_EMBED_BEFORE_SP:
+                logger.warning(
+                    "XTUNER_GLM53_VISION_EMBED_BEFORE_SP=1: full-sequence patch_embed before SP "
+                    "split (BF16 parity with no-SP / AutoModel). Raises per-rank Conv3D "
+                    "activation memory versus the default shard-then-embed path."
+                )
+                _WARNED_EMBED_BEFORE_SP = True
+            # Full-sequence Conv3D before any SP split matches no-SP / AutoModel CP batch shape.
+            # ViT blocks below still run on the local shard only.
             # `SequenceContext` may leave `pixel_values` on CPU; follow the module device.
             hidden_states = self.patch_embed(hidden_states.to(self.patch_embed.proj.weight.device))
             if sp_size > 1:
@@ -466,14 +473,6 @@ class Glm53VisionModel(BaseModel):
                     hidden_states, grid_thw, self.spatial_merge_size, sequence_parallel_mesh
                 )
         else:
-            global _WARNED_SHARD_BEFORE_EMBED
-            if sp_size > 1 and not _WARNED_SHARD_BEFORE_EMBED:
-                logger.warning(
-                    "XTUNER_GLM53_VISION_EMBED_BEFORE_SP=0: sharding raw vision patches before "
-                    "patch_embed. Lowers Conv3D activation memory but breaks SP↔no-SP and "
-                    "XTuner↔AutoModel vision embedding parity."
-                )
-                _WARNED_SHARD_BEFORE_EMBED = True
             if sp_size > 1:
                 assert sequence_parallel_mesh is not None
                 hidden_states, grid_thw, split_size = _shard_patches_for_sequence_parallel(
