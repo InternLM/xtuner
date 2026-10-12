@@ -80,6 +80,55 @@ def _get_muon_lr_ratio(
     return 0.2 * math.sqrt(max(fan_out, fan_in))
 
 
+def _muon_matrix_shape(
+    shape: tuple[int, ...],
+    *,
+    flatten: bool,
+    num_experts: int,
+) -> tuple[int, ...]:
+    """Return the Newton-Schulz layout: 2D or 3D.
+
+    This is the single source of truth for both orthogonalization and ``lr_ratio``.
+    ``rows`` / ``cols`` are always the last two entries of the returned shape.
+
+    Returns:
+        - 2D ``(rows, cols)``: one independent matrix, when ``num_experts == 1``
+          and either ``flatten`` is True or the parameter is already 2D.
+        - 3D ``(batch, rows, cols)``: a batch of independent matrices, when
+          ``num_experts > 1`` (concatenated experts as
+          ``[num_experts * rows, cols]``) or when ``flatten`` is False and the
+          parameter has leading batch dims (``ndim >= 3``).
+
+    Precedence: ``num_experts > 1``, then ``flatten`` or already-2D, otherwise
+    batch-over-last-two-dims.
+
+    Where 3D shows up in common models:
+
+    - MoE expert weights (most common NS 3D path): XTuner ``GroupedLinear`` stores
+      ``fused_w1w3`` / ``fused_w2`` as 2D ``[E * out, in]``, and ``num_experts > 1``
+      reshapes them to ``(E, out, in)`` for per-expert NS. The parameter itself is
+      not 3D.
+    - True 3D parameters are uncommon in Muon groups. Typical cases:
+      ``nn.Conv1d`` weights ``[out, in, k]``; custom layers that stack matrices as
+      ``[B, out, in]``. With the usual ``flatten=True`` (vision conv), these still
+      become 2D for NS; only ``flatten=False`` keeps a 3D NS layout.
+    - ``nn.Linear`` / attention projections stay 2D. Vision ``Conv2d`` /
+      patch-embed kernels are usually 4D and, with ``flatten=True``, also become
+      one 2D matrix rather than a 3D batch.
+    """
+    if num_experts > 1:
+        # Concatenated 2D expert layout -> batch of expert matrices.
+        return num_experts, shape[0] // num_experts, shape[1]
+
+    if flatten or len(shape) == 2:
+        # One matrix: plain 2D, or flatten higher-D weights (e.g. conv) to 2D.
+        # For already-2D shapes, prod(shape[1:]) == shape[1].
+        return shape[0], math.prod(shape[1:])
+
+    # Preserve independent matrices in the leading batch dimensions.
+    return math.prod(shape[:-2]), shape[-2], shape[-1]
+
+
 def pad_batch(batch: list[Tensor], batch_size: int) -> list[Tensor]:
     """Insert dummy tensors so the batch has exactly `batch_size` elements."""
     assert len(batch) > 0
@@ -307,7 +356,9 @@ class Muon(Optimizer):
             False: Tensors are not flattened. 3D+ tensors are treated as batches of 2D matrices.
         use_triton (bool): Whether to use Triton kernel for Newton-Schulz. Ignored if custom function is provided.
         newton_schulz_func (Callable | None): Use a custom Newton-Schulz function for orthogonalization.
-            Signature is `func(input: Tensor, epsilon: float, num_experts: int) -> Tensor`.
+            Signature is `func(input: Tensor, epsilon: float) -> Tensor`, where ``input`` is already
+            reshaped to 2D ``[rows, cols]`` or 3D ``[batch, rows, cols]`` by
+            :func:`muon_update_newton_schulz`.
         enable_all2all (bool): Whether to allow the all-to-all communication strategy. Set to False to
             force the all-gather + reduce-scatter (AGRS) path for all sharded batches. Useful on cluster
             topologies where all-to-all is unreliable.
@@ -789,14 +840,12 @@ class Muon(Optimizer):
         if param in self._muon_split_sizes:
             return 1.0
 
-        num_experts = group.get("num_experts", 1)
-        if group["flatten"] and param.ndim >= 3 and num_experts == 1:
-            fan_out = param.shape[0]
-            fan_in = math.prod(param.shape[1:])
-        else:
-            fan_out = param.shape[-2] // num_experts
-            fan_in = param.shape[-1]
-        return _get_muon_lr_ratio(fan_out, fan_in, group["adjust_lr"])
+        matrix_shape = _muon_matrix_shape(
+            tuple(param.shape),
+            flatten=group["flatten"],
+            num_experts=group.get("num_experts", 1),
+        )
+        return _get_muon_lr_ratio(matrix_shape[-2], matrix_shape[-1], group["adjust_lr"])
 
     def _build_muon_task(
         self,
@@ -1627,17 +1676,20 @@ def muon_update_newton_schulz(
     epsilon: Tensor,
     num_experts: int = 1,
 ) -> Tensor:
-    """Flatten the input tensor if needed and call the Newton-Schulz
-    function."""
-    original_shape = X.shape
-    if flatten and X.ndim >= 3:
-        # Flatten 3D+ tensors to 2D matrix
-        X = X.flatten(start_dim=1)
-    elif X.ndim >= 4:
-        # Given 4D+ batch, flatten to 3D batch
-        X = X.flatten(end_dim=-3)
+    """Reshape ``X`` to 2D/3D via :func:`_muon_matrix_shape` and call Newton-Schulz.
 
-    return newton_schulz_func(X, epsilon=epsilon, num_experts=num_experts).reshape(original_shape)
+    The NS callback receives either one matrix ``[rows, cols]`` or a batch
+    ``[batch, rows, cols]``, and must not reinterpret the tensor through
+    ``num_experts``.
+    """
+    original_shape = X.shape
+    matrix_shape = _muon_matrix_shape(
+        tuple(X.shape),
+        flatten=flatten,
+        num_experts=num_experts,
+    )
+    matrices = X.reshape(matrix_shape)
+    return newton_schulz_func(matrices, epsilon=epsilon).reshape(original_shape)
 
 
 def _muonsplit_newton_schulz(
@@ -1664,12 +1716,12 @@ def _muonsplit_newton_schulz(
 
     results: dict[int, Tensor] = {}
     for size, indexed_chunks in chunks_by_size.items():
-        batch = torch.cat([chunk for _, chunk in indexed_chunks], dim=-2)
-        batch = newton_schulz_func(batch, epsilon=epsilon, num_experts=len(indexed_chunks))
+        batch = torch.stack([chunk for _, chunk in indexed_chunks], dim=0)
+        batch = newton_schulz_func(batch, epsilon=epsilon)
         lr_ratio = _get_muon_lr_ratio(size, X.size(-1), adjust_lr)
         if lr_ratio != 1.0:
             batch.mul_(lr_ratio)
-        for (index, _), result in zip(indexed_chunks, batch.split(size, dim=-2)):
+        for (index, _), result in zip(indexed_chunks, batch.unbind(0)):
             results[index] = result
 
     output = torch.cat([results[index] for index in range(len(split_sizes))], dim=-2)
@@ -1679,32 +1731,14 @@ def _muonsplit_newton_schulz(
     return output
 
 
-def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7, num_experts: int = 1):
-    """Newton-Schulz iteration to approximate the orthogonalization of X.
-
-    This function handles both regular matrices and MoE expert weight matrices.
-    For MoE models, each expert's weight matrix is orthogonalized independently,
-    rather than orthogonalizing the concatenated large matrix.
-
-    Unified algorithm for both cases:
-    1. Reshape input to (num_experts, M, N) - for regular case this is (1, M, N)
-    2. Apply Newton-Schulz iteration to each expert matrix independently using
-       batch matrix multiplication
-    3. Reshape back to original shape
-
-    Mathematical equivalence:
-    - num_experts=1:  X.view(1, M, N) -> process -> X.view(M, N)
-      This is mathematically equivalent to processing X directly, but allows
-      unified code path with the MoE case.
-    - num_experts>1:  X.view(num_experts, M, N) -> process each expert -> X.view(num_experts*M, N)
-      Each expert matrix is orthogonalized independently with its own spectral norm.
+def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7):
+    """Newton-Schulz iteration over independent matrices in ``G``.
 
     Args:
-        G: Input tensor to orthogonalize. Shape: (num_experts * M, N) for MoE,
-           or (M, N) for regular matrices.
+        G: Tensor of shape ``[rows, cols]`` (one matrix) or ``[batch, rows, cols]``
+           (batch of matrices). Layout must already match :func:`_muon_matrix_shape`;
+           this function never reinterprets experts and does not accept 4D+.
         epsilon: Small value to avoid division by zero.
-        num_experts: Number of experts for MoE models. Default 1 for regular matrices.
-            When > 1, the input is treated as concatenated expert matrices.
     """
     # Newton-Schulz constants - fixed coefficients for 5th order iteration
     ns_consts = [
@@ -1716,38 +1750,22 @@ def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7, num_experts: i
     ]
 
     X = G.to(dtype=torch.bfloat16)
-    original_shape = X.shape
-
-    # Unified handling: reshape to (num_experts, M, N) for both cases
-    # For regular case (num_experts=1), this adds a batch dimension of size 1
-    N = X.size(-1)
-    X = X.view(num_experts, -1, N)
 
     # Transpose if needed (when rows > cols) for numerical stability in NS iteration
     # This ensures X @ X.mT produces a smaller square matrix
     need_transpose = X.size(-2) > X.size(-1)
     if need_transpose:
-        X = X.mT  # (num_experts, N, M) if rows > cols, else (num_experts, M, N)
-
-    # Ensure spectral norm is at most 1 for each expert matrix independently
-    # norm shape: (num_experts, 1, 1) - each expert has its own normalization factor
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) + epsilon)
-
-    # Newton-Schulz iteration: orthogonalize each expert matrix
-    # Using batch matrix multiplication (@) to process all experts in parallel
-    for a, b, c in ns_consts:
-        # A = X @ X^T: compute Gram matrix for each expert
-        A = X @ X.mT  # shape: (num_experts, M, M) or (num_experts, N, N)
-        # B = b * A + c * A @ A: polynomial combination for convergence
-        B = b * A + c * (A @ A)
-        # X = a * X + B @ X: update step
-        X = a * X + B @ X
-
-    # Undo transpose if applied
-    if need_transpose:
         X = X.mT
 
-    # Reshape back to original shape: (num_experts, M, N) -> (num_experts * M, N)
-    X = X.view(original_shape)
+    # Ensure spectral norm is at most 1 for each matrix independently
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) + epsilon)
 
+    # Newton-Schulz iteration: works for both 2D and batched 3D via `@`
+    for a, b, c in ns_consts:
+        A = X @ X.mT
+        B = b * A + c * (A @ A)
+        X = a * X + B @ X
+
+    if need_transpose:
+        X = X.mT
     return X
