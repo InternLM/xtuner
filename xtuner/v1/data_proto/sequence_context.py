@@ -465,7 +465,9 @@ class SequenceContext:
         # MTP rolls these embeddings to construct its future-token input. Unlike
         # integer input_ids, this gather must reduce-scatter gradients back to
         # their owners, including gradients crossing an SP shard boundary.
-        gathered = all_gather_tensor_autograd(self.inputs_embeds, gather_dim=1, group=self.sequence_parallel_mesh)
+        gathered = all_gather_tensor_autograd(
+            self.inputs_embeds.contiguous(), gather_dim=1, group=self.sequence_parallel_mesh
+        )
         self._raw_inputs_embeds = cast(torch.FloatTensor, gathered)
         return self._raw_inputs_embeds
 
