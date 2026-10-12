@@ -136,7 +136,7 @@ def _shard_patches_for_sequence_parallel(
     spatial_merge_size: int,
     sequence_parallel_mesh: DeviceMesh,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """Split the raw patch sequence across SP ranks on a merge-aligned
+    """Split the post-``patch_embed`` sequence across SP ranks on a merge-aligned
     boundary.
 
     Two constraints drive the layout (design doc F2 §9.3/§9.6):
@@ -152,8 +152,12 @@ def _shard_patches_for_sequence_parallel(
       appended silently, which keeps it a separate ``cu_seqlens`` segment: padding patches can
       never attend to, or be attended by, a real image.
 
+    Call this **after** ``patch_embed`` so every SP rank runs the same full-sequence Conv3D as
+    the no-SP path. Sharding raw patches first changes the BF16 Conv3D batch shape and diverges
+    from no-SP (and from AutoModel, which embeds the full vision sequence before any CP split).
+
     Args:
-        hidden_states (torch.Tensor): Raw patches ``[num_patches, patch_dim]``.
+        hidden_states (torch.Tensor): Embedded patches ``[num_patches, hidden_size]``.
         grid_thw (torch.Tensor): Per-image ``[t, h, w]`` rows, already expanded for video.
         spatial_merge_size (int): Projector merge size ``m``; a merge block is ``m ** 2`` patches.
         sequence_parallel_mesh (DeviceMesh): The sequence-parallel mesh.
@@ -435,6 +439,13 @@ class Glm53VisionModel(BaseModel):
         # mixing representations silently changes num_img_tokens/feature-grouping downstream.
         sp_size = sequence_parallel_mesh.size() if sequence_parallel_mesh is not None else 1
         split_size: int | None = None
+
+        # Embed the full patch sequence before any SP split. `SequenceContext` may still leave
+        # `pixel_values` on CPU; moving the full tensor here matches the no-SP Conv3D batch shape
+        # (required for BF16 parity). The 24 ViT blocks below still run on the local shard only.
+        # Follows the module's own device so a CPU-resident tower still works.
+        hidden_states = self.patch_embed(hidden_states.to(self.patch_embed.proj.weight.device))
+
         if sp_size > 1:
             assert sequence_parallel_mesh is not None
             hidden_states, grid_thw, split_size = _shard_patches_for_sequence_parallel(
@@ -452,11 +463,6 @@ class Glm53VisionModel(BaseModel):
         # `SequenceContext.max_length_q` (a CPU tensor) straight through.
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 
-        # `SequenceContext` deliberately leaves `pixel_values` on CPU (see its `.to()` comment):
-        # under SP only this rank's shard is worth moving, so the move happens here, after the
-        # split, rather than for the whole batch up front. Follows the module's own device rather
-        # than the global one so a CPU-resident tower still works. `patch_embed` casts the dtype.
-        hidden_states = self.patch_embed(hidden_states.to(self.patch_embed.proj.weight.device))
         cos, sin = self.rotary_pos_emb(position_ids.to(hidden_states.device))
         if sp_size > 1:
             assert sequence_parallel_mesh is not None
