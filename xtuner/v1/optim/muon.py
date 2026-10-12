@@ -382,7 +382,7 @@ class Muon(Optimizer):
         self._remainder_strategy = remainder_strategy
         self._muon_split_sizes = muon_split_sizes or {}
         self.register_state_dict_post_hook(self._remove_clip_grad_policy)
-        self.register_load_state_dict_pre_hook(self._prepare_state_dict_for_load)
+        self.register_load_state_dict_pre_hook(self._restore_clip_grad_policy)
 
         # Validate MuonSplit before any optimizer update or collective.
         for group in self.param_groups:
@@ -435,18 +435,12 @@ class Muon(Optimizer):
         return state_dict
 
     @staticmethod
-    def _prepare_state_dict_for_load(optimizer: Optimizer, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def _restore_clip_grad_policy(optimizer: Optimizer, state_dict: dict[str, Any]) -> dict[str, Any]:
         if len(state_dict["param_groups"]) != len(optimizer.param_groups):
             return state_dict
 
         state_dict = state_dict.copy()
         state_dict["param_groups"] = [group.copy() for group in state_dict["param_groups"]]
-        # Old checkpoints may contain a derived ratio. Drop it without modifying
-        # the caller's dictionaries; momentum and other historical state remain intact.
-        state_dict["state"] = {
-            param_id: {key: value for key, value in state.items() if key != "lr_ratio"}
-            for param_id, state in state_dict["state"].items()
-        }
         for loaded_group, current_group in zip(state_dict["param_groups"], optimizer.param_groups):
             loaded_group["clip_grad"] = current_group.get("clip_grad", True)
         return state_dict
@@ -833,6 +827,9 @@ class Muon(Optimizer):
         # current group configuration (including values restored from a checkpoint).
         lr_ratios = [self._param_lr_ratio(p, group) for p in params]
         assert len(set(lr_ratios)) == 1, f"Found different lr_ratios: {set(lr_ratios)}"
+        for state, lr_ratio in zip(states, lr_ratios):
+            # Keep the saved ratio aligned with the value used for this update.
+            state["lr_ratio"] = lr_ratio
 
         # Step 3: pick the Newton-Schulz callback — MuonSplit parameters orthogonalize
         # each logical row block independently, everything else uses the plain callback.
