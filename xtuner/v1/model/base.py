@@ -680,16 +680,35 @@ class BaseModel(nn.Module):
 
                 for hf_name in hf_name_list:
                     if any(re.search(p, hf_name) for p in patterns):  # type: ignore
-                        if isinstance(param, DTensor) and (
-                            param.device_mesh == self.world_mesh
-                            or not all(isinstance(placement, Replicate) for placement in param.placements)
-                        ):
-                            ignored_params.add(param)
-                            break
+                        if isinstance(param, DTensor):
+                            # Case 1: Already on the target world mesh, e.g. an FP32
+                            # replica with [Replicate(), Replicate()] on an FSDP x EP
+                            # mesh. Preserve all existing placements on this mesh.
+                            if param.device_mesh == self.world_mesh:
+                                ignored_params.add(param)
+                                break
 
-                        # A parameter replicated only on an EP/TP submesh is still
-                        # separate across FSDP rows. FSDP ignores these FP32 params,
-                        # so attach all data-parallel dimensions before training.
+                            # Case 2: On another mesh with a non-Replicate placement.
+                            # For Shard, to_local() returns only a parameter shard;
+                            # for Partial, it returns a value pending reduction.
+                            # Neither can be replicated as the full parameter.
+                            # Preserve these layouts; converting them is outside this fix.
+                            if any(not placement.is_replicate() for placement in param.placements):
+                                ignored_params.add(param)
+                                break
+
+                        # Case 3: A plain Tensor/Parameter becomes replicated across
+                        # every dimension of the target world mesh.
+                        #
+                        # Case 4: A fully replicated DTensor on another mesh, e.g.
+                        # the EP (or EP x expert-TP) submesh used by MoE initialization.
+                        # If that submesh covers fewer ranks, include the missing
+                        # FSDP rows so their FP32 gradients also synchronize.
+                        # If it already covers all ranks, normalize the mesh layout
+                        # without expanding the actual replica set.
+                        # Each rank holds the full parameter, so to_local().detach()
+                        # supplies a local leaf for rebuilding the DTensor. The
+                        # replacement remains ignored by FSDP.
                         local_param = param.to_local().detach() if isinstance(param, DTensor) else param
                         dist_param = nn.Parameter(
                             distribute_tensor(
