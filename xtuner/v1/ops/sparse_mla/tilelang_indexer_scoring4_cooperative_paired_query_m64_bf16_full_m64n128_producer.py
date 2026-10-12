@@ -1,11 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 """Opt-in full-output BF16 scorer for installed DeepSelect.
 
-Retains four M64N128 scoring WGs, a dedicated producer and two K stages.
-All scheduled tiles publish directly to a full FP32 GPU matrix. Scores in
-[0, end) outside each query's [start, end) range are initialized to -inf;
-unscheduled suffixes after end are unspecified and DeepSelect ignores them.
-DeepSelect has no begin support, so its companion wrapper requires starts=0.
+Retains four M64N128 scoring WGs, a dedicated producer and two K stages. All scheduled tiles publish directly to a full
+FP32 GPU matrix. Scores in [0, end) outside each query's [start, end) range are initialized to -inf; unscheduled
+suffixes after end are unspecified and DeepSelect ignores them. DeepSelect has no begin support, so its companion
+wrapper requires starts=0.
 """
 
 import tilelang
@@ -319,12 +318,12 @@ def _scorer_full_kernel(math_registers: int = 112, helper_source: str = _HELPER_
 
     @T.prim_func
     def bf16_scorer_full_m64n128_producer(
-        Q: T.Tensor((query_len * heads, index_dim), T.bfloat16),
-        K: T.Tensor((key_len, index_dim), T.bfloat16),
-        Weights: T.Tensor((query_len, heads), T.float32),
-        Starts: T.Tensor((query_len,), T.int32),
-        Ends: T.Tensor((query_len,), T.int32),
-        Scores: T.StridedTensor((query_len, key_len), (score_stride, 1), T.float32),
+        Q: T.Tensor((query_len * heads, index_dim), T.bfloat16),  # type: ignore[valid-type]
+        K: T.Tensor((key_len, index_dim), T.bfloat16),  # type: ignore[valid-type]
+        Weights: T.Tensor((query_len, heads), T.float32),  # type: ignore[valid-type]
+        Starts: T.Tensor((query_len,), T.int32),  # type: ignore[valid-type]
+        Ends: T.Tensor((query_len,), T.int32),  # type: ignore[valid-type]
+        Scores: T.StridedTensor((query_len, key_len), (score_stride, 1), T.float32),  # type: ignore[valid-type]
     ):
         with T.Kernel(T.ceildiv(query_len, block_q), threads=640) as bx:
             T.annotate_min_blocks_per_sm(1)
@@ -408,11 +407,10 @@ def scorer_full_interface(
 ) -> Tensor:
     """Write all valid scores to FP32[Q,K] with a DeepSelect-aligned stride.
 
-    Q[Q,32,128]/K[K,128] are BF16; weights[Q,32] are pre-scaled FP32.
-    Starts/ends are int32, with0<=start<=end<=K. Every [start,end) value is
-    written; preceding prefix holes are -inf. Unscheduled suffixes after
-    end are unspecified. This matrix remains on GPU; allocation can be
-    excluded by passing a preallocated output from allocate_scores().
+    Q[Q,32,128]/K[K,128] are BF16; weights[Q,32] are pre-scaled FP32. Starts/ends are int32, with0<=start<=end<=K.
+    Every [start,end) value is written; preceding prefix holes are -inf. Unscheduled suffixes after end are
+    unspecified. This matrix remains on GPU; allocation can be excluded by passing a preallocated output from
+    allocate_scores().
     """
     import deep_select
 
@@ -461,9 +459,8 @@ def deepselect_topk(
 ) -> Tensor:
     """Select valid zero-start prefixes; pad short rows with ID -1.
 
-    The installed selector has no begin support. Nonzero starts are
-    rejected because masking cannot reproduce its short-range padding.
-    Provide output_idx[Q,topk] int32 to exclude output allocation.
+    The installed selector has no begin support. Nonzero starts are rejected because masking cannot reproduce its
+    short-range padding. Provide output_idx[Q,topk] int32 to exclude output allocation.
     """
     import deep_select
 
