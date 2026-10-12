@@ -5,6 +5,43 @@ import torch
 from xtuner.v1.data_proto import SequenceContext
 
 
+def local_packed_future_embeddings(
+    raw_inputs_embeds: torch.Tensor,
+    cu_seq_lens: torch.IntTensor,
+    *,
+    depth: int,
+    shard_start: int,
+    shard_size: int,
+) -> torch.Tensor:
+    """Materialize an owned local embedding buffer for one MTP depth.
+
+    For global query position ``i``, read ``i + depth`` only within the same
+    packed sequence, otherwise fill zero. This equals repeated pack-aware
+    left rolls followed by an SP slice, without allocating full rolled copies.
+    The full input uses the existing SequenceContext gather and its existing
+    autograd semantics; this function does not detach or communicate tensors.
+    """
+    if depth < 1:
+        raise ValueError("MTP future depth must be positive")
+    if shard_start < 0 or shard_size < 0 or shard_start + shard_size > raw_inputs_embeds.shape[1]:
+        raise ValueError("Local MTP shard must lie within the full embedding sequence")
+    if shard_size == 0:
+        return raw_inputs_embeds[:, :0].clone()
+
+    positions = torch.arange(shard_start, shard_start + shard_size, device=raw_inputs_embeds.device)
+    # right=True skips empty packs and assigns a boundary position to its next pack.
+    ends = cu_seq_lens[1:].to(device=positions.device)
+    pack_indices = torch.searchsorted(ends, positions, right=True)
+    pack_ends = ends.index_select(0, pack_indices)
+    source_positions = positions + depth
+    valid = source_positions < pack_ends
+    # Invalid positions still need an in-bounds index before masking (last SP rank).
+    source_indices = source_positions.clamp_max(raw_inputs_embeds.shape[1] - 1)
+    future = raw_inputs_embeds.index_select(1, source_indices)
+    future.masked_fill_(~valid[None, :, None], 0)
+    return future
+
+
 def roll_packed_tensor(
     tensor: torch.Tensor,
     cu_seq_lens: torch.IntTensor,

@@ -193,8 +193,8 @@ class Glm53TextMoE(MoE):
 
         mtp_config = config.mtp_config
         assert mtp_config is not None
-        assert mtp_config.share_weights and mtp_config.num_layers == 1, (
-            "GLM-5.3-Flash checkpoint has exactly one physical MTP layer (layers.45)."
+        assert mtp_config.share_weights and mtp_config.num_layers > 0, (
+            "GLM-5.3-Flash requires one shared physical MTP layer (layers.45) and positive logical depth."
         )
         decoder_layer = self.moe_decoder_layer_cls(
             hidden_size=config.hidden_size,
