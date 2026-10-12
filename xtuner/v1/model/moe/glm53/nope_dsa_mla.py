@@ -14,7 +14,7 @@ unlike GLM-5.2's ``dsa_topk_source_layer``/``GLM52MTPBlock`` machinery.
 from typing import Literal, cast
 
 import torch
-from pydantic import ConfigDict, model_validator
+from pydantic import ConfigDict, Field, model_validator
 from torch import nn
 from torch.nn import functional as F
 from typing_extensions import overload
@@ -70,6 +70,8 @@ class KPoolIndexer(nn.Module):
         indexer_backend: KPoolIndexerBackend,
         alignment: int,
         topk_query_chunk_size: int | None = None,
+        balance_sp: bool = False,
+        sp_full_pool_work_ratio: float = 0.5,
     ):
         super().__init__()
         self.index_head_dim = index_head_dim
@@ -80,6 +82,8 @@ class KPoolIndexer(nn.Module):
         self.indexer_backend = indexer_backend
         self.alignment = alignment
         self.topk_query_chunk_size = topk_query_chunk_size
+        self.balance_sp = balance_sp
+        self.sp_full_pool_work_ratio = sp_full_pool_work_ratio
         # Resolved once here (not per forward call), mirroring GLM-5.2's
         # get_dsa_topk_indices(indexer_backend) precomputation.
         self._topk_indices_fn = get_kpool_topk_indices(indexer_backend)
@@ -125,6 +129,8 @@ class KPoolIndexer(nn.Module):
             always_select_tail=self.always_select_tail,
             alignment=self.alignment,
             query_chunk_size=self.topk_query_chunk_size,
+            balance_sp=self.balance_sp,
+            sp_full_pool_work_ratio=self.sp_full_pool_work_ratio,
         )
         return topk_ids.to(torch.int32).contiguous()
 
@@ -154,12 +160,15 @@ class NoPEDSAMLAConfig(MLAConfig):
     sparse_mla_backend: Literal["torch", "flash_mla_cudnn", "tilelang"] = "flash_mla_cudnn"
     # Independent of `sparse_mla_backend` above, which is `flash_mla_cudnn` here and is not
     # even a valid indexer backend -- inheriting it would never have worked.
+    # Opt in with "tilelang_cooperative" for cooperative BF16 scoring + DeepSelect.
+    # Requires SM90+, BF16 Q/K with 32 heads x 128, and an installed DeepSelect module.
     indexer_backend: KPoolIndexerBackend = "tilelang"
-    # Bounds the transient [query_chunk, num_pools] logits tile the selector materializes.
-    # ``None`` keeps a single launch; set it for long context, where that tile is the
-    # indexer's memory peak. Pool-space keys already make it index_kpool times smaller than
-    # the per-token DSA indexer's.
-    indexer_topk_query_chunk_size: int | None = None
+    # Bound logits memory with query chunks; cooperative scoring reuses FP32 scratch.
+    indexer_topk_query_chunk_size: int | None = Field(default=1024, gt=0)
+    # Enable SP balancing to redistribute causal scoring queries with neighbor P2P.
+    # Selected pool IDs return to their owners; attention keeps uniform sequence shards.
+    indexer_balance_sp: bool = False
+    indexer_sp_full_pool_work_ratio: float = Field(default=0.5, ge=0, allow_inf_nan=False)
     freeze_dsa_indexer: bool = True
 
     @model_validator(mode="after")
@@ -229,6 +238,8 @@ class NoPEDSAMultiLatentAttention(MultiLatentAttention):
         indexer_backend: KPoolIndexerBackend,
         indexer_topk_query_chunk_size: int | None,
         freeze_dsa_indexer: bool,
+        indexer_balance_sp: bool = False,
+        indexer_sp_full_pool_work_ratio: float = 0.5,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -274,6 +285,8 @@ class NoPEDSAMultiLatentAttention(MultiLatentAttention):
             indexer_backend=indexer_backend,
             alignment=self.alignment,
             topk_query_chunk_size=indexer_topk_query_chunk_size,
+            balance_sp=indexer_balance_sp,
+            sp_full_pool_work_ratio=indexer_sp_full_pool_work_ratio,
         )
         if freeze_dsa_indexer:
             self.indexer.requires_grad_(False)

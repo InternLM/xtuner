@@ -80,6 +80,8 @@ def get_kpool_topk_indices(backend: KPoolIndexerBackend) -> KPoolTopKIndicesProt
         return torch_kpool_topk_indices
     if backend == "tilelang":
         return kpool_topk_indices
+    if backend == "tilelang_cooperative":
+        return functools.partial(kpool_topk_indices, scorer="cooperative")
     raise ValueError(f"Unsupported KPool indexer backend: {backend}")
 
 
