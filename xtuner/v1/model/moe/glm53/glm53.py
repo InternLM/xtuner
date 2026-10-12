@@ -419,6 +419,7 @@ class Glm53TextMoEConfig(MoEConfig):
                 index_n_heads=cfg.index_n_heads,
                 index_kpool=cfg.index_kpool,
                 index_kpool_always_select_tail=cfg.index_kpool_always_select_tail,
+                rms_norm_eps=cfg.rms_norm_eps,
             ),
             linear_attention=KDAConfig(
                 num_heads=cfg.linear_attn_config["num_heads"],
