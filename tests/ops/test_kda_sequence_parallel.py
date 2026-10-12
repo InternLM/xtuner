@@ -11,15 +11,22 @@ from xtuner.v1.utils.test_utils import init_data_mesh
 
 def _assert_parity(actual, expected, dtype, name):
     assert actual is not None and expected is not None, name
-    assert torch.isfinite(actual).all(), name
     actual, expected = actual.float(), expected.float()
-    if not bool(expected.any()):
-        torch.testing.assert_close(actual, expected, atol=0, rtol=0, msg=name)
-        return
     limit = 2e-2 if dtype == torch.bfloat16 else 3e-3
     error = actual - expected
-    assert error.norm() / expected.norm() < limit, name
-    assert error.abs().max() / expected.abs().max() < 2 * limit, name
+    if bool(expected.any()):
+        relative_l2 = float(error.norm() / expected.norm())
+        relative_max = float(error.abs().max() / expected.abs().max())
+        valid = relative_l2 < limit and relative_max < 2 * limit
+    else:
+        relative_l2 = relative_max = float(error.abs().max())
+        valid = relative_max == 0
+    failed = torch.tensor(int(not valid), device=actual.device)
+    # Every rank must stop on an assertion; otherwise peers enter the next collective alone.
+    torch.distributed.all_reduce(failed, op=torch.distributed.ReduceOp.MAX)
+    assert failed.item() == 0, (
+        f"{name}: rank={torch.distributed.get_rank()}, relative_l2={relative_l2}, relative_max={relative_max}"
+    )
 
 
 class TestKDASequenceOps(DistributedTestBase):
@@ -85,6 +92,7 @@ class TestKDASequenceOps(DistributedTestBase):
             (torch.bfloat16, 2, True, False),
         )
         for dtype, layout, safe_gate, transpose in cases:
+            label = f"{dtype} layout={layout} safe_gate={safe_gate} transpose={transpose}"
             torch.manual_seed(4321)
             lengths = layouts[layout]
             cu = torch.tensor([0, *torch.tensor(lengths).cumsum(0).tolist()], device=device, dtype=torch.int32)
@@ -109,14 +117,14 @@ class TestKDASequenceOps(DistributedTestBase):
                 use_qk_l2norm_in_kernel=True,
             )[0]
             output = runner(*local)
-            _assert_parity(output, expected[:, selection], dtype, "chunk output")
+            _assert_parity(output, expected[:, selection], dtype, label + " output")
             torch.manual_seed(5678)
             gradient = torch.zeros_like(expected)
             gradient[:, -length : -length + 8] = torch.randn_like(gradient[:, :8])
             expected.backward(gradient)
             output.backward(gradient[:, selection].contiguous())
             for actual, reference, name in zip(local, full, ("q", "k", "v", "g", "beta")):
-                _assert_parity(actual.grad, reference.grad[:, selection], dtype, "chunk d" + name)
+                _assert_parity(actual.grad, reference.grad[:, selection], dtype, label + " d" + name)
             if layout == 0 and rank < self.world_size - 1:
                 assert local[0].grad is not None
                 # Earlier queries do not affect later outputs, but earlier k/v do.
