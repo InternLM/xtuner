@@ -541,7 +541,7 @@ chat template 输出的是**未展开**的单个占位 token；展开由 `Glm5Ne
 |---|---|
 | processor 是否输出 `mm_token_type_ids` | **存在**。`Glm5NextProcessor.model_input_names` 含该字段，`Glm5NextProcessorKwargs._defaults` 里 `return_mm_token_type_ids=True` 默认开启 |
 | 其取值语义 | `create_mm_token_type_ids`：对 `<\|begin_of_video\|>`/`<\|end_of_video\|>` 做 cumsum 得到 `is_video_modality`，`image_token_id` 位置在视频 span 内取 2、否则取 1，其余 0 —— 与设计文档 §8.1 的 0/1/2 契约一致 |
-| cache 阶段能否不解码媒体 | **可以**。`Glm5NextImageProcessor.get_number_of_image_patches(h, w, images_kwargs)` 与 `Glm5NextVideoProcessor.get_number_of_video_patches(...)` 都是纯几何 API，`Glm5NextProcessor._get_num_multimodal_tokens` 就是它们的调用方。视觉设计文档 §7.1 "若官方未暴露纯几何 API 则 import 内部 helper" 的退路不必启用 |
+| cache 阶段能否不解码媒体 | **图片可以，视频不行**。`Glm5NextImageProcessor.get_number_of_image_patches(h, w, images_kwargs)` 真实存在；但 **`get_number_of_video_patches` 在 transformers 5.17.0 里根本没有定义**——全包 `grep -rn "def get_number_of_video_patches"` 零命中，只有 10+ 个 processor（含 glm5_next）在调用它，是上游跨 VLM 家族的 bug，`_get_num_multimodal_tokens(video_sizes=...)` 会直接 AttributeError。视频侧必须启用视觉设计文档 §7.1 的退路：组合 `Glm5NextVideoProcessor.sample_frames` + 模块级 `smart_resize`（真实预处理路径内部用的同两个公开调用），并断言复现出的 `video_grid_thw` 与真实 processor 逐元素一致 |
 | resize 规则 | `smart_resize(num_frames=temporal_patch_size, ...)`，由 `min_image_tokens=16` / `max_image_tokens=8000` 动态约束——与 Qwen 的 `smart_resize` 不是同一个函数，禁止移植（对应 §16.1） |
 | `grid_t` 语义 | `patchify`：奇数帧用尾帧 `expand` 复制补齐后 `grid_t = padded_num_frames // temporal_patch_size`，确认是 tubelet 数而非原始帧数 |
 | `get_vision_cu_seqlens` 的 `merge_temporal` | 默认 `False`，即**每个 temporal slice 是独立 attention sequence**，与视觉设计文档 §2.2 一致 |
@@ -914,7 +914,7 @@ checkpoint 里 `layers.45` 有 `enorm` / `hnorm` / `eh_proj` / `shared_head.norm
 
 | 能力 | 处理 |
 |---|---|
-| SP（Ulysses） | 三条独立路径：KDA head-shard all-to-all（F3）；NoPE-DSA query 分片 + pool all-gather（F5）；Vision SP 走 merge-aligned padding + Ulysses + local projector（F2 阶段 5）。注意 Vision SP 与 LLM SP 是两类切分，compose 层需在 projector 输出后按 LLM visual mask 重分布（视觉设计文档 §9.1/§9.8） |
+| SP（Ulysses） | 三条独立路径：KDA head-shard all-to-all（F3）；NoPE-DSA query 分片 + indexer key/gate all-gather（F5，pool 必须在全局序列上构建，见 `kpool.py` 模块 docstring）；Vision SP 走 merge-aligned padding + Ulysses + local projector（F2 阶段 5）。注意 Vision SP 与 LLM SP 是两类切分，compose 层需在 projector 输出后按 LLM visual mask 重分布（视觉设计文档 §9.1/§9.8） |
 | EP / ExpertTP | 288 experts 走通用 `MoEBlock` + dispatcher，无需改动；EP 要求 `288 % ep_size == 0`（8/4/2 均可） |
 | `XTUNER_ACTIVATION_OFFLOAD` | offload 对象改为每层入口的 4 流张量 `[B,S,4,D]`；`offload_block_idx` 仍按 `layer_idx >= first_k_dense_replace` 计数，与 GLM-5.2 同构 |
 | `torch.compile` | 边界：`hc_pre` / `hc_post` 必须在内（否则 5D 中间量爆显存）、`MoEBlock.forward` fullgraph、`KimiDeltaAttention.forward`、`NoPEDSAMultiLatentAttention.forward` non-fullgraph；EP 时按 GLM-5.2 惯例摘掉整层边界 |

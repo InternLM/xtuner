@@ -17,6 +17,7 @@ via a separate ``forget_gate`` module before calling the (kernelizable) chunk/re
 
 from __future__ import annotations
 
+import math
 from typing import Annotated, Any, Literal
 
 import torch
@@ -24,11 +25,13 @@ import torch.nn as nn
 from cyclopts import Parameter
 from einops import rearrange
 from pydantic import BaseModel, ConfigDict
-from torch.distributed.tensor import DTensor
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
+from xtuner.v1.ops.kda import get_causal_conv1d_fn, get_chunk_kda_fn, get_fused_kda_gate_fn
+from xtuner.v1.utils.dtensor import materialize_full
+from xtuner.v1.utils.init_weight import init_params
 
 from ..linear import build_linear
 from .attn_outputs import AttnOutputs
@@ -59,8 +62,23 @@ def _all_to_all_out(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
 
 
-def _to_local(param: torch.Tensor) -> torch.Tensor:
-    return param.to_local() if isinstance(param, DTensor) else param
+def _gate_param(param: torch.Tensor) -> torch.Tensor:
+    """Unshard a forget-gate parameter and pin it to fp32 for the kernel.
+
+    `Glm53TextMoEConfig.hf_save_cfg.fp32_keys_pattern` normally keeps `A_log`/`dt_bias` out of
+    FSDP's mixed-precision cast, but a config that forgets to (or a plain bf16 module built
+    outside FSDP) would otherwise feed bf16 into `fused_kda_gate`, where the exponentiated decay
+    is precision-sensitive. `GatedDeltaNet` casts for the same reason.
+    """
+    return materialize_full(param).float()
+
+
+# Custom ops keep the chunk, convolution, and forget-gate kernels traceable.
+# XTUNER_HF_IMPL retains FLA's reference entrypoints for parity diagnostics.
+# Only explicit short-sequence inference uses the untraceable recurrent kernel.
+@torch._dynamo.disable
+def _run_recurrent_kda(**kwargs):
+    return fused_recurrent_kda(**kwargs)
 
 
 # Explicit eval-mode inference at or below this length uses the recurrent kernel.
@@ -71,19 +89,21 @@ _fla_kda_import_error: BaseException | None = None
 try:
     from fla.modules import FusedRMSNormGated as _FLAFusedRMSNormGated
     from fla.modules import ShortConvolution as _FLAShortConvolution
+    from fla.modules.fused_norm_gate import rms_norm_gated as _fla_rms_norm_gated
     from fla.ops.kda import fused_recurrent_kda as _fused_recurrent_kda
 
-    from xtuner.v1.ops.kda.causal_conv1d import causal_conv1d as _kda_causal_conv1d
-    from xtuner.v1.ops.kda.chunk_kda import chunk_kda as _chunk_kda
-    from xtuner.v1.ops.kda.fused_kda_gate import fused_kda_gate as _fused_kda_gate
-
     class FusedRMSNormGated(_FLAFusedRMSNormGated):
-        """Use XTuner's existing norm custom ops for compiled FLA sequence
-        SP."""
+        """Overrides ``forward`` to unshard ``weight`` first.
+
+        Unlike ``A_log``/``dt_bias``/the conv weight (all explicitly unsharded via
+        ``materialize_full`` before use), this class's base ``forward`` reads ``self.weight``
+        directly inside FLA's own code, so under EP it stays a DTensor with a null
+        ``data_ptr()`` and the Triton kernel segfaults. Same fix, applied here instead.
+        """
 
         compile_friendly: bool = False
 
-        def forward(
+        def forward(  # type: ignore[override]
             self,
             x: torch.Tensor,
             g: torch.Tensor,
@@ -91,15 +111,15 @@ try:
             prenorm: bool = False,
             residual_in_fp32: bool = False,
         ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-            if not self.compile_friendly:
-                return super().forward(x, g, residual, prenorm, residual_in_fp32)
-            from xtuner.v1.ops.gated_deltanet.rms_norm_gated import rms_norm_gated
-
+            if self.compile_friendly:
+                from xtuner.v1.ops.gated_deltanet.rms_norm_gated import rms_norm_gated
+            else:
+                rms_norm_gated = _fla_rms_norm_gated
             return rms_norm_gated(
                 x,
                 g,
-                _to_local(self.weight),
-                _to_local(self.bias) if self.bias is not None else None,
+                materialize_full(self.weight),
+                materialize_full(self.bias) if self.bias is not None else None,
                 self.activation,
                 residual=residual,
                 eps=self.eps,
@@ -113,8 +133,8 @@ try:
         (full) parameters."""
 
         def materialize_weight_bias(self) -> tuple[torch.Tensor, torch.Tensor | None]:
-            weight = rearrange(_to_local(self.weight), "d 1 w -> d w")
-            bias = _to_local(self.bias) if self.bias is not None else None
+            weight = rearrange(materialize_full(self.weight), "d 1 w -> d w")
+            bias = materialize_full(self.bias) if self.bias is not None else None
             return weight, bias
 
         def forward(  # type: ignore[override]
@@ -127,7 +147,7 @@ try:
         ) -> tuple[torch.Tensor, torch.Tensor | None]:
             if weight is None:
                 weight, bias = self.materialize_weight_bias()
-            return _kda_causal_conv1d(
+            return causal_conv1d(
                 x=x,
                 weight=weight,
                 bias=bias,
@@ -137,12 +157,14 @@ try:
                 **kwargs,
             )
 
-    chunk_kda = _chunk_kda
+    chunk_kda = get_chunk_kda_fn()
+    causal_conv1d = get_causal_conv1d_fn()
     fused_recurrent_kda = _fused_recurrent_kda
-    fused_kda_gate = _fused_kda_gate
+    fused_kda_gate = get_fused_kda_gate_fn()
 except (ImportError, ModuleNotFoundError) as e:
     has_fla_kda = False
     chunk_kda = None  # type: ignore[assignment]
+    causal_conv1d = None  # type: ignore[assignment]
     fused_recurrent_kda = None  # type: ignore[assignment]
     fused_kda_gate = None  # type: ignore[assignment]
     FusedRMSNormGated = None  # type: ignore[assignment,misc]
@@ -253,8 +275,10 @@ class KimiDeltaAttention(nn.Module):
 
         self.f_a_proj = build_linear(hidden_size, head_dim, bias=False, float8_cfg=float8_cfg)
         self.f_b_proj = build_linear(head_dim, projection_size, bias=False, float8_cfg=float8_cfg)
-        self.A_log = nn.Parameter(torch.log(torch.empty(num_heads, dtype=torch.float32).uniform_(1, 16)))
+        self.A_log = nn.Parameter(torch.empty(num_heads, dtype=torch.float32))
         self.dt_bias = nn.Parameter(torch.empty(projection_size, dtype=torch.float32))
+        if not self.A_log.is_meta:
+            self._init_forget_gate_params()
         self.b_proj = build_linear(hidden_size, num_heads, bias=False, float8_cfg=float8_cfg)
 
         if use_full_rank_gate:
@@ -267,6 +291,26 @@ class KimiDeltaAttention(nn.Module):
         self.o_norm.compile_friendly = sp_impl == "fla"
         self.o_proj = build_linear(projection_size, hidden_size, bias=False, float8_cfg=float8_cfg)
 
+    def init_weights(self) -> None:
+        """Initialize the parameters ``default_init_weights`` cannot reach by
+        name.
+
+        ``A_log`` / ``dt_bias`` are neither ``weight`` nor ``bias``, and the ``__init__`` values
+        above are lost when the module is built on the meta device.
+        """
+        self._init_forget_gate_params()
+
+    @torch.no_grad()
+    def _init_forget_gate_params(self) -> None:
+        # Matches HF's `_init_weights` for `Glm5NextTextForgetGate`: A_log is zeroed when a
+        # safe gate lower bound is set (GLM-5.3-Flash always sets one, -5.0), otherwise
+        # log-uniform; dt_bias is always log-uniform(1e-3, 1e-1) regardless.
+        if self.gate_lower_bound is not None:
+            init_params(self.A_log, nn.init.zeros_)
+        else:
+            init_params(self.A_log, lambda t: t.uniform_(1.0, 16.0).log_())
+        init_params(self.dt_bias, lambda t: t.uniform_(math.log(1e-3), math.log(1e-1)))
+
     def _select_kernel(self, seq_len: int, cp_context: Any | None):
         # A checkpoint's first pass uses no_grad even in eval mode. Reserve recurrent
         # dispatch for explicit inference so first-pass and replay computations agree.
@@ -278,15 +322,15 @@ class KimiDeltaAttention(nn.Module):
             or seq_len > _CHUNK_KERNEL_MIN_SEQ_LEN
         ):
             return chunk_kda
-        return fused_recurrent_kda
+        return _run_recurrent_kda
 
     def _compute_gate_and_beta(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size, seq_len, _ = hidden_states.shape
         g_raw = self.f_b_proj(self.f_a_proj(hidden_states)).view(batch_size, seq_len, self.num_heads, self.head_dim)
         gate = fused_kda_gate(
             g_raw,
-            _to_local(self.A_log),
-            dt_bias=_to_local(self.dt_bias),
+            _gate_param(self.A_log),
+            dt_bias=_gate_param(self.dt_bias),
             lower_bound=self.gate_lower_bound,
         )
         beta = self.b_proj(hidden_states).float().sigmoid()
@@ -433,9 +477,9 @@ class KimiDeltaAttention(nn.Module):
         k = k.view(batch_size, seq_len * sp_size, self.num_heads // sp_size, self.head_dim)
         v = v.view(batch_size, seq_len * sp_size, self.num_heads // sp_size, self.head_dim)
 
-        a_log = _to_local(self.A_log).chunk(sp_size, dim=0)[sp_rank]
+        a_log = _gate_param(self.A_log).chunk(sp_size, dim=0)[sp_rank]
         dt_bias = (
-            _to_local(self.dt_bias).view(self.num_heads, self.head_dim).chunk(sp_size, dim=0)[sp_rank].reshape(-1)
+            _gate_param(self.dt_bias).view(self.num_heads, self.head_dim).chunk(sp_size, dim=0)[sp_rank].reshape(-1)
         )
         gate = fused_kda_gate(g_raw, a_log, dt_bias=dt_bias, lower_bound=self.gate_lower_bound)
 

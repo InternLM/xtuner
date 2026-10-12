@@ -28,6 +28,7 @@ from copy import deepcopy
 
 import pytest
 import torch
+from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
 from torch.testing._internal.common_distributed import DistributedTestBase
 from torch.utils.checkpoint import checkpoint
 
@@ -76,7 +77,7 @@ def _build_xtuner_kda(hidden_size=64, num_heads=4, head_dim=16, conv_kernel_size
         sp_impl=sp_impl,
     )
     module = cfg.build(hidden_size=hidden_size, layer_idx=0)
-    # F3 constructs dt_bias with torch.empty; initialize standalone test modules explicitly.
+    # Match the HF fixture's gate values for standalone parity tests.
     with torch.no_grad():
         module.A_log.zero_()
         module.dt_bias.uniform_(math.log(1e-3), math.log(1e-1))
@@ -595,6 +596,79 @@ class TestKDAFLASequenceParallel8(TestKDAFLASequenceParallel4):
     @property
     def world_size(self) -> int:
         return 8
+
+
+class TestKDADTensorParameters(DistributedTestBase):
+    @pytest.mark.gpu
+    def test_replicated_kernel_parameters_preserve_outputs_and_gradients(self, device="cuda"):
+        """F6's EP-replicated kernel parameters work in eager and compiled KDA."""
+        self.create_pg(device)
+        mesh = init_data_mesh(device, self.world_size)["sp"]
+        for implementation, compiled in (("ulysses", False), ("fla", False), ("fla", True)):
+
+            def check(actual, expected, name):
+                if compiled:
+                    _assert_fla_sp_parity(actual, expected, torch.bfloat16, name)
+                else:
+                    torch.testing.assert_close(actual, expected, atol=0, rtol=0, msg=name)
+
+            torch.manual_seed(1234)
+            reference = _build_xtuner_kda(sp_impl=implementation).to(device=device, dtype=torch.bfloat16)
+            for name, parameter in reference.named_parameters():
+                if name in ("A_log", "dt_bias") or "conv1d" in name:
+                    parameter.data = parameter.data.float()
+            actual = deepcopy(reference)
+            kernel_names = (
+                "A_log",
+                "dt_bias",
+                "o_norm.weight",
+                "q_conv1d.weight",
+                "k_conv1d.weight",
+                "v_conv1d.weight",
+            )
+            for name in kernel_names:
+                parent_name, _, attribute = name.rpartition(".")
+                parent = actual.get_submodule(parent_name) if parent_name else actual
+                parameter = getattr(parent, attribute)
+                setattr(
+                    parent, attribute, torch.nn.Parameter(distribute_tensor(parameter.detach(), mesh, [Replicate()]))
+                )
+            # Distinct rank-local losses must not acquire an implicit all-reduce.
+            torch.manual_seed(4321 + mesh.get_local_rank())
+            hidden = torch.randn(1, 37, 64, device=device, dtype=torch.bfloat16, requires_grad=True)
+            replay_hidden = hidden.detach().clone().requires_grad_()
+            context = SequenceContext.from_input_ids((torch.zeros(1, 37, dtype=torch.long),), device=device)
+            expected = reference(hidden, context)["projected_output"]
+            runner = torch.compile(actual, fullgraph=True) if compiled else actual
+            output = runner(replay_hidden, context)["projected_output"]
+            check(output, expected, "output")
+            expected.float().square().mean().backward()
+            output.float().square().mean().backward()
+            check(replay_hidden.grad, hidden.grad, "input gradient")
+            for name, parameter in actual.named_parameters():
+                assert parameter.grad is not None, name
+                gradient = parameter.grad.to_local() if isinstance(parameter.grad, DTensor) else parameter.grad
+                check(gradient, reference.get_parameter(name).grad, name)
+
+    @property
+    def world_size(self) -> int:
+        return 2
+
+
+class TestKDAInitWeights:
+    @pytest.mark.parametrize("lower_bound", [-5.0, None])
+    def test_meta_gate_initialization(self, lower_bound):
+        """Meta construction retains F6's explicit initialization of gate parameters."""
+        with torch.device("meta"):
+            module = KDAConfig(num_heads=4, head_dim=16, gate_lower_bound=lower_bound).build(hidden_size=64)
+        module.to_empty(device="cpu")
+        module.init_weights()
+        assert torch.isfinite(module.A_log).all()
+        if lower_bound is not None:
+            torch.testing.assert_close(module.A_log, torch.zeros_like(module.A_log))
+        else:
+            assert ((module.A_log.exp() >= 1) & (module.A_log.exp() <= 16)).all()
+        assert ((module.dt_bias.exp() >= 1e-3 - 1e-6) & (module.dt_bias.exp() <= 1e-1 + 1e-6)).all()
 
 
 class TestKDASequenceSPConfig:

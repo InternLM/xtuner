@@ -87,6 +87,7 @@ def _tiny_checkpoint_config(dispatcher: str | None, ep_size: int) -> Glm52MoECon
             index_n_heads=2,
             indexer_types=["full", "shared"],
             sparse_mla_backend="torch",
+            indexer_backend="torch",
         ),
         hf_head_dim=4,
         qk_head_dim=8,

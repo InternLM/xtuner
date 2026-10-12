@@ -3,7 +3,7 @@ from typing import Callable, Literal, Protocol, TypeAlias, TypedDict, cast
 
 import torch
 import torch.nn as nn
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 from torch.autograd.function import Function
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
@@ -37,7 +37,7 @@ from xtuner.v1.module.dispatcher import (
 )
 from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linear
 from xtuner.v1.module.rope import RopeScalingConfig
-from xtuner.v1.ops.act_fn import get_act_fn
+from xtuner.v1.ops.act_fn import get_act_fn, get_gated_act_fn
 from xtuner.v1.utils import ForwardState
 
 from ..linear import build_linear
@@ -89,16 +89,26 @@ class MoEActFnProtocol(Protocol):
 
 class MoEActFnConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    act_type: Literal["clipped_swiglu", "swiglu"] = "swiglu"
+    act_type: Literal["clipped_swiglu", "clamped_swiglu", "swiglu"] = "swiglu"
 
     clip_alpha: float | None = None
     clip_limit: float | None = None
+
+    @model_validator(mode="after")
+    def _check_clip_limit(self) -> "MoEActFnConfig":
+        # Without it the activation reaches `clamp(max=None)`, whose RuntimeError says nothing
+        # about the misconfiguration; fail where the mistake was made.
+        if self.act_type in ("clipped_swiglu", "clamped_swiglu") and self.clip_limit is None:
+            raise ValueError(f"act_type={self.act_type!r} requires clip_limit")
+        return self
 
     def build(self) -> MoEActFnProtocol:
         act_fn = get_act_fn(self.act_type)
 
         if self.act_type == "clipped_swiglu":
             act_fn = partial(act_fn, alpha=self.clip_alpha, limit=self.clip_limit)
+        elif self.act_type == "clamped_swiglu":
+            act_fn = partial(act_fn, limit=self.clip_limit)
         return act_fn
 
 
@@ -111,6 +121,7 @@ class MoEMLP(nn.Module):
         moe_intermediate_size: int,
         hidden_act: str,
         mlp_bias: bool = False,
+        swiglu_limit: float | None = None,
         float8_cfg: Float8Config | None = None,
     ):
         super().__init__()
@@ -119,11 +130,10 @@ class MoEMLP(nn.Module):
         self.gate_proj = build_linear(self.hidden_size, self.intermediate_size, bias=mlp_bias, float8_cfg=float8_cfg)
         self.up_proj = build_linear(self.hidden_size, self.intermediate_size, bias=mlp_bias, float8_cfg=float8_cfg)
         self.down_proj = build_linear(self.intermediate_size, self.hidden_size, bias=mlp_bias, float8_cfg=float8_cfg)
-        self.act_fn = get_act_fn(hidden_act)
+        self.act_fn = get_gated_act_fn(hidden_act, swiglu_limit)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        return down_proj
+        return self.down_proj(self.act_fn(self.gate_proj(x), self.up_proj(x)))
 
 
 class MoEGate(nn.Module):
@@ -249,6 +259,7 @@ class MoEDecoderLayer(nn.Module):
         gate_bias: bool = False,
         moe_bias: bool = False,
         hidden_act: str,
+        swiglu_limit: float | None = None,
         rms_norm_eps: float = 1e-6,
         rms_norm_type: Literal["default", "zero_centered"] = "default",
         num_experts_per_tok: int,
@@ -302,6 +313,7 @@ class MoEDecoderLayer(nn.Module):
                 moe_intermediate_size=moe_intermediate_size,
                 hidden_act=hidden_act,
                 mlp_bias=mlp_bias,
+                swiglu_limit=swiglu_limit,
                 float8_cfg=float8_cfg,
             )
             if with_shared_expert_gate:
