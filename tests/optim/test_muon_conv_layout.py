@@ -2,17 +2,25 @@
 """Muon 卷积参数的逻辑矩阵形状回归测试。
 
 TestMuonConvLayout
-    test_flattened_convolutions_match_matrix_updates  分片/复制布局下 3D/4D 与等价二维参数更新一致
+    test_flattened_convolutions_match_matrix_updates  分片/复制布局下 3D/4D/5D 与等价二维参数更新一致
     test_existing_policies_keep_their_ratios          expert、非 flatten 和 MuonSplit 保持既有规则
-    test_legacy_checkpoint_restores_logical_matrix_ratio  旧 checkpoint 迁移比例并保留动量及训练状态
+    test_legacy_checkpoint_restores_logical_matrix_ratio  忽略旧 checkpoint 比例并保留动量及训练状态
+    test_updated_group_configuration_matches_fresh_optimizer  配置变化后与同配置新优化器更新一致
+    test_dcp_checkpoint_restores_groups_and_ignores_legacy_ratio  DCP 磁盘往返恢复后继续更新一致
 """
 
 import copy
 import math
+import shutil
+import tempfile
 from typing import Literal
+from unittest.mock import patch
 
 import pytest
 import torch
+import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
+from torch.distributed.checkpoint.state_dict import get_optimizer_state_dict, set_optimizer_state_dict
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Replicate, Shard, distribute_tensor
 
@@ -45,6 +53,8 @@ class TestMuonConvLayout(DeterministicDDPTestCase):
             ((64, 1, 4), Replicate()),
             ((32, 2, 3), Shard(0)),
             ((64, 2, 3, 4), Shard(0)),
+            ((32, 3, 2, 2, 2), Shard(0)),
+            ((32, 3, 2, 2, 2), Replicate()),
         ):
             matrix_shape = (shape[0], math.prod(shape[1:]))
             initial_weight = torch.randn(matrix_shape, device="cuda")
@@ -65,10 +75,8 @@ class TestMuonConvLayout(DeterministicDDPTestCase):
                     flatten=True,
                     adjust_lr=mode,
                 )
-                expected_ratio = _matrix_lr_ratio(*matrix_shape, mode)
-                assert optimizer.state[matrix]["lr_ratio"] == expected_ratio
-                assert optimizer.state[convolution]["lr_ratio"] == expected_ratio, (shape, placement, mode)
                 optimizer.step()
+                assert all("lr_ratio" not in state for state in optimizer.state_dict()["state"].values())
                 matrix_result = matrix.full_tensor()
                 convolution_result = convolution.full_tensor().reshape(matrix_shape)
                 assert torch.isfinite(matrix_result).all()
@@ -96,12 +104,14 @@ class TestMuonConvLayout(DeterministicDDPTestCase):
                 muon_split_sizes={split: (4, 4)},
             )
             optimizer.load_state_dict(copy.deepcopy(optimizer.state_dict()))
-            assert optimizer.state[unflattened]["lr_ratio"] == _matrix_lr_ratio(6, 4, mode)
-            assert optimizer.state[expert]["lr_ratio"] == _matrix_lr_ratio(3, 4, mode)
-            assert optimizer.state[split]["lr_ratio"] == 1.0
+            groups = optimizer.param_groups
+            assert optimizer._param_lr_ratio(unflattened, groups[0]) == _matrix_lr_ratio(6, 4, mode)
+            assert optimizer._param_lr_ratio(expert, groups[1]) == _matrix_lr_ratio(3, 4, mode)
+            assert optimizer._param_lr_ratio(split, groups[2]) == 1.0
+            assert all("lr_ratio" not in state for state in optimizer.state_dict()["state"].values())
 
     def test_legacy_checkpoint_restores_logical_matrix_ratio(self) -> None:
-        """加载旧比例后仅迁移 LR ratio，保留动量和 step，继续更新与二维参考一致。"""
+        """忽略旧比例，恢复参数组和动量/step，继续更新与二维参考一致。"""
         self.create_pg("cuda")
         mesh = init_device_mesh("cuda", (self.world_size,), mesh_dim_names=("conv.fsdp",))
         for shape in ((64, 1, 4), (32, 2, 3, 4)):
@@ -122,9 +132,11 @@ class TestMuonConvLayout(DeterministicDDPTestCase):
                 )
                 # 模拟旧版本真实训练一步，生成包含旧比例、动量和 step 的 checkpoint。
                 legacy_ratio = _matrix_lr_ratio(shape[-2], shape[-1], mode)
-                legacy_optimizer.state[legacy_weight]["lr_ratio"] = legacy_ratio
-                legacy_optimizer.step()
+                with patch.object(legacy_optimizer, "_param_lr_ratio", return_value=legacy_ratio):
+                    legacy_optimizer.step()
                 checkpoint = copy.deepcopy(legacy_optimizer.state_dict())
+                state_key = checkpoint["param_groups"][0]["params"][0]
+                checkpoint["state"][state_key]["lr_ratio"] = legacy_ratio
                 checkpoint_weight = legacy_weight.full_tensor().detach().clone()
                 checkpoint_momentum = legacy_optimizer.state[legacy_weight]["momentum"].full_tensor().clone()
                 assert checkpoint_momentum.count_nonzero() > 0
@@ -133,8 +145,7 @@ class TestMuonConvLayout(DeterministicDDPTestCase):
                 # 故意使用不同构造配置；恢复比例必须依据 load 后的配置。
                 resumed_optimizer = Muon([resumed_weight], lr=0.5, mu=0.1, flatten=False, adjust_lr="none")
                 resumed_optimizer.load_state_dict(copy.deepcopy(checkpoint))
-                expected_ratio = _matrix_lr_ratio(*matrix_shape, mode)
-                assert resumed_optimizer.state[resumed_weight]["lr_ratio"] == expected_ratio
+                assert "lr_ratio" not in resumed_optimizer.state[resumed_weight]
                 assert resumed_optimizer.param_groups[0]["flatten"] is True
                 assert resumed_optimizer.param_groups[0]["adjust_lr"] == mode
                 assert resumed_optimizer.param_groups[0]["step"] == checkpoint["param_groups"][0]["step"]
@@ -151,7 +162,6 @@ class TestMuonConvLayout(DeterministicDDPTestCase):
                 )
                 reference_checkpoint = copy.deepcopy(checkpoint)
                 state_key = reference_checkpoint["param_groups"][0]["params"][0]
-                reference_checkpoint["state"][state_key]["lr_ratio"] = expected_ratio
                 reference_checkpoint["state"][state_key]["momentum"] = distribute_tensor(
                     checkpoint_momentum.reshape(matrix_shape), mesh, [Shard(0)]
                 )
@@ -169,3 +179,128 @@ class TestMuonConvLayout(DeterministicDDPTestCase):
                     rtol=0,
                     msg=f"{shape}, {mode}",
                 )
+                assert checkpoint["state"][state_key]["lr_ratio"] == legacy_ratio
+                assert all("lr_ratio" not in state for state in resumed_optimizer.state_dict()["state"].values())
+
+    def test_updated_group_configuration_matches_fresh_optimizer(self) -> None:
+        """比例随当前参数组配置变化，实际更新不读取初始化时的缓存。"""
+        self.create_pg("cuda")
+        mesh = init_device_mesh("cuda", (self.world_size,), mesh_dim_names=("conv.fsdp",))
+        initial = torch.randn(32, 3, 2, 2, 2, device="cuda")
+        gradient = torch.randn_like(initial)
+        changed = torch.nn.Parameter(distribute_tensor(initial.clone(), mesh, [Shard(0)]))
+        reference = torch.nn.Parameter(distribute_tensor(initial.clone(), mesh, [Shard(0)]))
+        optimizer = Muon([changed], flatten=False, adjust_lr="none", weight_decay=0.0)
+        optimizer.param_groups[0].update(flatten=True, adjust_lr="spectral_norm")
+        reference_optimizer = Muon([reference], flatten=True, adjust_lr="spectral_norm", weight_decay=0.0)
+        changed.grad = distribute_tensor(gradient.clone(), mesh, [Shard(0)])
+        reference.grad = distribute_tensor(gradient.clone(), mesh, [Shard(0)])
+        optimizer.step()
+        reference_optimizer.step()
+        torch.testing.assert_close(changed.full_tensor(), reference.full_tensor(), rtol=0, atol=0)
+
+    def test_dcp_checkpoint_restores_groups_and_ignores_legacy_ratio(self) -> None:
+        """DCP 磁盘往返恢复参数组和动量，忽略旧比例且继续更新一致。"""
+        self.create_pg("cuda")
+        mesh = init_device_mesh("cuda", (self.world_size,), mesh_dim_names=("conv.fsdp",))
+        model = torch.nn.Module()
+        model.register_parameter(
+            "weight", torch.nn.Parameter(distribute_tensor(torch.randn(32, 3, 2, 2, device="cuda"), mesh, [Shard(0)]))
+        )
+        model.register_parameter(
+            "untouched",
+            torch.nn.Parameter(
+                distribute_tensor(torch.ones(4, 4, device="cuda"), mesh, [Shard(0)]), requires_grad=False
+            ),
+        )
+        optimizer = Muon(model.parameters(), flatten=True, adjust_lr="rms_norm", weight_decay=0.0)
+        model.weight.grad = torch.randn_like(model.weight)
+        optimizer.step()
+        state = get_optimizer_state_dict(model, optimizer)
+        assert all("lr_ratio" not in param_state for param_state in state["state"].values())
+        state["state"]["weight"]["lr_ratio"] = 1234.0
+
+        checkpoint_dirs = [tempfile.mkdtemp(prefix="muon-dcp-") if dist.get_rank() == 0 else None]
+        dist.broadcast_object_list(checkpoint_dirs)
+        checkpoint_dir = checkpoint_dirs[0]
+        try:
+            dcp.save({"optimizer": state}, checkpoint_id=checkpoint_dir)
+            loaded = copy.deepcopy(state)
+            loaded["state"]["weight"]["momentum"].zero_()
+            loaded["state"]["weight"]["lr_ratio"] = 0.0
+            dcp.load({"optimizer": loaded}, checkpoint_id=checkpoint_dir)
+
+            resumed_model = torch.nn.Module()
+            for name, param in model.named_parameters():
+                resumed_model.register_parameter(name, torch.nn.Parameter(param.detach().clone(), param.requires_grad))
+            resumed_optimizer = Muon(resumed_model.parameters(), flatten=False, adjust_lr="none", weight_decay=0.5)
+            set_optimizer_state_dict(resumed_model, resumed_optimizer, loaded)
+            assert resumed_optimizer.param_groups[0]["flatten"] is True
+            assert resumed_optimizer.param_groups[0]["adjust_lr"] == "rms_norm"
+            assert resumed_optimizer.param_groups[0]["step"] == optimizer.param_groups[0]["step"]
+            assert resumed_optimizer.state[resumed_model.untouched] == {}
+            assert "lr_ratio" not in resumed_optimizer.state[resumed_model.weight]
+            torch.testing.assert_close(
+                resumed_optimizer.state[resumed_model.weight]["momentum"].full_tensor(),
+                optimizer.state[model.weight]["momentum"].full_tensor(),
+                rtol=0,
+                atol=0,
+            )
+            gradient = torch.randn_like(model.weight)
+            model.weight.grad = gradient
+            resumed_model.weight.grad = gradient.clone()
+            optimizer.step()
+            resumed_optimizer.step()
+            torch.testing.assert_close(resumed_model.weight.full_tensor(), model.weight.full_tensor(), rtol=0, atol=0)
+            assert loaded["state"]["weight"]["lr_ratio"] == 1234.0
+            assert all("lr_ratio" not in value for value in resumed_optimizer.state_dict()["state"].values())
+        finally:
+            dist.barrier()
+            if dist.get_rank() == 0:
+                shutil.rmtree(checkpoint_dir)
+
+
+class TestMuonDerivedState:
+    def test_checkpoint_omits_ratio_and_keeps_untouched_parameters(self) -> None:
+        trainable = torch.nn.Parameter(torch.ones(8, 3, 2, 2))
+        untouched = torch.nn.Parameter(torch.ones(4, 4), requires_grad=False)
+        optimizer = Muon([trainable, untouched], flatten=True)
+        state = optimizer.state_dict()
+        assert len(state["state"]) == 2
+        assert all(param_state == {} for param_state in state["state"].values())
+
+    def test_legacy_state_is_removed_without_mutating_checkpoint(self) -> None:
+        param = torch.nn.Parameter(torch.ones(8, 3, 2, 2))
+        optimizer = Muon([param], flatten=True, adjust_lr="rms_norm")
+        checkpoint = copy.deepcopy(optimizer.state_dict())
+        key = checkpoint["param_groups"][0]["params"][0]
+        momentum = torch.arange(param.numel(), dtype=param.dtype).reshape(param.shape)
+        checkpoint["state"][key] = {"lr_ratio": -123.0, "momentum": momentum}
+        checkpoint["param_groups"][0]["step"] = 7
+        restored = Muon([param], flatten=False, adjust_lr="none")
+        restored.load_state_dict(checkpoint)
+        assert restored.param_groups[0]["flatten"] is True
+        assert restored.param_groups[0]["adjust_lr"] == "rms_norm"
+        assert restored.param_groups[0]["step"] == 7
+        torch.testing.assert_close(restored.state[param]["momentum"], momentum, rtol=0, atol=0)
+        assert "lr_ratio" not in restored.state[param]
+        assert all("lr_ratio" not in state for state in restored.state_dict()["state"].values())
+        assert checkpoint["state"][key]["lr_ratio"] == -123.0
+
+    @pytest.mark.parametrize(
+        ("shape", "num_experts", "split_sizes", "message"),
+        [
+            ((8, 4, 2), 1, (4, 4), "regular 2D"),
+            ((8, 4), 2, (4, 4), "regular 2D"),
+            ((8, 4), 1, (), "Invalid MuonSplit"),
+            ((8, 4), 1, (0, 8), "Invalid MuonSplit"),
+            ((8, 4), 1, (-1, 8), "Invalid MuonSplit"),
+            ((8, 4), 1, (4, 5), "exceed parameter shape"),
+        ],
+    )
+    def test_invalid_muonsplit_is_rejected_at_initialization(
+        self, shape: tuple[int, ...], num_experts: int, split_sizes: tuple[int, ...], message: str
+    ) -> None:
+        param = torch.nn.Parameter(torch.ones(shape))
+        with pytest.raises(ValueError, match=message):
+            Muon([{"params": [param], "num_experts": num_experts}], muon_split_sizes={param: split_sizes})

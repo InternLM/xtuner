@@ -382,20 +382,14 @@ class Muon(Optimizer):
         self._remainder_strategy = remainder_strategy
         self._muon_split_sizes = muon_split_sizes or {}
         self.register_state_dict_post_hook(self._remove_clip_grad_policy)
-        self.register_load_state_dict_pre_hook(self._restore_clip_grad_policy)
-        self.register_load_state_dict_post_hook(self._refresh_flattened_lr_ratios)
+        self.register_load_state_dict_pre_hook(self._prepare_state_dict_for_load)
 
-        # Pre-compute lr adjustment ratios for each Muon parameter based on global shape.
-        # This must happen at init time because DTensor.shape here is guaranteed to be
-        # the global (unsharded) shape, whereas inside the async task the shape may
-        # reflect a local shard after distributed communication.
+        # Validate MuonSplit before any optimizer update or collective.
         for group in self.param_groups:
             if group["algorithm"] != "muon":
                 continue
-            adj = group["adjust_lr"]
             ne = group.get("num_experts", 1)
             for p in group["params"]:
-                state = self.state[p]
                 split_sizes = self._muon_split_sizes.get(p)
                 if split_sizes is not None:
                     if p.ndim != 2 or ne != 1:
@@ -404,14 +398,6 @@ class Muon(Optimizer):
                         raise ValueError(f"Invalid MuonSplit sizes: {split_sizes}")
                     if sum(split_sizes) > p.shape[-2]:
                         raise ValueError(f"MuonSplit sizes {split_sizes} exceed parameter shape {tuple(p.shape)}")
-                    # Each logical block applies its own ratio inside the orthogonalization callback.
-                    state["lr_ratio"] = 1.0
-                elif group["flatten"] and p.ndim >= 3 and ne == 1:
-                    # Match the logical matrix used by muon_update_newton_schulz;
-                    # convolution kernels flatten all input dimensions after the output axis.
-                    state["lr_ratio"] = _get_muon_lr_ratio(p.shape[0], math.prod(p.shape[1:]), adj)
-                else:
-                    state["lr_ratio"] = _get_muon_lr_ratio(p.shape[-2] // ne, p.shape[-1], adj)
 
         # Newton-Schulz configuration
         if newton_schulz_func is not None:
@@ -449,29 +435,21 @@ class Muon(Optimizer):
         return state_dict
 
     @staticmethod
-    def _restore_clip_grad_policy(optimizer: Optimizer, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def _prepare_state_dict_for_load(optimizer: Optimizer, state_dict: dict[str, Any]) -> dict[str, Any]:
         if len(state_dict["param_groups"]) != len(optimizer.param_groups):
             return state_dict
 
         state_dict = state_dict.copy()
         state_dict["param_groups"] = [group.copy() for group in state_dict["param_groups"]]
+        # Old checkpoints may contain a derived ratio. Drop it without modifying
+        # the caller's dictionaries; momentum and other historical state remain intact.
+        state_dict["state"] = {
+            param_id: {key: value for key, value in state.items() if key != "lr_ratio"}
+            for param_id, state in state_dict["state"].items()
+        }
         for loaded_group, current_group in zip(state_dict["param_groups"], optimizer.param_groups):
             loaded_group["clip_grad"] = current_group.get("clip_grad", True)
         return state_dict
-
-    @staticmethod
-    def _refresh_flattened_lr_ratios(optimizer: Optimizer) -> None:
-        # Old checkpoints stored ratios from the unflattened trailing dimensions.
-        # Recompute only affected parameters using the restored group configuration.
-        muon = cast(Muon, optimizer)
-        for group in muon.param_groups:
-            if group["algorithm"] != "muon" or not group["flatten"] or group.get("num_experts", 1) != 1:
-                continue
-            for param in group["params"]:
-                if param.ndim >= 3 and param not in muon._muon_split_sizes:
-                    muon.state[param]["lr_ratio"] = _get_muon_lr_ratio(
-                        param.shape[0], math.prod(param.shape[1:]), group["adjust_lr"]
-                    )
 
     @overload
     def step(self, closure: None = None) -> None: ...
@@ -812,6 +790,20 @@ class Muon(Optimizer):
             num_experts=ns_num_experts,
         )
 
+    def _param_lr_ratio(self, param: Tensor, group: dict[str, Any]) -> float:
+        # MuonSplit scales each logical block inside its orthogonalization callback.
+        if param in self._muon_split_sizes:
+            return 1.0
+
+        num_experts = group.get("num_experts", 1)
+        if group["flatten"] and param.ndim >= 3 and num_experts == 1:
+            fan_out = param.shape[0]
+            fan_in = math.prod(param.shape[1:])
+        else:
+            fan_out = param.shape[-2] // num_experts
+            fan_in = param.shape[-1]
+        return _get_muon_lr_ratio(fan_out, fan_in, group["adjust_lr"])
+
     def _build_muon_task(
         self,
         group: dict,
@@ -837,7 +829,9 @@ class Muon(Optimizer):
 
         states = [self._get_or_initialize_state(p, algo_name) for p in params]
         momentums = [s["momentum"] for s in states]
-        lr_ratios = [1.0 if p in self._muon_split_sizes else s["lr_ratio"] for p, s in zip(params, states)]
+        # Use original global shapes before communication or to_local(), and the
+        # current group configuration (including values restored from a checkpoint).
+        lr_ratios = [self._param_lr_ratio(p, group) for p in params]
         assert len(set(lr_ratios)) == 1, f"Found different lr_ratios: {set(lr_ratios)}"
 
         # Step 3: pick the Newton-Schulz callback — MuonSplit parameters orthogonalize
