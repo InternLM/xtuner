@@ -215,6 +215,11 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
                 return ret
             else:
                 raise RuntimeError(f"!!!! RuntimeError: {e} of {self.data_name}")
+        if len(self._image_path) > 0 and len(self._video_path) > 0:
+            raise NotImplementedError(
+                "Mixed image and video samples in one record are not supported by "
+                f"{type(self).__name__}; please split them into separate records."
+            )
         if len(self._image_path) > 0:
             if self.state == "cache":
                 ret = self.calc_num_tokens_multi_modal_get_item(item)
