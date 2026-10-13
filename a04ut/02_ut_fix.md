@@ -8,16 +8,28 @@
 
 ### 1. Triton 缓存权限（原 A 类，88 项）
 
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| 本地环境 | 无仓库提交 | — | 用户修改 `zdev/env.sh` 和缓存目录权限。 |
+
 - 用户已将 `zdev/env.sh` 中的 `TRITON_CACHE_DIR` 改为 `$HOME/tmp/.triton`，并创建用户可写目录。
 - 验证：持 GPU 锁运行 `pytest -q tests/ops/test_grouped_gemm_triton.py::test_grouped_gemm_triton` → **1 passed**。旧日志中该 case 因 `/tmp/.triton` 权限失败；现在已能编译并执行。其余 87 项可能出现被权限错误遮蔽的第二层问题，待扩大回归确认。
 - 追加验证：`tests/module/attention/test_dsa_mla.py::TestAcceleratedSparseMLA::test_compiled_cudnn_backward_matches_tilelang` → **1 passed**。旧日志中此 case 实际也先被 A 类缓存权限阻断；编译后端与梯度对比现均通过。
 
 ### 2. 异步 pytest 插件（原 C 类，7 项）
 
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| 本地环境 | 无仓库提交 | — | 用户安装 `pytest-asyncio`。 |
+
 - 用户已安装 `pytest-asyncio`；当前 `pt29_glm2` 的 pytest 为 9.0.3，插件可导入。
 - 验证：`pytest -q tests/rl/test_sandbox_pool.py` → **8 passed**（含旧日志中失败的 7 个异步 case）。无需代码修改；C 类已解决。
 
 ### 3. Transformers 视频处理器接口（原 B 类，13 项）
+
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| F3 KDA | `ecdcdd5fe` | [Fix] Align GLM and Qwen parity with Transformers 5.17 | 改用公开的视频预处理接口。 |
 
 - 当前 `pt29_glm2` 的 Transformers 为 5.17.0；项目声明固定 5.14.1。
 - 复现：`pytest -q tests/datasets/test_qwen3_vl_tokenize_fn.py tests/datasets/test_qwen35_vl_tokenize_fn.py -k video` → **7 failed、1 passed**。7 项均在调用私有 `_preprocess` 时缺少新增的 6 个参数。
@@ -28,6 +40,10 @@
 
 ### 4. GitHub CI 的 Transformers 版本
 
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| F3 KDA | `ecdcdd5fe` | [Fix] Align GLM and Qwen parity with Transformers 5.17 | 将依赖固定为 Transformers 5.17.0。 |
+
 - #2108 CI 的 7 个 HF 对齐 case 因缺少 `transformers.models.glm5_next` 失败。`ci/scripts/CI_ENV.sh` 会执行 `pip install -e .[all]`，而原 `pyproject.toml` 将 Transformers 固定为 5.14.1；项目设计文档 §3.3 明确要求 5.17.0，并记录 5.16.1 的 GLM-5.3 数值 bug。
 - 已将项目依赖固定为 `transformers==5.17.0`，与当前本地环境一致。
 - 本地 5.17.0 下定向运行 GLM-5.3 DSA、KDA、mHC、NoPE-DSA 与 HF 对齐子集 → **13 passed**，包含 #2108 CI 当时因缺少模块/stack 依赖而失败的全部 8 个对应 case。CI 依赖安装仍需新的 workflow run 验证。
@@ -36,11 +52,19 @@
 
 ### 5. GLM-5.3 小模型配置（原 F/G 类，7 项）
 
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| F6 text MoE | `0f2b18b94` | [Test] Align F6 GLM checks with supported configurations | 调整 tiny 配置及后端赋值测试。 |
+
 - 当前 `_tiny_cfg()` 仍设置 `freeze_dsa_indexer=False`，但构造器显式拒绝可微 indexer；后端赋值测试以 4 个头构造默认 FlashMLA 配置，而该后端要求 64 头对齐。两个代表 case 在当前 HEAD 复现原错误。
 - 修改 `tests/model/test_glm53_text_moe.py`：删除 `_tiny_cfg()` 对 `freeze_dsa_indexer=False` 的覆盖，使用配置默认的冻结策略；后端赋值测试的 4 头小配置显式选 `sparse_mla_backend="torch"`，使测试到达真正的赋值校验。
 - 回归：`TestGlm53TextMoEInitWeights`、`TestGlm53TextMoEFp32Params`、`TestGlm53TextMoEForwardBackward`、`TestNoPEDSAMLAConfigValidatesAssignment` → **7 passed**，覆盖旧日志的 F/G 全部 7 项。
 
 ### 6. 类方法全局编译的测试顺序依赖（原 E 类，13 项）
+
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| F4 mHC | `b245bb814` | [Test] Keep F4 decoder checks within supported compile scope | 构造测试关闭全局编译。 |
 
 - 当前 HEAD 持 GPU 锁复现：先运行 `TestBuildModel.test_build_moe`，再运行 `TestGlm53DenseDecoderLayer.test_forward_finite_and_shape_preserving` → **1 passed、1 failed**；后者因 `DenseDecoderLayer.forward` 被此前的默认 `fullgraph=True` 全局编译，无法越过 KDA 的 `torch.compiler.disable` 边界。
 - `test_build_moe` 仅断言模型构造成功，不执行前向/编译行为；已将该测试的配置设为 `compile_cfg=False`，避免无关的全局类方法改写。相同两项顺序回归 → **2 passed**。
@@ -51,6 +75,10 @@
 
 ### 7. TileLang 小尺寸 indexer（原 H 类，4 项）
 
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| F5 NoPE DSA | `7c5fb4198` | [Test] Use supported tiny GLM DSA backends at F5 | 测试改用受支持的 indexer 维度和 sparse MLA 后端。 |
+
 - 当前 HEAD 持 GPU 锁重跑 `TestGlm52ExplicitDsaDataflow.test_model_forward_backward_with_explicit_dsa_dataflow`，再次复现 TileLang `For fp64 MMA, m_dim must be 8, got 16`；栈落在 `tl_indexer_fwd_impl(heads=2, index_dim=4)` 的布局推断。
 - 修改两个 GLM-5.2 tiny 测试配置的 `index_head_dim` 为 16，保持 indexer 测试走 TileLang 真实前向，而使 BF16 MMA K 维落在当前内核支持范围。
 - 第一轮 5 项回归 → **2 passed、3 failed**。两个 GLM-5.2 模型 case 已通过；三个 MTP checkpoint case 在越过 indexer 失败后，又触发 `SparseMLA supports (head_dim, value_dim) in [(512, 512), (576, 512)] only`。这是小模型默认选到生产尺寸专用的 TileLang sparse MLA 后端。
@@ -59,11 +87,19 @@
 
 ### 8. RL GPU 数量（原 D 类，1 项）
 
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| F5 NoPE DSA | `5344d1da9` | [Test] Check RL mismatch and checkpoint cleanup by stable behavior | colocate 测试默认申请单节点 8 个 worker。 |
+
 - 旧日志为测试申请 32 GPU，而 Ray 只有 8 GPU。当前测试代码从 `WORLD_SIZE` 计算节点数，再乘 8 得出 worker 数；日志中的 32 恰是 `WORLD_SIZE=4` 时的结果。`WORLD_SIZE` 可能来自其他分布式测试，不能作为本测试的节点数。
 - 修改 colocate 测试：默认 8 个 worker（单节点 8 GPU）；多节点仍可通过 `COLOCATE_NUM_WORKERS` 显式配置。
 - 回归：`test_lmdeploy_colocate_ipc_update_weight_and_generate` → **1 passed**（154.49 秒）；真实 Ray placement、LMDeploy 推理和 IPC 权重更新路径均已执行。原 D 类已解决。
 
 ### 9. CUDA allocator 断言（原 I 类，1 项）
+
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| F5 NoPE DSA | `5344d1da9` | [Test] Check RL mismatch and checkpoint cleanup by stable behavior | 改为检查临时 CUDA tensor 的实际释放。 |
 
 - 旧日志显示临时对象已释放，但 `memory_reserved()` 未严格下降。当前 HEAD 持 GPU 锁单独运行 `test_resume_and_load_checkpoint_cfg` → **1 passed**，没有复现该断言失败。暂不按推测修改 allocator 行为或放宽断言；待全量/顺序回归判断是否存在状态依赖。
 - #2108 rebase 后最新 CI 再次在同一断言失败，`memory_reserved()` 清理前后同为 **150994944**；测试已确认临时 `TemporaryState` 的弱引用为 `None`。原测试在 `load_dcp` 内先删除 16 MiB CUDA tensor，随后才记录 reserved bytes，因此该数值受缓存块与活跃分配共享情况影响，无法证明这块临时 tensor 是否仍存活。
@@ -73,15 +109,27 @@
 
 ### 10. DeepEP CUDA launch failure（原 J 类）
 
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| 无 | 无仓库提交 | — | 原项复验通过，未确认旧 launch failure 的独立根因；后续全量顺序问题见第 17 节。 |
+
 - 当前 HEAD 持 GPU 锁单独运行原 4 rank case → **1 passed**（22.70 秒），完整执行 DeepEP、Cutlass grouped GEMM、训练及专家梯度范数比较。`d0877d638..HEAD` 在该测试和 Cutlass grouped GEMM 路径没有提交差异；旧日志的 `CUDA error: unspecified launch failure` 暂未复现，不能把一次通过归因为某个代码修复。待全套顺序回归后判断是否为资源/状态依赖；目前不改内核或断言。
 - 138 项定向回归中，该 case 排在第 20 项，前面已执行多个真实 MoE engine 训练 case；它再次通过，旧 launch failure 在这段相邻测试顺序下也未复现。
 
 ### 11. DCP 分布式超时（原 K 类）
 
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| 无 | 无仓库提交 | — | 原项单独及定向顺序复验通过，未修改代码。 |
+
 - 当前 HEAD 持 GPU 锁单独运行原 2 rank DCP 往返测试 → **1 passed**（17.86 秒）；模型和优化器状态、恢复后的继续训练路径均完成。`d0877d638..HEAD` 在测试及 TrainEngine 路径无提交差异。旧日志只见 600 秒超时及 rank 0 停在 `finally: dist.barrier()`，当前没有复现，暂不能把超时归因为某个代码缺陷；待全套顺序回归判断是否有跨测试状态依赖。
 - 138 项定向回归中，该 case 排在第 16 项，前面已执行 GLM-5.2 编译/offload 与 FP8 engine 测试；它再次通过，说明旧超时在这段相邻测试顺序下也未复现。
 
 ### 12. Qwen3.5 视觉塔数值差异（原 L 类）
+
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| F3 KDA | `ecdcdd5fe` | [Fix] Align GLM and Qwen parity with Transformers 5.17 | 视觉 RoPE 频率计算保持 fp32。 |
 
 - 当前 HEAD 在可写缓存、Transformers 5.17.0 下单独复现：`test_vision_tower_bitwise_parity[cuda]` 四个 rank 均报输出最大差 **1.0625**。此问题与测试顺序、旧 Triton 权限无关。下一步在真实 checkpoint 的同一测试中比较位置插值、patch embedding、首层 block 和 merger，定位首次分歧后再改。
 - 真实 checkpoint、单 rank 的临时 hook 进一步确认：patch embedding 与位置插值最大差均为 **0**，第 0 个 block 输出最大差 **0.046875**。待分辨的假设按优先级为：（1）RoPE/位置参数不同；（2）eager attention 的 mask 或 softmax 路径不同；（3）MLP/残差计算不同；（4）第 0 个 block 权重未按预期加载。下一步只比较该 block 的 norm、QKV、attention 投影、MLP 边界，确认首个不相等的位置。
@@ -90,10 +138,18 @@
 
 ### 13. FlashMLA/cuDNN 反向梯度差异（原 M 类）
 
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| F5 NoPE DSA | `b43184df3` | [Fix] Pass natural-log LSE to the cuDNN sparse MLA backward (#2147) | rebase 带入的 #2147 修复：传递自然对数 LSE。 |
+
 - 旧日志中的真正 M 类是 `tests/ops/test_flash_mla_cudnn_sparse_mla.py::TestFlashMlaCudnnSparseMLA::test_forward_backward_matches_torch_reference`，dQ 有 **93.1%** 元素超出容差；`test_dsa_mla.py` 的编译版测试则先被 A 类缓存权限阻断。
 - 当前 HEAD 持 GPU 锁重跑真正 M 类 → **1 passed**。检查 `d0877d638..HEAD` 的改动确认 `eb6ad8f2`（#2147）已修复根因：此前 FlashMLA 返回的自然对数 LSE 被转为 log2 后传给期待自然对数 LSE 的 cuDNN backward；现直接传自然对数 LSE。无须重复修改。原 M 类已由 rebase 带入的修复解决。
 
 ### 14. Triton 权限修好后新出现的 Qwen3.5 MTP 视频基线失败
+
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| F3 KDA | `ecdcdd5fe` | [Fix] Align GLM and Qwen parity with Transformers 5.17 | 更新 Transformers 5.17.0 的视频 loss 基线。 |
 
 - 138 项连续回归在第 78 项首次失败，之前 **77 passed**：`test_qwen3_5_vl_run_mtp[cuda-1-0-01]` 的文本、图像 loss 断言均通过，视频 loss 为 **6.614266**，测试写死的预期为 **8.5521**（注释明确注明基于 Transformers 5.14.1）。旧日志该项首先被 Triton 缓存权限挡住。
 - 当前待验证的原因按优先级为：（1）Transformers 5.17.0 的视频预处理或公开 `preprocess` 调用改变了输入；（2）已确认正确的 fp32 视觉 RoPE 改变了旧错误路径下的基线；（3）随机采帧/测试状态造成输入变化；（4）MTP 数值路径另有回归。先比较真实视频的帧索引、grid、输入 token 和同一模型的逐项 loss，不直接把常量改成这次观测值。
@@ -105,6 +161,10 @@
 
 ### 15. Qwen3.5 dense 线性注意力逐层数值差异（新暴露）
 
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| F3 KDA | `ecdcdd5fe` | [Fix] Align GLM and Qwen parity with Transformers 5.17 | HF 对齐模式匹配 gated RMSNorm 的舍入顺序。 |
+
 - 从旧失败列表第 80 项续跑，首项 `test_decoder_layer_bitwise_parity[cuda-0]` 在 4 个 rank 均复现第 0 层 `linear_attention` 输出最大差 **0.0625**；日志为 `failed_nodes80_138_rerun.log`。本轮 `--maxfail=1` 停止，后面的 58 项尚未执行。
 - 将在真实 checkpoint 的同一测试中比较 layer norm、输入投影、卷积、衰减参数、chunk 输出、gated norm 和输出投影的首个分歧。候选原因按优先级为：（1）投影/卷积输入布局或权重载入差异；（2）衰减 `g` 的混合精度计算；（3）chunk kernel 及序列边界传参；（4）gated RMSNorm 的 HF/FLA 实现差异。每项只依据边界实测结果取舍，不先放宽 bitwise 断言。
 - 临时 hook 的单 rank 原始 case 中，`input_layernorm`、五个输入投影及其权重、`A_log`/`dt_bias` 均最大差 **0**；gated norm 的 `x`、`gate` 两个真实输入也均最大差 **0**。gated norm 输出首次出现 **0.25** 差，`out_proj` 后为 **0.0625**。因此根因确定为 HF 手写 gated RMSNorm 与 XTuner 当前 FLA fused norm 的计算次序/舍入不同，前面卷积和 chunk 路径已排除。将只调整 `XTUNER_HF_IMPL` 对齐模式的 norm 路径，生产 fused 路径保持现状。
@@ -112,6 +172,10 @@
 - 已清理全部临时 hook 和探针日志。默认 **4 rank** 原始 case → **1 passed**（14.87 秒）；第 80 项已解决，开始续跑第 80–138 项。
 
 ### 16. 相邻 RL 测试后的 Ray 节点启动超时（新暴露）
+
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| 无 | 无仓库提交 | — | Ray/NVML 启动时序问题；试探补丁已撤销。 |
 
 - 第 80–138 项顺序回归在第 124 项 `test_rl_train_with_sft` 首次失败：前 **44 passed**，第 123 项真实 Qwen3.5 两步异步训练已通过；随后该测试在 `ray.init()` 中等待本地 raylet 注册 GCS 超过 30 秒，报 `The current node timed out during startup`。日志为 `failed_nodes80_138_after_norm.log`，整轮耗时 1716.52 秒。先检查 Ray session/raylet 日志、进程和资源，再单独及相邻顺序复现；暂不凭超时文本修改业务代码。
 - Ray session `12-11-29_...` 的 `raylet.err` 给出更早的直接原因：raylet 在 **12:11:48** 等待 `dashboard_agent_listen_port_*` 文件超时并 abort；dashboard agent 自 **12:11:33** 加载模块，直到 **12:12:04** 才完成，错过 raylet 等待窗口。前一成功 session 的模块加载只需约 **1.25 秒**。`/tmp`、`/dev/shm` 与可用内存均充足；前一 Ray 集群在 **12:11:26** 才开始退出，与新集群启动相隔约 3 秒。待单独运行原始测试及进一步顺序对照确认是否为收尾时序影响。
@@ -129,6 +193,11 @@
 - 核对 Ray **2.54.1** 源码：`NodeManager::WaitForDashboardAgentPorts` 调用 `WaitForPersistedPort`，其默认等待时间硬编码为 **15000 ms**（`ray/util/port_persistence.h`）；这与日志中 **18:09:03 → 18:09:19** 的 abort 精确吻合。Ray agent 的 profiler 实际同步运行 `subprocess.check_output(["nvidia-smi"])`，慢查询占用了 **约 33 秒**；`agent_register_timeout_ms` 属另一个注册等待配置，不能修复这个端口文件超时。当前这是外部 Ray/NVML 启动时序问题，尚无项目内可靠修复，不能把放宽业务断言或固定睡眠当作解决。
 
 ### 17. 全量回归新增的 DeepEP 超时与 GPU 内存不足
+
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| F6 text MoE | `b85abd1bd` | [Fix] Preserve DeepEP layout event for synchronous dispatch | 保留 DeepEP layout 的通信事件，修复全量顺序超时。 |
+| F6 text MoE | `0f2b18b94` | [Test] Align F6 GLM checks with supported configurations | 权重覆盖测试回收模型和 CUDA 缓存，消除后续 OOM。 |
 
 - 为及早取得完整 traceback，在 Qwen3.5 连续失败后中断首轮全量运行；已完成 **404 passed、12 skipped、5 failed**（约 39%，4737.06 秒）。这是一轮诊断运行，尚不是完整回归结果。
 - DeepEP 的实际失败项是 `test_deepep_expert_tp_domino_micro_batch_matches_sync_baseline`；`unittest` 按方法名字母序收集，所以它确实是文件首项，后 3 项通过。该项在同步基线 backward 的 DeepEP `intranode_dispatch` 报 `DeepEP error: CPU recv timeout`，非梯度断言失败。待用原始文件顺序复现。
@@ -163,6 +232,10 @@
 
 ### 18. DeepEP layout 事件后的 allocator 测试断言
 
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| F6 text MoE | `9cc523c6d` | [Test] Check payload buffer reuse with DeepEP layout events | 只对 payload 级缓冲区检查计算流分配和立即复用。 |
+
 - 最终 F6 提交的原始全量到约 **48%** 时出现新失败：`test_sync_dispatch_and_combine_buffers_are_reusable_once_freed`。为了取得完整 traceback，主动中断本轮；截至中断为 **1 failed、501 passed、12 skipped**。DeepEP expert TP 四项、GLM-5.3 全段和 Qwen3.5 OOM 检查点此前均已通过。
 - 八个 rank 均在旧测试第 100 行的“所有分配都来自计算流”断言失败。原项的真实 CUDA allocator 快照显示新增通信流分配仅 **32、64、256 字节**；解除前一断言后，待完成释放为 **32、64、256、1024 字节**。本测试输入 payload 为 **8192 字节**。这些小对象是 layout/路由元数据，不是该测试原本要保证立即复用的多 GiB dispatch/combine payload。
 - 把 stream 和 pending-free 两处断言限定到 `hidden_states.numel() * hidden_states.element_size()` 大小及以上的分配；仍检查所有 payload 级缓冲区来自计算流且释放立即完成。删除临时快照打印后，原 DeepEP dispatcher 文件真实 **8 卡 3 passed**（70.40 秒）。后续从该失败项起续跑剩余 **549 个**原收集 node id，以覆盖后半套顺序。
@@ -171,6 +244,12 @@
 ## 主题五：stack 分层与后续 CI
 
 ### 19. F5 测试提前引用 F6 模型配置（#2108 CI 的 stack 依赖）
+
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| F4 mHC | `b245bb814` | [Test] Keep F4 decoder checks within supported compile scope | 移除本层尚不能支持的动态 KDA 编译测试。 |
+| F5 NoPE DSA | `7c5fb4198` | [Test] Use supported tiny GLM DSA backends at F5 | routed expert 测试改用 F5 已有的公开配置。 |
+| F6 text MoE | `0f2b18b94` | [Test] Align F6 GLM checks with supported configurations | 补充 F6 配置测试并恢复动态 KDA 编译测试。 |
 
 - 在独立的 F5 HEAD `eb6ad8f20` worktree 上运行 `TestClampedSwiglu.test_routed_experts_use_the_same_clamp_as_shared_experts`，**1 failed**：`ImportError: cannot import name 'Glm53TextMoEConfig'`。F5 的测试引用了 F6 才引入的模型配置；顶层 F6 全量测试会掩盖这个中间层 PR 的失败。
 - F5 测试改用本层公开的 `MoEActFnConfig(act_type="clamped_swiglu", clip_limit=10.0).build()` 验证 fused routed-expert 激活，仍检查大幅输入时的真实限幅输出。相同 F5 worktree case → **1 passed**。
@@ -182,6 +261,10 @@
 
 ### 20. #2108 CI 的 RL mismatch KL 边界断言
 
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| F5 NoPE DSA | `5344d1da9` | [Test] Check RL mismatch and checkpoint cleanup by stable behavior | 保留直接估计的有限值检查，以 K3 检查 KL 上界。 |
+
 - 读取 rebase 后 #2108 的 `unit_test` run `38039400021`：**23 failed、927 passed、34 skipped**。其中 22 项与用户提供的旧 run 属同组；额外失败是 Qwen3.5 VL 两步异步训练在第 2 步 `mismatch/mismatch_kl=0.005058742`，刚超过测试上限 `0.005`。训练本身走到指标断言，日志尚不能区分随机采样波动、版本变化或实际权重不同步。
 - 该测试启用 `XTUNER_DETERMINISTIC=false`，且依赖真实 rollout；先等待第三轮本地全套的同项结果，再依据真实指标与输入/权重状态定位。当前不放宽阈值或修改训练逻辑。
 - 旧 #2108 run `37946542582` 的失败摘要没有这一项；两次 CI 的 F5 head 只相差 FlashMLA/cuDNN LSE 修复（`9c1f93c6a..eb6ad8f20`，仅改 `flash_mla_cudnn.py`），本测试代码和 Qwen3.5 路径没有提交差异。采样参数虽为 `temperature=0`、训练 seed 为 123，但此测试因 FA3 反向限制显式关闭确定性；仍需用本地真实指标判断波动范围。
@@ -190,12 +273,16 @@
 
 ### 21. 修复在 stack 中的落点
 
-| 分支 | 本次修复 | 提交 |
-| --- | --- | --- |
-| F3 KDA | Transformers 5.17 依赖、Qwen 视频/视觉与 Gated DeltaNet 数值对齐 | `ecdcdd5f` |
-| F4 mHC | 构造测试关闭全局编译；动态 KDA 编译检查移到实现已存在的 F6 | `b245bb81` |
-| F5 NoPE DSA | 小尺寸 GLM 测试、RL worker/KL 检查、trainer 临时 CUDA tensor 断言 | `7c5fb419`、`5344d1da` |
-| F6 text MoE | tiny 配置、权重覆盖后内存释放、动态编译测试；DeepEP layout 事件及对应大缓冲区复用断言 | `0f2b18b9`、`b85abd1b`、`9cc523c6` |
+| Stack | Commit | 提交名称 | 对应处理 |
+| --- | --- | --- | --- |
+| F3 KDA | `ecdcdd5fe` | [Fix] Align GLM and Qwen parity with Transformers 5.17 | Transformers 5.17 依赖、Qwen 视频/视觉与 Gated DeltaNet 数值对齐。 |
+| F4 mHC | `b245bb814` | [Test] Keep F4 decoder checks within supported compile scope | 构造测试关闭全局编译；动态 KDA 编译检查移到 F6。 |
+| F5 NoPE DSA | `7c5fb4198` | [Test] Use supported tiny GLM DSA backends at F5 | 小尺寸 GLM 测试及 F5 routed expert 测试。 |
+| F5 NoPE DSA | `5344d1da9` | [Test] Check RL mismatch and checkpoint cleanup by stable behavior | RL worker/KL 检查及 trainer 临时 CUDA tensor 断言。 |
+| F5 NoPE DSA（rebase 带入） | `b43184df3` | [Fix] Pass natural-log LSE to the cuDNN sparse MLA backward (#2147) | FlashMLA/cuDNN 自然对数 LSE 修复。 |
+| F6 text MoE | `0f2b18b94` | [Test] Align F6 GLM checks with supported configurations | tiny 配置、权重覆盖后内存释放及动态编译测试。 |
+| F6 text MoE | `b85abd1bd` | [Fix] Preserve DeepEP layout event for synchronous dispatch | DeepEP layout 通信事件。 |
+| F6 text MoE | `9cc523c6d` | [Test] Check payload buffer reuse with DeepEP layout events | DeepEP payload 级缓冲区复用断言。 |
 
 F1、F2 已重排到更新后的 F5 上；F6 的 13 个原有提交也已无冲突接到更新后的 F2。F6 上的小模型配置接线和动态编译定向复验 **8 passed**，DeepEP 干净代码相邻顺序三轮均 **5 passed**。DeepEP 是全套集成顺序中暴露的通用通信问题，作为独立提交放在最顶层 F6，避免为该问题重排所有已修好的祖先 PR。
 
