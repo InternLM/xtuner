@@ -182,8 +182,9 @@ class Glm53TextMoE(MoE):
                     ep_tp_mesh=self.ep_tp_mesh,
                 )
                 if self.config.freeze_routers:
-                    layers[str(layer_idx)].gate.requires_grad_(False)
-                    layers[str(layer_idx)].gate.eval()
+                    gate = cast(nn.Module, layers[str(layer_idx)].gate)
+                    gate.requires_grad_(False)
+                    gate.eval()
 
         layers.__class__.__repr__ = module_dict_repr  # type: ignore[method-assign]
         return layers
@@ -378,7 +379,10 @@ class Glm53TextMoEConfig(MoEConfig):
     # x11, pattern [KDA,KDA,KDA,DSA]*11 + KDA. "deepseek_sparse_attention" maps to XTuner's
     # generic "full_attention" bucket (build_layers dispatches on config.attention for it).
     glm53_layer_types: list[Literal["linear_attention", "deepseek_sparse_attention"]] = Field(
-        default_factory=lambda: (["linear_attention"] * 3 + ["deepseek_sparse_attention"]) * 11 + ["linear_attention"]
+        default_factory=lambda: cast(
+            list[Literal["linear_attention", "deepseek_sparse_attention"]],
+            (["linear_attention"] * 3 + ["deepseek_sparse_attention"]) * 11 + ["linear_attention"],
+        )
     )
 
     @property
