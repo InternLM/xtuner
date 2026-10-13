@@ -292,6 +292,9 @@ def chunk_gated_delta_rule(
     cu_seqlens_cpu: torch.Tensor | None = None,
     cp_context: FLACPContext | None = None,
     transpose_state_layout: bool = False,
+    cu_seqlens_int64: torch.Tensor | None = None,
+    chunk_indices: dict[str, torch.Tensor] | None = None,
+    chunk_indices_list: dict[str, list[int]] | None = None,
     **kwargs,
 ):
     r"""
@@ -368,6 +371,10 @@ def chunk_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
+    # CUDA delta-rule metadata preparation intentionally remains in the existing
+    # custom-op path. These NPU metadata arguments are part of the common wrapper
+    # interface but are not consumed by the CUDA implementation.
+
     if "head_first" in kwargs:
         warnings.warn(
             "head_first is deprecated and will be removed in a future version. "

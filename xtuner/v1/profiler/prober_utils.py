@@ -6,13 +6,14 @@ import torch
 import torch.nn as nn
 
 from xtuner.v1.model.moe.moe import DenseDecoderLayer, LMHead, MoEBlock, MoEDecoderLayer
-from xtuner.v1.module.attention.gated_deltanet import FusedRMSNormGated, GatedDeltaNet, has_fused_rms_norm_gated
+from xtuner.v1.module.attention.gated_deltanet import GatedDeltaNet
 from xtuner.v1.module.attention.mha import MultiHeadAttention
 from xtuner.v1.module.attention.mla import MultiLatentAttention
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEGate, MoEMLP
 from xtuner.v1.module.linear.linear import _Linear
 from xtuner.v1.module.rms_norm.rms_norm import RMSNorm
 from xtuner.v1.module.rope.rope import FourierEmbedding, Qwen3VLTextRotaryEmbedding, RotaryEmbedding
+from xtuner.v1.ops.gated_deltanet import is_rms_norm_gated_module
 from xtuner.v1.profiler.prober import ProberList
 
 
@@ -30,7 +31,7 @@ def register_prober_list(model: nn.Module):
         elif isinstance(module, RMSNorm):
             wrapped = ProberList.wrap_rms_norm_forward(module.forward, name)
             module.forward = types.MethodType(wrapped, module)  # type: ignore
-        elif has_fused_rms_norm_gated and isinstance(module, FusedRMSNormGated):
+        elif is_rms_norm_gated_module(module):
             wrapped = ProberList.wrap_fused_rms_norm_gated_forward(module.forward, name)
             module.forward = types.MethodType(wrapped, module)  # type: ignore
         elif isinstance(module, MoEMLP):
