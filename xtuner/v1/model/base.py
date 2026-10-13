@@ -694,9 +694,8 @@ class BaseModel(nn.Module):
                         # 3. Any non-replicate placement → fail closed. Gathering
                         #    shards is outside this path's responsibility.
                         if isinstance(param, DTensor):
-                            if (
-                                param.device_mesh == self.world_mesh
-                                and all(placement.is_replicate() for placement in param.placements)
+                            if param.device_mesh == self.world_mesh and all(
+                                placement.is_replicate() for placement in param.placements
                             ):
                                 ignored_params.add(param)
                                 break
