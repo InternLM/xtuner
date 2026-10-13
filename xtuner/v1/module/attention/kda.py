@@ -59,6 +59,9 @@ def _all_to_all_beta(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
 
 
+# At 512Ki/SP16, tensor_split/cat backward creates offsets beyond int32. Keep this
+# redistribution outside compiled regions so Inductor cannot fuse its slice backward.
+@torch._dynamo.disable
 def _all_to_all_out(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
 

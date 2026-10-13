@@ -315,7 +315,7 @@ class TestKDAModuleParity:
 
 class TestKDASequenceParallel(DistributedTestBase):
     @pytest.mark.gpu
-    def test_packed_backward_and_fullgraph_match_non_sp(self, device="cuda"):
+    def test_packed_backward_and_compiled_match_non_sp(self, device="cuda"):
         """Ulysses preserves local input gradients and head-sliced parameter gradients."""
         self.create_pg(device)
         mesh = init_data_mesh(device, self.world_size)["sp"]
@@ -336,7 +336,8 @@ class TestKDASequenceParallel(DistributedTestBase):
                     reference = deepcopy(module)
                     if compiled:
                         torch._dynamo.reset()
-                    runner = torch.compile(module, fullgraph=True) if compiled else module
+                    # KDA's output all-to-all breaks the graph to avoid 512K slice-backward overflow.
+                    runner = torch.compile(module, fullgraph=False) if compiled else module
                     context = SequenceContext.from_input_ids(
                         tuple(torch.zeros(1, length, dtype=torch.long) for length in lengths), device=device
                     )
