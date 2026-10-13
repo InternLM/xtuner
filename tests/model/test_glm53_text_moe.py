@@ -297,7 +297,8 @@ class TestGlm53TextMoEForwardBackward:
         assert len(loss_ctx["mtp"]) == mtp_depth
         out = model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
         assert out.mtp_loss is not None and torch.isfinite(out.mtp_loss) and out.mtp_loss > 0
-        loss = out.loss + out.mtp_loss + out.balancing_loss
+        assert out.balancing_loss is None  # GLM-5.3 balances via correction-bias updates, no aux loss
+        loss = out.loss + out.mtp_loss
         assert torch.isfinite(loss)
         loss.backward()
         for name, parameter in model.mtp_block.named_parameters():
