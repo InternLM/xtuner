@@ -19,15 +19,19 @@ TestGlm53CacheInvalidation
 """
 
 import os
+from pathlib import Path
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
 import torch
 from PIL import Image
 
-from transformers import AutoProcessor, AutoTokenizer
+from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizerBase
 from transformers.video_utils import VideoMetadata
-from xtuner.v1.datasets.mllm_tokenize_fn import Glm53VLTokenizeFnConfig
+from xtuner.v1.datasets.mllm_tokenize_fn import Glm53VLTokenizeFnConfig, Glm53VLTokenizeFunction
+from xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn import BaseMLLMTokenizeFunction
+from xtuner.v1.datasets.mllm_tokenize_fn.qwen3_vl_utils import sort_frames
 
 
 GLM_5_3_FLASH_PATH = os.environ["GLM_5_3_FLASH_PATH"]
@@ -153,6 +157,68 @@ class TestGlm53TokenizeCacheRuntimeParity:
         assert cache_ret["num_img_tokens"] == runtime_ret["num_img_tokens"]
 
 
+class TestGlm53OSSLoader:
+    def test_oss_image_matches_local_and_cache(
+        self,
+        ckpt_path: str,
+        tokenizer: PreTrainedTokenizerBase,
+        image_fixture: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client = Mock()
+        backend = Mock(return_value=client)
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.qwen3_vl_utils.get_oss_backend", backend)
+        fn = Glm53VLTokenizeFnConfig(
+            processor_path=ckpt_path,
+            oss_loader_cfg={"backend": "petrel", "backend_kwargs": {"conf_path": "test.conf"}},
+        ).build(tokenizer, anno_name="test")
+        backend.assert_called_once_with("petrel", conf_path="test.conf")
+
+        local_item = _image_item(image_fixture)
+        remote_item = _image_item("img.png")
+        client.get.side_effect = {"s3://bucket/img.png": Path(image_fixture).read_bytes()}.__getitem__
+        fn.state = "cache"
+        cache = fn(remote_item, media_root="s3://bucket/")
+        client.get.assert_not_called()
+        fn.state = "runtime"
+        local = fn(local_item)
+        client.get.assert_not_called()
+        remote = fn(remote_item, media_root="s3://bucket/")
+        assert client.get.called
+        assert cache["num_tokens"] == remote["num_tokens"] == local["num_tokens"]
+        assert cache["num_img_tokens"] == remote["num_img_tokens"] == local["num_img_tokens"]
+        for key in ("input_ids", "labels"):
+            assert remote[key] == local[key]
+        for key in ("pixel_values", "image_grid_thw", "mm_token_type_ids"):
+            assert torch.equal(remote[key], local[key])
+
+    def test_oss_image_requires_loader(self, tokenize_fn: Glm53VLTokenizeFunction) -> None:
+        tokenize_fn.state = "runtime"
+        with pytest.raises(AssertionError, match="oss_loader_cfg"):
+            tokenize_fn(_image_item("s3://bucket/image.png"))
+
+    def test_oss_loader_cfg_does_not_change_cache_hash(
+        self, ckpt_path: str, tokenizer: PreTrainedTokenizerBase, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The media backend only affects runtime reading, never cache-path geometry:
+        # a differing hash would silently invalidate every cached length.
+        monkeypatch.setattr(
+            "xtuner.v1.datasets.mllm_tokenize_fn.qwen3_vl_utils.get_oss_backend", Mock(return_value=Mock())
+        )
+        plain = Glm53VLTokenizeFnConfig(processor_path=ckpt_path).build(tokenizer, anno_name="test")
+        with_oss = Glm53VLTokenizeFnConfig(
+            processor_path=ckpt_path,
+            oss_loader_cfg={"backend": "petrel", "backend_kwargs": {"conf_path": "test.conf"}},
+        ).build(tokenizer, anno_name="test")
+        assert plain.hash() == with_oss.hash()
+
+
+class TestFrameNamingConvention:
+    def test_sort_frames_rejects_nonconforming_names(self) -> None:
+        with pytest.raises(ValueError, match="naming convention"):
+            sort_frames(["cluster:s3://bucket/frames/frame.0068.tonemap.jpg"])
+
+
 class TestGlm53VisualPlaceholderAndTokenSemantics:
     def test_glm53_visual_placeholder_count(self, tokenize_fn, image_fixture):
         tokenize_fn.state = "runtime"
@@ -214,17 +280,23 @@ class TestGlm53MmTokenTypeIdsMatchesProcessorGolden:
 
 
 class TestGlm53MixedMediaAndTruncation:
-    def test_glm53_mixed_media_fails_fast(self, tokenize_fn, image_fixture, video_fixture):
+    @pytest.mark.parametrize("state", ["cache", "runtime"])
+    def test_glm53_mixed_media_fails_fast(
+        self, tokenize_fn: Glm53VLTokenizeFunction, state: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert Glm53VLTokenizeFunction.__call__ is BaseMLLMTokenizeFunction.__call__
+        load = Mock(side_effect=AssertionError("Mixed samples must fail before loading media"))
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn.load_image", load)
         item = {
             "messages": [
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image", "image": {"url": image_fixture, "image_wh": [448, 448]}},
+                        {"type": "image", "image": {"url": "unused.jpg", "image_wh": [448, 448]}},
                         {
                             "type": "video",
                             "video": {
-                                "url": video_fixture,
+                                "url": "unused.mp4",
                                 "image_wh": [224, 224],
                                 "origin_video_length": 6,
                                 "origin_fps": 2.0,
@@ -234,9 +306,10 @@ class TestGlm53MixedMediaAndTruncation:
                 }
             ]
         }
-        tokenize_fn.state = "runtime"
-        with pytest.raises(NotImplementedError):
+        tokenize_fn.state = state
+        with pytest.raises(NotImplementedError, match="Mixed image and video"):
             tokenize_fn(item)
+        load.assert_not_called()
 
     def test_glm53_visual_truncation_is_dropped(self, ckpt_path, tokenizer, image_fixture):
         # max_length 短于样本、会切进 256 token 的图像跨度：cache 阶段就必须报 num_tokens=0，让

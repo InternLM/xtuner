@@ -7,11 +7,15 @@ TestNoPEDSAMultiLatentAttentionFloat8
     test_kv_b_proj_stays_high_precision_under_fp8          absorbed 折叠所需的投影不量化
 TestNoPEDSAMLAConfigIndexerChunking
     test_config_reaches_the_indexer                        分块配置真正传到 indexer
-    test_defaults_to_a_single_launch                       默认单次 launch，不改既有行为
+    test_defaults_to_1024_query_chunks                       默认 query chunk=1024
 TestNoPEDSAMLAConfigGuards
     test_rejects_unfreezing_the_indexer                    freeze_dsa_indexer=False 拒绝（同 GLM-5.2）
     test_rejects_misaligned_heads_for_flash_mla_cudnn      FlashMLA 头对齐提前到 config 校验
     test_allows_misaligned_heads_for_torch_backend         torch 参考后端无该对齐要求
+TestNoPEDSAMLAConfigRMSNormEps
+    test_eps_reaches_q_and_kv_layernorms                   rms_norm_eps 从 config 传到两个 norm（回归）
+    test_default_keeps_legacy_eps                           无 config 值时保持旧 1e-6 行为
+    test_hf_builds_these_norms_from_the_same_config_eps     HF 同样按 config.rms_norm_eps 构造
 """
 
 import pytest
@@ -221,14 +225,43 @@ class TestNoPEDSAMLAConfigIndexerChunking:
             index_n_heads=INDEX_N_HEADS,
             index_kpool=INDEX_KPOOL,
             sparse_mla_backend="torch",
-            indexer_backend="torch",
+            indexer_backend="tilelang_cooperative",
             indexer_topk_query_chunk_size=64,
+            indexer_balance_sp=True,
+            indexer_sp_full_pool_work_ratio=0.25,
         )
-        assert cfg.build(hidden_size=HIDDEN, layer_idx=0).indexer.topk_query_chunk_size == 64
+        indexer = cfg.build(hidden_size=HIDDEN, layer_idx=0).indexer
+        assert indexer.topk_query_chunk_size == 64
+        assert indexer.indexer_backend == "tilelang_cooperative"
+        assert indexer.balance_sp is True
+        assert indexer.sp_full_pool_work_ratio == 0.25
+        captured = {}
 
-    def test_defaults_to_a_single_launch(self):
-        # 不配置时保持单次 launch，不改变既有行为。
-        assert _xtuner_module().indexer.topk_query_chunk_size is None
+        def selector(*args, **kwargs):
+            captured.update(kwargs)
+            return torch.full((4, 1, 8), -1, dtype=torch.int32)
+
+        indexer._topk_indices_fn = selector
+        ctx = SequenceContext.from_input_ids((torch.zeros(1, 4, dtype=torch.long),), device="cpu")
+        indexer(torch.randn(1, 4, HIDDEN), torch.randn(1, 4, Q_LORA_RANK), ctx)
+        assert captured["balance_sp"] is True
+        assert captured["sp_full_pool_work_ratio"] == 0.25
+
+    def test_defaults_to_1024_query_chunks(self):
+        assert _xtuner_module().indexer.topk_query_chunk_size == 1024
+        kwargs = {k: v for k, v in TestNoPEDSAMLAConfigGuards._BASE_KWARGS.items() if k != "indexer_backend"}
+        cfg = NoPEDSAMLAConfig(**kwargs)
+        assert cfg.indexer_backend == "tilelang"
+        indexer = cfg.build(hidden_size=HIDDEN).indexer
+        assert indexer.indexer_backend == "tilelang"
+        assert indexer.balance_sp is False
+        assert indexer.sp_full_pool_work_ratio == 0.5
+
+    @pytest.mark.parametrize("ratio", [-1, float("inf"), float("nan")])
+    def test_rejects_invalid_sp_work_ratio(self, ratio):
+        cfg = NoPEDSAMLAConfig(**TestNoPEDSAMLAConfigGuards._BASE_KWARGS)
+        with pytest.raises(ValueError):
+            cfg.indexer_sp_full_pool_work_ratio = ratio
 
 
 class TestNoPEDSAMLAConfigGuards:
@@ -267,3 +300,57 @@ class TestNoPEDSAMLAConfigGuards:
     def test_allows_misaligned_heads_for_torch_backend(self):
         # 对齐要求只属于 FlashMLA kernel；torch 参考后端不应被误伤。
         NoPEDSAMLAConfig(**{**self._BASE_KWARGS, "sparse_mla_backend": "torch"})
+
+
+class TestNoPEDSAMLAConfigRMSNormEps:
+    """q/kv a-layernorm 的 eps 必须能从 config 传入（回归：曾固定在 RMSNorm 默认 1e-6）。
+
+    公开 GLM-5.3-Flash checkpoint 的 text config 携带 rms_norm_eps=1e-5，HF 与
+    Automodel 都按该值构造这两个 norm；xtuner 曾落到 RMSNorm 类默认 1e-6，静默偏离
+    checkpoint 定义。q_a latent 逐 token 方差（约 1e-4~7e-4）与 eps 同量级，1e-6/1e-5
+    之差使 norm 输出偏移约 1%（每 token 中位数），并经 indexer/MoE 的近并列选择放大。
+    """
+
+    _BASE_KWARGS = dict(
+        q_lora_rank=Q_LORA_RANK,
+        kv_lora_rank=KV_LORA_RANK,
+        qk_nope_head_dim=QK_NOPE_HEAD_DIM,
+        qk_rope_head_dim=0,
+        v_head_dim=V_HEAD_DIM,
+        num_attention_heads=NUM_HEADS,
+        head_dim=0,
+        index_topk=INDEX_TOPK,
+        index_head_dim=INDEX_HEAD_DIM,
+        index_n_heads=INDEX_N_HEADS,
+        index_kpool=INDEX_KPOOL,
+        sparse_mla_backend="torch",
+        indexer_backend="torch",
+    )
+
+    def test_eps_reaches_q_and_kv_layernorms(self):
+        # 修复前：config 无 rms_norm_eps 字段（extra="forbid" 下直接 TypeError），
+        # 两个 norm 恒为类默认 1e-6。
+        cfg = NoPEDSAMLAConfig(**self._BASE_KWARGS, rms_norm_eps=1e-5)
+        attn = cfg.build(hidden_size=HIDDEN, layer_idx=0)
+        assert attn.q_a_layernorm.variance_epsilon == 1e-5
+        assert attn.kv_a_layernorm.variance_epsilon == 1e-5
+
+    def test_default_keeps_legacy_eps(self):
+        # 不带 config 值直接构造时保持旧的 1e-6 行为，既有调用方不受影响。
+        attn = NoPEDSAMLAConfig(**self._BASE_KWARGS).build(hidden_size=HIDDEN, layer_idx=0)
+        assert attn.q_a_layernorm.variance_epsilon == 1e-6
+        assert attn.kv_a_layernorm.variance_epsilon == 1e-6
+
+    def test_hf_builds_these_norms_from_the_same_config_eps(self):
+        # 语义来源交叉验证：HF 对这两个 norm 用 config.rms_norm_eps。注意现有 HF 对拍
+        # 用例（_hf_module）把 rms_norm_eps 硬编码为 1e-6，恰好等于旧默认值，因此对拍
+        # 从未覆盖该 eps 分歧 —— 真实 checkpoint 为 1e-5。
+        from transformers.models.glm5_next.configuration_glm5_next import Glm5NextTextConfig
+        from transformers.models.glm5_next.modeling_glm5_next import Glm5NextTextAttention
+
+        _, config = _hf_module()
+        config.rms_norm_eps = 1e-5
+        with torch.device("meta"):
+            hf_attn = Glm5NextTextAttention(config, layer_idx=0)
+        assert hf_attn.q_a_layernorm.variance_epsilon == 1e-5
+        assert hf_attn.kv_a_layernorm.variance_epsilon == 1e-5
