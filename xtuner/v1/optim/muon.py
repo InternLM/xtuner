@@ -101,23 +101,16 @@ def _muon_matrix_shape(
 
     Precedence: ``num_experts > 1``, then ``flatten`` or already-2D, otherwise
     batch-over-last-two-dims.
-
-    Where 3D shows up in common models:
-
-    - MoE expert weights (most common NS 3D path): XTuner ``GroupedLinear`` stores
-      ``fused_w1w3`` / ``fused_w2`` as 2D ``[E * out, in]``, and ``num_experts > 1``
-      reshapes them to ``(E, out, in)`` for per-expert NS. The parameter itself is
-      not 3D.
-    - True 3D parameters are uncommon in Muon groups. Typical cases:
-      ``nn.Conv1d`` weights ``[out, in, k]``; custom layers that stack matrices as
-      ``[B, out, in]``. With the usual ``flatten=True`` (vision conv), these still
-      become 2D for NS; only ``flatten=False`` keeps a 3D NS layout.
-    - ``nn.Linear`` / attention projections stay 2D. Vision ``Conv2d`` /
-      patch-embed kernels are usually 4D and, with ``flatten=True``, also become
-      one 2D matrix rather than a 3D batch.
     """
     if num_experts > 1:
         # Concatenated 2D expert layout -> batch of expert matrices.
+        # Production GroupedLinear weights are always 2D [E * rows, cols]. Reject
+        # higher-D tensors so a bad group config cannot silently drop trailing dims.
+        assert len(shape) == 2, (
+            f"num_experts={num_experts} requires a concatenated 2D expert layout "
+            f"[num_experts * rows, cols], got shape={shape}"
+        )
+        assert shape[0] % num_experts == 0, f"expert dim {shape[0]} is not divisible by num_experts={num_experts}"
         return num_experts, shape[0] // num_experts, shape[1]
 
     if flatten or len(shape) == 2:
@@ -1676,7 +1669,8 @@ def muon_update_newton_schulz(
     epsilon: Tensor,
     num_experts: int = 1,
 ) -> Tensor:
-    """Reshape ``X`` to 2D/3D via :func:`_muon_matrix_shape` and call Newton-Schulz.
+    """Reshape ``X`` to 2D/3D via :func:`_muon_matrix_shape` and call Newton-
+    Schulz.
 
     The NS callback receives either one matrix ``[rows, cols]`` or a batch
     ``[batch, rows, cols]``, and must not reinterpret the tensor through
@@ -1695,15 +1689,19 @@ def muon_update_newton_schulz(
 def _muonsplit_newton_schulz(
     X: Tensor,
     epsilon: float | Tensor,
-    num_experts: int,
     *,
     newton_schulz_func: Callable,
     split_sizes: tuple[int, ...],
     adjust_lr: Literal["rms_norm", "spectral_norm", "none"],
 ) -> Tensor:
-    """Orthogonalize and scale unequal logical row blocks independently."""
-    if X.ndim != 2 or num_experts != 1:
-        raise ValueError(f"MuonSplit expects one 2D matrix, got shape={tuple(X.shape)}, num_experts={num_experts}")
+    """Orthogonalize and scale unequal logical row blocks independently.
+
+    Matches the NS callback contract used by :func:`muon_update_newton_schulz`:
+    ``func(matrices, epsilon=...)`` with no ``num_experts`` argument. MuonSplit is
+    only registered for regular 2D params (``num_experts == 1``) at ``Muon`` init.
+    """
+    if X.ndim != 2:
+        raise ValueError(f"MuonSplit expects one 2D matrix, got shape={tuple(X.shape)}")
 
     logical_rows = sum(split_sizes)
     if logical_rows > X.size(-2):
@@ -1732,12 +1730,31 @@ def _muonsplit_newton_schulz(
 
 
 def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7):
-    """Newton-Schulz iteration over independent matrices in ``G``.
+    """Newton-Schulz iteration to approximate the orthogonalization of ``G``.
+
+    Handles both a single matrix and a batch of matrices. For MoE / MuonSplit,
+    each logical matrix is orthogonalized independently rather than treating a
+    concatenated wide/tall tensor as one matrix. Layout is decided upstream by
+    :func:`_muon_matrix_shape` (or an explicit 2D/3D caller); this function does
+    not take ``num_experts`` and never reinterprets the leading dimension.
+
+    Algorithm:
+    1. Accept ``G`` as ``[rows, cols]`` (one matrix) or ``[batch, rows, cols]``
+       (batch of independent matrices). 4D+ is not supported.
+    2. Optionally transpose each matrix when ``rows > cols`` for cheaper Gram
+       products, then normalize so each matrix has spectral norm at most 1.
+    3. Run the fixed 5-step Newton-Schulz polynomial with batched matmul ``@``,
+       which applies independently on each batch element when ``G`` is 3D.
+    4. Undo the optional transpose and return a tensor with the same shape as
+       ``G``.
+
+    Equivalence:
+    - 2D input: NS on that one matrix.
+    - 3D input ``[B, M, N]``: equivalent to stacking ``B`` independent 2D NS
+      results; each slice has its own spectral-norm scaling.
 
     Args:
-        G: Tensor of shape ``[rows, cols]`` (one matrix) or ``[batch, rows, cols]``
-           (batch of matrices). Layout must already match :func:`_muon_matrix_shape`;
-           this function never reinterprets experts and does not accept 4D+.
+        G: Tensor of shape ``[rows, cols]`` or ``[batch, rows, cols]``.
         epsilon: Small value to avoid division by zero.
     """
     # Newton-Schulz constants - fixed coefficients for 5th order iteration

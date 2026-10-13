@@ -77,7 +77,6 @@ class TestNewtonSchulz(DeterministicDDPTestCase):
         result = _muonsplit_newton_schulz(
             G,
             epsilon=1e-7,
-            num_experts=1,
             newton_schulz_func=zeropower_via_newtonschulz5,
             split_sizes=split_sizes,
             adjust_lr="rms_norm",
@@ -95,6 +94,23 @@ class TestNewtonSchulz(DeterministicDDPTestCase):
         expected = torch.cat(expected_chunks)
 
         torch.testing.assert_close(result, expected)
+
+    def test_muonsplit_step_matches_callback_contract(self):
+        """Muon.step must invoke MuonSplit under the no-num_experts NS contract."""
+        self.create_pg("cuda")
+        split_sizes = (4, 4)
+        param = torch.nn.Parameter(torch.randn(8, 4, device="cuda", dtype=torch.float32))
+        param.grad = torch.randn_like(param)
+        optimizer = Muon(
+            [{"params": [param]}],
+            muon_split_sizes={param: split_sizes},
+            use_triton=False,
+            adjust_lr="rms_norm",
+        )
+        before = param.detach().clone()
+        optimizer.step()
+        assert torch.isfinite(param).all()
+        assert not torch.equal(param, before)
 
 
 # ─── Model for end-to-end tests ──────────────────────────────────────────────
