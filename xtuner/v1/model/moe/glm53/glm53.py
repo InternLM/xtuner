@@ -32,7 +32,7 @@ from pydantic import Field, computed_field
 from typing_extensions import Self, override
 
 from xtuner.v1.model.base import DEFAULT_FLOAT8_CFG, HFSaveCfg, TorchCompileOption
-from xtuner.v1.model.moe.moe import MoE, MoEConfig
+from xtuner.v1.model.moe.moe import BalancingLossConfig, MoE, MoEConfig
 from xtuner.v1.module.decoder_layer.mhc import MHCConfig
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig
 from xtuner.v1.module.mtp import MTPConfig
@@ -330,6 +330,14 @@ class Glm53TextMoEConfig(MoEConfig):
     router: NoAuxRouterConfig = NoAuxRouterConfig(
         n_group=1, topk_group=1, scoring_func="sigmoid", norm_topk_prob=True, router_scaling_factor=2.5
     )
+    # GLM-5.3 balances its MoE auxiliary-loss-free: `e_score_correction_bias` is updated after
+    # every optimizer step (`MoE.update_moe_gate_bias`). HF only adds the aux loss under
+    # `output_router_logits=True` (the checkpoint leaves it False) and AutoModel hardcodes
+    # `aux_loss_coeff=0.0`, so the base default `BalancingLossConfig()` is overridden here --
+    # otherwise SFT silently carries a 1e-3-weighted balancing loss whose softmax-over-logits
+    # formula does not even match this sigmoid router. Pass a BalancingLossConfig explicitly
+    # to opt back in.
+    balancing_loss_cfg: BalancingLossConfig | None = None
     num_nextn_predict_layers: int | None = 1
     mtp_config: MTPConfig | None = MTPConfig(num_layers=1, share_weights=True)
 
@@ -448,6 +456,7 @@ class Glm53TextMoEConfig(MoEConfig):
                 router_scaling_factor=cfg.routed_scaling_factor,
             ),
             mhc=MHCConfig(hc_mult=cfg.hc_mult, hc_eps=cfg.hc_eps, hc_sinkhorn_iters=cfg.hc_sinkhorn_iters),
+            balancing_loss_cfg=None,
             num_nextn_predict_layers=getattr(cfg, "num_nextn_predict_layers", None),
             mtp_config=MTPConfig(num_layers=cfg.num_nextn_predict_layers, share_weights=True)
             if getattr(cfg, "num_nextn_predict_layers", 0)
