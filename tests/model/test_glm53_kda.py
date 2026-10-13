@@ -746,11 +746,11 @@ class TestKDASequenceSPConfig:
         rebuilt = KDAConfig.model_validate_json(cfg.model_dump_json())
         assert rebuilt.build(hidden_size=64).sp_impl == implementation
 
-    def test_default_uses_fla(self):
+    def test_default_preserves_ulysses(self):
         cfg = KDAConfig(num_heads=4, head_dim=16)
-        assert cfg.sp_impl == "fla"
-        assert cfg.build(hidden_size=64).sp_impl == "fla"
-        assert KimiDeltaAttention(hidden_size=64, num_heads=4, head_dim=16).sp_impl == "fla"
+        assert cfg.sp_impl == "ulysses"
+        assert cfg.build(hidden_size=64).sp_impl == "ulysses"
+        assert KimiDeltaAttention(hidden_size=64, num_heads=4, head_dim=16).sp_impl == "ulysses"
 
     def test_rejects_unknown_backend(self):
         with pytest.raises(ValueError):

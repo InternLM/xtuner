@@ -10,6 +10,7 @@ TestKDAForwardPrecision
 import pytest
 import torch
 import torch.nn.functional as F
+from fla.ops.kda import chunk_kda as fla_chunk_kda
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.index import prepare_chunk_indices
 
@@ -93,6 +94,7 @@ class TestKDAForwardPrecision:
         values += [-torch.rand(shape, device="cuda") * abs(lower_bound or -5.0), torch.rand(shape[:-1], device="cuda")]
         inputs = [v.detach().clone().requires_grad_() for v in values]
         reference_inputs = [v.detach().clone().requires_grad_() for v in values]
+        native_inputs = [v.detach().clone().requires_grad_() for v in values]
         cu = torch.tensor([0, 37, 65], device="cuda", dtype=torch.int32) if packed else None
         actual = chunk_kda(
             *inputs,
@@ -101,6 +103,15 @@ class TestKDAForwardPrecision:
             transpose_state_layout=transpose,
             scale=scale,
             lower_bound=lower_bound,
+        )[0]
+        native = fla_chunk_kda(
+            *native_inputs,
+            cu_seqlens=cu,
+            safe_gate=safe_gate,
+            transpose_state_layout=transpose,
+            scale=scale,
+            lower_bound=lower_bound,
+            use_qk_l2norm_in_kernel=True,
         )[0]
 
         q, k, v, gate, beta = reference_inputs
@@ -123,13 +134,24 @@ class TestKDAForwardPrecision:
             outputs.append(torch.stack(sample_outputs))
         expected = torch.stack(outputs).to(v.dtype)
         torch.testing.assert_close(actual, expected, atol=5e-3, rtol=2e-2)
+        torch.manual_seed(5678)
         upstream = torch.randn_like(actual)
         gradients = torch.autograd.grad(actual, inputs, upstream)
         reference_gradients = torch.autograd.grad(expected, reference_inputs, upstream)
-        for name, gradient, reference in zip(("q", "k", "v", "g", "beta"), gradients, reference_gradients):
+        native_gradients = torch.autograd.grad(native, native_inputs, upstream)
+        for name, gradient, reference, original in zip(
+            ("q", "k", "v", "g", "beta"), gradients, reference_gradients, native_gradients
+        ):
             assert torch.isfinite(gradient).all(), name
             relative_error = (gradient.float() - reference.float()).norm() / reference.float().norm()
-            assert relative_error < (2e-2 if dtype == torch.bfloat16 else 3e-3), (name, relative_error)
+            limit = 2e-2 if dtype == torch.bfloat16 else 3e-3
+            # Native FLA's FP32 safe-gate backward has ~0.5% dg error here; its
+            # triangular solve uses TF32. Retain the stricter native parity check.
+            if dtype == torch.float32 and safe_gate and name == "g":
+                limit = 1e-2
+            assert relative_error < limit, (name, relative_error)
+            native_error = (gradient.float() - original.float()).norm() / original.float().norm()
+            assert native_error < (1e-3 if dtype == torch.bfloat16 else 1e-4), (name, native_error)
 
     @pytest.mark.parametrize("packed", [True, False], ids=["default-packed", "custom-batch2"])
     def test_compiled_forward_and_gradients(self, packed: bool) -> None:

@@ -185,8 +185,8 @@ class KDAConfig(BaseModel):
     gate_lower_bound: Annotated[float | None, Parameter(group="attention")] = -5.0
     rms_norm_eps: Annotated[float, Parameter(group="attention")] = 1e-5
     # Both implementations use SequenceContext.sequence_parallel_mesh.
-    # FLA keeps projected tensors local; "ulysses" selects the original path.
-    sp_impl: Literal["ulysses", "fla"] = "fla"
+    # Preserve the original Ulysses default; FLA keeps projected tensors local.
+    sp_impl: Literal["ulysses", "fla"] = "ulysses"
 
     def build(
         self,
@@ -225,7 +225,7 @@ class KimiDeltaAttention(nn.Module):
         use_full_rank_gate: bool = False,
         gate_lower_bound: float | None = -5.0,
         rms_norm_eps: float = 1e-5,
-        sp_impl: Literal["ulysses", "fla"] = "fla",
+        sp_impl: Literal["ulysses", "fla"] = "ulysses",
         layer_idx: int = 0,
         float8_cfg: Float8Config | None = None,
     ) -> None:

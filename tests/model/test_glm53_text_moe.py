@@ -232,6 +232,14 @@ class TestGlm53TextMoEFp32Params:
         assert not self._matches(cfg, model, "layers.0.hc_attn_fn")
         assert not self._matches(cfg, model, "layers.0.self_attn.q_proj.weight")
 
+    def test_convolution_export_preserves_fp32_masters(self):
+        model = _tiny_cfg().build()
+        for projection in ("q", "k", "v"):
+            key = model.to_hf_key_list(f"layers.0.self_attn.{projection}_conv1d.weight")[0]
+            assert model._get_save_dtype(key, torch.bfloat16) == torch.float32
+        key = model.to_hf_key_list("layers.0.self_attn.q_proj.weight")[0]
+        assert model._get_save_dtype(key, torch.bfloat16) == torch.bfloat16
+
 
 @pytest.mark.gpu
 class TestGlm53TextMoEForwardBackward:
