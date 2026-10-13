@@ -680,13 +680,37 @@ class BaseModel(nn.Module):
 
                 for hf_name in hf_name_list:
                     if any(re.search(p, hf_name) for p in patterns):  # type: ignore
-                        # Always rematerialize FP32-ignored params as full-world
-                        # replicas. MoE may have already placed them on an EP-only
-                        # mesh; leaving that layout would desync FSDP-rank grads and
-                        # make global norms / clipping inconsistent. Use full_tensor()
-                        # so both replicated and sharded DTensors become a complete
-                        # local value before redistribute.
-                        local_param = param.full_tensor().detach() if isinstance(param, DTensor) else param
+                        # FP32-ignored params must be world-wide replicas so
+                        # scale_and_reduce_grad / grad-norm cover every FSDP rank.
+                        # MoE may have already placed them on an EP-only (or EP x
+                        # expert-TP) mesh; normalize that layout here.
+                        #
+                        # Contract:
+                        # 1. Already DTensor(world_mesh, all Replicate) → no-op
+                        #    (idempotent under MoE's layer-then-root _fully_shard).
+                        # 2. Plain tensor or fully-replicated DTensor on any mesh →
+                        #    rematerialize via to_local() (local already holds the
+                        #    full value; never gather).
+                        # 3. Any non-replicate placement → fail closed. Gathering
+                        #    shards is outside this path's responsibility.
+                        if isinstance(param, DTensor):
+                            if (
+                                param.device_mesh == self.world_mesh
+                                and all(placement.is_replicate() for placement in param.placements)
+                            ):
+                                ignored_params.add(param)
+                                break
+                            if any(not placement.is_replicate() for placement in param.placements):
+                                raise ValueError(
+                                    f"FP32-ignored parameter {full_name} has non-replicate "
+                                    f"placements {tuple(param.placements)} on mesh "
+                                    f"{param.device_mesh}; cannot rematerialize as a "
+                                    f"world-wide replica without gathering shards."
+                                )
+                            local_param = param.to_local().detach()
+                        else:
+                            local_param = param
+                        assert self.world_mesh is not None
                         dist_param = nn.Parameter(
                             distribute_tensor(
                                 local_param, self.world_mesh, [Replicate() for _ in range(self.world_mesh.ndim)]
