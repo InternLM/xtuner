@@ -58,16 +58,26 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
     def setUpClass(cls) -> None:
         if MODEL_PATH is None:
             raise unittest.SkipTest("MODEL_PATH is not set")
-        os.environ["XTUNER_USE_FA3"] = "1"
-        # TODO(shipengcheng): SGLang disaggregated weight update cannot use
-        # NCCL_CUMEM for now. Remove this after the root cause is fixed.
-        os.environ["NCCL_CUMEM_ENABLE"] = "0"
-        if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
-            os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+
+        updates = {
+            "XTUNER_USE_FA3": "1",
+            # TODO(shipengcheng): SGLang disaggregated weight update cannot use
+            # NCCL_CUMEM for now. Remove this after the root cause is fixed.
+            "NCCL_CUMEM_ENABLE": "0",
+        }
+        unset = ("PYTORCH_CUDA_ALLOC_CONF",) if os.environ.get("XTUNER_USE_SGLANG", "0") == "1" else ()
+        cls._old_env = {key: os.environ.get(key) for key in set(updates) | set(unset)}
+        os.environ.update(updates)
+        for key in unset:
+            os.environ.pop(key, None)
 
     @classmethod
     def tearDownClass(cls) -> None:
-        del os.environ["XTUNER_USE_FA3"]
+        for key, old in getattr(cls, "_old_env", {}).items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
 
     def setUp(self):
         ray.init(num_cpus=128, ignore_reinit_error=True)
