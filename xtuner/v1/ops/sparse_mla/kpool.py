@@ -105,20 +105,24 @@ def build_pool_index(seq_ctx: SequenceContext, seq_len: int, index_kpool: int, d
     boundary.
 
     Returns:
-        Tensor: ``pool_index``, shape ``[P, index_kpool]`` int64. ``pool_index[p, slot]`` is
-            the global token id at that slot, or ``-1`` if the pool is incomplete there (its
-            document ended before filling the pool).
+        Tensor: ``pool_index``, shape ``[P_max, index_kpool]`` int64. ``pool_index[p, slot]`` is
+            the global token id at that slot, or ``-1`` if its document ended. Any unused
+            trailing pools are all ``-1`` and never enter a causal selection range.
     """
     cu = seq_ctx.cu_seq_lens_q.to(device=device)
-    num_pools_per_doc, doc_pool_start = _doc_pool_layout(cu, index_kpool)
+    _, doc_pool_start = _doc_pool_layout(cu, index_kpool)
     # start=0: pools always cover the whole sequence, never a shard (see build_pools).
     token_ids, doc_of_token, local_pos = _token_doc_layout(cu, 0, seq_len, device)
 
     pool_id = doc_pool_start[doc_of_token] + local_pos // index_kpool
     slot = local_pos % index_kpool
 
-    num_pools = int(num_pools_per_doc.sum().item())
-    pool_index = torch.full((num_pools, index_kpool), -1, device=device, dtype=torch.int64)
+    # sum(ceil(doc_len/k)) <= ceil(seq_len/k) + num_docs - 1. Computing the
+    # exact count with .item() synchronizes GPU to host, and its data-dependent
+    # pool dimension makes torch.compile recompile when the count changes.
+    # Allocate this shape-only bound; causal ranges skip unused trailing rows.
+    max_pools = (seq_len + index_kpool - 1) // index_kpool + cu.shape[0] - 2
+    pool_index = torch.full((max_pools, index_kpool), -1, device=device, dtype=torch.int64)
     pool_index[pool_id, slot] = token_ids
     return pool_index
 
@@ -152,9 +156,9 @@ def build_pools(
 
     Returns:
         tuple[Tensor, Tensor, Tensor]:
-            - ``pool_key`` ``[P, index_head_dim]``, same dtype as ``k``.
-            - ``pool_index`` ``[P, index_kpool]`` int32 (global token ids, ``-1`` if invalid).
-            - ``pool_complete`` ``[P]`` bool (all ``index_kpool`` slots valid).
+            - ``pool_key`` ``[P_max, index_head_dim]``, same dtype as ``k``.
+            - ``pool_index`` ``[P_max, index_kpool]`` int32 (global token ids, ``-1`` if invalid).
+            - ``pool_complete`` ``[P_max]`` bool (all ``index_kpool`` slots valid).
     """
     seq_len, device = k.shape[0], k.device
     # Reading `cu_seq_lens_q[-1]` is a host sync, and under `torch.compile` it is also a graph
@@ -162,7 +166,11 @@ def build_pools(
     # the SP mesh -- is a programming error, not a data condition, so eager (which every test and
     # the first training step exercise) is where it is worth paying for.
     if not torch.compiler.is_compiling():
-        global_len = int(seq_ctx.cu_seq_lens_q[-1].item())
+        global_len = (
+            seq_ctx._raw_input_ids.shape[1]
+            if seq_ctx._raw_input_ids is not None
+            else int(seq_ctx.cu_seq_lens_q[-1].item())
+        )
         if seq_len != global_len:
             raise RuntimeError(
                 f"build_pools needs key features for the whole sequence ({global_len} tokens) but "
@@ -177,8 +185,7 @@ def build_pools(
 
     logits = grouped_gate.float() + kpool_ape.float().unsqueeze(0)
     logits = logits.masked_fill(~valid.unsqueeze(-1), float("-inf"))
-    # A fully-invalid pool never occurs in practice (every document has >= 1 token, so its
-    # first pool always has >= 1 valid slot), but nan_to_num matches HF's defensive guard.
+    # Trailing padding pools have only -inf logits; map their NaN softmax to zero keys.
     probs = torch.nan_to_num(logits.softmax(dim=1)).to(grouped_k.dtype)
     pool_key = (probs * grouped_k).sum(dim=1)
     pool_complete = valid.all(dim=-1)
@@ -205,8 +212,8 @@ def pool_causal_ranges(
     Args:
         seq_ctx (SequenceContext): Packed-sequence metadata; ``shard_start`` locates this rank's
             queries inside the global sequence.
-        pool_index (Tensor): From :func:`build_pools`, shape ``[P, index_kpool]``, covering the
-            **whole** sequence (pool ids returned here index into it).
+        pool_index (Tensor): From :func:`build_pools`, shape ``[P_max, index_kpool]``, covering the
+            **whole** sequence with any unused pools at the end.
         query_len (int): Number of local queries on this rank.
         device: Device to build the range tensors on.
 
@@ -262,7 +269,7 @@ def expand_pools_and_tail(
     Args:
         selected_pool_ids (Tensor): Top-k pool ids from the indexer kernel, shape
             ``[S, 1, index_topk // index_kpool]``, ``-1`` for unfilled slots.
-        pool_index (Tensor): From :func:`build_pools`, shape ``[P, index_kpool]``.
+        pool_index (Tensor): From :func:`build_pools`, shape ``[P_max, index_kpool]``.
         seq_ctx (SequenceContext): Packed-sequence metadata.
         index_topk (int): Semantic token budget (e.g. 2048).
         index_kpool (int): Pool size.
