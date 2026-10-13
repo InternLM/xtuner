@@ -342,6 +342,10 @@ class Glm53TextMoEConfig(MoEConfig):
     # `fully_shard(ignored_params=...)`, leaving them replicated and untouched by the policy
     # (and `_get_save_dtype` then writes them back out as fp32). Needed because
     # `hc_split_sinkhorn`'s 20 iterations and KDA's `fused_kda_gate` are bf16-unstable.
+    # Convolution masters must also stay fp32 so their gradients are not rounded before
+    # replicated-parameter reduction; the convolution forward still uses the activation dtype.
+    # This shared policy also exports convolution tensors as fp32. BF16 inference loads
+    # round them to the same values used by the convolution forward during training.
     #
     # `hc_*_fn` is deliberately absent: `hc_pre` already casts it to the activation dtype, and
     # ignored parameters are replicated rather than sharded, so pinning a
@@ -356,6 +360,7 @@ class Glm53TextMoEConfig(MoEConfig):
             r"model\.language_model\.layers\.\d+\.hc_(attn|ffn)_(base|scale)",
             r"model\.language_model\.layers\.\d+\.self_attn\.A_log",
             r"model\.language_model\.layers\.\d+\.self_attn\.dt_bias",
+            r"model\.language_model\.layers\.\d+\.self_attn\.[qkv]_conv1d\.(weight|bias)",
         ],
     )
 

@@ -216,16 +216,29 @@ class TestGlm53TextMoEFp32Params:
         patterns = cfg.hf_save_cfg.fp32_keys_pattern or []
         return any(re.search(p, k) for p in patterns for k in model.to_hf_key_list(param_name))
 
-    def test_only_the_sinkhorn_and_gate_scalars_are_pinned_to_fp32(self):
-        # sinkhorn 的 base/scale 与 KDA 的 A_log/dt_bias 必须留在 fp32；而 hc_*_fn 刻意不留
-        # （hc_pre 本就把它转成激活 dtype，pin 住只会让 45x2 个投影矩阵在每个 rank 上复制）。
+    def test_sensitive_parameters_are_pinned_to_fp32(self):
+        # Preserve sinkhorn, gate, and convolution precision through the HF key mapping.
+        # hc_pre already casts hc_*_fn to the activation dtype, so leave those matrices sharded.
         cfg = _tiny_cfg()
         model = cfg.build()
-        pinned = [n for n, _ in model.named_parameters() if re.search(r"hc_(attn|ffn)_(base|scale)|A_log|dt_bias", n)]
+        pinned = [
+            n
+            for n, _ in model.named_parameters()
+            if re.search(r"hc_(attn|ffn)_(base|scale)|A_log|dt_bias|[qkv]_conv1d\.(weight|bias)", n)
+        ]
         assert pinned, "tiny config should carry mHC and KDA parameters"
         for name in pinned:
             assert self._matches(cfg, model, name), f"{name} -> {model.to_hf_key_list(name)} not pinned to fp32"
         assert not self._matches(cfg, model, "layers.0.hc_attn_fn")
+        assert not self._matches(cfg, model, "layers.0.self_attn.q_proj.weight")
+
+    def test_convolution_export_preserves_fp32_masters(self):
+        model = _tiny_cfg().build()
+        for projection in ("q", "k", "v"):
+            key = model.to_hf_key_list(f"layers.0.self_attn.{projection}_conv1d.weight")[0]
+            assert model._get_save_dtype(key, torch.bfloat16) == torch.float32
+        key = model.to_hf_key_list("layers.0.self_attn.q_proj.weight")[0]
+        assert model._get_save_dtype(key, torch.bfloat16) == torch.bfloat16
 
 
 @pytest.mark.gpu

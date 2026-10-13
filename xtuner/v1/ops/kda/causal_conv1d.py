@@ -7,11 +7,15 @@ FLA's ``causal_conv1d`` dispatcher derives its chunk table from ``cu_seqlens`` a
 launch helpers that dynamo cannot trace, so KDA's three per-layer convolutions (q/k/v) each broke
 the enclosing compiled region -- the largest single source of graph breaks left after
 ``chunk_kda.py``. This wraps the same ``causal_conv1d_fwd``/``causal_conv1d_bwd`` Triton entry
-points in ``torch.library.custom_op``, so the numerics are FLA's and the graph stays whole.
+points in ``torch.library.custom_op`` so the graph stays whole. The forward uses weights
+rounded to the activation dtype; FP32 master parameters retain FP32 weight/bias gradients
+instead of FLA's final low-precision cast.
 
 Only KDA's call shape is supported: no residual, no ``initial_state``, no returned final state,
 and the Triton backend. Anything else should keep using FLA's own dispatcher.
 """
+
+from typing import Any
 
 import torch
 from fla.modules.conv.triton.ops import causal_conv1d_bwd as _fla_causal_conv1d_bwd
@@ -34,10 +38,12 @@ def causal_conv1d_fwd(
     activation: str | None,
     cu_seqlens: torch.Tensor | None,
 ) -> torch.Tensor:
+    # Keep the established low-precision forward even when FSDP preserves an
+    # FP32 master here so its gradient can be reduced without an earlier cast.
     y, _ = _fla_causal_conv1d_fwd(
         x=x,
-        weight=weight,
-        bias=bias,
+        weight=weight.to(x.dtype),
+        bias=None if bias is None else bias.to(x.dtype),
         residual=None,
         initial_state=None,
         output_final_state=False,
@@ -72,12 +78,15 @@ def causal_conv1d_bwd(
     activation: str | None,
     cu_seqlens: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    # FLA casts dw/db to the supplied parameter dtype after its FP32 sum. Use
+    # the forward's rounded values, represented in the original parameter
+    # dtype, to preserve both the forward derivative and FP32 accumulation.
     dx, dw, db, _, _ = _fla_causal_conv1d_bwd(
         x=x,
         dy=dy,
         dht=None,
-        weight=weight,
-        bias=bias,
+        weight=weight.to(x.dtype).to(weight.dtype),
+        bias=None if bias is None else bias.to(x.dtype).to(bias.dtype),
         residual=None,
         initial_state=None,
         activation=activation,
@@ -132,26 +141,47 @@ def causal_conv1d(
     bias: torch.Tensor | None = None,
     activation: str | None = None,
     cu_seqlens: torch.Tensor | None = None,
-    **kwargs,
+    *,
+    backend: str = "triton",
+    residual: torch.Tensor | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool | None = False,
+    cp_context: Any | None = None,
 ) -> tuple[torch.Tensor, None]:
     """Causal depthwise short convolution, traceable by ``torch.compile``.
 
     Args:
         x (torch.Tensor): Input of shape ``[B, T, D]``.
-        weight (torch.Tensor): Depthwise kernel of shape ``[D, W]``.
-        bias (torch.Tensor | None): Optional per-channel bias ``[D]``.
+        weight (torch.Tensor): Depthwise kernel of shape ``[D, W]``. Forward values are
+            rounded to ``x.dtype``; the parameter dtype controls gradient precision.
+        bias (torch.Tensor | None): Optional per-channel bias ``[D]``, with the same
+            forward-rounding and gradient-precision contract as ``weight``.
         activation (str | None): ``"silu"``/``"swish"`` or ``None``.
         cu_seqlens (torch.Tensor | None): Packed-sequence offsets, so the convolution never reads
             across a document boundary.
+        backend (str): Only ``"triton"`` is supported.
+        residual (torch.Tensor | None): Must be ``None``.
+        initial_state (torch.Tensor | None): Must be ``None``.
+        output_final_state (bool | None): Must be ``False`` or ``None``.
+        cp_context (Any | None): Must be ``None``; sequence SP uses a separate entry point.
 
     Returns:
         tuple[torch.Tensor, None]: The convolved tensor, and ``None`` for the final state, which
         this entry point does not produce.
     """
-    for unsupported in ("residual", "initial_state", "output_final_state", "cp_context"):
-        if kwargs.get(unsupported):
+    if backend != "triton":
+        raise NotImplementedError("xtuner's causal_conv1d supports only backend='triton'.")
+    if activation not in (None, "silu", "swish"):
+        raise ValueError(f"Unsupported causal_conv1d activation: {activation!r}")
+    for unsupported, value in (("residual", residual), ("initial_state", initial_state), ("cp_context", cp_context)):
+        if value is not None:
             raise NotImplementedError(
                 f"xtuner's compile-friendly causal_conv1d does not support {unsupported!r}; use "
                 "fla.modules.conv.causal_conv1d directly."
             )
+    if output_final_state is not None and output_final_state is not False:
+        raise NotImplementedError(
+            "xtuner's compile-friendly causal_conv1d does not support 'output_final_state'; use "
+            "fla.modules.conv.causal_conv1d directly."
+        )
     return CausalConv1dFunction.apply(x, weight, bias, activation, cu_seqlens), None

@@ -128,4 +128,7 @@ def fused_kda_gate(
             "xtuner's compile-friendly fused_kda_gate always emits fp32; use fla.ops.kda.gate "
             "directly if a caller needs another dtype."
         )
-    return KDAGateFunction.apply(g, A_log, dt_bias, lower_bound)
+    # FLA casts dg to g.dtype before summing dbias. Keep that reduction in fp32;
+    # the external cast restores dg to the projection dtype after the custom backward.
+    # Forward is unchanged: the FLA kernel already loads g in fp32.
+    return KDAGateFunction.apply(g.float(), A_log, dt_bias, lower_bound)
