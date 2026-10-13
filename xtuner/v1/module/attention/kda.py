@@ -18,17 +18,18 @@ via a separate ``forget_gate`` module before calling the (kernelizable) chunk/re
 from __future__ import annotations
 
 import math
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 import torch
 import torch.nn as nn
 from cyclopts import Parameter
 from einops import rearrange
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
+from xtuner.v1.ops.fp32_linear import fp32_linear
 from xtuner.v1.ops.kda import get_causal_conv1d_fn, get_chunk_kda_fn, get_fused_kda_gate_fn
 from xtuner.v1.utils.dtensor import materialize_full
 from xtuner.v1.utils.init_weight import init_params
@@ -187,6 +188,8 @@ class KDAConfig(BaseModel):
     # Both implementations use SequenceContext.sequence_parallel_mesh.
     # Preserve the original Ulysses default; FLA keeps projected tensors local.
     sp_impl: Literal["ulysses", "fla"] = "ulysses"
+    # Opt-in: keep sensitive gate projections outside FP8 and fix their token-row shape.
+    gate_projection_block_size: int = Field(default=0, ge=0)
 
     def build(
         self,
@@ -226,6 +229,7 @@ class KimiDeltaAttention(nn.Module):
         gate_lower_bound: float | None = -5.0,
         rms_norm_eps: float = 1e-5,
         sp_impl: Literal["ulysses", "fla"] = "ulysses",
+        gate_projection_block_size: int = 0,
         layer_idx: int = 0,
         float8_cfg: Float8Config | None = None,
     ) -> None:
@@ -252,6 +256,8 @@ class KimiDeltaAttention(nn.Module):
         if sp_impl not in ("ulysses", "fla"):
             raise ValueError(f"Unsupported KDA sp_impl: {sp_impl!r}")
         self.sp_impl = sp_impl
+        self.gate_projection_block_size = gate_projection_block_size
+        gate_float8_cfg = None if gate_projection_block_size else float8_cfg
 
         projection_size = head_dim * num_heads
         self.q_proj = build_linear(hidden_size, projection_size, bias=False, float8_cfg=float8_cfg)
@@ -268,8 +274,8 @@ class KimiDeltaAttention(nn.Module):
             hidden_size=projection_size, kernel_size=conv_kernel_size, activation="silu"
         )
 
-        self.f_a_proj = build_linear(hidden_size, head_dim, bias=False, float8_cfg=float8_cfg)
-        self.f_b_proj = build_linear(head_dim, projection_size, bias=False, float8_cfg=float8_cfg)
+        self.f_a_proj = build_linear(hidden_size, head_dim, bias=False, float8_cfg=gate_float8_cfg)
+        self.f_b_proj = build_linear(head_dim, projection_size, bias=False, float8_cfg=gate_float8_cfg)
         self.A_log = nn.Parameter(torch.empty(num_heads, dtype=torch.float32))
         self.dt_bias = nn.Parameter(torch.empty(projection_size, dtype=torch.float32))
         if not self.A_log.is_meta:
@@ -277,10 +283,10 @@ class KimiDeltaAttention(nn.Module):
         self.b_proj = build_linear(hidden_size, num_heads, bias=False, float8_cfg=float8_cfg)
 
         if use_full_rank_gate:
-            self.g_proj = build_linear(hidden_size, projection_size, bias=False, float8_cfg=float8_cfg)
+            self.g_proj = build_linear(hidden_size, projection_size, bias=False, float8_cfg=gate_float8_cfg)
         else:
-            self.g_a_proj = build_linear(hidden_size, head_dim, bias=False, float8_cfg=float8_cfg)
-            self.g_b_proj = build_linear(head_dim, projection_size, bias=False, float8_cfg=float8_cfg)
+            self.g_a_proj = build_linear(hidden_size, head_dim, bias=False, float8_cfg=gate_float8_cfg)
+            self.g_b_proj = build_linear(head_dim, projection_size, bias=False, float8_cfg=gate_float8_cfg)
 
         self.o_norm = FusedRMSNormGated(head_dim, eps=rms_norm_eps, activation="sigmoid")
         self.o_proj = build_linear(projection_size, hidden_size, bias=False, float8_cfg=float8_cfg)
@@ -318,9 +324,17 @@ class KimiDeltaAttention(nn.Module):
             return chunk_kda
         return _run_recurrent_kda
 
+    def _project_gate(self, layer: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
+        if not self.gate_projection_block_size:
+            return layer(hidden_states)
+        weight = materialize_full(cast(torch.Tensor, layer.weight), name="kda.gate.weight")
+        return fp32_linear(hidden_states, weight, block_size=self.gate_projection_block_size)
+
     def _compute_gate_and_beta(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size, seq_len, _ = hidden_states.shape
-        g_raw = self.f_b_proj(self.f_a_proj(hidden_states)).view(batch_size, seq_len, self.num_heads, self.head_dim)
+        g_raw = self._project_gate(self.f_b_proj, self._project_gate(self.f_a_proj, hidden_states)).view(
+            batch_size, seq_len, self.num_heads, self.head_dim
+        )
         gate = fused_kda_gate(
             g_raw,
             _gate_param(self.A_log),
@@ -332,8 +346,8 @@ class KimiDeltaAttention(nn.Module):
 
     def _gate_output(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.use_full_rank_gate:
-            return self.g_proj(hidden_states)
-        return self.g_b_proj(self.g_a_proj(hidden_states))
+            return self._project_gate(self.g_proj, hidden_states)
+        return self._project_gate(self.g_b_proj, self._project_gate(self.g_a_proj, hidden_states))
 
     def forward(
         self,
@@ -458,7 +472,7 @@ class KimiDeltaAttention(nn.Module):
         )
 
         # Local seq, full heads -> all_to_all -> full seq, head shard (same as GDN g/beta).
-        g_raw = self.f_b_proj(self.f_a_proj(hidden_states))
+        g_raw = self._project_gate(self.f_b_proj, self._project_gate(self.f_a_proj, hidden_states))
         g_raw = g_raw.view(batch_size, seq_len, projection_size).transpose(1, 2)  # (B, H*D, L/sp)
         g_raw = _all_to_all_g(g_raw, scatter_dim=1, gather_dim=2, mesh=sp_mesh)
         g_raw = g_raw.transpose(1, 2).view(batch_size, seq_len * sp_size, self.num_heads // sp_size, self.head_dim)
