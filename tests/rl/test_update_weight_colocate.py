@@ -81,23 +81,30 @@ class TestUpdateWeightColocate(unittest.TestCase):
     def setUpClass(cls) -> None:
         if MODEL_PATH is None:
             raise unittest.SkipTest("MODEL_PATH is not set")
-        os.environ["XTUNER_USE_FA3"] = "1"
-        os.environ["NCCL_CUMEM_ENABLE"] = "0"
-        os.environ["NCCL_IB_HCA"] = "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
-        os.environ["PS_P2P_STORE_RDMA_DEVICES"] = "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
         if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
-            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:False"
+            alloc_conf = "expandable_segments:False"
         elif os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "1":
-            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+            alloc_conf = "expandable_segments:True"
         else:
             raise unittest.SkipTest("XTUNER_USE_SGLANG or XTUNER_USE_LMDEPLOY is not set")
+
+        updates = {
+            "XTUNER_USE_FA3": "1",
+            "NCCL_CUMEM_ENABLE": "0",
+            "NCCL_IB_HCA": "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7",
+            "PS_P2P_STORE_RDMA_DEVICES": "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7",
+            "PYTORCH_CUDA_ALLOC_CONF": alloc_conf,
+        }
+        cls._old_env = {key: os.environ.get(key) for key in updates}
+        os.environ.update(updates)
+
     @classmethod
     def tearDownClass(cls) -> None:
-        del os.environ["XTUNER_USE_FA3"]
-        del os.environ["NCCL_CUMEM_ENABLE"]
-        del os.environ["NCCL_IB_HCA"]
-        del os.environ["PS_P2P_STORE_RDMA_DEVICES"]
-        del os.environ["PYTORCH_CUDA_ALLOC_CONF"]
+        for key, old in getattr(cls, "_old_env", {}).items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
 
     def setUp(self):
         self.model_path = MODEL_PATH
@@ -119,14 +126,12 @@ class TestUpdateWeightColocate(unittest.TestCase):
             self.temp_dir = None
 
     def init_config(self, *, weight_transport_type: str, extra_rollout_config: dict | None = None):
-        nnodes = int(os.environ.get("WORLD_SIZE", "1"))
-        num_workers = int(os.environ.get("COLOCATE_NUM_WORKERS", str(8 * nnodes)))
         rollout_tp_size = 4
         rollout_ep_size = 1
 
         self.resources_cfg = AcceleratorResourcesConfig(
             accelerator="GPU",
-            num_workers=num_workers,
+            num_workers=8,
             num_cpus_per_worker=12,
             cpu_memory_per_worker=32 * 1024**3,
         )
@@ -139,14 +144,14 @@ class TestUpdateWeightColocate(unittest.TestCase):
             rollout_cross_node_comm=False,
             tensor_parallel_size=rollout_tp_size,
             expert_parallel_size=rollout_ep_size,
-            gpus_per_node=int(os.environ.get("GPUS_PER_NODE", "8")),
+            gpus_per_node=8,
             dtype="bfloat16",
             skip_load_weights=False,
             weight_transport_type=weight_transport_type,
             checkpoint_name_prefix=f"test-update-weight-colocate-{id(self)}",
-            context_length=int(os.environ.get("ROLLOUT_CONTEXT_LENGTH", "10240")),
+            context_length=10240,
             worker_log_dir=self.worker_log_dir,
-            gpu_memory_utilization=float(os.environ.get("ROLLOUT_GPU_MEMORY_UTILIZATION", "0.8")),
+            gpu_memory_utilization=0.8,
             extra_rollout_config=extra_rollout_config or {},
         )
 
@@ -179,7 +184,7 @@ class TestUpdateWeightColocate(unittest.TestCase):
             fsdp_cfg=fsdp_cfg,
             sp_size=1,
             optimizer_steps=1,
-            pack_max_length=int(os.environ.get("PACK_MAX_LENGTH", str(10 * 1024))),
+            pack_max_length=10*1024,
         )
 
     def _setup_engines(self, *, weight_transport_type: str, extra_rollout_config: dict | None = None):
