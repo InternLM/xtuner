@@ -6,7 +6,7 @@ Critic 模型配置的 `head_type` 必须是 `"value_head"`。checkpoint 里没�
 
 Critic 前向不使用 rollout 记录的 expert id。`seq_ctx.rollout_routed_experts` 在进 critic 前被置成 `None`，MoE router 按 critic 自己的 logits 选 expert。这些 ObjectRef 留给后面的 actor `fit` 再取、再释放。
 
-参数在 CPU 和 GPU 之间的切换只发生在 `onload` / `offload`，由 `switch_role_modules` 调用。`collect_values`、`forward_only` 和 `critic.fit` 不自己搬模型。
+参数在 CPU 和 GPU 之间的切换只发生在 `onload` / `offload`，由 `switch_role_modules` 调用。`collect_values` 和 `critic.fit` 不自己搬模型。
 
 ## GAEAdvantageConfig
 

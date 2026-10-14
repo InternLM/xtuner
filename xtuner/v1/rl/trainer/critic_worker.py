@@ -16,7 +16,7 @@ from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.rl.loss import CriticLossConfig, CriticLossContext
 from xtuner.v1.utils import get_device, get_torch_device_module
 
-from .pack import DPRankPackIndices
+from .pack import DPRankPackIndices, TokenTensorBatch
 from .schedule import build_lr_scheduler, optimizer_step_succeeds, partition_indices, pass_order
 from .worker import TrainBatchAttr, WorkerLogItem, WorkerTrainLogItem
 
@@ -187,7 +187,7 @@ class CriticWorker:
             raise ValueError("critic loss context could not be built from returns")
         return seq_ctx, loss_ctx
 
-    def _forward_values(self, seq_ctx: SequenceContext) -> torch.Tensor:
+    def forward_only(self, seq_ctx: SequenceContext) -> torch.Tensor:
         with torch.no_grad():
             # Value collection is inference: loss_ctx=None returns the value-head
             # logits. TrainEngine.forward_only always wraps a LogProbContext and
@@ -198,123 +198,109 @@ class CriticWorker:
             raise RuntimeError("critic forward did not return value predictions")
         return values.float()
 
-    def collect_values(
-        self,
-        rollout_item_refs: list[ray.ObjectRef],
-        batch_attr: TrainBatchAttr,
-        pack_plan: DPRankPackIndices,
-    ) -> list[list[float]]:
-        """Return one value vector per local sample, aligned with shifted
-        labels."""
+    def collect_values(self) -> TokenTensorBatch:
+        """Return packed values and keep the per-sample rows on this worker."""
         host = self._require_host()
-        rollout_items: list[RolloutState] = ray.get(rollout_item_refs[0])
+        train_samples, pack_plan, batch_attr = host._get_cached_batch()
         samples: list[tuple[SequenceContext, torch.Tensor, torch.Tensor, None]] = []
-        for state in rollout_items:
-            seq_ctx, loss_ctx = host._convert_one_rollout_state(state, 0.0, batch_attr["use_3d_position_ids"])
-            labels = loss_ctx.loss_kwargs.shifted_labels
-            samples.append((seq_ctx, labels, torch.zeros_like(labels, dtype=torch.float32), None))
+        for item in train_samples:
+            labels = item.shifted_labels
+            samples.append((item.seq_ctx, labels, torch.zeros_like(labels, dtype=torch.float32), None))
         packed: list[list[tuple[list[int], SequenceContext, torch.Tensor]]] = []
         for step in pack_plan:
             packed.append([(pack, *self._pack_one([samples[i] for i in pack], batch_attr)[:2]) for pack in step])
         torch.distributed.barrier()
-        values: list[list[float] | None] = [None] * len(samples)
+        values: list[torch.Tensor | None] = [None] * len(samples)
         for packed_step in packed:
             for indices, forward_ctx, _shifted_labels in packed_step:
                 forward_ctx = host._prepare_forward_seq_ctx(
                     forward_ctx, sequence_parallel=False, need_routed_experts=False
                 )
-                raw = self._forward_values(forward_ctx).detach().float().reshape(-1)
+                raw = self.forward_only(forward_ctx).detach().float().reshape(-1)
                 offset = 0
                 for index in indices:
                     length = samples[index][1].size(1)
-                    values[index] = raw[offset : offset + length].cpu().tolist()
+                    values[index] = raw[offset : offset + length].detach().float().cpu()
                     offset += length
-        collected: list[list[float]] = []
-        for item in values:
-            if item is None:
+        collected: list[torch.Tensor] = []
+        for value in values:
+            if value is None:
                 raise RuntimeError("pack plan did not cover every local sample")
-            collected.append(item)
-        return collected
-
-    def forward_only(
-        self,
-        rollout_item_refs: list[ray.ObjectRef],
-        advantages: list[float],
-        pack_plan: DPRankPackIndices,
-        batch_attr: TrainBatchAttr,
-        **kwargs,
-    ) -> list[torch.Tensor]:
-        """Return old value predictions for the packed plan without a loss."""
-        del advantages, kwargs
-        packed = self._materialize(rollout_item_refs, pack_plan, batch_attr)
-        values: list[torch.Tensor] = []
-        for step in packed:
-            for seq_ctx, _, _, _ in step:
-                values.append(
-                    self._forward_values(
-                        self._require_host()._prepare_forward_seq_ctx(seq_ctx, need_routed_experts=False)
-                    )
-                )
-        return values
+            collected.append(value)
+        batch = TokenTensorBatch.cat_samples(collected)
+        for item, row in zip(train_samples, batch.split_samples()):
+            item.values = row.unsqueeze(0)
+        return batch
 
     def _materialize(
         self,
         rollout_item_refs: list[ray.ObjectRef],
         pack_plan: DPRankPackIndices,
         batch_attr: TrainBatchAttr,
-        token_returns: list[list[float]] | None = None,
-        token_values: list[list[float]] | None = None,
+        token_returns: TokenTensorBatch | None = None,
     ) -> list[list[tuple[SequenceContext, torch.Tensor, torch.Tensor, torch.Tensor | None]]]:
         host = self._require_host()
-        rollout_items: list[RolloutState] = ray.get(rollout_item_refs[0])
+        train_samples = host._cached_samples
+        rollout_items: list[RolloutState] | None = None
+        values_ready = train_samples is not None and all(item.values is not None for item in train_samples)
+        if train_samples is None:
+            if not rollout_item_refs:
+                raise RuntimeError("critic materialize requires a loaded training batch")
+            host.load_train_batch(rollout_item_refs, pack_plan, batch_attr)
+            train_samples = host._cached_samples
+            if train_samples is None:
+                raise RuntimeError("critic materialize requires a loaded training batch")
+        if token_returns is None or not values_ready:
+            if not rollout_item_refs:
+                raise RuntimeError("critic materialize requires a loaded training batch")
+            rollout_items = ray.get(rollout_item_refs[0])
+        return_rows = None if token_returns is None else token_returns.split_samples()
+        if return_rows is not None and len(return_rows) != len(train_samples):
+            raise ValueError(f"token return rows {len(return_rows)} do not match samples {len(train_samples)}")
         samples: list[tuple[SequenceContext, torch.Tensor, torch.Tensor, torch.Tensor | None]] = []
-        for index, state in enumerate(rollout_items):
-            seq_ctx, loss_ctx = host._convert_one_rollout_state(state, 0.0, batch_attr["use_3d_position_ids"])
-            shifted_labels = loss_ctx.loss_kwargs.shifted_labels
+        for index, item in enumerate(train_samples):
+            shifted_labels = item.shifted_labels
             shifted_len = shifted_labels.size(1)
-            returns: torch.Tensor | None
-            if token_returns is not None:
-                returns = torch.tensor(token_returns[index], dtype=torch.float32).unsqueeze(0)
-                if returns.size(1) != shifted_len:
+            if return_rows is not None:
+                item.returns = return_rows[index].unsqueeze(0)
+                if item.returns.size(1) != shifted_len:
                     raise ValueError(
-                        f"token returns length {returns.size(1)} does not match shifted labels length {shifted_len}"
+                        f"token returns length {item.returns.size(1)} does not match "
+                        f"shifted labels length {shifted_len}"
                     )
-            else:
-                returns = self._token_tensor(state, "returns", shifted_len)
-            if returns is None:
+            elif item.returns is None:
+                if rollout_items is None:
+                    raise RuntimeError("critic materialize is missing rollout states for extra-field returns")
+                item.returns = self._token_tensor(rollout_items[index], "returns", shifted_len)
+            if item.returns is None:
                 raise ValueError("PPO critic fit requires per-token returns")
-            old_values: torch.Tensor | None
-            if token_values is not None:
-                old_values = torch.tensor(token_values[index], dtype=torch.float32).unsqueeze(0)
-            else:
-                old_values = self._token_tensor(state, "old_values", shifted_len)
-            samples.append((seq_ctx, shifted_labels, returns, old_values))
+            if item.values is None and rollout_items is not None:
+                item.values = self._token_tensor(rollout_items[index], "old_values", shifted_len)
+            if item.values is not None and item.values.size(1) != shifted_len:
+                raise ValueError(
+                    f"cached value length {item.values.size(1)} does not match shifted labels length {shifted_len}"
+                )
+            samples.append((item.seq_ctx, shifted_labels, item.returns, item.values))
         return [
             [self._pack_one([samples[index] for index in pack], batch_attr) for pack in step] for step in pack_plan
         ]
 
-    def fit(
-        self,
-        rollout_item_refs: list[ray.ObjectRef],
-        advantages: list[float],
-        pack_plan: DPRankPackIndices,
-        batch_attr: TrainBatchAttr,
-        rollout_idx: int = 0,
-        token_returns: list[list[float]] | None = None,
-        token_values: list[list[float]] | None = None,
-        **kwargs,
-    ) -> WorkerLogItem:
-        """Train the clipped value head for ``num_passes`` over the packed
-        plan."""
-        del advantages, kwargs
+    def fit(self, token_returns: TokenTensorBatch | None = None, **kwargs) -> WorkerLogItem:
+        """Train the clipped value head for ``num_passes`` over the loaded pack
+        plan.
+
+        Old values and returns are stored on the host ``TrainSample`` cache.
+        """
+        del kwargs
+        host = self._require_host()
+        _samples, pack_plan, batch_attr = host._get_cached_batch()
         step_batches = self._materialize(
-            rollout_item_refs,
+            [],
             pack_plan,
             batch_attr,
             token_returns=token_returns,
-            token_values=token_values,
         )
-        updates = self._critic_updates(step_batches, rollout_idx)
+        updates = self._critic_updates(step_batches, batch_attr["rollout_idx"])
         worker_log_item: WorkerLogItem = {"train_entropy": 0.0, "train_metrics": []}
 
         for step in updates:

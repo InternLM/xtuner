@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 import ray
 import torch
@@ -13,7 +13,7 @@ from xtuner.v1.rl.utils import free_object_refs
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import get_logger
 
-from .pack import DPRankPackIndices, RLDataPacker
+from .pack import DPRankPackIndices, RLDataPacker, TokenTensorBatch
 from .worker import TrainBatchAttr, TrainingWorker, WorkerConfig, WorkerLogItem
 
 
@@ -30,7 +30,6 @@ class _DPRankDispatch(TypedDict):
     plan: DPRankPackIndices
     rollout_items: list[RolloutState]
     sample_indices: list[int]
-    advantages: NotRequired[list[float] | list[list[float]]]
 
 
 class _PackPlan(TypedDict):
@@ -49,7 +48,6 @@ class _PreparedBatch(TypedDict):
     """Outputs of ``_prepare_rollout_items`` consumed by the fit phases."""
 
     rollout_items: list[RolloutState]
-    advantages: list[float]
     batch_attr: TrainBatchAttr
     cluster_rewards: list[float]
     distillation_reward_observations: list[tuple[RolloutState, float]]
@@ -197,9 +195,6 @@ class TrainingController:
             list[float]: Advantage per state, aligned with the group order. Zero when task advantage
             is disabled or the state carries no reward.
         """
-        if self._uses_gae():
-            # Token advantages are filled after the critic value pass.
-            return [0.0] * len(cluster_indices)
         if self.task_adv_weight != 0 and self.advantage_estimator is not None:
             cluster_advantages = self.advantage_estimator.compute(
                 torch.tensor(cluster_rewards, dtype=torch.float32), session_representatives
@@ -230,6 +225,7 @@ class TrainingController:
         prepared: _PreparedBatch,
         pack_plan: _PackPlan,
         log_infos: list[WorkerLogItem],
+        sample_advantages: list[float],
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
         critic_log_infos: list[WorkerLogItem] | None = None,
@@ -244,6 +240,7 @@ class TrainingController:
             prepared (_PreparedBatch): Output of ``_prepare_rollout_items``.
             pack_plan (_PackPlan): Output of ``_build_pack_plan``.
             log_infos (list[WorkerLogItem]): Per-worker actor training logs of the batch.
+            sample_advantages (list[float]): One scalar per rollout item, from ``_compute_advantages``.
             raw_rewards_sum (float): Producer-side raw reward sum used by ``raw_rewards/mean``.
             raw_rewards_count (int): Producer-side raw reward count used by ``raw_rewards/mean``.
             critic_log_infos (list[WorkerLogItem] | None): Per-worker critic logs. Rank 0 is
@@ -257,7 +254,7 @@ class TrainingController:
         response_len_list: list[float] = []
         tool_turns_list: list[int] = []
         training_tokens = 0
-        for state, advantage in zip(prepared["rollout_items"], prepared["advantages"]):
+        for state, advantage in zip(prepared["rollout_items"], sample_advantages):
             # Advantage metrics count one entry per supervised position, matching the
             # per-position advantage layout built by the worker conversion.
             supervised_positions = int(state.extra_fields["supervised_tokens"])
@@ -318,8 +315,8 @@ class TrainingController:
         return info_dict
 
     def _prepare_rollout_items(self, rollout_groups: list[list[RolloutState]], rollout_idx: int) -> _PreparedBatch:
-        """Cluster rewards, estimate advantages and validate the train meta
-        fields without building training tensors.
+        """Cluster rewards and validate the train meta fields without building
+        training tensors or advantages.
 
         Groups arrive pre-filtered: the replay buffer selects by ``Status.COMPLETED``
         and sample alignment is guaranteed by ``canonicalize_train_fields`` on the
@@ -331,31 +328,26 @@ class TrainingController:
             rollout_idx (int): Global rollout (train step) id written into ``batch_attr``.
 
         Returns:
-            _PreparedBatch: Flat rollout items in training order with aligned
-            advantages, reward clusters for the step statistics, and the batch-level
-            ``TrainBatchAttr`` derived in the same single pass over the states.
+            _PreparedBatch: Flat rollout items in training order, reward clusters for
+            the step statistics, and the batch-level ``TrainBatchAttr`` derived in the
+            same single pass over the states. Advantages are returned later by
+            ``_compute_advantages``.
         """
         cluster_rewards_list: list[float] = []
         distillation_reward_observations: list[tuple[RolloutState, float]] = []
         rollout_items: list[RolloutState] = []
-        advantages: list[float] = []
         use_3d_position_ids = False
         has_rollout_logprobs = False
         has_routed_experts = False
         for group in rollout_groups:
-            # Phase 1: session reward clustering keeps one reward per agentic session so
-            # rewards/* and advantages are not amplified by per-session segment counts.
-            cluster_rewards, session_representatives, cluster_indices = self._cluster_group_rewards(group)
+            # Session reward clustering keeps one reward per agentic session so rewards/*
+            # are not amplified by per-session segment counts.
+            cluster_rewards, session_representatives, _ = self._cluster_group_rewards(group)
             cluster_rewards_list.extend(cluster_rewards)
             distillation_reward_observations.extend(zip(session_representatives, cluster_rewards))
 
-            # Phase 2: group-level advantage estimation scattered back to members.
-            sample_advantages = self._compute_group_advantages(
-                cluster_rewards, session_representatives, cluster_indices
-            )
-            for state, advantage in zip(group, sample_advantages):
+            for state in group:
                 rollout_items.append(state)
-                advantages.append(advantage)
                 use_3d_position_ids = use_3d_position_ids or _state_uses_3d_position_ids(state)
                 has_rollout_logprobs = has_rollout_logprobs or _state_has_rollout_logprobs(state)
                 has_routed_experts = has_routed_experts or _state_has_routed_experts(state)
@@ -373,7 +365,6 @@ class TrainingController:
 
         return {
             "rollout_items": rollout_items,
-            "advantages": advantages,
             "batch_attr": {
                 "rollout_idx": rollout_idx,
                 "use_3d_position_ids": use_3d_position_ids,
@@ -453,9 +444,8 @@ class TrainingController:
         self,
         rollout_items: list[RolloutState],
         pack_plan: _PackPlan,
-        value_lists: list[list[list[float]]],
+        value_batches: list[TokenTensorBatch],
         data_replicate_size: int,
-        rollout_idx: int,
     ) -> tuple[list[list[float]], list[list[float]]]:
         """Build split actor advantages and critic returns from critic
         values."""
@@ -466,7 +456,7 @@ class TrainingController:
             raise RuntimeError("Critic training requires a GAE advantage estimator")
         dense_values: list[list[float] | None] = [None] * len(rollout_items)
         for dp_rank, dispatch in pack_plan["dp_dispatches"].items():
-            local_values = value_lists[dp_rank * data_replicate_size]
+            local_values = [row.tolist() for row in value_batches[dp_rank * data_replicate_size].split_samples()]
             sample_indices = dispatch["sample_indices"]
             if len(local_values) != len(sample_indices):
                 raise ValueError(
@@ -480,8 +470,60 @@ class TrainingController:
         return estimator.compute_gae(
             rollout_items,
             cast(list[list[float]], dense_values),
-            rollout_idx,
         )
+
+    def _compute_advantages(
+        self,
+        rollout_groups: list[list[RolloutState]],
+        rollout_items: list[RolloutState],
+        pack_plan: _PackPlan,
+        value_batches: list[TokenTensorBatch] | None,
+        data_replicate_size: int,
+    ) -> tuple[list[float], list[list[float]] | None, list[list[float]] | None]:
+        """Return scalar advantages, token advantages, and critic returns.
+
+        Args:
+            rollout_groups (list[list[RolloutState]]): Training groups. Non-GAE estimates one
+                scalar per member from each group's clustered rewards.
+            rollout_items (list[RolloutState]): Flat states in the same order as
+                ``rollout_groups``. GAE reads ``labels`` from these states.
+            pack_plan (_PackPlan): Maps each DP rank's packed samples back to global indices.
+            value_batches (list[TokenTensorBatch] | None): Critic values, one batch per worker.
+                ``None`` when the estimator is not GAE.
+            data_replicate_size (int): Workers that share one DP rank. Only replica 0's values
+                are read, at worker index ``dp_rank * data_replicate_size``.
+
+        Returns:
+            sample_advantages (list[float]): One float per rollout item, for ``advantages/*``
+                logs. Non-GAE is the group estimate. GAE is the mean of that sample's
+                supervised-token advantages.
+            token_advantages (list[list[float]] | None): One row per sample and one value
+                per shifted token, passed to actor ``fit``. ``None`` for non-GAE.
+            token_returns (list[list[float]] | None): Critic returns with the same layout as
+                ``token_advantages``, passed to critic ``fit``. ``None`` for non-GAE.
+        """
+        if not self._uses_gae():
+            sample_advantages: list[float] = []
+            for group in rollout_groups:
+                cluster_rewards, representatives, cluster_indices = self._cluster_group_rewards(group)
+                sample_advantages.extend(
+                    self._compute_group_advantages(cluster_rewards, representatives, cluster_indices)
+                )
+            return sample_advantages, None, None
+        if value_batches is None:
+            raise RuntimeError("GAE requires critic values")
+        token_advantages, token_returns = self._compute_ppo_targets(
+            rollout_items, pack_plan, value_batches, data_replicate_size
+        )
+        sample_means: list[float] = []
+        for state, row in zip(rollout_items, token_advantages):
+            labels = state.labels or []
+            mask = [label != -100 for label in labels[1:]]
+            if len(mask) != len(row):
+                raise ValueError(f"shifted label length {len(mask)} does not match advantage length {len(row)}")
+            supervised = [advantage for advantage, keep in zip(row, mask) if keep]
+            sample_means.append(sum(supervised) / len(supervised) if supervised else 0.0)
+        return sample_means, token_advantages, token_returns
 
     def fit(
         self,
@@ -519,77 +561,63 @@ class TrainingController:
                 dp_rank: [ray.put(dispatch["rollout_items"])]
                 for dp_rank, dispatch in pack_plan["dp_dispatches"].items()
             }
-            token_advantages: list[list[float]] | None = None
-            critic_log_infos: list[WorkerLogItem] | None = None
-            if has_critic:
-                self.switch_role_modules("critic")
-                value_handles = []
-                for worker_idx, worker in enumerate(self.workers):
-                    dp_rank = worker_idx // data_replicate_size
-                    dp_dispatch = pack_plan["dp_dispatches"][dp_rank]
-                    value_handles.append(
-                        worker.call_attached.remote(
-                            "critic",
-                            "collect_values",
-                            rollout_item_refs=item_refs_by_dp[dp_rank],
-                            batch_attr=prepared["batch_attr"],
-                            pack_plan=dp_dispatch["plan"],
-                        )
-                    )
-                value_lists = ray.get(value_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
-                token_advantages, token_returns = self._compute_ppo_targets(
-                    rollout_items, pack_plan, value_lists, data_replicate_size, rollout_idx
-                )
-                sample_means: list[float] = []
-                for state, sample_advantages in zip(rollout_items, token_advantages):
-                    labels = state.labels or []
-                    mask = [label != -100 for label in labels[1:]]
-                    if len(mask) != len(sample_advantages):
-                        raise ValueError(
-                            f"shifted label length {len(mask)} does not match advantage length {len(sample_advantages)}"
-                        )
-                    supervised = [advantage for advantage, keep in zip(sample_advantages, mask) if keep]
-                    sample_means.append(sum(supervised) / len(supervised) if supervised else 0.0)
-                prepared["advantages"] = sample_means
-                critic_handles = []
-                for worker_idx, worker in enumerate(self.workers):
-                    dp_rank = worker_idx // data_replicate_size
-                    dp_dispatch = pack_plan["dp_dispatches"][dp_rank]
-                    local_indices = dp_dispatch["sample_indices"]
-                    critic_handles.append(
-                        worker.call_attached.remote(  # type: ignore[attr-defined]
-                            "critic",
-                            "fit",
-                            rollout_item_refs=item_refs_by_dp[dp_rank],
-                            advantages=[prepared["advantages"][index] for index in local_indices],
-                            pack_plan=dp_dispatch["plan"],
-                            batch_attr=prepared["batch_attr"],
-                            rollout_idx=rollout_idx,
-                            token_returns=[token_returns[index] for index in local_indices],
-                            token_values=value_lists[dp_rank * data_replicate_size],
-                        )
-                    )
-                critic_log_infos = ray.get(critic_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
-            self.switch_role_modules("actor")
-
-            for dispatch in pack_plan["dp_dispatches"].values():
-                indices = dispatch["sample_indices"]
-                if token_advantages is None:
-                    dispatch["advantages"] = [prepared["advantages"][index] for index in indices]
-                else:
-                    dispatch["advantages"] = [token_advantages[index] for index in indices]
-
+            # 1. Each worker fetches its rank's rollout states and pack plan once. Later critic
+            # and actor calls read that cache instead of passing again.
+            load_handles = []
             for worker_idx, worker in enumerate(self.workers):
                 dp_rank = worker_idx // data_replicate_size
                 dp_dispatch = pack_plan["dp_dispatches"][dp_rank]
-                handles.append(
-                    worker.fit.remote(  # type: ignore[attr-defined]
+                load_handles.append(
+                    worker.load_train_batch.remote(  # type: ignore[attr-defined]
                         rollout_item_refs=item_refs_by_dp[dp_rank],
-                        advantages=dp_dispatch["advantages"],
                         pack_plan=dp_dispatch["plan"],
                         batch_attr=prepared["batch_attr"],
                     )
                 )
+            ray.get(load_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+            critic_log_infos: list[WorkerLogItem] | None = None
+            value_batches: list[TokenTensorBatch] | None = None
+            # 2. Optional. Critic value forward. Each worker returns one value per token for GAE.
+            if has_critic:
+                self.switch_role_modules("critic")
+                value_handles = [
+                    worker.call_attached.remote("critic", "collect_values")  # type: ignore[attr-defined]
+                    for worker in self.workers
+                ]
+                value_batches = ray.get(value_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+            sample_advantages, token_advantages, token_returns = self._compute_advantages(
+                rollout_groups, rollout_items, pack_plan, value_batches, data_replicate_size
+            )
+            # 3. Optional. Critic fit. Each worker trains the value head on its samples' token returns.
+            if has_critic:
+                critic_handles = []
+                for worker_idx, worker in enumerate(self.workers):
+                    dp_rank = worker_idx // data_replicate_size
+                    local_indices = pack_plan["dp_dispatches"][dp_rank]["sample_indices"]
+                    assert token_returns is not None
+                    critic_handles.append(
+                        worker.call_attached.remote(  # type: ignore[attr-defined]
+                            "critic",
+                            "fit",
+                            token_returns=TokenTensorBatch.cat_samples(
+                                [torch.tensor(token_returns[index], dtype=torch.float32) for index in local_indices]
+                            ),
+                        )
+                    )
+                critic_log_infos = ray.get(critic_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+            # 4. Actor fit. Each worker trains the policy on its samples' advantages.
+            self.switch_role_modules("actor")
+
+            for worker_idx, worker in enumerate(self.workers):
+                dp_rank = worker_idx // data_replicate_size
+                indices = pack_plan["dp_dispatches"][dp_rank]["sample_indices"]
+                if token_advantages is None:
+                    advantages: list[float] | TokenTensorBatch = [sample_advantages[index] for index in indices]
+                else:
+                    advantages = TokenTensorBatch.cat_samples(
+                        [torch.tensor(token_advantages[index], dtype=torch.float32) for index in indices]
+                    )
+                handles.append(worker.fit.remote(advantages=advantages))  # type: ignore[attr-defined]
             log_infos = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         finally:
             if has_critic:
@@ -607,6 +635,7 @@ class TrainingController:
             prepared,
             pack_plan,
             log_infos,
+            sample_advantages,
             raw_rewards_sum=raw_rewards_sum,
             raw_rewards_count=raw_rewards_count,
             critic_log_infos=critic_log_infos,

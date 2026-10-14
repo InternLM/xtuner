@@ -1,9 +1,10 @@
 """TrainingWorker rollout-to-train-item 转换的 contract 测试。
 
-``TrainingWorker._convert_rollout_items_to_train_items`` 是 RolloutState -> (seq_ctx, loss_ctx)
-的唯一入口：shift、scalar advantage 逐监督位广播、rollout logprob shift、position 布局统一、
-seq_ctx 构造、teacher target 对齐与 CPU per-item loss_ctx 构建都在这一步完成。本文件只测该
-纯转换逻辑，不启动 Ray、模型或 rollout backend。
+``_get_train_sample`` 把 RolloutState 转成 ``TrainSample``，
+``_get_train_items`` 再写成 (seq_ctx, loss_ctx)。shift、scalar advantage
+逐监督位广播、rollout logprob shift、position 布局统一、seq_ctx 构造、teacher target
+对齐与 CPU per-item loss_ctx 构建都在这两步完成。本文件只测该纯转换逻辑，不启动 Ray、
+模型或 rollout backend。
 
 当前测试点：
 - 文本样本：input_ids 去尾、shifted_labels、rollout_logprobs shift 与形状对齐。
@@ -23,16 +24,12 @@ import torch
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, TeacherTargets
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter, RolloutTeacherConfig
 from xtuner.v1.rl.loss import DistillationLossConfig, GRPOLossConfig
-from xtuner.v1.rl.trainer.worker import TrainingWorker, TrainBatchAttr
+from xtuner.v1.rl.trainer.worker import TrainingWorker
 
 
-def _batch_attr(use_3d: bool) -> TrainBatchAttr:
-    return {
-        "rollout_idx": 0,
-        "use_3d_position_ids": use_3d,
-        "pack_loss_keys": [],
-        "has_routed_experts": False,
-    }
+def _convert(worker: TrainingWorker, states: list[RolloutState], advantages: list[float], use_3d: bool = False):
+    samples = [worker._get_train_sample(state, use_3d) for state in states]
+    return worker._get_train_items(samples, advantages)
 
 
 class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
@@ -109,7 +106,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             supervised_mask=[1, 0, 1],
         )
 
-        items = worker._convert_rollout_items_to_train_items([state], [1.5], _batch_attr(False))
+        items = _convert(worker, [state], [1.5])
 
         self.assertEqual(len(items), 1)
         seq_ctx, loss_ctx = items[0]
@@ -135,7 +132,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
         first = self._state(uid=1, response_ids=[20, 21], supervised_mask=[1, 1])
         second = self._state(uid=2, response_ids=[30, 31], supervised_mask=[1, 0])
 
-        items = worker._convert_rollout_items_to_train_items([first, second], [1.5, -2.0], _batch_attr(False))
+        items = _convert(worker, [first, second], [1.5, -2.0])
 
         torch.testing.assert_close(
             items[0][1].loss_kwargs.advantages,
@@ -150,7 +147,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
         worker = self._make_worker()
         state = self._state(response_ids=[20, 21])
 
-        items = worker._convert_rollout_items_to_train_items([state], [0.0], _batch_attr(False))
+        items = _convert(worker, [state], [0.0])
 
         self.assertIsNone(items[0][0].position_ids)
 
@@ -158,7 +155,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
         worker = self._make_worker()
         state = self._state(response_ids=[20, 21])
 
-        items = worker._convert_rollout_items_to_train_items([state], [0.0], _batch_attr(True))
+        items = _convert(worker, [state], [0.0], use_3d=True)
 
         position_ids = items[0][0].position_ids
         self.assertEqual(tuple(position_ids.shape), (3, 1, 4))
@@ -180,7 +177,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             routed_experts=routed_experts,
         )
 
-        items = worker._convert_rollout_items_to_train_items([state], [0.25], _batch_attr(True))
+        items = _convert(worker, [state], [0.25], use_3d=True)
 
         seq_ctx = items[0][0]
         self.assertEqual(seq_ctx.input_ids.tolist(), [[100, 101, 102]])
@@ -219,7 +216,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             extra_fields={"origin_data_source": "agent_math"},
         )
 
-        items = worker._convert_rollout_items_to_train_items([state], [0.0], _batch_attr(False))
+        items = _convert(worker, [state], [0.0])
 
         loss_kwargs = items[0][1].loss_kwargs
         self.assertEqual(loss_kwargs.shifted_labels.tolist(), [[-100, 20, -100, 22]])
@@ -250,7 +247,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             extra_fields={"origin_data_source": "agent_math"},
         )
 
-        items = worker._convert_rollout_items_to_train_items([state], [0.0], _batch_attr(False))
+        items = _convert(worker, [state], [0.0])
 
         loss_kwargs = items[0][1].loss_kwargs
         self.assertIsNone(loss_kwargs.target_token_ids)
@@ -268,14 +265,14 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
         )
 
         with self.assertRaises(AssertionError):
-            worker._convert_rollout_items_to_train_items([state], [1.0], _batch_attr(False))
+            _convert(worker, [state], [1.0])
 
     def test_misaligned_labels_fail_fast(self):
         worker = self._make_worker()
         state = self._state(input_ids=[30, 31, 40])
 
         with self.assertRaises(AssertionError):
-            worker._convert_rollout_items_to_train_items([state], [1.0], _batch_attr(False))
+            _convert(worker, [state], [1.0])
 
 
 if __name__ == "__main__":

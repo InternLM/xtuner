@@ -7,8 +7,8 @@ trainer、Ray worker、模型或 rollout backend：
   （``input_ids``/``labels``/``logprobs`` 等长、未 shift）并写轻量 train meta；
   localhost/sandbox 各自覆写为 trace 全序列字段的校验（失败置 FAILED，不上抛）。
 - controller 侧 ``TrainingController._prepare_rollout_items``：只消费轻量 meta 字段
-  （``num_tokens``/``supervised_tokens``/``train_prompt_length`` 等），完成组校验、组级
-  advantage、``data_info`` 统计与 items-advantages 配对 shuffle，不构造任何训练张量。
+  （``num_tokens``/``supervised_tokens``/``train_prompt_length`` 等）并聚类 reward。
+  标量 advantage 由 ``_compute_advantages`` 返回；``data_info`` 统计不构造训练张量。
 - token 级张量构造与 pack 物化在 training worker 侧（见 ``test_training_worker_rank.py``）；
   index-only 打包计划见 ``test_pack.py``。
 
@@ -394,10 +394,10 @@ class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
 
 
 class TestPrepareRolloutItems(unittest.TestCase):
-    """TrainingController._prepare_rollout_items 合同：组级 advantage 与 data_info 统计。
+    """组级 advantage 与 data_info 统计。
 
-    controller 只消费 write_train_meta 写入的轻量 meta 字段（缺失即 fail fast；组级
-    状态/对齐校验由 replay buffer 查询与 canonicalize_train_fields 保证）；shift/张量化/
+    ``_prepare_rollout_items`` 只消费 write_train_meta 写入的轻量 meta 字段（缺失即 fail
+    fast）。标量 advantage 由 ``_compute_advantages`` 返回，不写入 prepared。shift/张量化/
     pack 物化在 training worker 侧（见 test_training_worker_rank.py），本类不构造任何训练张量。
     """
 
@@ -411,11 +411,21 @@ class TestPrepareRolloutItems(unittest.TestCase):
 
     def _prepare(self, controller, data_groups):
         prepared = controller._prepare_rollout_items(data_groups, rollout_idx=0)
+        sample_advantages, _, _ = controller._compute_advantages(
+            data_groups,
+            prepared["rollout_items"],
+            {"dp_dispatches": {}, "plan_log": {}},
+            None,
+            1,
+        )
         return (
             prepared["rollout_items"],
-            prepared["advantages"],
+            sample_advantages,
             controller._build_trainer_log_info(
-                prepared, pack_plan={"dp_dispatches": {}, "plan_log": {}}, log_infos=[]
+                prepared,
+                pack_plan={"dp_dispatches": {}, "plan_log": {}},
+                log_infos=[],
+                sample_advantages=sample_advantages,
             ),
             prepared["batch_attr"]["use_3d_position_ids"],
         )

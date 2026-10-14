@@ -3,8 +3,8 @@
 重构后 token 级张量构造从 controller 移到 training worker，本文件只测两段公开纯逻辑，
 不启动 Ray、模型或 rollout backend：
 
-- ``_convert_rollout_items_to_train_items``：shift、advantage 张量化、seq_ctx 构造、
-  distillation teacher targets 附加，并在 CPU 上构建 per-item loss_ctx
+- ``_get_train_sample`` 与 ``_get_train_items``：shift、advantage 张量化、
+  seq_ctx 构造、distillation teacher targets 附加，并在 CPU 上构建 per-item loss_ctx
   （use_3d_position_ids 时给文本样本补 3D 轴）。
 - ``_pack_train_items`` / ``_pack_one_batch``：按 controller 的 index-only 打包计划把
   (seq_ctx, loss_ctx) 拼成 ``pack_max_length`` 定长的 pack：loss_kwargs 张量沿序列维 cat、
@@ -138,7 +138,8 @@ def _batch_attr(
 
 
 def _convert(worker: TrainingWorker, states: list[RolloutState], advantages: list[float], use_3d: bool = False):
-    return worker._convert_rollout_items_to_train_items(states, advantages, _batch_attr(use_3d=use_3d))
+    samples = [worker._get_train_sample(state, use_3d) for state in states]
+    return worker._get_train_items(samples, advantages)
 
 
 class TestConvertRolloutItemsToTrainItems(unittest.TestCase):

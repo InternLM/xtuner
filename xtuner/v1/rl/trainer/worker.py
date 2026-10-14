@@ -5,6 +5,7 @@ import json
 import os
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -77,7 +78,7 @@ from xtuner.v1.utils.fsdp import release_deferred_fsdp_all_gathers
 from xtuner.v1.utils.nccl_process_group import resume_nccl_process_groups, suspend_nccl_process_groups
 
 from ..rollout_is import merge_rollout_is_metrics
-from .pack import DPRankPackIndices
+from .pack import DPRankPackIndices, TokenTensorBatch
 from .schedule import build_lr_scheduler, optimizer_step_succeeds
 
 
@@ -358,6 +359,25 @@ class WorkerLogItem(TypedDict):
     packing_pack_time_s: NotRequired[float]
 
 
+@dataclass
+class TrainSample:
+    """Training tensors for one rollout sample, shared by the actor and the
+    critic.
+
+    ``values``, ``returns``, and ``advantages`` start as ``None`` and are filled by later stages.
+    GRPO leaves ``values`` and ``returns`` as ``None``.
+    """
+
+    seq_ctx: SequenceContext
+    shifted_labels: torch.Tensor
+    rollout_logprobs: torch.Tensor | None
+    teacher_targets: dict[str, torch.Tensor]
+
+    values: torch.Tensor | None = None  # per-token critic values, written when the critic collects values
+    returns: torch.Tensor | None = None  # GAE returns, written when the critic fits
+    advantages: torch.Tensor | None = None  # per-token row written when the actor builds the loss
+
+
 class TrainingWorker(SingleAcceleratorWorker):
     _SAVE_WEIGHTS_DIR = "weights"
     _SAVE_SFT_DATALOADER_DIR = "sft_dataloader"
@@ -392,6 +412,9 @@ class TrainingWorker(SingleAcceleratorWorker):
         # The critic is an ordinary object in this actor process. The registry
         # keeps role switching explicit.
         self._attached: dict[str, Any] = {}
+        self._cached_samples: list[TrainSample] | None = None
+        self._cached_pack_plan: DPRankPackIndices | None = None
+        self._cached_batch_attr: TrainBatchAttr | None = None
 
         self.data_mesh = self._init_data_mesh(sp_size=worker_cfg.sp_size)
         self.sp_mesh = self.data_mesh["sp"]
@@ -835,34 +858,55 @@ class TrainingWorker(SingleAcceleratorWorker):
                 stack.enter_context(profiling_memory(memory_dir))
             yield
 
-    def _convert_rollout_items_to_train_items(
-        self,
-        rollout_items: list[RolloutState],
-        advantages: list[float] | list[list[float]],
-        batch_attr: TrainBatchAttr,
-    ) -> list[tuple[SequenceContext, BaseRLLossContext]]:
-        per_token = bool(advantages) and isinstance(advantages[0], list)
-        converted = []
-        for state, advantage in zip(rollout_items, advantages):
-            token_advantage = cast(list[float], advantage) if per_token else None
-            advantage_val = 0.0 if per_token else cast(float, advantage)
-            converted.append(
-                self._convert_one_rollout_state(
-                    state,
-                    advantage_val,
-                    batch_attr["use_3d_position_ids"],
-                    token_advantage,
-                )
-            )
-        return converted
+    def _release_cache_samples(self) -> None:
+        """Drop the samples, pack plan, and batch attributes cached by
+        ``load_train_batch``.
 
-    def _convert_one_rollout_state(
+        Called at the end of actor ``fit``, including when training raises.
+        """
+        self._cached_samples = None
+        self._cached_pack_plan = None
+        self._cached_batch_attr = None
+
+    def _get_cached_batch(self) -> tuple[list[TrainSample], DPRankPackIndices, TrainBatchAttr]:
+        """Return the samples, pack plan, and batch attributes cached by
+        ``load_train_batch``.
+
+        Actor ``fit`` and the critic read this cache. Raises when it has not been loaded.
+        """
+        samples = self._cached_samples
+        pack_plan = self._cached_pack_plan
+        batch_attr = self._cached_batch_attr
+        if samples is None or pack_plan is None or batch_attr is None:
+            raise RuntimeError("training batch is not loaded; call load_train_batch before training")
+        return samples, pack_plan, batch_attr
+
+    @ray_method
+    def load_train_batch(
         self,
-        state: RolloutState,
-        advantage_val: float,
-        use_3d_position_ids: bool,
-        token_advantages: list[float] | None = None,
-    ) -> tuple[SequenceContext, BaseRLLossContext]:
+        rollout_item_refs: list[ray.ObjectRef],
+        pack_plan: DPRankPackIndices,
+        batch_attr: TrainBatchAttr,
+    ) -> None:
+        """Fetch this rank's rollout states once and keep the samples and pack
+        plan.
+
+        Called from the controller before critic and actor training.
+        """
+        rollout_items: list[RolloutState] = ray.get(rollout_item_refs[0])
+        self._cached_samples = [
+            self._get_train_sample(state, batch_attr["use_3d_position_ids"]) for state in rollout_items
+        ]
+        del rollout_items
+        self._cached_pack_plan = pack_plan
+        self._cached_batch_attr = batch_attr
+
+    def _get_train_sample(self, state: RolloutState, use_3d_position_ids: bool) -> TrainSample:
+        """Convert one rollout state into a ``TrainSample``.
+
+        Drops the last input id and shifts labels and logprobs onto the prediction
+        positions. ``values``, ``returns``, and ``advantages`` stay unset.
+        """
         input_ids = state.input_ids
         labels = state.labels
         assert input_ids is not None and labels is not None and len(input_ids) == len(labels), (
@@ -882,22 +926,6 @@ class TrainingWorker(SingleAcceleratorWorker):
                 f"{rollout_logprobs.size()} vs {shifted_labels_t.size()}"
             )
 
-        # Keep the advantage layout aligned with input_ids (response excludes EOS).
-        # Prompt positions predict prompt tokens whose shifted labels are -100, so their
-        # advantage is 0; the last entry of response_ids (EOS) is only a label, never an input.
-        if token_advantages is None:
-            advantage_values = [0.0 if label == -100 else advantage_val for label in shifted_labels]
-        else:
-            if len(token_advantages) != len(shifted_labels):
-                raise ValueError(
-                    f"token advantages length {len(token_advantages)} does not match "
-                    f"shifted labels length {len(shifted_labels)}"
-                )
-            advantage_values = [
-                0.0 if label == -100 else token_advantages[index] for index, label in enumerate(shifted_labels)
-            ]
-        advantages = torch.tensor([advantage_values], dtype=torch.float32)
-
         position_ids = state.position_ids
         if use_3d_position_ids and (position_ids is None or position_ids.ndim != 3):
             seq_len = input_ids_t.size(-1)
@@ -909,41 +937,65 @@ class TrainingWorker(SingleAcceleratorWorker):
         multimodal_train_info = cast(dict | None, state.mm_info)
         seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, multimodal_train_info)
         seq_ctx.rollout_routed_experts = state.routed_experts  # type: ignore[assignment] # n,layer*expert
+        return TrainSample(
+            seq_ctx=seq_ctx,
+            shifted_labels=shifted_labels_t,
+            rollout_logprobs=rollout_logprobs,
+            teacher_targets=self._distillation.rollout_teacher_targets(state, shifted_labels=shifted_labels),
+        )
 
-        loss_inputs: dict[str, torch.Tensor | None] = {
-            "shifted_labels": shifted_labels_t,
-            "advantages": advantages,
-            "rollout_logprobs": rollout_logprobs,
-        }
-        loss_inputs.update(self._distillation.rollout_teacher_targets(state, shifted_labels=shifted_labels))
+    def _get_train_items(
+        self,
+        samples: list[TrainSample],
+        advantages: list[float] | TokenTensorBatch,
+    ) -> list[tuple[SequenceContext, BaseRLLossContext]]:
+        """Build one ``(seq_ctx, loss_ctx)`` per cached sample.
 
-        # Build the per-item loss context on CPU with everything convertible at this
-        # stage (shifted_labels / advantages / rollout_logprobs / teacher targets);
-        # packing concatenates the loss_kwargs tensors and `_fit` does the device transfer.
-        loss_ctx = self.config.loss_cfg.build(data=loss_inputs, device="cpu")
-        assert loss_ctx is not None
-        return seq_ctx, loss_ctx
+        Writes advantages onto each sample and builds its loss context on CPU.
+        Samples stay separate; ``_pack_train_items`` packs them afterwards.
+        """
+        if isinstance(advantages, TokenTensorBatch):
+            rows = advantages.split_samples()
+            if len(rows) != len(samples):
+                raise ValueError(f"token advantage rows {len(rows)} do not match samples {len(samples)}")
+            advantage_rows: list[tuple[float, torch.Tensor | None]] = [(0.0, row) for row in rows]
+        else:
+            if len(advantages) != len(samples):
+                raise ValueError(f"advantage rows {len(advantages)} do not match samples {len(samples)}")
+            advantage_rows = [(float(advantage), None) for advantage in advantages]
+
+        items: list[tuple[SequenceContext, BaseRLLossContext]] = []
+        for sample, (advantage_val, token_advantages) in zip(samples, advantage_rows):
+            shifted_labels = sample.shifted_labels
+            if token_advantages is None:
+                advantage_tensor = torch.full(shifted_labels.shape, advantage_val, dtype=torch.float32)
+            else:
+                flat = token_advantages.detach().reshape(-1).float()
+                if flat.numel() != shifted_labels.size(1):
+                    raise ValueError(
+                        f"token advantages length {flat.numel()} does not match "
+                        f"shifted labels length {shifted_labels.size(1)}"
+                    )
+                advantage_tensor = flat.unsqueeze(0)
+            sample.advantages = advantage_tensor.masked_fill(shifted_labels.eq(-100), 0.0)
+            loss_inputs: dict[str, torch.Tensor | None] = {
+                "shifted_labels": shifted_labels,
+                "advantages": sample.advantages,
+                "rollout_logprobs": sample.rollout_logprobs,
+            }
+            loss_inputs.update(sample.teacher_targets)
+            loss_ctx = self.config.loss_cfg.build(data=loss_inputs, device="cpu")
+            assert loss_ctx is not None
+            items.append((sample.seq_ctx, loss_ctx))
+        return items
 
     @ray_method
-    def fit(
-        self,
-        rollout_item_refs: list[ray.ObjectRef],
-        advantages: list[float] | list[list[float]],
-        pack_plan: DPRankPackIndices,
-        batch_attr: TrainBatchAttr,
-    ) -> WorkerLogItem:
-        """Train one rollout batch from the controller's packed per-DP plan.
+    def fit(self, advantages: list[float] | TokenTensorBatch) -> WorkerLogItem:
+        """Train one rollout from the batch loaded by ``load_train_batch``.
 
         Args:
-            rollout_item_refs (list[ray.ObjectRef]): Nested per-DP object refs; element
-                zero wraps this DP rank's ``RolloutState`` list and is shared by all
-                data replicas of the rank.
-            advantages (list[float] | list[list[float]]): One scalar per sample, or one
-                token vector per sample. Aligned with the dereferenced state list.
-            pack_plan (DPRankPackIndices): Local ``[optimizer_step][pack][sample]`` plan
-                whose indices address the dereferenced state list.
-            batch_attr (TrainBatchAttr): Batch-level attributes derived by the
-                controller; uniform across all workers of the batch.
+            advantages (list[float] | TokenTensorBatch): One scalar per local sample, or one
+                packed token-advantage batch. Aligned with the loaded sample list.
 
         Returns:
             WorkerLogItem: Training metrics of one rollout batch.
@@ -951,15 +1003,18 @@ class TrainingWorker(SingleAcceleratorWorker):
         # NOTE: sglang会清除logger handle, 重新创建
         self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
         convert_begin = time.perf_counter()
-        rollout_items = ray.get(rollout_item_refs[0])
-        train_items = self._convert_rollout_items_to_train_items(rollout_items, advantages, batch_attr)
-        conversion_time_s = time.perf_counter() - convert_begin
-        del rollout_items, advantages, rollout_item_refs
+        samples, pack_plan, batch_attr = self._get_cached_batch()
+        try:
+            train_items = self._get_train_items(samples, advantages)
+            conversion_time_s = time.perf_counter() - convert_begin
+            del advantages
 
-        pack_begin = time.perf_counter()
-        step_batches = self._pack_train_items(train_items, pack_plan, batch_attr)
-        pack_time_s = time.perf_counter() - pack_begin
-        del train_items, pack_plan
+            pack_begin = time.perf_counter()
+            step_batches = self._pack_train_items(train_items, pack_plan, batch_attr)
+            pack_time_s = time.perf_counter() - pack_begin
+            del train_items, pack_plan
+        finally:
+            self._release_cache_samples()
 
         worker_log_item = self._fit(step_batches, batch_attr["rollout_idx"])
         worker_log_item["packing_conversion_time_s"] = conversion_time_s
