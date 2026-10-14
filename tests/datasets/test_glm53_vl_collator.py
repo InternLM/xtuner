@@ -84,6 +84,17 @@ class TestGlm53VlSftCollator:
     IMAGE_TOKEN_ID = 999
     MERGE_UNIT = 4
 
+    def test_oversized_media_sample_cannot_bypass_tokenize_validation(self) -> None:
+        item = _glm53_item(text_len=10, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=4)
+        with pytest.raises(ValueError, match="truncate at tokenize time"):
+            glm53_vl_sft_collator(
+                [[item]],
+                pack_max_length=4,
+                padding_token_idx=0,
+                image_token_id=self.IMAGE_TOKEN_ID,
+                merge_unit=self.MERGE_UNIT,
+            )
+
     def test_glm53_collator_keeps_media_with_instance(self):
         # 4 placeholders * merge_unit(4) = 16 raw patches.
         item = _glm53_item(text_len=10, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=4)

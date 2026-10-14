@@ -32,13 +32,23 @@ def _render_from_hf(tokenizer, messages, **kwargs):
 
 class TestGlm53Rendering:
     @pytest.mark.parametrize("reasoning_effort", ["low", "high", "max", "bogus"])
-    def test_reasoning_effort_domain_matches_jinja(self, tokenizer, reasoning_effort):
+    @pytest.mark.parametrize("enable_thinking", [False, True])
+    def test_reasoning_effort_domain_matches_jinja(self, tokenizer, reasoning_effort, enable_thinking):
         # jinja: reasoning_effort in ['low', 'high'] else 'max' -- "bogus" exercises the fallback.
         messages = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
-        tokenized = Glm53ChatMessages(messages=messages).tokenize(tokenizer, reasoning_effort=reasoning_effort)
-        hf_rendered = _render_from_hf(tokenizer, messages, reasoning_effort=reasoning_effort)
+        tokenized = Glm53ChatMessages(messages=messages).tokenize(
+            tokenizer, reasoning_effort=reasoning_effort, enable_thinking=enable_thinking
+        )
+        hf_rendered = _render_from_hf(
+            tokenizer, messages, reasoning_effort=reasoning_effort, enable_thinking=enable_thinking
+        )
         rendered = tokenizer.decode(tokenized["input_ids"], skip_special_tokens=False)
         assert rendered == hf_rendered + tokenizer.eos_token
+        slow_ids, slow_labels = glm53_tokenize_fn_slowspeed(
+            tokenizer, messages, reasoning_effort=reasoning_effort, enable_thinking=enable_thinking
+        )
+        assert tokenized["input_ids"] == slow_ids
+        assert tokenized["labels"] == slow_labels
 
     def test_all_generation_eos_are_supervised_at_assistant_boundaries(self, tokenizer):
         # 助手轮边界上的停止 token 必须计入 loss，否则模型学不会停。
