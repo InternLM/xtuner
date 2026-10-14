@@ -207,9 +207,9 @@ class ToyMoEModel(BaseModel):
 class ReferenceMuon(torch.optim.Optimizer):
     """Self-contained single-process reference for Muon + AdamW.
 
-    Classifies parameters using the same name-based rules as MuonConfig.build():
-    - 2D+ tensors (excluding embed_tokens, lm_head, effectively-1D) → Muon
-    - Everything else → AdamW
+    Classifies parameters using the same rules as MuonConfig.build():
+    - 2D tensors (excluding embed_tokens, lm_head, effectively-1D) → Muon
+    - Conv/3D tensors and everything else → AdamW
     """
 
     FUSED_W1W3_PATTERNS = ("fused_w1w3",)
@@ -239,7 +239,7 @@ class ReferenceMuon(torch.optim.Optimizer):
         for name, p in model.named_parameters():
             if not p.requires_grad:
                 continue
-            is_muon = p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name and p.numel() not in p.shape
+            is_muon = p.ndim == 2 and "embed_tokens" not in name and "lm_head" not in name and p.numel() not in p.shape
             if is_muon:
                 ne = self._get_num_experts(name, n_routed_experts)
                 muon_groups.append(
