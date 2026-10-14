@@ -36,6 +36,7 @@ from xtuner.v1.model.moe.moe import BalancingLossConfig, MoE, MoEConfig
 from xtuner.v1.module.decoder_layer.mhc import MHCConfig
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig
 from xtuner.v1.module.mtp import MTPConfig
+from xtuner.v1.module.rms_norm import RMSNorm
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 
 from .decoder_layer import Glm53DenseDecoderLayer, Glm53MoEDecoderLayer
@@ -89,6 +90,13 @@ GLM53_MOE_EP_COMPILE_CFG.pop("xtuner.v1.model.moe.glm53.decoder_layer.Glm53MoEDe
 GLM53_MOE_EP_COMPILE_CFG.pop("xtuner.v1.model.moe.glm53.decoder_layer.Glm53MoEDecoderLayer._post_moe_forward")
 
 
+def _glm53_rms_norm(x: torch.Tensor, weight: torch.Tensor, epsilon: float) -> torch.Tensor:
+    # HF normalizes in FP32, then rounds before the affine multiply (also used by native AutoModel).
+    states = x.float()
+    normalized = states * torch.rsqrt(states.square().mean(-1, keepdim=True) + epsilon)
+    return weight * normalized.to(x.dtype)
+
+
 class Glm53TextMoE(MoE):
     # mHC's extra required `mhc_cfg` keyword makes these constructors intentionally incompatible
     # with the base MoE.build_layers()/build_mtp_block() generic calling convention -- both are
@@ -102,6 +110,14 @@ class Glm53TextMoE(MoE):
     moe_decoder_layer_cls = Glm53MoEDecoderLayer  # type: ignore[assignment]
 
     config: "Glm53TextMoEConfig"
+
+    @override
+    def _configure_model_specific_layers(self) -> None:
+        super()._configure_model_specific_layers()
+        # Covers decoder, DSA, final and MTP norms without changing vision or other models.
+        for module in self.modules():
+            if isinstance(module, RMSNorm) and module._type == "default":
+                module.rms_norm_fn = _glm53_rms_norm
 
     @property
     @override
