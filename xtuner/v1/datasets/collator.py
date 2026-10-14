@@ -323,7 +323,7 @@ def glm53_vl_sft_collator(
     for instance in instances:
         # The shared text helper truncates a single oversized sample without checking media
         # end markers. Let the GLM tokenizer validate sample truncation before packing.
-        if instance[0]["num_tokens"] > pack_max_length and sum(instance[0].get("num_img_tokens", [])):
+        if instance[0]["num_tokens"] > pack_max_length and any(instance[0].get("num_img_tokens", [])):
             raise ValueError("GLM-5.3-Flash multimodal sample exceeds pack_max_length; truncate at tokenize time.")
         seq_ctx, shifted_labels, instance = build_text_ctx_labels(  # type: ignore
             instance,

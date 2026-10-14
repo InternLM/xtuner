@@ -95,6 +95,22 @@ class TestGlm53VlSftCollator:
                 merge_unit=self.MERGE_UNIT,
             )
 
+    def test_oversized_text_sample_keeps_text_truncation(self) -> None:
+        item = _glm53_item(text_len=10, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=0)
+        expected_ids = item["input_ids"][:3]
+        expected_labels = item["labels"][1:4]
+        result = glm53_vl_sft_collator(
+            [[item]],
+            pack_max_length=4,
+            padding_token_idx=0,
+            image_token_id=self.IMAGE_TOKEN_ID,
+            merge_unit=self.MERGE_UNIT,
+        )[0]
+        assert result["seq_ctx"].input_ids[0, :3].tolist() == expected_ids
+        assert result["shifted_labels"][0, :3].tolist() == expected_labels
+        assert result["shifted_labels"][0, 3].item() == -100
+        assert result["seq_ctx"].pixel_values is None
+
     def test_glm53_collator_keeps_media_with_instance(self):
         # 4 placeholders * merge_unit(4) = 16 raw patches.
         item = _glm53_item(text_len=10, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=4)
