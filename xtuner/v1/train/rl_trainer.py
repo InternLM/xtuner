@@ -56,6 +56,7 @@ from xtuner.v1.rl.utils import (
     set_cpu_resource_manager,
     sort_rollout_state_for_deterministic,
 )
+from xtuner.v1.rl.utils.async_utils import CleanupError
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
@@ -875,6 +876,15 @@ class BaseRLTrainer:
             train_state = json.load(f)
         self._cur_step = train_state["cur_step"]
         return checkpoint_path
+
+    async def _close_agent_loop_managers(self) -> None:
+        managers = [getattr(self, name, None) for name in ("agent_loop_manager", "eval_agent_loop_manager")]
+        results = await asyncio.gather(
+            *(manager.close() for manager in managers if manager is not None), return_exceptions=True
+        )
+        errors = [result for result in results if isinstance(result, Exception)]
+        if errors:
+            raise CleanupError("Agent manager cleanup failed", errors)
 
     async def _resume_agent_loop_manager(self, checkpoint_path: Path | str) -> int:
         self.logger.info(f"Resume agent_loop_manager from {checkpoint_path}")
@@ -1850,9 +1860,12 @@ class RLColocateTrainer(BaseRLTrainer):
         try:
             self._fit()
         finally:
-            self.rl_health_manager.stop()
-            self._exp_tracker.close()
-            close_trace()
+            try:
+                asyncio_run(self._close_agent_loop_managers())
+            finally:
+                self.rl_health_manager.stop()
+                self._exp_tracker.close()
+                close_trace()
 
     def _fit(self):
         self.logger.info("Start RL training")
@@ -2112,8 +2125,11 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         try:
             return asyncio_run(self._fit())
         finally:
-            self._exp_tracker.close()
-            close_trace()
+            try:
+                asyncio_run(self._close_agent_loop_managers())
+            finally:
+                self._exp_tracker.close()
+                close_trace()
 
     async def _get_batch_or_raise_producer_failure(
         self,
@@ -2246,7 +2262,9 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 train_step = self._cur_step + 1
         finally:
             self.agent_loop_manager.shutdown()
-            await producer_task
+            await asyncio.sleep(0)
+            producer_task.cancel()
+            await asyncio.gather(producer_task, return_exceptions=True)
 
     async def _sync_weights_and_save(self, model_step: int, step_timer_dict: dict):
         # producer 已暂停；保持 save -> bind -> update 顺序。

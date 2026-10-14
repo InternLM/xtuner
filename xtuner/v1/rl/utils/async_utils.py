@@ -149,3 +149,14 @@ def asyncio_run(coro: Coroutine, loop: Optional[AbstractEventLoop] = None) -> An
         except Exception as exc:
             if os.getenv("XTUNER_ASYNCIO_DIAGNOSTICS"):
                 logger.warning(f"[AsyncioDiag] failed to stop asyncio diagnostics: {type(exc).__name__}: {exc}")
+
+
+class CleanupError(RuntimeError):
+    """Resource cleanup failed after all owners were given a chance to close.
+
+    Retain every original exception on Python 3.10 as well as newer runtimes.
+    """
+
+    def __init__(self, message: str, errors: list[Exception]):
+        self.errors = tuple(errors)
+        super().__init__(message + ": " + "; ".join(str(error) for error in errors))

@@ -48,6 +48,7 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     StageStatus,
 )
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.trace import span
+from xtuner.v1.rl.utils.async_utils import CleanupError
 from xtuner.v1.utils import get_logger
 
 
@@ -831,13 +832,15 @@ class _SandboxLease:
     name: str
     client: Any
     env_id: str
+    deleted: bool = False
+    closed: bool = False
 
 
 class SandboxPool:
     """Per-run sandbox pool with transactional dependency groups.
 
-    One ``SandboxPool`` instance is created at the start of ``Runner.run`` and
-    released in the ``finally`` block.  The pool owns:
+    One ``SandboxPool`` instance is created per episode by the environment
+    provider and released when the episode context exits.  The pool owns:
 
       - every ``provider.create`` / ``provider.delete`` and client close
       - rate limiting, health polling, group retry, and reverse-order rollback
@@ -864,8 +867,11 @@ class SandboxPool:
         creates_per_sec: float | None = 3.0,
         creates_burst: int = 1,
         create_rate_limit_key: str = "xtuner.sandbox_agent_loop.sandbox_acquire",
+        cleanup_timeout_sec: float = 60.0,
     ):
         self._provider = create_object(provider)
+        if cleanup_timeout_sec <= 0:
+            raise ValueError("cleanup_timeout_sec must be positive")
         self._specs: dict[str, SandboxSpec] = {name: create_object(spec) for name, spec in specs.items()}
         self._provisioners = {
             name: create_object(spec.provisioner) if spec.provisioner is not None else None
@@ -883,8 +889,14 @@ class SandboxPool:
         self._env_ids: dict[str, str] = {}
         self._urls: dict[str, str | None] = {}
         self._groups: dict[str, list[_SandboxLease]] = {}
+        self._cleanup_timeout_sec = cleanup_timeout_sec
+        self._lock = asyncio.Lock()
 
     async def get(self, name: str, *, record: StageRecord | None = None) -> Any:
+        async with self._lock:
+            return await self._get(name, record=record)
+
+    async def _get(self, name: str, *, record: StageRecord | None = None) -> Any:
         if name in self._clients:
             return self._clients[name]
         self.validate_name(name)
@@ -929,15 +941,24 @@ class SandboxPool:
         return self._specs[name]
 
     async def release_all(self) -> None:
-        for name in list(reversed(self._clients)):
-            client = self._clients.pop(name)
-            env_id = self._env_ids.pop(name, None)
-            self._urls.pop(name, None)
-            group = self._groups.pop(name, None)
-            if group is None and env_id is not None:
-                group = [_SandboxLease(name="primary", client=client, env_id=env_id)]
-            if group:
-                await self._release_group(name, group)
+        async with self._lock:
+            errors = []
+            for name, group in reversed(list(self._groups.items())):
+                self._clients.pop(name, None)
+                self._env_ids.pop(name, None)
+                self._urls.pop(name, None)
+                try:
+                    await self._release_group(name, group)
+                except Exception as exc:
+                    errors.append(exc)
+                if not group:
+                    self._groups.pop(name, None)
+            if errors:
+                raise CleanupError("Sandbox cleanup failed", errors)
+
+    @property
+    def pending_resource_ids(self) -> list[str]:
+        return [lease.env_id for group in self._groups.values() for lease in group]
 
     @staticmethod
     def _url_of(client: Any) -> str | None:
@@ -961,6 +982,9 @@ class SandboxPool:
             if record is not None:
                 record.metadata["sandbox_create_attempts"] = attempt
             group: list[_SandboxLease] = []
+            if self._groups.get(name):
+                raise RuntimeError(f"sandbox {name!r} still owns resources pending cleanup")
+            self._groups[name] = group
             try:
                 if t_ready is None:
                     t_ready = time.monotonic()
@@ -1023,27 +1047,34 @@ class SandboxPool:
         )
 
     async def _release_group(self, name: str, group: list[_SandboxLease]) -> None:
-        for lease in reversed(group):
+        errors = []
+        for lease in reversed(list(group)):
             try:
-                await self._provider.delete(lease.env_id)
+                if not lease.deleted:
+                    await asyncio.wait_for(self._provider.delete(lease.env_id), self._cleanup_timeout_sec)
+                    lease.deleted = True
             except Exception as exc:
-                get_logger().warning(
-                    f"gateway delete failed for sandbox {name} member={lease.name} env_id={lease.env_id}:\n"
-                    f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
-                )
+                failure = RuntimeError(f"delete sandbox={name} member={lease.name} env_id={lease.env_id}: {exc}")
+                failure.__cause__ = exc
+                errors.append(failure)
             try:
-                await lease.client.aclose()
+                if not lease.closed:
+                    await asyncio.wait_for(lease.client.aclose(), self._cleanup_timeout_sec)
+                    lease.closed = True
             except Exception as exc:
-                get_logger().warning(
-                    f"client aclose failed for sandbox {name} member={lease.name} env_id={lease.env_id}:\n"
-                    f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
-                )
+                failure = RuntimeError(f"close sandbox={name} member={lease.name} env_id={lease.env_id}: {exc}")
+                failure.__cause__ = exc
+                errors.append(failure)
+            if lease.deleted and lease.closed:
+                group.remove(lease)
+        if errors:
+            raise CleanupError(f"Sandbox {name!r} cleanup failed", errors)
 
     async def _wait_healthy(self, client: Any) -> bool:
         deadline = time.monotonic() + self._health_max_wait_sec
         while time.monotonic() < deadline:
             try:
-                h = await client.health_check()
+                h = await asyncio.wait_for(client.health_check(), max(0.001, deadline - time.monotonic()))
                 if h.get("ok"):
                     return True
             except Exception as exc:

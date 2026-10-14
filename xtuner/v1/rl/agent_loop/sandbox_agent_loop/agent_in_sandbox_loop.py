@@ -18,6 +18,7 @@ from xtuner.v1.rl.utils import create_task
 from ...rollout.chat_template import canonicalize_messages_for_chat_template
 from ...rollout.trace_store import get_store
 from ..agent_loop import AgentLoop, AgentLoopConfig, maybe_filter_invalid_sample
+from .environment import EnvironmentProvider
 from .schemas import AgentRolloutItem, RolloutStatus
 
 
@@ -192,6 +193,7 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
     replay buffer/trainer.
     """
 
+    environment_provider: dict[str, Any] | str
     max_concurrent_samples: int | None = None
     mode: Literal["train", "eval"] = "train"
     requires_rollout_proxy: bool = True
@@ -207,6 +209,7 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
             logger=logger,
             max_concurrent_samples=self.max_concurrent_samples,
             mode=self.mode,
+            environment_provider=self.environment_provider,
         )
 
 
@@ -220,6 +223,8 @@ class AgentInSandboxLoop(AgentLoop):
         logger=None,
         max_concurrent_samples: int | None = None,
         mode: Literal["train", "eval"] = "train",
+        *,
+        environment_provider: dict[str, Any] | str,
     ):
         if hf_checkpoint is None:
             raise ValueError("hf_checkpoint must be provided for AgentInSandboxLoop.")
@@ -227,6 +232,11 @@ class AgentInSandboxLoop(AgentLoop):
         self.max_concurrent_samples = max_concurrent_samples
         self._sample_semaphore = asyncio.Semaphore(max_concurrent_samples) if max_concurrent_samples else None
         self.mode = mode
+        self._environment_config = environment_provider
+        self._environment_provider: EnvironmentProvider | None = None
+        self._active_runs: set[asyncio.Task] = set()
+        self._closing = False
+        self._close_task: asyncio.Task | None = None
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         async def generate_one(state: RolloutState) -> list[RolloutState]:
@@ -276,10 +286,53 @@ class AgentInSandboxLoop(AgentLoop):
             return [rollout_state]
 
     async def _run_item(self, item: AgentRolloutItem) -> AgentRolloutItem:
+        if self._closing:
+            raise RuntimeError("agent loop is closing")
+        task = asyncio.current_task()
+        assert task is not None
+        self._active_runs.add(task)
+        try:
+            return await self._run_in_environment(item)
+        finally:
+            self._active_runs.discard(task)
+
+    async def _run_in_environment(self, item: AgentRolloutItem) -> AgentRolloutItem:
         runner = _resolve_runner(item.pipeline, str(item.uid))
         if runner is None:
             raise ValueError("AgentRolloutItem.pipeline is required.")
-        return await runner.run(item)
+        if self._environment_provider is None:
+            config = self._environment_config
+            if isinstance(config, str):
+                config = _import_from_path(config)
+            self._environment_provider = create_object(copy.deepcopy(config))
+        async with self._environment_provider.open(item) as environment:
+            result = await runner.run(item, environment)
+            await environment.check()
+        return result
+
+    async def close(self) -> None:
+        """Cancel live work, drain contexts, then close shared connections."""
+        self._closing = True
+        if self._close_task is None or (self._close_task.done() and self._close_task.exception() is not None):
+            self._close_task = asyncio.create_task(self._close())
+        cancelled = False
+        while not self._close_task.done():
+            try:
+                await asyncio.shield(self._close_task)
+            except asyncio.CancelledError:
+                cancelled = True
+        self._close_task.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _close(self) -> None:
+        tasks = list(self._active_runs)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if self._environment_provider is not None:
+            await self._environment_provider.close()
+            self._environment_provider = None
 
     async def _build_rollout_states(self, rollout_state: RolloutState, item: AgentRolloutItem) -> list[RolloutState]:
         if self.mode == "eval":

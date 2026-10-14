@@ -40,6 +40,9 @@ from xtuner.v1.train.rl_trainer import RLDisaggregatedTrainer, _validate_sync_in
 
 
 class _FakeManager:
+    async def close(self):
+        self.calls.append("close")
+
     def __init__(self, get_batch_results):
         self._results = list(get_batch_results)
         self._status = AgentLoopManagerStatus.NORMAL
@@ -129,7 +132,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         )
         Path(trainer.exp_dir).mkdir(parents=True, exist_ok=True)
         trainer.agent_loop_manager = agent_loop_manager
-        trainer.eval_agent_loop_manager = SimpleNamespace(produce_batch=AsyncMock())
+        trainer.eval_agent_loop_manager = SimpleNamespace(produce_batch=AsyncMock(), close=AsyncMock())
         trainer.evaluator = MagicMock(eval_batch_size=1, run=MagicMock(return_value={"acc": 1.0}))
         trainer._exp_tracker = MagicMock()
         trainer._prepare_train_data = MagicMock(
@@ -488,9 +491,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
                     "teacher_a": {"compute": 1.0, "onload": 2.0, "offload": 3.0},
                     "teacher_b": {"compute": 3.0, "onload": 4.0, "offload": 5.0},
                 },
-                "train_metrics": [
-                    {"actor_distillation_kl": 0.5, "sampled_opd_loss": 0.25, "policy_loss": 1.0}
-                ],
+                "train_metrics": [{"actor_distillation_kl": 0.5, "sampled_opd_loss": 0.25, "policy_loss": 1.0}],
                 "sft_train_metrics": {},
             },
             {

@@ -6,7 +6,8 @@ from typing import Any
 
 from lagent.utils import create_object
 
-from xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox import SandboxPool, SandboxStage
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.environment import Environment
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox import SandboxStage
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     AgentRolloutItem,
     RolloutError,
@@ -25,16 +26,18 @@ class Judger:
     async def run(
         self,
         item: AgentRolloutItem,
-        pool: SandboxPool,
+        environment: Environment,
         record: StageRecord,
     ) -> float:
         try:
-            sandbox_name = _judger_sandbox_name(self.stage, pool)
-            client = await pool.get(sandbox_name, record=record)
-            spec = pool.spec(sandbox_name)
+            sandbox_name = _judger_sandbox_name(self.stage, environment)
+            client = await environment.get(sandbox_name, record=record)
+            info = environment.info(sandbox_name)
             record.sandbox_name = sandbox_name
-            record.sandbox_image = spec.image
-            record.workspace = spec.workspace_path
+            record.sandbox_image = info.image
+            record.workspace = info.workspace
+            record.sandbox_env_id = info.environment_id
+            record.sandbox_url = info.url
             record.judger_name = self.name
             await self.stage.run(client, item, record)
             if record.status == StageStatus.FAILED:
@@ -53,11 +56,11 @@ class Judger:
             raise
 
 
-def _judger_sandbox_name(stage: SandboxStage, pool: SandboxPool) -> str:
+def _judger_sandbox_name(stage: SandboxStage, environment: Environment) -> str:
     name = stage.sandbox
     if not isinstance(name, str):
         raise TypeError(f"SandboxStage.sandbox must be a sandbox name, got {type(name).__name__}")
-    pool.validate_name(name)
+    environment.info(name)
     return name
 
 

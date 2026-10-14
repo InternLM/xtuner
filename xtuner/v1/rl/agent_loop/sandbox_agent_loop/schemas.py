@@ -172,7 +172,8 @@ class AgentRolloutItem(BaseModel):
         task the agent sees.  Pipeline exports it as ``$TASK_INSTRUCTION``.
       - ``task_root``: host task directory available to the current worker.
       - ``uid``: rollout identity supplied by the outer dataflow.
-      - ``pipeline`` / ``pipeline_overrides``: lazy runner config binding.
+      - ``pipeline``: lazy runner config binding.
+      - ``environment``: opaque request interpreted by the environment provider.
 
     Runtime/result fields are filled in place by :class:`Runner.run`:
       - ``status``, ``reward``, ``infer``, ``judgers``,
@@ -197,7 +198,7 @@ class AgentRolloutItem(BaseModel):
     group_id: int | None = None  # rollout group identity (same query's K-rollouts share)
     uid: int | None = None  # per-rollout unique id (different across K-rollouts of same query)
     pipeline: PipelineConfig | Any | None = None
-    pipeline_overrides: dict[str, Any] = Field(default_factory=dict)
+    environment: dict[str, Any] = Field(default_factory=dict)
 
     # Output and observation.
     status: RolloutStatus = RolloutStatus.PENDING
