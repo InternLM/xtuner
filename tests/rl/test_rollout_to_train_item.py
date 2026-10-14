@@ -1,6 +1,6 @@
 """TrainingWorker rollout-to-train-item 转换的 contract 测试。
 
-``TrainingWorker._convert_rollout_items_to_train_items`` 是 RolloutState -> (seq_ctx, loss_inputs)
+``TrainingWorker._get_train_sample / _get_train_items`` 是 RolloutState -> (seq_ctx, loss_inputs)
 的唯一入口：shift、scalar advantage 逐监督位广播、rollout logprob shift、position 布局统一、
 seq_ctx 构造、teacher target 对齐与 CPU per-item loss_inputs 构建都在这一步完成。本文件只测该
 纯转换逻辑，不启动 Ray、模型或 rollout backend。
@@ -23,16 +23,15 @@ import torch
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, TeacherTargets
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter, RolloutTeacherConfig
 from xtuner.v1.rl.loss import DistillationLossConfig, GRPOLossConfig
-from xtuner.v1.rl.trainer.worker import TrainBatchAttr, TrainingWorker
+from xtuner.v1.rl.trainer.pack import TokenTensorBatch
+from xtuner.v1.rl.trainer.worker import TrainingWorker
 
 
-def _batch_attr(use_3d: bool) -> TrainBatchAttr:
-    return {
-        "rollout_idx": 0,
-        "use_3d_position_ids": use_3d,
-        "pack_loss_keys": [],
-        "has_routed_experts": False,
-    }
+def _convert(worker, states, advantages, use_3d=False):
+    samples = [worker._get_train_sample(state, use_3d) for state in states]
+    if advantages and isinstance(advantages[0], list):
+        advantages = TokenTensorBatch.cat_samples([torch.tensor(row, dtype=torch.float32) for row in advantages])
+    return worker._get_train_items(samples, advantages)
 
 
 class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
@@ -109,7 +108,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             supervised_mask=[1, 0, 1],
         )
 
-        items = worker._convert_rollout_items_to_train_items([state], [1.5], _batch_attr(False))
+        items = _convert(worker, [state], [1.5])
 
         self.assertEqual(len(items), 1)
         seq_ctx = items[0]["seq_ctx"]
@@ -135,7 +134,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
         first = self._state(uid=1, response_ids=[20, 21], supervised_mask=[1, 1])
         second = self._state(uid=2, response_ids=[30, 31], supervised_mask=[1, 0])
 
-        items = worker._convert_rollout_items_to_train_items([first, second], [1.5, -2.0], _batch_attr(False))
+        items = _convert(worker, [first, second], [1.5, -2.0])
 
         torch.testing.assert_close(
             items[0]["loss_inputs"].get("advantages"),
@@ -150,7 +149,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
         worker = self._make_worker()
         state = self._state(response_ids=[20, 21])
 
-        items = worker._convert_rollout_items_to_train_items([state], [0.0], _batch_attr(False))
+        items = _convert(worker, [state], [0.0])
 
         torch.testing.assert_close(items[0]["seq_ctx"].position_ids, torch.arange(4).reshape(1, -1))
 
@@ -158,7 +157,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
         worker = self._make_worker()
         state = self._state(response_ids=[20, 21])
 
-        items = worker._convert_rollout_items_to_train_items([state], [0.0], _batch_attr(True))
+        items = _convert(worker, [state], [0.0], use_3d=True)
 
         position_ids = items[0]["seq_ctx"].position_ids
         self.assertEqual(tuple(position_ids.shape), (3, 1, 4))
@@ -180,7 +179,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             routed_experts=routed_experts,
         )
 
-        items = worker._convert_rollout_items_to_train_items([state], [0.25], _batch_attr(True))
+        items = _convert(worker, [state], [0.25], use_3d=True)
 
         seq_ctx = items[0]["seq_ctx"]
         self.assertEqual(seq_ctx.input_ids.tolist(), [[100, 101, 102]])
@@ -219,7 +218,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             extra_fields={"origin_data_source": "agent_math"},
         )
 
-        items = worker._convert_rollout_items_to_train_items([state], [0.0], _batch_attr(False))
+        items = _convert(worker, [state], [0.0])
 
         loss_kwargs = SimpleNamespace(**items[0]["loss_inputs"])
         self.assertEqual(loss_kwargs.shifted_labels.tolist(), [[-100, 20, -100, 22]])
@@ -250,7 +249,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             extra_fields={"origin_data_source": "agent_math"},
         )
 
-        items = worker._convert_rollout_items_to_train_items([state], [0.0], _batch_attr(False))
+        items = _convert(worker, [state], [0.0])
 
         loss_kwargs = SimpleNamespace(**items[0]["loss_inputs"])
         self.assertIsNone(getattr(loss_kwargs, "target_token_ids", None))
@@ -262,13 +261,13 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
     def test_token_advantages_mask_prompt_and_semantic_holes(self):
         worker = self._make_worker()
         state = self._state(supervised_mask=[1, 0, 1])
-        items = worker._convert_rollout_items_to_train_items([state], [[1, 2, 3, 4, 5]], _batch_attr(False))
+        items = _convert(worker, [state], [[1, 2, 3, 4, 5]])
         torch.testing.assert_close(items[0]["loss_inputs"]["advantages"], torch.tensor([[0.0, 0.0, 3.0, 0.0, 5.0]]))
 
     def test_token_advantages_require_shifted_length(self):
         worker = self._make_worker()
         with self.assertRaisesRegex(ValueError, "Token advantage length mismatch"):
-            worker._convert_rollout_items_to_train_items([self._state()], [[1.0]], _batch_attr(False))
+            _convert(worker, [self._state()], [[1.0]])
 
 
 if __name__ == "__main__":
