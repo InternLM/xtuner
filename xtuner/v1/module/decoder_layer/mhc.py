@@ -30,12 +30,13 @@ import os
 import torch
 from pydantic import BaseModel, ConfigDict, Field
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
 from xtuner.v1.ops.fp32_linear import fp32_linear
 from xtuner.v1.utils.compile import maybe_compile
 
 
-__all__ = ["MHCConfig", "hc_split_sinkhorn", "hc_pre", "hc_post"]
+__all__ = ["MHCConfig", "hc_split_sinkhorn", "hc_pre", "hc_pre_checkpointed", "hc_post"]
 
 # Opt-in switch for the DeepSeek TileKernels ``mhc`` backend (Hopper TileLang; see
 # https://github.com/deepseek-ai/TileKernels). Not yet ported to this branch -- porting the
@@ -57,6 +58,8 @@ class MHCConfig(BaseModel):
             anchor in tests).
         hc_eps (float): Stabilizer used inside the Sinkhorn normalization.
         hc_sinkhorn_iters (int): Number of Sinkhorn iterations.
+        checkpoint_pre (bool): Recompute ``hc_pre`` within decoder-layer backward
+            to avoid retaining its FP32 intermediates through the layer replay.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -65,6 +68,7 @@ class MHCConfig(BaseModel):
     hc_eps: float = 1e-6
     hc_sinkhorn_iters: int = 20
     projection_block_size: int = Field(default=0, ge=0)
+    checkpoint_pre: bool = False
 
 
 def hc_split_sinkhorn(
@@ -182,6 +186,12 @@ def hc_pre(
     # Weighted reduce over the hc_mult axis: y[..., d] = sum_h pre[..., h] * x[..., h, d].
     y = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=-2)
     return y.to(dtype), post, comb
+
+
+def hc_pre_checkpointed(*args, **kwargs) -> tuple[Tensor, Tensor, Tensor]:
+    # The decoder layer is already checkpointed, but its backward replay still
+    # saves hc_pre's large FP32 norm/projection intermediates until layer backward.
+    return checkpoint(hc_pre, *args, use_reentrant=False, **kwargs)
 
 
 def hc_post(x: Tensor, residual: Tensor, post: Tensor, comb: Tensor) -> Tensor:
