@@ -196,6 +196,8 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         # while runtime truncates by new ones). max_length is read from the local variable because
         # super().__init__ (which stores it as self.max_length) runs after this string is built.
         _hash_str = (
+            # Invalidate pre-fix lengths and media filtering results; explicit hash overrides remain caller-owned.
+            "input_contract:2_"
             f"{self.image_processor.min_image_tokens}_{self.image_processor.max_image_tokens}_"
             f"{self.video_processor.fps}_{self.video_processor.max_frames}_{self.merge_unit}_"
             f"processor_path:{processor_path}_llm_pack_weight:{llm_pack_weight}_"
