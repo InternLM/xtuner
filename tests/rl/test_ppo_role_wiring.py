@@ -34,7 +34,6 @@ class TestPPORoleWiring(unittest.TestCase):
         advantages, returns = estimator.compute_gae(
             [_state(labels=[0, -100, 1, 1], reward={"score": 1.0})],
             [[0.0, 0.0, 0.0]],
-            rollout_idx=0,
         )
         self.assertEqual(advantages, [[0.0, 1.0, 1.0]])
         self.assertEqual(returns, [[0.0, 1.0, 1.0]])
@@ -44,7 +43,6 @@ class TestPPORoleWiring(unittest.TestCase):
         advantages, returns = estimator.compute_gae(
             [_state(labels=[0, 1, 2], reward={"score": 1.0})],
             [[0.0, 0.0]],
-            rollout_idx=0,
         )
         self.assertEqual(advantages, [[0.0, 1.0]])
         self.assertEqual(returns, [[0.0, 1.0]])
@@ -91,7 +89,6 @@ class TestPPORoleWiring(unittest.TestCase):
         advantages, returns = estimator.compute_gae(
             states,
             [[0.0, 0.0], [0.0, 0.0]],
-            rollout_idx=0,
         )
         self.assertEqual(advantages, [[0.0, 0.0], [0.0, 1.0]])
         self.assertEqual(returns, [[0.0, 0.0], [0.0, 1.0]])
@@ -105,7 +102,6 @@ class TestPPORoleWiring(unittest.TestCase):
         advantages, returns = estimator.compute_gae(
             states,
             [[0.0, 0.0], [0.0, 0.0]],
-            rollout_idx=0,
         )
         self.assertEqual(returns, [[1.0, 1.0], [3.0, 3.0]])
         flat = [value for sample in advantages for value in sample]

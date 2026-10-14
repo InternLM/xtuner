@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import math
 import random
 from collections.abc import Sequence
-from typing import Literal, TypeAlias
+from typing import Literal, NamedTuple, TypeAlias
 
 import numpy as np
 import torch
@@ -17,6 +19,44 @@ DPRankPackIndices: TypeAlias = list[OptimizerStepPackIndices]
 PackedDataIndices: TypeAlias = list[DPRankPackIndices]
 
 _BALANCE_DEFAULT_SEED = 42
+
+
+class TokenTensorBatch(NamedTuple):
+    """Intermediate type for passing a list of tensors across Ray.
+
+    A list of 1D tensors is sent as one float32 tensor (``data``) plus one
+    length per sample (``lengths``). Tensors with more than one dimension are rejected.
+    """
+
+    data: torch.Tensor
+    lengths: torch.Tensor
+
+    @staticmethod
+    def cat_samples(samples: Sequence[torch.Tensor]) -> TokenTensorBatch:
+        """``list[torch.Tensor]`` -> ``TokenTensorBatch``.
+
+        Each sample must be a 1D tensor.
+        """
+        if not samples:
+            return TokenTensorBatch(torch.empty(0, dtype=torch.float32), torch.empty(0, dtype=torch.int32))
+        for index, sample in enumerate(samples):
+            if sample.ndim != 1:
+                raise ValueError(
+                    f"cat_samples requires a 1D tensor per sample, got shape {tuple(sample.shape)} at index {index}"
+                )
+        flat = [sample.detach().reshape(-1).to(dtype=torch.float32, device="cpu").contiguous() for sample in samples]
+        lengths = torch.tensor([sample.numel() for sample in flat], dtype=torch.int32)
+        data = flat[0] if len(flat) == 1 else torch.cat(flat)
+        return TokenTensorBatch(data, lengths)
+
+    def split_samples(self) -> list[torch.Tensor]:
+        """``TokenTensorBatch`` -> ``list[torch.Tensor]``.
+
+        Split into one 1D tensor per sample.
+        """
+        if int(self.lengths.numel()) == 0:
+            return []
+        return list(self.data.split(tuple(int(length) for length in self.lengths)))
 
 
 def get_greedy_pack_infos(data_indices: Sequence[int], num_tokens: Sequence[int], target: int) -> list[PackIndices]:

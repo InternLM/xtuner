@@ -3,7 +3,7 @@
 重构后 token 级张量构造从 controller 移到 training worker，本文件只测两段公开纯逻辑，
 不启动 Ray、模型或 rollout backend：
 
-- ``_convert_rollout_items_to_train_items``：shift、advantage 张量化、seq_ctx 构造、
+- ``_get_train_sample / _get_train_items``：shift、advantage 张量化、seq_ctx 构造、
   distillation teacher targets 附加，保留 CPU 原始 loss_inputs
   （use_3d_position_ids 时给文本样本补 3D 轴）。
 - ``_pack_train_items`` / ``_pack_one_batch``：按 controller 的 index-only 打包计划把
@@ -38,6 +38,7 @@ from xtuner.v1.rl.agent_loop.agent_loop import AgentLoop
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter, RolloutTeacherConfig
 from xtuner.v1.rl.loss import DistillationLossConfig, GRPOLossConfig
 from xtuner.v1.rl.trainer.pack import RLDataPacker
+from xtuner.v1.rl.trainer.pack import TokenTensorBatch
 from xtuner.v1.rl.trainer.worker import TrainBatchAttr, TrainingWorker, get_train_seq_ctx
 
 
@@ -141,7 +142,8 @@ def _batch_attr(
 
 
 def _convert(worker: TrainingWorker, states: list[RolloutState], advantages: list[float], use_3d: bool = False):
-    return worker._convert_rollout_items_to_train_items(states, advantages, _batch_attr(use_3d=use_3d))
+    samples = [worker._get_train_sample(state, use_3d) for state in states]
+    return worker._get_train_items(samples, advantages)
 
 
 class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
