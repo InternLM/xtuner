@@ -3,8 +3,11 @@
 import copy
 import csv
 import json
+import logging
 import os
+import random
 import sys
+from collections.abc import Iterator
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +17,6 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 import torch
-from mmengine.runner import set_random_seed
 from pydantic import BaseModel
 from tokenizers import Tokenizer, models, pre_tokenizers
 
@@ -37,6 +39,37 @@ from xtuner.v1.datasets import (
 )
 from xtuner.v1.datasets.collator import sft_llm_collator
 from xtuner.v1.datasets.token_stats import TokenStatsTokenizeFunction
+
+
+@pytest.fixture(autouse=True)
+def _single_process_cli_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # DistributedTestBase leaves WORLD_SIZE in the parent process after earlier tests.
+    monkeypatch.setenv("WORLD_SIZE", "1")
+
+
+@pytest.fixture(autouse=True)
+def _restore_sampling_rng() -> Iterator[None]:
+    # Sampling comparisons must not leave seeds behind for later training tests.
+    python_state, numpy_state = random.getstate(), np.random.get_state()
+    with torch.random.fork_rng(devices=[]):
+        try:
+            yield
+        finally:
+            random.setstate(python_state)
+            np.random.set_state(numpy_state)
+
+
+def _set_sampling_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.random.default_generator.manual_seed(seed)
+
+
+def _stats_inputs() -> dict[str, Any]:
+    source = SimpleNamespace(
+        name="subset", path="unused.jsonl", _meta={"num_tokens": np.array([2]), "original_num_tokens": np.array([3])}
+    )
+    return {"datasets": [source]}
 
 
 def _tokenizer() -> PreTrainedTokenizerFast:
@@ -349,6 +382,120 @@ class TestTokenStatsCache:
 
 
 class TestTokenStatsConfig:
+    @pytest.mark.parametrize("fail", [False, True])
+    def test_config_restores_sampling_rng(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail: bool) -> None:
+        from xtuner.v1.utils import Config
+
+        def build_stats_inputs(work_dir):
+            assert random.random() == random.Random(17).random()
+            assert np.random.random() == np.random.RandomState(17).random()
+            torch.testing.assert_close(torch.rand(3), torch.rand(3, generator=torch.Generator().manual_seed(17)))
+            if fail:
+                raise RuntimeError("factory failed")
+            return _stats_inputs()
+
+        def load_config(path):
+            # Config loading can also consume randomness before the sampling seed is applied.
+            random.random()
+            np.random.random()
+            torch.rand(3)
+            return {"seed": 17, "build_stats_inputs": build_stats_inputs}
+
+        monkeypatch.setattr(Config, "fromfile", load_config)
+        monkeypatch.setattr(sys, "argv", ["token_stats", "--config", "unused.py", "--output-dir", str(tmp_path)])
+        _set_sampling_seed(991)
+        python_state, numpy_state, torch_state = random.getstate(), np.random.get_state(), torch.get_rng_state()
+        with pytest.raises(RuntimeError, match="factory failed") if fail else nullcontext():
+            main()
+        assert random.getstate() == python_state
+        current_numpy_state = np.random.get_state()
+        np.testing.assert_array_equal(current_numpy_state[1], numpy_state[1])
+        assert current_numpy_state[0] == numpy_state[0] and current_numpy_state[2:] == numpy_state[2:]
+        assert torch.equal(torch.get_rng_state(), torch_state)
+
+    @pytest.mark.parametrize("source", ["config", "cache-manifest"])
+    @pytest.mark.parametrize("fail", [False, True])
+    def test_cli_preserves_logging_and_environment(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        source: str,
+        fail: bool,
+    ) -> None:
+        from xtuner.v1.utils import Config, get_logger
+
+        def build_stats_inputs(work_dir):
+            if fail:
+                raise FileNotFoundError("factory input missing")
+            return _stats_inputs()
+
+        monkeypatch.setattr(Config, "fromfile", lambda path: {"seed": 17, "build_stats_inputs": build_stats_inputs})
+        path = tmp_path / "input.json"
+        if not fail:
+            np.save(tmp_path / "num_tokens.npy", np.array([2]))
+            np.save(tmp_path / "original_num_tokens.npy", np.array([3]))
+            path.write_text(json.dumps([{"name": "subset", "meta_dirs": ["."]}]))
+        monkeypatch.setattr(sys, "argv", ["token_stats", f"--{source}", str(path), "--output-dir", str(tmp_path)])
+        monkeypatch.delenv("TQDM_DISABLE", raising=False)
+        log = get_logger()
+        records = []
+        sink_id = log.add(lambda message: records.append(str(message)), format="{message}")
+        root_logger = logging.getLogger()
+        monkeypatch.setattr(root_logger, "handlers", [])
+        monkeypatch.setattr(root_logger, "level", root_logger.level)
+        handlers, level = list(root_logger.handlers), root_logger.level
+        environment = dict(os.environ)
+        try:
+            with pytest.raises(FileNotFoundError) if fail else nullcontext():
+                main()
+            log.info("training log still visible")
+            assert any("training log still visible" in record for record in records)
+            assert dict(os.environ) == environment
+            assert root_logger.handlers == handlers and root_logger.level == level
+            if not fail:
+                assert "Token statistics:" in capsys.readouterr().err
+        finally:
+            try:
+                log.remove(sink_id)
+            except ValueError:
+                pass  # Old implementations removed the caller's sink; keep the assertion failure visible.
+
+    def test_config_does_not_seed_accelerators(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from xtuner.v1.utils import Config
+
+        monkeypatch.setattr(
+            Config, "fromfile", lambda path: {"seed": 17, "build_stats_inputs": lambda _: _stats_inputs()}
+        )
+        monkeypatch.setattr(sys, "argv", ["token_stats", "--config", "unused.py", "--output-dir", str(tmp_path)])
+        with (
+            patch.object(
+                torch.cuda, "manual_seed", side_effect=AssertionError("offline statistics must not seed CUDA")
+            ),
+            patch.object(
+                torch.cuda, "manual_seed_all", side_effect=AssertionError("offline statistics must not seed CUDA")
+            ),
+        ):
+            main()
+
+    @pytest.mark.parametrize("source", ["--config", "--cache-manifest"])
+    @pytest.mark.parametrize("world_size", [2, 8])
+    def test_cli_rejects_distributed_launch(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        source: str,
+        world_size: int,
+    ) -> None:
+        monkeypatch.setenv("WORLD_SIZE", str(world_size))
+        monkeypatch.setattr(sys, "argv", ["token_stats", source, "unused.json", "--output-dir", str(tmp_path)])
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 2
+        assert "Run this offline coordinator once, without torchrun" in capsys.readouterr().err
+        assert not list(tmp_path.iterdir())
+
     @pytest.mark.parametrize("packing", [False, True])
     @pytest.mark.parametrize("legacy", [False, True])
     @pytest.mark.parametrize("wrapped", [False, True])
@@ -474,7 +621,7 @@ def build_stats_inputs(work_dir):
     return {"datasets": datasets}
 """
         )
-        set_random_seed(effective_seed)
+        _set_sampling_seed(effective_seed)
         training = _dataset(tmp_path / "data.jsonl", tmp_path / "training_cache", False, sample_ratio=ratio)
         expected_original = []
         with (tmp_path / "data.jsonl").open() as stream:
@@ -494,7 +641,7 @@ def build_stats_inputs(work_dir):
         cache_snapshot = None
         for phase, ambient_seed in [("cold", 991), ("warm", 117)]:
             output = tmp_path / phase
-            set_random_seed(ambient_seed)
+            _set_sampling_seed(ambient_seed)
             monkeypatch.setattr(sys, "argv", ["token_stats", "--config", str(config), "--output-dir", str(output)])
             guard = (
                 patch.object(JsonlDataset, "count_tokens", side_effect=AssertionError("must reuse cache"))
@@ -509,7 +656,7 @@ def build_stats_inputs(work_dir):
             assert rows == [
                 {
                     key: "" if value is None else str(value)
-                    for key, value in {**expected, "seed": effective_seed}.items()
+                    for key, value in {**expected, "num_shards": 1, "seed": effective_seed}.items()
                 }
             ]
             assert {path.name for path in report.iterdir()} == {"subset_token_stats.csv"}
@@ -540,13 +687,152 @@ def build_stats_inputs(work_dir):
 
 
 class TestTokenStatsReports:
+    @pytest.mark.parametrize("chunk_size", [1, 3, 65_536])
+    def test_source_counts_and_metrics_are_independent_of_chunk_size(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, chunk_size: int
+    ) -> None:
+        import xtuner.tools.token_stats as token_stats
+
+        metadata = [
+            {"num_tokens": np.array([0, 2, 8, 8, 8]), "original_num_tokens": np.array([-1, 2, 8, 12, 10**12])},
+            {"num_tokens": np.array([3, 4])},
+            {"num_tokens": np.array([], dtype=np.int64), "original_num_tokens": np.array([], dtype=np.int64)},
+        ]
+        sources = []
+        directories = []
+        for index, shard in enumerate(metadata):
+            directory = tmp_path / str(index)
+            directory.mkdir()
+            for key, values in shard.items():
+                values.flags.writeable = False
+                np.save(directory / f"{key}.npy", values)
+            sources.append(SimpleNamespace(name="subset", path=str(index), _meta=shard))
+            directories.append(str(directory))
+        expected = summarize_datasets(sources)[0]
+        assert expected["num_shards"] == 3 and expected["count"] == 7
+        assert expected["known_original_count"] == 4 and expected["unknown_original_count"] == 3
+        monkeypatch.setattr(token_stats, "_STATS_CHUNK_SIZE", chunk_size)
+        assert summarize_datasets(sources) == [expected]
+        assert summarize_cache_manifest([{"name": "subset", "meta_dirs": directories}]) == [
+            {**expected, "scope": "source_samples_before_filtering"}
+        ]
+
+    @pytest.mark.parametrize("dtype", [np.int64, np.float64])
+    @pytest.mark.parametrize("case", ["mixed", "boundary", "sparse"])
+    def test_dense_and_sparse_length_counts_match_numpy(self, dtype: Any, case: str) -> None:
+        from xtuner.tools.token_stats import _DENSE_LENGTH_LIMIT
+
+        limit = _DENSE_LENGTH_LIMIT
+        lengths = {
+            "mixed": [0, 1, limit - 1, limit, 10**12, 1, limit - 1, limit + 1, limit, 4],
+            "boundary": [limit - 1, limit],
+            "sparse": [limit, 10**12, limit + 1, limit],
+        }[case]
+        original = np.asarray(lengths, dtype=dtype)
+        kept = np.minimum(original, 8)
+        original.flags.writeable = kept.flags.writeable = False
+        shards = [
+            {"num_tokens": k, "original_num_tokens": o}
+            for k, o in zip(np.array_split(kept, 3), np.array_split(original, 3))
+        ]
+        row = summarize_samples("subset", shards, "source")
+        losses = original - kept
+        assert row["count"] == row["known_original_count"] == len(original)
+        assert row["original_total_tokens"] == int(original.sum())
+        assert row["original_mean_tokens"] == original.mean()
+        assert row["original_median_tokens"] == np.median(original)
+        assert row["original_p99_tokens"] == np.percentile(original, 99)
+        assert row["original_max_tokens"] == int(original.max())
+        assert row["retained_tokens_all_samples"] == int(kept.sum())
+        assert row["truncated_count"] == int((losses > 0).sum())
+        assert row["truncated_tokens"] == int(losses.sum())
+        np.testing.assert_array_equal(original, lengths)
+        np.testing.assert_array_equal(kept, np.minimum(lengths, 8))
+
+    @pytest.mark.parametrize("dtype", [np.float64, ">i8"])
+    @pytest.mark.parametrize("version", [(1, 0), (2, 0)])
+    def test_cache_reader_preserves_numeric_dtype_and_npy_headers(
+        self, tmp_path: Path, dtype: Any, version: tuple[int, int]
+    ) -> None:
+        shard = {
+            "num_tokens": np.array([0, 1, 8, 8], dtype=dtype),
+            "original_num_tokens": np.array([-1, 1, 8, 11], dtype=dtype),
+        }
+        for key, values in shard.items():
+            with (tmp_path / f"{key}.npy").open("wb") as stream:
+                np.lib.format.write_array(stream, values, version=version)
+        manifest = [{"name": "subset", "meta_dirs": [str(tmp_path)]}]
+        assert summarize_cache_manifest(manifest) == [
+            {**summarize_samples("subset", [shard], "source_samples_before_filtering"), "num_shards": 1}
+        ]
+
+    @pytest.mark.parametrize("shape", [(2,), (3, 1), ()])
+    @pytest.mark.parametrize("source", ["dataset", "cache"])
+    def test_readers_reject_invalid_metadata_shapes(self, tmp_path: Path, shape: tuple[int, ...], source: str) -> None:
+        shard = {"num_tokens": np.ones(3, dtype=np.int64), "original_num_tokens": np.ones(shape, dtype=np.int64)}
+        for key, values in shard.items():
+            np.save(tmp_path / f"{key}.npy", values)
+        with pytest.raises(ValueError, match="Invalid"):
+            if source == "dataset":
+                summarize_datasets([SimpleNamespace(name="subset", path="unused.jsonl", _meta=shard)])
+            else:
+                summarize_cache_manifest([{"name": "subset", "meta_dirs": [str(tmp_path)]}])
+
+    @pytest.mark.parametrize("workers", [1, 2])
+    def test_multiple_caches_match_numpy_with_exact_quantiles(self, tmp_path: Path, workers: int) -> None:
+        rng = np.random.default_rng(17)
+        original = rng.integers(0, 1000, size=200_003, dtype=np.int64)
+        original[1] = 10**12  # Sparse outliers must not require an array indexed by maximum length.
+        kept = np.minimum(original, 128)
+        original[::11] = -1
+        boundaries = (0, 0, 70_001, 100_001, len(original))
+        directories = []
+        for index, (start, end) in enumerate(zip(boundaries, boundaries[1:])):
+            directory = tmp_path / str(index)
+            directory.mkdir()
+            directories.append(str(directory))
+            np.save(directory / "num_tokens.npy", kept[start:end])
+            # Also cover a legacy shard with no original-length metadata.
+            if index != 2:
+                np.save(directory / "original_num_tokens.npy", original[start:end])
+            else:
+                original[start:end] = -1
+        row = summarize_cache_manifest([{"name": "subset", "meta_dirs": directories}], workers=workers)[0]
+        known = original >= 0
+        losses = original[known] - kept[known]
+        assert row["count"] == len(original)
+        assert row["num_shards"] == 4
+        assert row["damaged_or_empty_count"] == int((kept == 0).sum())
+        assert row["known_original_count"] == int(known.sum())
+        assert row["unknown_original_count"] == int((~known).sum())
+        assert row["retained_tokens_all_samples"] == int(kept.sum())
+        assert row["original_total_tokens"] == int(original[known].sum())
+        assert row["original_mean_tokens"] == pytest.approx(original[known].mean())
+        assert row["original_median_tokens"] == np.median(original[known])
+        assert row["original_p99_tokens"] == pytest.approx(np.percentile(original[known], 99))
+        assert row["original_max_tokens"] == int(original[known].max())
+        assert row["truncated_count"] == int((losses > 0).sum())
+        assert row["truncated_tokens"] == int(losses.sum())
+        assert row["truncated_sample_ratio"] == (losses > 0).mean()
+        assert row["truncated_token_ratio"] == losses.sum() / original[known].sum()
+
+    @pytest.mark.parametrize("lengths", [[], [0], [9], [0, 100], [1, 1, 1, 100], list(range(101))])
+    def test_streamed_shards_preserve_quantile_interpolation(self, lengths: list[int]) -> None:
+        values = np.asarray(lengths, dtype=np.int64)
+        shards = ({"num_tokens": part, "original_num_tokens": part} for part in np.array_split(values, 4))
+        row = summarize_samples("subset", shards, "source")
+        assert row["count"] == len(lengths)
+        for metric, percentile in [("median", 50), ("p99", 99)]:
+            expected = np.percentile(values, percentile) if lengths else None
+            assert row[f"original_{metric}_tokens"] == expected
+
     def test_partial_coverage_denominators_and_csv(self, tmp_path: Path) -> None:
         shard = {
             "num_tokens": np.array([5, 8, 8, 8, 0]),
             "original_num_tokens": np.array([5, 8, 12, -1, -1]),
         }
         row = summarize_samples("subset", [shard], "source_samples_before_filtering")
-        assert row["count"] == 5 and row["complete_count"] == 3
+        assert row["count"] == 5
         assert row["known_original_count"] == 3 and row["unknown_original_count"] == 2
         assert row["original_total_tokens"] == 25
         assert row["original_median_tokens"] == 8
@@ -554,13 +840,17 @@ class TestTokenStatsReports:
         assert row["original_max_tokens"] == 12
         assert row["truncated_sample_ratio"] == 1 / 3
         assert row["truncated_token_ratio"] == 4 / 25
+        row["seed"] = 17
+        before = dict(row)
         first, message = save_reports([row], tmp_path)
         second, _ = save_reports([row], tmp_path)
         assert first != second
-        assert "complete 3/5" in message and "4 tokens" in message
+        assert "original length known 3/5" in message and "4 tokens" in message
         with (first / "subset_token_stats.csv").open() as stream:
             rows = list(csv.DictReader(stream))
         assert len(rows) == 1 and rows[0]["truncated_tokens"] == "4"
+        assert rows[0]["seed"] == "17" and row == before
+        assert {"complete_count", "incomplete_count", "complete_original_tokens"}.isdisjoint(rows[0])
         assert "supervised_tokens_after_collator" not in rows[0]
         assert not (first / "packing_token_stats.csv").exists()
 
@@ -580,7 +870,6 @@ class TestTokenStatsReports:
         ]
         row = summarize_samples("subset", shards, "source")
         known = original >= 0
-        assert row["num_shards"] == len(shards)
         assert row["known_original_count"] == int(known.sum())
         assert row["original_total_tokens"] == int(original[known].sum())
         assert row["original_median_tokens"] == np.median(original[known])
@@ -605,7 +894,7 @@ class TestTokenStatsReports:
         measured = summarize_samples(
             "measured", [{"num_tokens": np.array([8]), "original_num_tokens": np.array([12])}], "source"
         )
-        assert measured["known_original_count"] == measured["complete_count"] == 1
+        assert measured["known_original_count"] == 1
         assert measured["truncated_tokens"] == 4
         assert measured["truncated_sample_ratio"] == 1
         assert measured["truncated_token_ratio"] == 4 / 12
@@ -688,18 +977,65 @@ class TestPackingTokenStats:
 
         monkeypatch.setattr(dataset_utils, "_MMAP_DIR", tmp_path)
 
+    @pytest.mark.parametrize("actual_level", ["none", "soft", "hard", "__legacy"])
+    @pytest.mark.parametrize("declared_level", ["none", "soft", "hard", "__legacy"])
+    def test_existing_pack_mode_must_match_config(self, actual_level: str, declared_level: str) -> None:
+        sources = [_PackingSamples("subset", [5, 8, 13], 2)]
+        config = DataloaderConfig(pack_level=actual_level, pack_max_length=8, pack_workers=1)
+        packed = _build_packed_dataset(sources, config, 17)
+        declared = config.model_copy(update={"pack_level": declared_level})
+        if actual_level != declared_level:
+            with pytest.raises(ValueError, match="pack_level"):
+                summarize_packing(packed, declared)
+        else:
+            result, _ = summarize_packing(packed, declared)
+            assert result["pack_level"] == actual_level
+
+    @pytest.mark.parametrize("packing", [False, True])
+    def test_factory_packing_requires_explicit_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, packing: bool
+    ) -> None:
+        from xtuner.v1.utils import Config
+
+        sources = [_PackingSamples("subset", [5, 8, 13], 2)]
+        loader = DataloaderConfig(pack_level="hard", pack_max_length=8, pack_workers=1)
+        inputs = {"datasets": sources, "dataloader_config": loader}
+        monkeypatch.setattr(Config, "fromfile", lambda _: {"seed": 42, "build_stats_inputs": lambda work_dir: inputs})
+        arguments = ["token_stats", "--config", "unused.py", "--output-dir", str(tmp_path)]
+        monkeypatch.setattr(sys, "argv", arguments + (["--packing"] if packing else []))
+        guard = (
+            nullcontext()
+            if packing
+            else patch(
+                "xtuner.tools.token_stats._build_packed_dataset", side_effect=AssertionError("packing disabled")
+            )
+        )
+        with guard:
+            main()
+        reports = list(tmp_path.glob("*/packing_token_stats.csv"))
+        assert bool(reports) == packing
+        if packing:
+            with reports[0].open() as stream:
+                row = next(csv.DictReader(stream))
+            assert row["pack_level"] == "hard"
+            assert row["seed"] == "42"
+        with next(tmp_path.glob("*/subset_token_stats.csv")).open() as stream:
+            row = next(csv.DictReader(stream))
+        assert row["seed"] == "42"
+        assert ("effective_tokens" in row) == packing
+
     @pytest.mark.parametrize("limit", [6, 8, 16])
     @pytest.mark.parametrize("padding", [False, True])
     def test_packed_length_changes_subset_loss_and_shares(self, limit: int, padding: bool) -> None:
         sources = [_PackingSamples("short", [5], 2), _PackingSamples("long", [8], 3, originals=[12])]
         original_items = copy.deepcopy([source.items for source in sources])
         config = DataloaderConfig(pack_level="none", pack_max_length=limit, pack_to_max_length=padding)
-        rows = summarize_datasets(sources)
-        result = summarize_packing(_build_packed_dataset(sources, config, 42), config, subset_rows=rows)
+        result, rows = summarize_packing(_build_packed_dataset(sources, config, 42), config)
         by_name = {row["name"]: row for row in rows}
         short, long = by_name["short"], by_name["long"]
         retained = min(8, limit)
-        assert long["truncated_tokens"] == 4  # First truncation: 12 -> 8.
+        sample_rows = {row["name"]: row for row in summarize_datasets(sources)}
+        assert sample_rows["long"]["truncated_tokens"] == 4  # First truncation: 12 -> 8.
         assert long["packing_collator_lost_tokens"] == 8 - retained
         assert long["packing_collator_loss_ratio"] == (8 - retained) / 8
         assert long["token_share_before_packing"] == 8 / 13
@@ -717,14 +1053,40 @@ class TestPackingTokenStats:
         assert long["supervised_tokens_after_collator"] == retained - 1
         assert [source.items for source in sources] == original_items
 
+    @pytest.mark.parametrize("padding", [False, True])
+    def test_global_losses_include_collator_truncation_and_drops(self, tmp_path: Path, padding: bool) -> None:
+        from xtuner.v1.datasets.packing import _LegacySoftPackDataset
+
+        sources = [_PackingSamples("a", [4], 2), _PackingSamples("b", [6], 3)]
+        packed = _LegacySoftPackDataset(sources, pack_max_length=16, global_pack=True, seed=0)
+        config = DataloaderConfig(pack_level="__legacy", pack_max_length=3, pack_to_max_length=padding)
+        result, rows = summarize_packing(packed, config)
+
+        # The first sequence loses one token, the second is dropped; label shift is separate.
+        assert result["sampled_input_tokens"] == result["tokens_before_collation"] == 10
+        assert result["packing_unassigned_tokens"] == 0
+        assert result["collator_truncated_tokens"] == 1
+        assert result["collator_dropped_tokens"] == 6
+        assert result["packing_collator_lost_tokens"] == 7
+        assert result["packing_collator_loss_ratio"] == 0.7
+        assert result["label_shift_tokens"] == 1
+        assert result["effective_total_tokens"] == 2
+        assert result["padding_tokens"] == int(padding)
+        assert [row["packing_collator_lost_tokens"] for row in rows] == [1, 6]
+        output, message = save_reports(summarize_datasets(sources), tmp_path, result)
+        assert "Packing/collator lost 7 tokens" in message
+        with (output / "packing_token_stats.csv").open() as stream:
+            saved = next(csv.DictReader(stream))
+        assert saved["packing_collator_lost_tokens"] == "7"
+        assert saved["packing_collator_loss_ratio"] == "0.7"
+
     @pytest.mark.parametrize("counts", [(9, 1, 0), (0, 0, 0)])
     def test_supervision_shares_and_zero_supervision_packs(self, tmp_path: Path, counts: tuple[int, ...]) -> None:
         sources = [_PackingSamples(name, [10], 2) for name in ("dense", "sparse", "zero")]
         for source, count in zip(sources, counts):
             source.items[0]["labels"] = [-100] * (10 - count) + [2] * count
         config = DataloaderConfig(pack_level="none", pack_max_length=10, pack_to_max_length=True)
-        rows = summarize_datasets(sources)
-        result = summarize_packing(_build_packed_dataset(sources, config, 17), config, subset_rows=rows)
+        result, rows = summarize_packing(_build_packed_dataset(sources, config, 17), config)
         total = sum(counts)
         for row, count in zip(rows, counts):
             assert row["effective_tokens"] == 9
@@ -734,7 +1096,7 @@ class TestPackingTokenStats:
         assert result["supervision_ratio"] == total / 27
         assert result["zero_supervision_pack_count"] == counts.count(0)
         assert result["padding_ratio"] == 3 / 30
-        report, _ = save_reports(rows, tmp_path, result)
+        report, _ = save_reports(summarize_datasets(sources), tmp_path, result)
         with (report / "packing_token_stats.csv").open() as stream:
             saved = next(csv.DictReader(stream))
         assert saved["supervised_tokens_after_collator"] == str(total)
@@ -748,25 +1110,27 @@ class TestPackingTokenStats:
         sources[1].items[0]["labels"] = [3]
         packed = _LegacySoftPackDataset(sources, pack_max_length=8, global_pack=True, seed=0)
         config = DataloaderConfig(pack_level="__legacy", pack_max_length=8, pack_to_max_length=padding)
-        rows = summarize_datasets(sources)
-        result = summarize_packing(packed, config, subset_rows=rows)
+        result, rows = summarize_packing(packed, config)
         assert [row["effective_tokens"] for row in rows] == [4, 0]
         assert [row["supervised_tokens_after_collator"] for row in rows] == [3, 1]
         assert rows[1]["supervised_token_share"] == 1 / 4
         assert result["supervised_tokens_after_collator"] == 4
         assert result["supervision_ratio"] == 1
 
-    @pytest.mark.parametrize("missing_total", [False, True])
-    def test_subset_population_mismatch_does_not_modify_rows(self, missing_total: bool) -> None:
+    def test_packing_returns_independent_subset_results(self) -> None:
         sources = [_PackingSamples("a", [5], 2), _PackingSamples("b", [8], 3)]
-        rows = summarize_datasets([sources[0], _PackingSamples("b", [5], 3)])
-        if missing_total:
-            rows[-1].pop("retained_tokens_all_samples")
-        original_rows = copy.deepcopy(rows)
+        sample_rows = summarize_datasets(sources)
+        original_rows = copy.deepcopy(sample_rows)
+        original_items = copy.deepcopy([source.items for source in sources])
         config = DataloaderConfig(pack_level="none", pack_max_length=6)
-        with pytest.raises(ValueError, match="Subset and packing populations do not match"):
-            summarize_packing(_build_packed_dataset(sources, config, 17), config, subset_rows=rows)
-        assert rows == original_rows
+        packed = _build_packed_dataset(sources, config, 17)
+        result, rows = summarize_packing(packed, config)
+        expected = copy.deepcopy((result, rows))
+        result["effective_total_tokens"] = -1
+        rows[0]["effective_tokens"] = -1
+        assert summarize_packing(packed, config) == expected
+        assert sample_rows == original_rows
+        assert [source.items for source in sources] == original_items
 
     @pytest.mark.parametrize("level", ["soft", "hard", "__legacy"])
     @pytest.mark.parametrize("global_pack", [False, True])
@@ -782,8 +1146,7 @@ class TestPackingTokenStats:
             pack_extra_buffer_size=2,
         )
         packed = _build_packed_dataset(sources, config, 17)
-        rows = summarize_datasets(sources)
-        result = summarize_packing(packed, config, subset_rows=rows)
+        result, rows = summarize_packing(packed, config)
         expected_effective = {"a": 0, "b": 0}
         expected_packed = {"a": 0, "b": 0}
         expected_supervised = {"a": 0, "b": 0}
@@ -814,8 +1177,7 @@ class TestPackingTokenStats:
     def test_hard_pack_tail_changes_mixture_without_counting_interior_slices_as_loss(self) -> None:
         sources = [_PackingSamples("a", [10], 2), _PackingSamples("b", [1, 1], 3)]
         config = DataloaderConfig(pack_level="hard", pack_max_length=8, global_pack=True, pack_workers=1)
-        rows = summarize_datasets(sources)
-        result = summarize_packing(_build_packed_dataset(sources, config, 1), config, subset_rows=rows)
+        result, rows = summarize_packing(_build_packed_dataset(sources, config, 1), config)
         a, b = rows
         assert a["packing_truncated_instances"] == 1 and a["packing_truncated_tokens"] == 2
         assert b["packing_dropped_instances"] == 2 and b["packing_dropped_tokens"] == 2
@@ -828,8 +1190,7 @@ class TestPackingTokenStats:
         assert result["collator_truncated_tokens"] == 0
 
         long = [_PackingSamples("long", [21], 2)]
-        rows = summarize_datasets(long)
-        result = summarize_packing(_build_packed_dataset(long, config, 1), config, subset_rows=rows)
+        result, rows = summarize_packing(_build_packed_dataset(long, config, 1), config)
         assert result["count"] == 2
         assert rows[0]["packing_truncated_instances"] == 1
         assert rows[0]["packing_truncated_tokens"] == 5
@@ -841,8 +1202,7 @@ class TestPackingTokenStats:
         sources = [_PackingSamples("a", [4], 2), _PackingSamples("b", [6], 3)]
         packed = _LegacySoftPackDataset(sources, pack_max_length=16, global_pack=True, seed=0)
         config = DataloaderConfig(pack_level="__legacy", pack_max_length=8)
-        rows = summarize_datasets(sources)
-        result = summarize_packing(packed, config, subset_rows=rows)
+        result, rows = summarize_packing(packed, config)
         assert result["collator_dropped_tokens"] == 6
         assert result["collator_truncated_tokens"] == 0
         assert rows[0]["effective_tokens"] == 3
@@ -850,8 +1210,7 @@ class TestPackingTokenStats:
         assert rows[1]["token_share_after_packing"] == 0
         assert [row["supervised_tokens_after_collator"] for row in rows] == [3, 0]
         sources[1].name = "a"
-        rows = summarize_datasets(sources)
-        summarize_packing(packed, config, subset_rows=rows)
+        _, rows = summarize_packing(packed, config)
         assert len(rows) == 1
         assert rows[0]["packing_input_tokens"] == 10
         assert rows[0]["packing_collator_loss_ratio"] == 0.6
@@ -862,8 +1221,7 @@ class TestPackingTokenStats:
     def test_empty_distribution_and_report_export(self, tmp_path: Path) -> None:
         sources = [_PackingSamples("empty", [], 2)]
         config = DataloaderConfig(pack_level="none", pack_max_length=8)
-        rows = summarize_datasets(sources)
-        result = summarize_packing(_build_packed_dataset(sources, config, 42), config, subset_rows=rows)
+        result, rows = summarize_packing(_build_packed_dataset(sources, config, 42), config)
         assert result["count"] == 0 and result["effective_mean_tokens"] is None
         assert rows[0]["packing_collator_loss_ratio"] is None
         assert rows[0]["token_share_change"] is None
@@ -873,7 +1231,8 @@ class TestPackingTokenStats:
         assert result["supervision_ratio"] is None
         assert result["zero_supervision_pack_count"] == 0
         assert result["padding_ratio"] is None
-        report, message = save_reports(rows, tmp_path, result, seed=42)
+        result["seed"] = 42
+        report, message = save_reports(summarize_datasets(sources), tmp_path, result)
         assert "Packing/collator lost 0 tokens" in message
         with (report / "packing_token_stats.csv").open() as stream:
             saved = next(csv.DictReader(stream))
@@ -921,51 +1280,32 @@ class TestPackingTokenStats:
         assert trainer.dataloader_cfg is loader
         assert loader.pack_to_max_length is padding
 
-    def test_cache_only_cannot_claim_packing_statistics(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_cache_only_cannot_claim_packing_statistics(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         monkeypatch.setattr(
             sys, "argv", ["token_stats", "--cache-manifest", "unused.json", "--packing", "--output-dir", "."]
         )
-        with pytest.raises(SystemExit, match="2"):
+        with pytest.raises(SystemExit) as exc_info:
             main()
+        assert exc_info.value.code == 2
+        assert "--packing requires --config" in capsys.readouterr().err
 
-    @pytest.mark.parametrize("mismatch", [None, "length", "instance", "repeated"])
-    def test_factory_existing_packs_require_matching_sources(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str | None
+    @pytest.mark.parametrize("packing", [False, True])
+    def test_factory_rejects_prebuilt_packs_with_migration_hint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], packing: bool
     ) -> None:
         from xtuner.v1.utils import Config
 
-        sources = [_PackingSamples("subset", [5, 8], 2)]
-        packed_sources = sources
-        if mismatch == "length":
-            packed_sources = [_PackingSamples("subset", [5, 5], 2)]
-        elif mismatch == "instance":
-            packed_sources = copy.deepcopy(sources)
-        elif mismatch == "repeated":
-            packed_sources = sources * 2
-        loader = DataloaderConfig(pack_level="none", pack_max_length=6)
-        inputs = {
-            "datasets": sources,
-            "packed_dataset": _build_packed_dataset(packed_sources, loader, 17),
-            "dataloader_config": loader,
-        }
-        monkeypatch.setattr(sys, "argv", ["token_stats", "--config", "custom.py", "--output-dir", str(tmp_path)])
-        with (
-            patch.object(Config, "fromfile", return_value={"build_stats_inputs": lambda work_dir: inputs, "seed": 17}),
-            pytest.raises(ValueError, match="datasets and packed_dataset must share sampled sources")
-            if mismatch is not None
-            else nullcontext(),
-        ):
+        inputs = {**_stats_inputs(), "packed_dataset": object()}
+        monkeypatch.setattr(Config, "fromfile", lambda _: {"build_stats_inputs": lambda work_dir: inputs, "seed": 17})
+        arguments = ["token_stats", "--config", "custom.py", "--output-dir", str(tmp_path)]
+        monkeypatch.setattr(sys, "argv", arguments + (["--packing"] if packing else []))
+        with pytest.raises(SystemExit) as exc_info:
             main()
-        if mismatch is not None:
-            assert not list(tmp_path.rglob("*.csv"))
-            return
-        with next(tmp_path.glob("*/packing_token_stats.csv")).open() as stream:
-            row = next(csv.DictReader(stream))
-        assert row["collator_truncated_tokens"] == "2"
-        assert row["seed"] == "17"
-        with next(tmp_path.glob("*/subset_token_stats.csv")).open() as stream:
-            row = next(csv.DictReader(stream))
-        assert float(row["packing_collator_loss_ratio"]) == 2 / 13
+        assert exc_info.value.code == 2
+        assert "remove packed_dataset and use --packing" in capsys.readouterr().err
+        assert not list(tmp_path.rglob("*.csv"))
 
 
 def _distributed_cache_worker(rank: int, directory: str, path: str) -> None:

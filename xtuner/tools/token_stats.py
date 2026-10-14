@@ -3,14 +3,15 @@
 
 import argparse
 import csv
-import logging
 import os
+import random
 import sys
 import tempfile
 from bisect import bisect_right
 from collections import Counter, defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,70 +21,80 @@ import numpy as np
 
 Row = dict[str, str | int | float | None]
 _LENGTH_KEYS = ("num_tokens", "original_num_tokens")
+_STATS_CHUNK_SIZE = 65_536
+# Bound dense counters to 8 MiB per subset; exceptionally long samples stay sparse.
+_DENSE_LENGTH_LIMIT = 1_048_576
 
 
-def summarize_samples(name: str, shards: Sequence[Mapping[str, np.ndarray]], scope: str) -> Row:
+def summarize_samples(name: str, chunks: Iterable[Mapping[str, np.ndarray]], scope: str) -> Row:
     """Summarize original lengths and tokenization losses for one subset.
 
     Args:
         name (str): Dataset/subset name.
-        shards (Sequence[Mapping[str, np.ndarray]]): Metadata in sample order, before packing.
+        chunks (Iterable[Mapping[str, np.ndarray]]): Bounded blocks of metadata before packing; consumed once.
+            Readers own chunking and source counts; block boundaries do not affect the result.
         scope (str): Counting population, e.g. source samples or sampled instances.
 
     Returns:
         Row: One CSV row. Ratios are fractions in [0, 1], undefined metrics are None.
     """
-    arrays: dict[str, list[np.ndarray]] = {key: [] for key in _LENGTH_KEYS}
-    for shard in shards:
-        if "chunks" in shard:
+    dense_counts = np.empty(0, dtype=np.int64)
+    sparse_counts: Counter[int] = Counter()
+    count = damaged = known_count = retained_total = truncated_count = lost_total = 0
+    for chunk in chunks:
+        if "chunks" in chunk:
             raise ValueError("Long-text chunk caches are not original-sample metadata")
-        n = len(shard["num_tokens"])
-        for key in _LENGTH_KEYS:
-            values = np.asarray(shard[key] if key in shard else np.full(n, -1, dtype=np.int64))
-            # Empty ranks can promote cached counts to float. Reject non-integral values.
-            if (
-                values.ndim != 1
-                or len(values) != n
-                or values.dtype.kind not in "iuf"
-                or (
-                    values.dtype.kind == "f"
-                    and (not np.all(np.isfinite(values)) or np.any(values != np.floor(values)))
-                )
-            ):
+        arrays = {key: np.asarray(chunk[key]) for key in _LENGTH_KEYS if key in chunk}
+        n = arrays["num_tokens"].size
+        for key, values in arrays.items():
+            if values.ndim != 1 or len(values) != n or values.dtype.kind not in "iuf":
                 raise ValueError(f"Invalid {key} array in subset {name!r}")
-            arrays[key].append(values.astype(np.int64, copy=False))
-    merged = {
-        key: vals[0] if len(vals) == 1 else np.concatenate(vals) if vals else np.empty(0, dtype=np.int64)
-        for key, vals in arrays.items()
-    }
-    kept, original = (merged[key] for key in _LENGTH_KEYS)
-    if np.any(kept < 0) or np.any(original < -1):
-        raise ValueError(f"Invalid negative token counts in subset {name!r}")
-    known = original >= 0
-    known_count = int(known.sum())
-    known_original = original if known_count == len(original) else original[known]
-    # num_tokens is recorded after tokenization truncation, before packing and collation.
-    lost = known_original - (kept if known_count == len(kept) else kept[known])
-    if np.any(lost < 0):
-        raise ValueError(f"Inconsistent tokenization truncation metadata in subset {name!r}")
-    truncated_count = int((lost > 0).sum())
-    lost_total = int(lost.sum())
-    del lost
-    denominator = int(known_original.sum())
+            # Empty ranks can promote cached counts to float. Reject fractions and unsafe casts.
+            if (
+                values.dtype.kind == "f" and (not np.all(np.isfinite(values)) or np.any(values != np.floor(values)))
+            ) or (np.any(values < -1) or np.any(values >= 2**63)):
+                raise ValueError(f"Invalid {key} array in subset {name!r}")
+            arrays[key] = values.astype(np.int64, copy=False)
+        count += n
+        kept = arrays["num_tokens"]
+        original = arrays.get("original_num_tokens")
+        if np.any(kept < 0):
+            raise ValueError(f"Invalid negative token counts in subset {name!r}")
+        retained_total += int(kept.sum())
+        damaged += int((kept == 0).sum())
+        if original is None:
+            continue
+        known = original >= 0
+        known_original = original[known]
+        # num_tokens is recorded after tokenization truncation, before packing and collation.
+        if np.any(known_original < kept[known]):
+            raise ValueError(f"Inconsistent tokenization truncation metadata in subset {name!r}")
+        lost = known_original - kept[known]
+        known_count += len(known_original)
+        truncated_count += int((lost > 0).sum())
+        lost_total += int(lost.sum())
+        common = known_original
+        if len(common) and common.max() >= _DENSE_LENGTH_LIMIT:
+            dense_mask = common < _DENSE_LENGTH_LIMIT
+            lengths, counts = np.unique(common[~dense_mask], return_counts=True)
+            sparse_counts.update(dict(zip(lengths.tolist(), counts.tolist())))
+            common = common[dense_mask]
+        counts = np.bincount(common)
+        if len(counts) > len(dense_counts):
+            dense_counts = np.pad(dense_counts, (0, len(counts) - len(dense_counts)))
+        dense_counts[: len(counts)] += counts
+    distribution = _frequency_distribution(dense_counts, sparse_counts, "original")
+    denominator = int(distribution["original_total_tokens"] or 0)
     return {
         "name": name,
         "scope": scope,
         "truncation_stage": "tokenization",
-        "num_shards": len(shards),
-        "count": len(kept),
-        "damaged_or_empty_count": int((kept == 0).sum()),
+        "count": count,
+        "damaged_or_empty_count": damaged,
         "known_original_count": known_count,
-        "unknown_original_count": len(kept) - known_count,
-        "complete_count": known_count,
-        "incomplete_count": len(kept) - known_count,
-        **_distribution(known_original, "original"),
-        "retained_tokens_all_samples": int(kept.sum()),
-        "complete_original_tokens": denominator,
+        "unknown_original_count": count - known_count,
+        **distribution,
+        "retained_tokens_all_samples": retained_total,
         "truncated_count": truncated_count if known_count else None,
         "truncated_sample_ratio": truncated_count / known_count if known_count else None,
         "truncated_tokens": lost_total if known_count else None,
@@ -110,7 +121,11 @@ def summarize_datasets(datasets: Sequence[Any]) -> list[Row]:
         seen.add(instance_id)
         grouped[dataset.name].append(dataset._meta)
     return [
-        summarize_samples(name, shards, "sampled_instances_before_packing") for name, shards in sorted(grouped.items())
+        {
+            **summarize_samples(name, _sample_chunks(shards), "sampled_instances_before_packing"),
+            "num_shards": len(shards),
+        }
+        for name, shards in sorted(grouped.items())
     ]
 
 
@@ -145,26 +160,40 @@ def summarize_cache_manifest(manifest: Sequence[Mapping[str, Any]], workers: int
         return list(executor.map(_summarize_cache_subset, jobs))
 
 
-def summarize_packing(packed_dataset: Any, dataloader_config: Any, *, subset_rows: Sequence[Row] | None = None) -> Row:
+def summarize_packing(packed_dataset: Any, dataloader_config: Any) -> tuple[Row, list[Row]]:
     """Measure packing/collator losses and changes in subset token shares.
 
     Args:
         packed_dataset (Any): Existing text soft/hard packed dataset or unpacked ConcatDataset.
         dataloader_config (Any): DataloaderConfig supplying the actual collator and length settings.
-        subset_rows (Sequence[Row] | None): Enrich these rows in place; each must describe the same sampled
-            population and include a matching retained_tokens_all_samples total.
 
     Returns:
-        Row: Global pack lengths and losses, before the distributed sampler. Padding and label shift are separate.
+        tuple[Row, list[Row]]: Global statistics and per-subset packing statistics sorted by name.
+            All packs are counted once, before the distributed sampler. Inputs are not modified.
     """
+    from torch.utils.data import ConcatDataset
+
     from xtuner.v1.datasets.collator import build_text_ctx_labels
-    from xtuner.v1.datasets.packing import HardPackDataset
+    from xtuner.v1.datasets.packing import ExpandSoftPackDataset, HardPackDataset, _LegacySoftPackDataset
     from xtuner.v1.utils import IGNORE_INDEX
 
     if dataloader_config.collator != "sft_llm_collator":
         raise ValueError("Packing statistics require sft_llm_collator")
     if dataloader_config.pack_level not in ("none", "soft", "hard", "__legacy"):
         raise ValueError("Packing statistics support text none/soft/hard/__legacy only")
+    # Hard and expanded soft packers both inherit from the legacy packer.
+    for cls, level in (
+        (HardPackDataset, "hard"),
+        (ExpandSoftPackDataset, "soft"),
+        (_LegacySoftPackDataset, "__legacy"),
+        (ConcatDataset, "none"),
+    ):
+        if isinstance(packed_dataset, cls):
+            break
+    else:
+        raise ValueError("Packing provenance requires a standard text packed dataset or ConcatDataset")
+    if level != dataloader_config.pack_level:
+        raise ValueError(f"packed_dataset pack_level {level!r} does not match config {dataloader_config.pack_level!r}")
     sources = _source_datasets(packed_dataset)
     fields = (
         "packing_input_tokens",
@@ -259,30 +288,24 @@ def summarize_packing(packed_dataset: Any, dataloader_config: Any, *, subset_row
         key: sum(row[key] for row in totals.values()) for key in next(iter(totals.values()), dict.fromkeys(fields, 0))
     }
     supervised_total = sum(supervised.values())
-    if subset_rows is not None:
-        if {row["name"] for row in subset_rows} != set(totals):
-            raise ValueError("Packing sources and subset report names do not match")
-        for row in subset_rows:
-            expected = totals[str(row["name"])]["packing_input_tokens"]
-            if row.get("retained_tokens_all_samples") != expected:
-                raise ValueError("Subset and packing populations do not match")
-        for row in subset_rows:
-            counts = totals[str(row["name"])]
-            row.update(counts)
-            row["packing_collator_loss_ratio"] = _ratio(
-                counts["packing_collator_lost_tokens"], counts["packing_input_tokens"]
-            )
-            row["token_share_before_packing"] = _ratio(counts["packing_input_tokens"], sums["packing_input_tokens"])
-            row["token_share_after_packing"] = _ratio(counts["after_collator_tokens"], sums["after_collator_tokens"])
-            row["effective_token_share"] = _ratio(counts["effective_tokens"], sums["effective_tokens"])
-            before_share, after_share = row["token_share_before_packing"], row["token_share_after_packing"]
-            row["token_share_change"] = (
-                after_share - before_share if before_share is not None and after_share is not None else None
-            )
-            row["supervised_tokens_after_collator"] = supervised[str(row["name"])]
-            row["supervised_token_share"] = _ratio(supervised[str(row["name"])], supervised_total)
+    subset_rows = []
+    for name, counts in sorted(totals.items()):
+        row: Row = {"name": name, **counts}
+        row["packing_collator_loss_ratio"] = _ratio(
+            counts["packing_collator_lost_tokens"], counts["packing_input_tokens"]
+        )
+        row["token_share_before_packing"] = _ratio(counts["packing_input_tokens"], sums["packing_input_tokens"])
+        row["token_share_after_packing"] = _ratio(counts["after_collator_tokens"], sums["after_collator_tokens"])
+        row["effective_token_share"] = _ratio(counts["effective_tokens"], sums["effective_tokens"])
+        before_share, after_share = row["token_share_before_packing"], row["token_share_after_packing"]
+        row["token_share_change"] = (
+            after_share - before_share if before_share is not None and after_share is not None else None
+        )
+        row["supervised_tokens_after_collator"] = supervised[name]
+        row["supervised_token_share"] = _ratio(supervised[name], supervised_total)
+        subset_rows.append(row)
     effective_total = sum(lengths)
-    return {
+    packing = {
         "scope": "all_packs_once_before_distributed_sampler",
         "pack_level": dataloader_config.pack_level,
         "pack_max_length": dataloader_config.pack_max_length,
@@ -306,18 +329,16 @@ def summarize_packing(packed_dataset: Any, dataloader_config: Any, *, subset_row
         "zero_supervision_pack_count": zero_supervision_packs,
         "padding_ratio": _ratio(padding, effective_total + padding),
     }
+    return packing, subset_rows
 
 
-def save_reports(
-    rows: Sequence[Row], output_dir: str | Path, packing: Row | None = None, *, seed: int | None = None
-) -> tuple[Path, str]:
+def save_reports(rows: Sequence[Row], output_dir: str | Path, packing: Row | None = None) -> tuple[Path, str]:
     """Save CSV reports in a new directory and return the log summary.
 
     Args:
-        rows (Sequence[Row]): Final subset aggregates (also used for the log summary).
-        output_dir (str | Path): Existing work/output directory.
-        packing (Row | None): Optional global packing/collator summary.
-        seed (int | None): Seed used to sample the datasets; None for cache-only or unknown runs.
+        rows (Sequence[Row]): Final subset aggregates including any metadata to export, such as seed.
+        output_dir (str | Path): Output directory; created if missing.
+        packing (Row | None): Optional final global packing/collator summary.
 
     Returns:
         tuple[Path, str]: Output directory and short log message derived from these same rows.
@@ -326,24 +347,23 @@ def save_reports(
     output.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_")
     run_dir = Path(tempfile.mkdtemp(prefix=f"token_stats_{stamp}", dir=output))
-    _write_csv(run_dir / "subset_token_stats.csv", [{**row, "seed": seed} for row in rows])
+    _write_csv(run_dir / "subset_token_stats.csv", rows)
     if packing is not None:
-        _write_csv(run_dir / "packing_token_stats.csv", [{**packing, "seed": seed}])
+        _write_csv(run_dir / "packing_token_stats.csv", [packing])
     count = sum(int(row["count"]) for row in rows)
     known = sum(int(row["known_original_count"]) for row in rows)
-    complete = sum(int(row["complete_count"]) for row in rows)
     lost = sum(int(row["truncated_tokens"] or 0) for row in rows)
     truncated = sum(int(row["truncated_count"] or 0) for row in rows)
     truncation_summary = (
-        f"{truncated} samples, {lost} tokens (complete coverage only)" if complete else "unknown (no complete samples)"
+        f"{truncated} samples, {lost} tokens (known original lengths only)"
+        if known
+        else "unknown (no original lengths recorded)"
     )
     message = (
         f"Token statistics: {len(rows)} subsets, {count} samples/instances; original length known {known}/{count}, "
-        f"complete {complete}/{count}; tokenization truncated {truncation_summary}. "
+        f"tokenization truncated {truncation_summary}. "
         f"CSV: {run_dir / 'subset_token_stats.csv'}"
     )
-    if seed is not None:
-        message += f" Seed: {seed}."
     if packing is not None:
         message += (
             f" Packing/collator lost {packing['packing_collator_lost_tokens']} tokens "
@@ -352,19 +372,42 @@ def save_reports(
     return run_dir, message
 
 
+@contextmanager
+def _preserve_sampling_rng() -> Iterator[None]:
+    """Keep offline CPU sampling from changing a caller's subsequent random draws."""
+    import torch
+
+    python_state = random.getstate()
+    numpy_state = np.random.get_state()
+    torch_state = torch.get_rng_state()
+    try:
+        yield
+    finally:
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
+        torch.set_rng_state(torch_state)
+
+
 def main() -> None:
     """Run token statistics from a config or cache manifest."""
     import json
 
-    os.environ.setdefault("TQDM_DISABLE", "1")
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=(
+            "--config counts filtered and sampled instances (including repetitions); "
+            "--cache-manifest counts source records before filtering and sampling. "
+            "These counts describe different populations. "
+            "XTUNER_TOKENIZE_WORKERS controls tokenization parallelism in config mode."
+        ),
+    )
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--cache-manifest", type=Path, help="JSON list of {name, meta_dirs}; never rebuilds caches")
     source.add_argument("--config", type=Path, help="SFT config defining trainer, or build_stats_inputs(work_dir)")
     parser.add_argument(
         "--packing", action="store_true", help="Also measure packing/collator losses and subset token shares"
     )
-    parser.add_argument("--output-dir", type=Path, required=True, help="Existing work/output directory")
+    parser.add_argument("--output-dir", type=Path, required=True, help="Output directory; created if missing")
     parser.add_argument("--workers", type=int, default=1, help="Parallel subset readers in cache mode")
     args = parser.parse_args()
     # Avoid reporting replicated datasets once per rank.
@@ -379,46 +422,50 @@ def main() -> None:
         for entry in manifest:
             entry["meta_dirs"] = [str(args.cache_manifest.parent / path) for path in entry["meta_dirs"]]
         rows = summarize_cache_manifest(manifest, args.workers)
-        log = logging.getLogger("xtuner.token_stats")
-        logging.basicConfig(level=logging.INFO, format="%(message)s")
     else:
-        from mmengine.runner import set_random_seed
+        with _preserve_sampling_rng():
+            import torch
 
-        from xtuner.v1.utils import Config, get_logger, log_format
+            from xtuner.v1.utils import Config
 
-        log = get_logger()
-        # Keep per-sample logs out of the report.
-        log.remove()
-        log.add(sys.stderr, format=log_format(), filter=lambda record: record["name"] == __name__)
-        args.output_dir.mkdir(parents=True, exist_ok=True)
-        config = Config.fromfile(args.config)
-        factory = config.get("build_stats_inputs")
-        trainer = config.get("trainer")
-        if factory is None and trainer is None:
-            parser.error("Config must define trainer or build_stats_inputs(work_dir)")
-        seed = config.get("seed", 42) if factory is not None else trainer.seed
-        if type(seed) is not int or not 0 <= seed < 2**32:
-            parser.error("Config seed must be an integer in [0, 2**32)")
-        set_random_seed(seed)
-        inputs = factory(args.output_dir) if factory is not None else {"datasets": _build_training_datasets(trainer)}
-        rows = summarize_datasets(inputs["datasets"])
-        if args.packing or "packed_dataset" in inputs:
-            loader = inputs.get("dataloader_config") if factory is not None else trainer.dataloader_cfg
-            if loader is None:
-                parser.error("Packing statistics require dataloader_config in build_stats_inputs()")
-            if factory is None and trainer.sp_size > 1:
-                # Match Trainer's forced padding without mutating the input config.
-                loader = loader.model_copy(update={"pack_to_max_length": True})
-            packed = inputs.get("packed_dataset")
-            if packed is None:
+            args.output_dir.mkdir(parents=True, exist_ok=True)
+            config = Config.fromfile(args.config)
+            factory = config.get("build_stats_inputs")
+            trainer = config.get("trainer")
+            if factory is None and trainer is None:
+                parser.error("Config must define trainer or build_stats_inputs(work_dir)")
+            seed = config.get("seed", 42) if factory is not None else trainer.seed
+            if type(seed) is not int or not 0 <= seed < 2**32:
+                parser.error("Config seed must be an integer in [0, 2**32)")
+            random.seed(seed)
+            np.random.seed(seed)
+            # Match training's CPU sampling without reseeding accelerator generators,
+            # including CUDA's pending lazy seed calls in a shared pytest process.
+            torch.random.default_generator.manual_seed(seed)
+            inputs = (
+                factory(args.output_dir) if factory is not None else {"datasets": _build_training_datasets(trainer)}
+            )
+            if "packed_dataset" in inputs:
+                parser.error(
+                    "build_stats_inputs must return unpacked datasets; remove packed_dataset and use --packing"
+                )
+            rows = summarize_datasets(inputs["datasets"])
+            if args.packing:
+                loader = inputs.get("dataloader_config") if factory is not None else trainer.dataloader_cfg
+                if loader is None:
+                    parser.error("Packing statistics require dataloader_config in build_stats_inputs()")
+                if factory is None and trainer.sp_size > 1:
+                    # Match Trainer's forced padding without mutating the input config.
+                    loader = loader.model_copy(update={"pack_to_max_length": True})
                 packed = _build_packed_dataset(inputs["datasets"], loader, seed)
-            elif Counter(id(source) for source in inputs["datasets"]) != Counter(
-                id(source) for source in _source_datasets(packed)
-            ):
-                raise ValueError("datasets and packed_dataset must share sampled sources")
-            packing = summarize_packing(packed, loader, subset_rows=rows)
-    _, message = save_reports(rows, args.output_dir, packing, seed=seed)
-    log.info(message)
+                packing, packing_rows = summarize_packing(packed, loader)
+                by_name = {row["name"]: row for row in packing_rows}
+                rows = [{**row, **by_name[row["name"]]} for row in rows]
+    rows = [{**row, "seed": seed} for row in rows]
+    if packing is not None:
+        packing = {**packing, "seed": seed}
+    _, message = save_reports(rows, args.output_dir, packing)
+    print(message, file=sys.stderr)
 
 
 def _build_training_datasets(trainer: Any) -> list[Any]:
@@ -525,19 +572,89 @@ def _distribution(values: np.ndarray, prefix: str) -> Row:
     }
 
 
+def _frequency_distribution(dense: np.ndarray, sparse: Counter[int], prefix: str) -> Row:
+    """Exact NumPy-style linear percentiles from bounded dense and sparse counters."""
+    dense_lengths = np.flatnonzero(dense)
+    sparse_lengths = np.asarray(sorted(sparse), dtype=np.int64)
+    # Every sparse length is above the dense range, so concatenation preserves order.
+    lengths = np.concatenate((dense_lengths, sparse_lengths))
+    counts = np.concatenate(
+        (dense[dense_lengths], np.asarray([sparse[int(n)] for n in sparse_lengths], dtype=np.int64))
+    )
+    cumulative = np.cumsum(counts, dtype=np.int64)
+    count = int(cumulative[-1]) if len(cumulative) else 0
+    total = sum(int(length) * int(frequency) for length, frequency in zip(lengths, counts))
+    median = p99 = None
+    if count:
+        positions = (count - 1) * np.array([0.5, 0.99])
+        lower = np.floor(positions).astype(np.int64)
+        upper = np.ceil(positions).astype(np.int64)
+        left = lengths[np.searchsorted(cumulative, lower, side="right")]
+        right = lengths[np.searchsorted(cumulative, upper, side="right")]
+        weight = positions - lower
+        delta = right - left
+        median, p99 = np.where(weight < 0.5, left + delta * weight, right - delta * (1 - weight))
+    return {
+        f"{prefix}_total_tokens": total if count else None,
+        f"{prefix}_mean_tokens": total / count if count else None,
+        f"{prefix}_median_tokens": float(median) if count else None,
+        f"{prefix}_p99_tokens": float(p99) if count else None,
+        f"{prefix}_max_tokens": int(lengths[-1]) if count else None,
+    }
+
+
 def _summarize_cache_subset(job: tuple[str, list[str]]) -> Row:
     name, directories = job
-    shards = []
+    return {
+        **summarize_samples(name, _cache_chunks(directories), "source_samples_before_filtering"),
+        "num_shards": len(directories),
+    }
+
+
+def _sample_chunks(shards: Sequence[Mapping[str, np.ndarray]]) -> Iterator[Mapping[str, np.ndarray]]:
+    """Slice in-memory dataset metadata into bounded views, including empty sources."""
+    for shard in shards:
+        if "chunks" in shard:
+            raise ValueError("Long-text chunk caches are not original-sample metadata")
+        arrays = {key: np.asarray(shard[key]) for key in _LENGTH_KEYS if key in shard}
+        n = arrays["num_tokens"].size
+        if any(values.ndim != 1 or len(values) != n for values in arrays.values()):
+            raise ValueError("Invalid token count array shapes in dataset metadata")
+        for start in range(0, max(n, 1), _STATS_CHUNK_SIZE):
+            yield {key: values[start : start + _STATS_CHUNK_SIZE] for key, values in arrays.items()}
+
+
+def _cache_chunks(directories: Sequence[str]) -> Iterator[Mapping[str, np.ndarray]]:
+    """Read NPY headers, then stream bounded chunks without retaining mapped data pages."""
     for directory in directories:
         path = Path(directory)
         if (path / "chunks.npy").exists():
             raise ValueError(f"Chunked caches have no original-document coverage: {path}")
-        shard = {"num_tokens": np.load(path / "num_tokens.npy", allow_pickle=False)}
-        for key in _LENGTH_KEYS[1:]:
-            if (path / f"{key}.npy").exists():
-                shard[key] = np.load(path / f"{key}.npy", allow_pickle=False)
-        shards.append(shard)
-    return summarize_samples(name, shards, "source_samples_before_filtering")
+        with ExitStack() as stack:
+            arrays = {}
+            for key in _LENGTH_KEYS:
+                filename = path / f"{key}.npy"
+                if key != "num_tokens" and not filename.exists():
+                    continue
+                # Inspect shape/dtype/offset without reading the mapped data pages.
+                metadata = np.load(filename, mmap_mode="r", allow_pickle=False)
+                if metadata.ndim != 1 or metadata.dtype.kind not in "iuf":
+                    raise ValueError(f"Invalid {key} array in cache {path}")
+                stream = stack.enter_context(filename.open("rb"))
+                stream.seek(metadata.offset)
+                arrays[key] = (stream, metadata.dtype, len(metadata))
+                del metadata
+            n = arrays["num_tokens"][2]
+            if any(size != n for _, _, size in arrays.values()):
+                raise ValueError(f"Invalid token count array lengths in cache {path}")
+            for start in range(0, max(n, 1), _STATS_CHUNK_SIZE):
+                size = min(_STATS_CHUNK_SIZE, n - start)
+                chunk = {
+                    key: np.fromfile(stream, dtype=dtype, count=size) for key, (stream, dtype, _) in arrays.items()
+                }
+                if any(len(values) != size for values in chunk.values()):
+                    raise ValueError(f"Incomplete token count array in cache {path}")
+                yield chunk
 
 
 def _write_csv(path: Path, rows: Sequence[Row]) -> None:
