@@ -19,6 +19,7 @@ TestGlm53CacheInvalidation
     test_glm53_hash_covers_every_init_parameter  逐参数 hash 失效 + __init__ 参数分类完备性
 """
 
+import copy
 import inspect
 import os
 from pathlib import Path
@@ -279,6 +280,117 @@ class TestGlm53MmTokenTypeIdsMatchesProcessorGolden:
         assert golden["input_ids"][0].tolist() == ret["input_ids"]
         assert golden["mm_token_type_ids"][0].tolist() == ret["mm_token_type_ids"][0].tolist()
         assert (golden["mm_token_type_ids"][0] == 1).sum().item() == 0  # video-only: no type-1
+
+
+class TestGlm53NativeHFInputContract:
+    @pytest.mark.parametrize("media_count", [0, 1, 2])
+    @pytest.mark.parametrize("generation", [False, True])
+    @pytest.mark.parametrize("enable_thinking", [False, True])
+    def test_full_image_input_matches_native_template(
+        self, tokenize_fn, processor, image_fixture, media_count: int, generation: bool, enable_thinking: bool
+    ) -> None:
+        item = _image_item(image_fixture)
+        media = item["messages"][0]["content"][0]
+        item["messages"][0]["content"] = [
+            {"type": "text", "text": "比较图片：\n"},
+            *[copy.deepcopy(media) for _ in range(media_count)],
+            {"type": "text", "text": "\n请说明。"},
+        ]
+        if generation:
+            item["messages"].pop()
+        else:
+            item["messages"] += [
+                {"role": "user", "content": "再说一次"},
+                {"role": "assistant", "content": "紫色。"},
+            ]
+        tokenize_fn.enable_thinking = enable_thinking
+        tokenize_fn.add_generation_prompt = generation
+        tokenize_fn.state = "runtime"
+        actual = tokenize_fn(item)
+        text = processor.apply_chat_template(
+            item["messages"],
+            tokenize=False,
+            add_generation_prompt=generation,
+            enable_thinking=enable_thinking,
+            reasoning_effort="max",
+            clear_thinking=False,
+        )
+        # XTuner supervises the terminal stop token; HF renders the inference conversation without it.
+        if not generation:
+            text += processor.tokenizer.eos_token
+        images = [Image.open(image_fixture).convert("RGB") for _ in range(media_count)]
+        golden = processor(text=[text], images=images or None, return_tensors="pt", add_special_tokens=False)
+        assert actual["input_ids"] == golden["input_ids"][0].tolist()
+        assert torch.equal(actual["mm_token_type_ids"], golden["mm_token_type_ids"])
+        if media_count:
+            assert torch.equal(actual["image_grid_thw"], golden["image_grid_thw"])
+            assert torch.equal(actual["pixel_values"], golden["pixel_values"])
+        assert actual["labels"][0] == -100
+        for index, token in enumerate(actual["input_ids"]):
+            if token == processor.image_token_id:
+                assert actual["labels"][index] == -100
+        tokenize_fn.state = "cache"
+        cached = tokenize_fn(item)
+        assert cached["num_tokens"] == len(actual["input_ids"])
+        assert cached["num_img_tokens"] == actual["num_img_tokens"]
+
+    @pytest.mark.parametrize("source", ["padded", "numbered", "file"])
+    def test_video_pixels_and_timestamps_match_native_template(
+        self, tokenize_fn, processor, tmp_path: Path, source: str
+    ) -> None:
+        frames = []
+        for index in range(12):
+            frame = Image.new("RGB", (112, 112), (index * 20, 10, 200))
+            name = f"frame_{index}.jpg" if source == "numbered" else f"{index:08d}.jpg"
+            frame.save(tmp_path / name)
+            frames.append(np.array(Image.open(tmp_path / name).convert("RGB")))
+        video_path = str(tmp_path) + "/"
+        if source == "file":
+            import cv2
+
+            from transformers.video_utils import load_video
+
+            video_path = str(tmp_path / "video.mp4")
+            writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*"mp4v"), 2.0, (112, 112))
+            assert writer.isOpened()
+            for frame in frames:
+                writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            writer.release()
+            frames, _ = load_video(video_path, backend="decord")
+        item = _video_item(video_path, num_frames=12, width=112, height=112)
+        tokenize_fn.state = "runtime"
+        actual = tokenize_fn(item)
+        text = processor.apply_chat_template(item["messages"], tokenize=False) + processor.tokenizer.eos_token
+        golden = processor(
+            text=[text],
+            videos=[np.stack(frames)],
+            video_metadata=[VideoMetadata(total_num_frames=12, fps=2.0)],
+            do_sample_frames=True,
+            return_tensors="pt",
+            add_special_tokens=False,
+        )
+        assert actual["input_ids"] == golden["input_ids"][0].tolist()
+        assert torch.equal(actual["mm_token_type_ids"], golden["mm_token_type_ids"])
+        assert torch.equal(actual["video_grid_thw"], golden["video_grid_thw"])
+        assert torch.equal(actual["pixel_values_videos"], golden["pixel_values_videos"])
+        tokenize_fn.state = "cache"
+        assert tokenize_fn(item)["num_tokens"] == actual["num_tokens"]
+
+    @pytest.mark.parametrize("media_kind", ["image", "video"])
+    @pytest.mark.parametrize("keep_end", [False, True])
+    def test_truncation_before_media_end_is_rejected(
+        self, tokenize_fn, image_fixture, video_fixture, media_kind: str, keep_end: bool
+    ) -> None:
+        item = _image_item(image_fixture) if media_kind == "image" else _video_item(video_fixture)
+        tokenize_fn.state = "runtime"
+        actual = tokenize_fn(item)
+        end_id = tokenize_fn.tokenizer.convert_tokens_to_ids(f"<|end_of_{media_kind}|>")
+        tokenize_fn.max_length = actual["input_ids"].index(end_id) + int(keep_end)
+        tokenize_fn.state = "cache"
+        assert tokenize_fn(item)["num_tokens"] == 0
+        tokenize_fn.state = "runtime"
+        with pytest.raises(AssertionError, match="visual span"):
+            tokenize_fn(item)
 
 
 class TestGlm53MixedMediaAndTruncation:
