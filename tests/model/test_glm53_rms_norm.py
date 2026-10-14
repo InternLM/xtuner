@@ -10,12 +10,15 @@ from xtuner.v1.model.moe.glm53.glm53 import Glm53TextMoEConfig, _glm53_rms_norm
 from xtuner.v1.module.attention.kda import KDAConfig
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.rms_norm import RMSNorm
+from xtuner.v1.ops.rms_norm import _triton_rms_norm, native_rms_norm, npu_rms_norm
+from xtuner.v1.ops.rms_norm.protocol import RMSNormProtocol
 
 
 class TestGlm53RMSNorm:
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.gpu)])
-    def test_hf_forward_and_backward(self, dtype: torch.dtype, device: str) -> None:
+    @pytest.mark.parametrize("shape", [(37, 64), (1, 37, 64), (2, 7, 64)])
+    def test_hf_forward_and_backward(self, dtype: torch.dtype, device: str, shape: tuple[int, ...]) -> None:
         if device == "cuda" and not torch.cuda.is_available():
             pytest.skip("CUDA required")
         torch.manual_seed(41)
@@ -24,7 +27,7 @@ class TestGlm53RMSNorm:
         with torch.no_grad():
             xt.weight.uniform_(0.5, 1.5)
             hf.weight.copy_(xt.weight)
-        x = torch.randn(1, 37, 64, device=device, dtype=dtype)
+        x = torch.randn(shape, device=device, dtype=dtype)
         if dtype == torch.bfloat16:
             assert not torch.equal(xt(x), hf(x)), "Fixture must expose the original rounding error"
         xt.rms_norm_fn = _glm53_rms_norm
@@ -37,7 +40,8 @@ class TestGlm53RMSNorm:
         torch.testing.assert_close(a.grad, b.grad, atol=0, rtol=0)
         torch.testing.assert_close(xt.weight.grad, hf.weight.grad, atol=0, rtol=0)
 
-    def test_glm_builder_configures_all_text_norms_before_sharding(self) -> None:
+    @pytest.mark.parametrize("backend", [native_rms_norm, _triton_rms_norm, npu_rms_norm])
+    def test_glm_builder_preserves_backend_selection(self, backend: RMSNormProtocol) -> None:
         cfg = Glm53TextMoEConfig(
             compile_cfg=False,
             ep_size=1,
@@ -50,7 +54,11 @@ class TestGlm53RMSNorm:
         )
         other = RMSNorm(32)
         original_fn = other.rms_norm_fn
-        with patch("torch.cuda.Stream"), torch.device("meta"):
+        with (
+            patch("xtuner.v1.module.rms_norm.rms_norm.rms_norm", backend),
+            patch("torch.cuda.Stream"),
+            torch.device("meta"),
+        ):
             model = cfg.build()
         selected = {name for name, module in model.named_modules() if isinstance(module, RMSNorm)}
         assert {
@@ -63,6 +71,7 @@ class TestGlm53RMSNorm:
             "layers.1.self_attn.kv_a_layernorm",
         } <= selected
         assert any(name.startswith("mtp_block.") for name in selected)
+        expected_fn = _glm53_rms_norm if backend is native_rms_norm else backend
         for name in selected:
-            assert model.get_submodule(name).rms_norm_fn is _glm53_rms_norm, name
+            assert model.get_submodule(name).rms_norm_fn is expected_fn, name
         assert other.rms_norm_fn is original_fn

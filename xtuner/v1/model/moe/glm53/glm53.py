@@ -38,6 +38,7 @@ from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.rms_norm import RMSNorm
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
+from xtuner.v1.ops.rms_norm import native_rms_norm
 
 from .decoder_layer import Glm53DenseDecoderLayer, Glm53MoEDecoderLayer
 from .nope_dsa_mla import NoPEDSAMLAConfig
@@ -92,9 +93,10 @@ GLM53_MOE_EP_COMPILE_CFG.pop("xtuner.v1.model.moe.glm53.decoder_layer.Glm53MoEDe
 
 def _glm53_rms_norm(x: torch.Tensor, weight: torch.Tensor, epsilon: float) -> torch.Tensor:
     # HF normalizes in FP32, then rounds before the affine multiply (also used by native AutoModel).
-    states = x.float()
+    # Keep the native path's 2D geometry for Inductor's weight-gradient reduction.
+    states = x.reshape(-1, weight.numel()).float()
     normalized = states * torch.rsqrt(states.square().mean(-1, keepdim=True) + epsilon)
-    return weight * normalized.to(x.dtype)
+    return (weight * normalized.to(x.dtype)).view_as(x)
 
 
 class Glm53TextMoE(MoE):
@@ -114,9 +116,9 @@ class Glm53TextMoE(MoE):
     @override
     def _configure_model_specific_layers(self) -> None:
         super()._configure_model_specific_layers()
-        # Covers decoder, DSA, final and MTP norms without changing vision or other models.
+        # Keep explicitly selected Triton/NPU backends; only fix the native text path.
         for module in self.modules():
-            if isinstance(module, RMSNorm) and module._type == "default":
+            if isinstance(module, RMSNorm) and module._type == "default" and module.rms_norm_fn is native_rms_norm:
                 module.rms_norm_fn = _glm53_rms_norm
 
     @property
