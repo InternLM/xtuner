@@ -40,6 +40,7 @@ from typing import Literal
 
 import torch
 from torch import Tensor
+from torch.nn import functional as F
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.ops.comm import gather_for_sequence_parallel
@@ -307,13 +308,14 @@ def kpool_topk_indices(
     alignment: int = 512,
     query_chunk_size: int | None = None,
     scorer: Literal["original", "cooperative"] = "original",
+    selector: Literal["torch", "deep_select"] = "torch",
     balance_sp: bool = False,
     sp_full_pool_work_ratio: float = 0.5,
 ) -> Tensor:
     """Build pools (A), score/select pools (B), expand to token ids + tail (C).
 
-    ``scorer="original"`` retains TileLang + torch.topk. ``"cooperative"`` uses
-    the SM90 BF16 producer kernel + DeepSelect with reusable query-chunk scratch.
+    ``scorer="original"`` uses TileLang scoring with the selected TopK kernel;
+    ``"cooperative"`` uses its fused scoring and selection path.
 
     Args:
         q (Tensor): Index query, shape ``[1, S, index_n_heads, index_head_dim]``, bf16.
@@ -329,6 +331,7 @@ def kpool_topk_indices(
         index_topk (int): Semantic token budget (e.g. 2048); must be divisible by ``index_kpool``.
         always_select_tail (bool): Whether to append the incomplete trailing pool.
         alignment (int): Output width alignment (FlashMLA: 512; TileLang: 64).
+        selector (Literal["torch", "deep_select"]): TopK kernel for original TileLang scoring.
         balance_sp (bool): Redistribute query scoring work with neighbor P2P, then
             restore attention ownership before token expansion and tail selection.
         sp_full_pool_work_ratio (float): Fixed per-query selection/launch estimate
@@ -338,6 +341,8 @@ def kpool_topk_indices(
         Tensor: ``[S, 1, kpool_output_width(index_topk, index_kpool, alignment)]`` int32.
     """
     assert index_topk % index_kpool == 0
+    if scorer == "cooperative" and selector != "torch":
+        raise ValueError("selector is only supported with the original KPool scorer")
     if not math.isfinite(sp_full_pool_work_ratio) or sp_full_pool_work_ratio < 0:
         raise ValueError("sp_full_pool_work_ratio must be finite and nonnegative")
     # SP: queries stay sharded; the key side gathers *before* pooling, because a pool can
@@ -391,6 +396,12 @@ def kpool_topk_indices(
         )
     elif scorer == "original":
         starts, ends = pool_causal_ranges(query_ctx, pool_index, q_local.shape[0], q.device)
+        if selector == "deep_select":
+            # DeepSelect requires a 1024-byte logits row stride. Pad the small BF16
+            # key table before scoring; causal ends still exclude the added pools.
+            padding = -pool_key.shape[0] % 256
+            if padding:
+                pool_key = F.pad(pool_key, (0, 0, 0, padding))
         selected_pool_ids = tilelang_indexer_topk_from_ranges(
             q_local,
             pool_key.contiguous(),
@@ -399,6 +410,7 @@ def kpool_topk_indices(
             ends,
             select_k,
             query_chunk_size=query_chunk_size,
+            selector=selector,
         )
     else:
         raise ValueError(f"Unsupported KPool scorer: {scorer}")
