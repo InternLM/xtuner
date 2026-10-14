@@ -178,7 +178,6 @@ class GAEEstimator(AdvantageEstimator):
         self,
         states: Sequence[RolloutState],
         values: Sequence[Sequence[float]],
-        rollout_idx: int,
     ) -> tuple[list[list[float]], list[list[float]]]:
         """Return actor advantages and critic returns.
 
@@ -186,7 +185,6 @@ class GAEEstimator(AdvantageEstimator):
         ``reward_scope="session"`` concatenates segments that share a session and
         places the reward on the session's last controllable action.
         """
-        del rollout_idx
         if len(states) != len(values):
             raise ValueError(f"states and values must have the same length, got {len(states)} and {len(values)}")
         action_masks: list[list[bool]] = []
