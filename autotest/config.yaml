@@ -53,6 +53,7 @@ case:
                     - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/opd_eval_meta.json
                     - OPD_DATA_SOURCE=gsm8k
                     - OPD_TEACHER_DATA_SOURCE=openai/gsm8k
+                    - OPD_CONFIG_PATH=autotest/config/rl_qwen3_2B_vl_opd_dapo.py
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
             assert_info:
@@ -93,6 +94,7 @@ case:
                     - GEO3K_TEACHER_MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-4B-Instruct
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/opd_train_meta.json
                     - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/opd_eval_meta.json
+                    - OPD_CONFIG_PATH=autotest/config/rl_qwen3_2B_vl_mopd_k1.py
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
             assert_info:
@@ -134,6 +136,7 @@ case:
                     - GEO3K_TEACHER_MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-4B-Instruct
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/opd_train_meta.json
                     - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/opd_eval_meta.json
+                    - OPD_CONFIG_PATH=autotest/config/rl_qwen3_2B_vl_mopd_topk.py
                     - XTUNER_RL_NUM_WORKERS=16
                     - TOTAL_TRAIN_STEPS=5
                     - XTUNER_USE_LMDEPLOY=1
