@@ -30,12 +30,22 @@ def pil_loader(img_str):
 
 def extract_frame_number(filename):
     # Extract the numeric part from the filename using regular expressions
-    match = re.search(r"_(\d+).jpg$", filename)
+    match = re.search(r"(?:^|_)(\d+)\.jpg$", filename)
     return int(match.group(1)) if match else -1
 
 
 def sort_frames(frame_paths):
-    # Extract filenames from each path and sort by their numeric part
+    # Fail fast instead of silently keeping the storage listing order when a delivery
+    # deviates from the '<number>.jpg' or '<prefix>_<number>.jpg' conventions: mis-ordered
+    # frames are trained on without any error surfacing.
+    keys = [extract_frame_number(os.path.basename(x)) for x in frame_paths]
+    if any(k == -1 for k in keys):
+        bad = [x for x, k in zip(frame_paths, keys) if k == -1][:3]
+        raise ValueError(
+            "Frame files must follow the '<number>.jpg' or '<prefix>_<number>.jpg' naming convention for "
+            f"deterministic temporal order; non-conforming name(s), e.g. {bad}. "
+            "Please rename the frames and re-deliver the data."
+        )
     return sorted(frame_paths, key=lambda x: extract_frame_number(os.path.basename(x)))
 
 
