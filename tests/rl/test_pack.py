@@ -8,11 +8,10 @@ worker ``iters_per_step`` 重分组的精确等价性。
 """
 
 import math
-import random
 import unittest
 from unittest.mock import patch
 
-from xtuner.v1.rl.trainer.pack import RLDataPacker, get_greedy_pack_infos
+from xtuner.v1.rl.trainer.pack import RLDataPacker
 
 
 def _legacy_reference_plan(
@@ -110,14 +109,14 @@ class TestRLDataPacker(unittest.TestCase):
     def test_legacy_regroups_when_packs_fewer_than_optimizer_steps(self):
         # packs_per_dp=2 < optimizer_steps=4：旧 worker iters_per_step=ceil(2/4)=1，
         # 实际只训练 2 个 step。
-        lengths = [16, 16, 16, 16]
+        lengths = [32, 32, 32, 32]
         packer = self._make_packer(world_size=2, optimizer_steps=4)
 
         plan, padding = packer.pack(lengths)
 
         self.assertEqual(plan, _legacy_reference_plan(lengths, self.PACK_MAX_LENGTH, dp_size=2, optimizer_steps=4))
         self.assertEqual(len(plan[0]), 2)
-        self.assertEqual(padding, 4 * 2 * self.PACK_MAX_LENGTH - sum(lengths))
+        self.assertEqual(padding, 4 * self.PACK_MAX_LENGTH - sum(lengths))
 
     def test_single_pack_interleaves_across_dp(self):
         # 全部样本拼进一个 pack 时，interleaved 分配把唯一 pack 给 rank0，其余 rank 全空 pack。
@@ -154,6 +153,28 @@ class TestRLDataPacker(unittest.TestCase):
 
         self.assertEqual(plan, [])
         self.assertEqual(padding, 0)
+
+    def test_shuffled_indices_use_matching_lengths(self):
+        lengths = [2, 8, 8]
+        for strategy in ("legacy", "greedy"):
+            with self.subTest(strategy=strategy):
+                packer = RLDataPacker(10, 2, 1, 2, pack_strategy=strategy)
+                with (
+                    patch("xtuner.v1.rl.trainer.pack.XTUNER_DETERMINISTIC", False),
+                    patch(
+                        "xtuner.v1.rl.trainer.pack.random.shuffle",
+                        side_effect=lambda indices: indices.__setitem__(slice(None), [1, 2, 0]),
+                    ),
+                ):
+                    plan, padding = packer.pack(lengths)
+                packs = [pack for rank in plan for step in rank for pack in step]
+                self.assertEqual(sorted(index for pack in packs for index in pack), [0, 1, 2])
+                self.assertTrue(all(sum(lengths[i] for i in pack) <= 10 for pack in packs))
+                self.assertEqual(padding, len(packs) * 10 - sum(lengths))
+                self.assertEqual(lengths, [2, 8, 8])
+                self.assertEqual(len({len(rank) for rank in plan}), 1)
+                for step in range(len(plan[0])):
+                    self.assertEqual(len({len(rank[step]) for rank in plan}), 1)
 
     def test_unknown_strategy_raises(self):
         with self.assertRaisesRegex(ValueError, "Unknown packing strategy"):

@@ -167,6 +167,15 @@ class TestAgentLoopCanonicalizeTrainFields(unittest.TestCase):
         self.assertEqual((state.input_ids, state.labels, state.logprobs), before)
         loop.tokenizer.assert_not_called()
 
+    def test_existing_full_sequence_fields_are_validated(self):
+        loop = self._make_loop()
+        state = self._state(input_ids=[30, 31, 40], labels=[40], logprobs=None)
+        loop.canonicalize_train_fields([state])
+        self.assertEqual(state.status, Status.FAILED)
+        self.assertIn("labels length mismatch", state.error_msg)
+        self.assertIn(f"rollout_id={state.rollout_id}", state.error_msg)
+        loop.tokenizer.assert_not_called()
+
     def test_non_completed_state_is_skipped(self):
         loop = self._make_loop()
         state = self._state(status=Status.FAILED)
@@ -414,9 +423,7 @@ class TestPrepareRolloutItems(unittest.TestCase):
         return (
             prepared["rollout_items"],
             prepared["advantages"],
-            controller._build_trainer_log_info(
-                prepared, pack_plan={"dp_dispatches": {}, "plan_log": {}}, log_infos=[]
-            ),
+            controller._build_trainer_log_info(prepared, pack_plan={"dp_plans": {}, "plan_log": {}}, log_infos=[]),
             prepared["batch_attr"]["use_3d_position_ids"],
         )
 

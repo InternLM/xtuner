@@ -5,7 +5,7 @@ from typing import cast
 
 from pydantic import BaseModel, ConfigDict
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, validate_train_fields
 from xtuner.v1.rl.agent_loop import AgentLoop, AgentLoopConfig
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
@@ -163,9 +163,7 @@ class GSM8KToolAgentLoop(AgentLoop):
             resp_id if mask_value else -100 for resp_id, mask_value in zip(final_response_ids, final_response_mask)
         ]
         rollout_state.response = self.tokenizer.decode(rollout_state.response_ids)
-        assert len(rollout_state.input_ids) == len(rollout_state.labels) == len(rollout_state.logprobs), (
-            f"{len(rollout_state.input_ids)} vs {len(rollout_state.labels)} vs {len(rollout_state.logprobs)}"
-        )
+        validate_train_fields(rollout_state)
         if self.judger is not None and not self.enable_batch_judge:
             rollout_state = await self.run_judger(rollout_state)
         return rollout_state

@@ -144,7 +144,8 @@ class RLDataPacker:
     ) -> PackedDataIndices:
         if not XTUNER_DETERMINISTIC:
             random.shuffle(data_indices)
-        total_pack_indices = get_greedy_pack_infos(data_indices, data_lengths, self.pack_max_length)
+        visit_lengths = [data_lengths[index] for index in data_indices]
+        total_pack_indices = get_greedy_pack_infos(data_indices, visit_lengths, self.pack_max_length)
         # Interleaved DP allocation over a DP-multiple pack list, then per-rank
         # sequential optimizer-step grouping: this is the exact schedule the previous
         # controller + `iters_per_step` worker regrouping produced.
@@ -173,7 +174,8 @@ class RLDataPacker:
     ) -> PackedDataIndices:
         if not XTUNER_DETERMINISTIC:
             random.shuffle(data_indices)
-        total_pack_indices = get_greedy_pack_infos(data_indices, data_lengths, self.pack_max_length)
+        visit_lengths = [data_lengths[index] for index in data_indices]
+        total_pack_indices = get_greedy_pack_infos(data_indices, visit_lengths, self.pack_max_length)
         pad_num = math.ceil(len(total_pack_indices) / self.dp_size) * self.dp_size - len(total_pack_indices)
         total_pack_indices.extend([[] for _ in range(pad_num)])
 
@@ -297,7 +299,10 @@ class RLDataPacker:
                 total_packs += len(step_indices)
                 for pack_indices in step_indices:
                     seen_indices.extend(pack_indices)
-                    scheduled_tokens += sum(data_lengths[data_index] for data_index in pack_indices)
+                    pack_tokens = sum(data_lengths[data_index] for data_index in pack_indices)
+                    if pack_tokens > self.pack_max_length:
+                        raise RuntimeError(f"Pack tokens {pack_tokens} exceed pack_max_length {self.pack_max_length}")
+                    scheduled_tokens += pack_tokens
 
         if sorted(seen_indices) != list(range(len(data_lengths))):
             raise RuntimeError("Packing plan must contain every data index exactly once")

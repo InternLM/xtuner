@@ -11,7 +11,12 @@ from pydantic import BaseModel, ConfigDict
 from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, get_group_status, write_train_meta
+from xtuner.v1.data_proto.rl_data import (
+    RolloutState,
+    SampleParams,
+    Status,
+    get_group_status,
+)
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.rollout.constants import AGENT_LOOP_RAY_GENERATE_MAX_CONCURRENCY
@@ -290,9 +295,9 @@ class AgentLoop(ABC):
         Prompt+response samples without ``input_ids`` are assembled in place into the
         unified full-sequence convention: ``input_ids``/``labels``/``logprobs`` share one
         length, where ``labels[j]`` is the prediction target of the token at position
-        ``j`` and the train controller applies the one-position shift at conversion time.
-        Samples that already carry ``input_ids`` satisfy the convention and are left
-        untouched. Non-completed samples are skipped. Failures mark the single sample as
+        ``j`` and the training worker applies the one-position shift at conversion time.
+        Samples that already carry ``input_ids`` are validated without rebuilding
+        their fields. Non-completed samples are skipped. Failures mark the single sample as
         ``Status.FAILED`` instead of raising into the producer. Loops that assemble their
         own full sequences (e.g. the agentic localhost/sandbox loops) override this
         method with their own loop-specific implementation instead of relying on this
@@ -352,8 +357,6 @@ class AgentLoop(ABC):
                 self.logger.error(f"Canonicalize train fields failed for rollout_id={state.rollout_id}: {exc}")
                 state.status = Status.FAILED
                 state.error_msg = f"canonicalize_train_fields failed: {exc}"
-        for state in group:
-            write_train_meta(state)
         return group
 
     @overload
