@@ -15,7 +15,6 @@ TestGlm53NativeHFInputContract
     test_full_image_input_matches_native_template   完整图像输入与原生模板/processor 一致
     test_enable_thinking_false_rejected             enable_thinking=False 被显式拒绝（jinja 忽略该参数）
     test_video_pixels_and_timestamps_match_native_template  视频像素/时间戳与原生模板一致
-    test_truncation_before_media_end_is_logged      截断切到媒体结束符前：记录 error 并继续
 TestGlm53MixedMediaAndTruncation
     test_glm53_mixed_media_fails_fast               图文混合视频未支持，必须快速失败
     test_glm53_visual_truncation_is_dropped         截断会切断视觉跨度时 cache 阶段就丢弃
@@ -388,32 +387,6 @@ class TestGlm53NativeHFInputContract:
         tokenize_fn.state = "cache"
         assert tokenize_fn(item)["num_tokens"] == actual["num_tokens"]
 
-    @pytest.mark.parametrize("media_kind", ["image", "video"])
-    @pytest.mark.parametrize("keep_end", [False, True])
-    def test_truncation_before_media_end_is_logged(
-        self,
-        tokenize_fn,
-        image_fixture,
-        video_fixture,
-        media_kind: str,
-        keep_end: bool,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        mock_logger = Mock()
-        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn.logger", mock_logger)
-        item = _image_item(image_fixture) if media_kind == "image" else _video_item(video_fixture)
-        tokenize_fn.state = "runtime"
-        actual = tokenize_fn(item)
-        end_id = tokenize_fn.tokenizer.convert_tokens_to_ids(f"<|end_of_{media_kind}|>")
-        tokenize_fn.max_length = actual["input_ids"].index(end_id) + int(keep_end)
-        tokenize_fn.state = "cache"
-        assert tokenize_fn(item)["num_tokens"] == 0
-        tokenize_fn.state = "runtime"
-        # 截断切断媒体结束符不再中断训练：打 error 日志后照常返回截断样本。
-        truncated = tokenize_fn(item)
-        assert mock_logger.error.called
-        assert len(truncated["input_ids"]) == tokenize_fn.max_length
-
 
 class TestGlm53MixedMediaAndTruncation:
     @pytest.mark.parametrize("state", ["cache", "runtime"])
@@ -447,20 +420,17 @@ class TestGlm53MixedMediaAndTruncation:
             tokenize_fn(item)
         load.assert_not_called()
 
-    def test_glm53_visual_truncation_is_dropped(self, ckpt_path, tokenizer, image_fixture, monkeypatch):
+    def test_glm53_visual_truncation_is_dropped(self, ckpt_path, tokenizer, image_fixture):
         # max_length 短于样本、会切进 256 token 的图像跨度：cache 阶段就必须报 num_tokens=0，让
         # 数据集在打包前把它滤掉。只在 runtime 报错是不够的——数据集会吞掉异常换成假样本，而
         # packer 早已按 cache 报的截断长度给它留了位置。
         short_fn = Glm53VLTokenizeFnConfig(processor_path=ckpt_path, max_length=20).build(tokenizer, anno_name="test")
         short_fn.state = "cache"
         assert short_fn(_image_item(image_fixture))["num_tokens"] == 0
-        # runtime 不再中断训练：打 error 日志后照常返回截断样本。
-        mock_logger = Mock()
-        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn.logger", mock_logger)
+        # runtime 仍然拒绝，作为 cache 过滤漏掉时的最后一道防线。
         short_fn.state = "runtime"
-        result = short_fn(_image_item(image_fixture))
-        assert mock_logger.error.called
-        assert len(result["input_ids"]) == 20
+        with pytest.raises(AssertionError):
+            short_fn(_image_item(image_fixture))
 
 
 class TestGlm53CacheInvalidation:

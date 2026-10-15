@@ -321,16 +321,6 @@ def glm53_vl_sft_collator(
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
-        # The shared text helper truncates a single oversized sample without checking media
-        # end markers. The GLM tokenizer is expected to validate truncation at tokenize time;
-        # a multimodal sample that still arrives oversized is logged and truncated here
-        # instead of aborting training.
-        if instance[0]["num_tokens"] > pack_max_length and any(instance[0].get("num_img_tokens", [])):
-            logger.error(
-                f"GLM-5.3-Flash multimodal sample of {instance[0]['num_tokens']} tokens exceeds "
-                f"pack_max_length={pack_max_length} and will be truncated at pack time without "
-                "media-boundary validation."
-            )
         seq_ctx, shifted_labels, instance = build_text_ctx_labels(  # type: ignore
             instance,
             pack_max_length,

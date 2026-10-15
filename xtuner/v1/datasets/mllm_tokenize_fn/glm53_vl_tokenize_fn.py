@@ -166,13 +166,6 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             "and num_img_tokens semantics assume one merge_unit for both."
         )
         self.merge_unit = self.image_processor.merge_size**2
-        self._media_boundary_ids = [
-            (
-                tokenizer.convert_tokens_to_ids(f"<|begin_of_{kind}|>"),
-                tokenizer.convert_tokens_to_ids(f"<|end_of_{kind}|>"),
-            )
-            for kind in ("image", "video")
-        ]
 
         self.oss_loader = None
         self.debug = debug
@@ -287,26 +280,17 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         input_ids, labels, mm_token_type_ids = self._finalize(text, loss_mask)
 
         num_img_tokens = (image_grid_thw[:, 1] * image_grid_thw[:, 2]).tolist()
+        # Truncation must never cut a visual span in half; assert-and-drop mirrors the existing
+        # qwen3_vl_tokenize_fn.py convention (an AssertionError here is caught upstream and the
+        # sample is discarded, not silently trained on a corrupted span).
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
         mm_token_type_ids = mm_token_type_ids[: len(input_ids)]
-        # Truncation must never cut a visual span in half. A damaged span is logged as an error
-        # and the truncated sample is still trained on: aborting here would kill a long training
-        # run over a single bad sample, and the cache path already filters such samples before
-        # packing instead of replacing them with a fake sample.
         placeholder_count = input_ids.count(self.processor.image_token_id)
-        if placeholder_count != sum(num_img_tokens) // self.merge_unit:
-            logger.error(
-                f"GLM-5.3-Flash image placeholder count {placeholder_count} != expected "
-                f"{sum(num_img_tokens) // self.merge_unit} after truncation, "
-                f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. "
-                "The truncated sample will still be trained."
-            )
-        if not self._complete_visual_spans(input_ids):
-            logger.error(
-                "Truncation cuts a GLM-5.3-Flash visual span, "
-                f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. "
-                "The truncated sample will still be trained."
-            )
+        assert placeholder_count == sum(num_img_tokens) // self.merge_unit, (
+            f"GLM-5.3-Flash image placeholder count {placeholder_count} != expected "
+            f"{sum(num_img_tokens) // self.merge_unit}, data_name: {self.data_name}, "
+            f"data_id: {data_item.get('id', '')}. Discard this data."
+        )
 
         return Glm53VLDataItem(
             input_ids=input_ids,
@@ -326,20 +310,14 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         # it is filtered out before packing instead of being packed at its truncated length and
         # training as a 33-token fake -- qwen3_vl's cache path makes the same check.
         placeholder_count = input_ids.count(self.processor.image_token_id)
-        if placeholder_count != sum(num_img_tokens) // self.merge_unit or not self._complete_visual_spans(input_ids):
-            logger.error(
+        if placeholder_count != sum(num_img_tokens) // self.merge_unit:
+            logger.warning(
                 f"GLM-5.3-Flash sample exceeds max_length={self.max_length} inside its visual span "
                 f"({placeholder_count} of {sum(num_img_tokens) // self.merge_unit} placeholders kept), "
                 f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
             )
             return {"num_tokens": 0, "num_img_tokens": [0]}
         return {"num_tokens": len(input_ids), "num_img_tokens": num_img_tokens}
-
-    def _complete_visual_spans(self, input_ids: list[int]) -> bool:
-        # The collator removes the final token for next-token prediction. Keep media end
-        # markers in the model input even when truncation preserves every image placeholder.
-        model_ids = input_ids[:-1]
-        return all(model_ids.count(start) == model_ids.count(end) for start, end in self._media_boundary_ids)
 
     # ---- video: geometry prediction (cache) ----
 
@@ -433,19 +411,11 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
         mm_token_type_ids = mm_token_type_ids[: len(input_ids)]
         placeholder_count = input_ids.count(self.processor.image_token_id)
-        if placeholder_count != sum(num_img_tokens) // self.merge_unit:
-            logger.error(
-                f"GLM-5.3-Flash video placeholder count {placeholder_count} != expected "
-                f"{sum(num_img_tokens) // self.merge_unit} after truncation, "
-                f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. "
-                "The truncated sample will still be trained."
-            )
-        if not self._complete_visual_spans(input_ids):
-            logger.error(
-                "Truncation cuts a GLM-5.3-Flash visual span, "
-                f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. "
-                "The truncated sample will still be trained."
-            )
+        assert placeholder_count == sum(num_img_tokens) // self.merge_unit, (
+            f"GLM-5.3-Flash video placeholder count {placeholder_count} != expected "
+            f"{sum(num_img_tokens) // self.merge_unit}, data_name: {self.data_name}, "
+            f"data_id: {data_item.get('id', '')}. Discard this data."
+        )
 
         return Glm53VLDataItem(
             input_ids=input_ids,

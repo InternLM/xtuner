@@ -12,7 +12,6 @@ TestGlm53SequenceContextSplitKeepsMmAlignment
 """
 
 import os
-from unittest.mock import Mock
 
 import pytest
 import torch
@@ -84,36 +83,6 @@ def _glm53_item(text_len: int, image_token_id: int, num_placeholders: int, merge
 class TestGlm53VlSftCollator:
     IMAGE_TOKEN_ID = 999
     MERGE_UNIT = 4
-
-    def test_oversized_media_sample_is_truncated_with_error_log(self, monkeypatch) -> None:
-        mock_logger = Mock()
-        monkeypatch.setattr("xtuner.v1.datasets.collator.logger", mock_logger)
-        item = _glm53_item(text_len=10, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=4)
-        result = glm53_vl_sft_collator(
-            [[item]],
-            pack_max_length=4,
-            padding_token_idx=0,
-            image_token_id=self.IMAGE_TOKEN_ID,
-            merge_unit=self.MERGE_UNIT,
-        )
-        mock_logger.error.assert_called_once()
-        assert result[0]["seq_ctx"].input_ids.shape[-1] == 4
-
-    def test_oversized_text_sample_keeps_text_truncation(self) -> None:
-        item = _glm53_item(text_len=10, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=0)
-        expected_ids = item["input_ids"][:3]
-        expected_labels = item["labels"][1:4]
-        result = glm53_vl_sft_collator(
-            [[item]],
-            pack_max_length=4,
-            padding_token_idx=0,
-            image_token_id=self.IMAGE_TOKEN_ID,
-            merge_unit=self.MERGE_UNIT,
-        )[0]
-        assert result["seq_ctx"].input_ids[0, :3].tolist() == expected_ids
-        assert result["shifted_labels"][0, :3].tolist() == expected_labels
-        assert result["shifted_labels"][0, 3].item() == -100
-        assert result["seq_ctx"].pixel_values is None
 
     def test_glm53_collator_keeps_media_with_instance(self):
         # 4 placeholders * merge_unit(4) = 16 raw patches.
