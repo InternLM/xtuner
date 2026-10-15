@@ -17,6 +17,8 @@ from xtuner.v1.data_proto.rl_data import (
     Status,
     calculate_group_effective_response_masks,
     get_group_status,
+    validate_response_model_steps,
+    validate_train_fields,
 )
 from xtuner.v1.rl.agent_loop import AgentLoopSpec
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
@@ -588,6 +590,14 @@ async def take_train_batch(
     pause_time_s: float = 0.0,
 ) -> ProduceBatchResult:
     batch_by_task, consumed_counts = await replay_buffer.take_batch(task_batch_sizes)
+
+    # Validate before any mask calculation, including batches with staleness disabled.
+    # Custom generate_group implementations may bypass AgentLoop canonicalization.
+    for task_name, groups in batch_by_task.items():
+        for group in groups:
+            for item in group:
+                validate_train_fields(item, task_name=task_name)
+                validate_response_model_steps(item, task_name=task_name)
 
     for task in task_runners:
         if task.token_stale_threshold is None:
