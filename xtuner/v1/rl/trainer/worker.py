@@ -929,12 +929,13 @@ class TrainingWorker(SingleAcceleratorWorker):
             for key in template_keys:
                 values = [getattr(kwargs, key, None) for kwargs in loss_kwargs_list]
                 present = [value is not None for value in values]
-                if any(present) and not all(present):
-                    raise ValueError(f"Pack field {key} must be all-present or all-absent within a pack: {present}")
-                if all(present):
-                    loss_inputs[key] = torch.cat([cast(torch.Tensor, value) for value in values], dim=1)
-                else:
-                    loss_inputs[key] = self._pack_padding_loss_input(key, padding_len)
+                if not all(present):
+                    raise ValueError(f"Required pack field {key} must be present on every sample: {present}")
+                loss_inputs[key] = torch.cat([cast(torch.Tensor, value) for value in values], dim=1)
+            if padding_len > 0:
+                for key, tensor in loss_inputs.items():
+                    assert tensor is not None
+                    loss_inputs[key] = torch.cat([tensor, self._pack_padding_loss_input(key, padding_len)], dim=1)
         else:
             # Scheduling-only padding slot: the whole pack materializes as padding.
             loss_inputs = {
@@ -953,7 +954,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                     has_routed_experts=has_routed_experts,
                 )
             )
-        seq_ctx = seq_ctx_list[0] if len(seq_ctx_list) == 1 else SequenceContext.cat(seq_ctx_list)
+        seq_ctx = SequenceContext.cat(seq_ctx_list)
 
         assert seq_ctx.input_ids is not None
         seq_len = seq_ctx.input_ids.shape[1]
@@ -979,6 +980,8 @@ class TrainingWorker(SingleAcceleratorWorker):
         if key in ("teacher_logprobs", "target_token_ids"):
             distillation_config = self.config.distillation_config
             assert distillation_config is not None, f"Padding {key} requires distillation_config"
+            if key == "teacher_logprobs" and distillation_config.loss_config.uses_sampled_token_targets:
+                return torch.zeros(1, padding_len, dtype=torch.float32)
             top_k = distillation_config.loss_config.top_k
             assert top_k is not None, f"Padding {key} requires loss_config.top_k"
             if key == "teacher_logprobs":

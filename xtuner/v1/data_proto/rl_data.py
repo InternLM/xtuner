@@ -410,6 +410,41 @@ def refresh_seq_staleness(group: list[RolloutState], current_train_step: int) ->
     return group
 
 
+def validate_train_fields(rollout_state: RolloutState, *, task_name: str | None = None) -> None:
+    """Validate finalized full-sequence fields of a sample selected for
+    training.
+
+    Callers decide whether a state is a training sample. Eval and unfinished rollout states need not have canonical
+    training fields.
+    """
+    context = f"task={task_name!r}, rollout_id={rollout_state.rollout_id}"
+    input_ids = rollout_state.input_ids
+    if input_ids is None or len(input_ids) < 2:
+        length = None if input_ids is None else len(input_ids)
+        raise ValueError(f"input_ids must contain at least 2 tokens: {length}; {context}")
+    for field_name in ("labels", "logprobs"):
+        values = getattr(rollout_state, field_name)
+        if values is None and field_name == "logprobs":
+            continue
+        length = None if values is None else len(values)
+        if length != len(input_ids):
+            raise ValueError(f"{field_name} length mismatch: {length} vs input_ids={len(input_ids)}; {context}")
+
+
+def validate_response_model_steps(rollout_state: RolloutState, *, task_name: str | None = None) -> None:
+    """Validate token versions after replay has filled newly generated
+    tokens."""
+    steps = rollout_state.response_model_steps
+    if steps is None:
+        return
+    response_length = len(rollout_state.response_ids or [])
+    if len(steps) != response_length:
+        raise ValueError(
+            f"response_model_steps length mismatch: {len(steps)} vs response_ids={response_length}; "
+            f"task={task_name!r}, rollout_id={rollout_state.rollout_id}"
+        )
+
+
 def write_train_meta(rollout_state: RolloutState) -> None:
     """Write the controller-facing lightweight train metadata in place.
 
