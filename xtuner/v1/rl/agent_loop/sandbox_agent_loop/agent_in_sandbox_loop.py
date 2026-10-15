@@ -186,8 +186,8 @@ def _extract_reward_payload(item: AgentRolloutItem) -> dict[str, Any] | None:
 def _task_result_error(item: AgentRolloutItem) -> str | None:
     """Only a completed, finite verifier score is a task outcome.
 
-    A task-budget timeout is scoreable only after the harness confirms the
-    agent stopped. Transport timeouts and adapter errors remain unscored.
+    A task-budget timeout is scoreable only after the harness confirms the agent stopped. Transport timeouts and
+    adapter errors remain unscored.
     """
     if item.error is not None:
         return f"{item.error.stage}/{item.error.category}: {item.error.message}"
