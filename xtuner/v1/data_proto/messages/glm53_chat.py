@@ -16,6 +16,8 @@ in the official ``chat_template.jinja``:
    instead of GLM-5.2's ``<reminder>...</reminder>`` text (GLM-5.2 has no multimodal input).
 3. ``enable_thinking`` is accepted for API compatibility but, like the official template,
    does not remove the reasoning-effort header or close the generation-time ``<think>`` prefix.
+   Because the flag has no effect, ``False`` is rejected with an ``AssertionError`` instead of
+   being silently ignored.
 """
 
 from collections.abc import Mapping
@@ -77,6 +79,11 @@ def render_glm53_chat(
     clear_thinking: bool = False,
 ) -> tuple[str, list[bool]]:
     """渲染 GLM-5.3-Flash 对话；结构与 GLM-5.2 相同，媒体渲染为两段式 placeholder 标记。"""
+    assert enable_thinking, (
+        "GLM-5.3's official chat template ignores enable_thinking: the Reasoning Effort header "
+        "and the generation-time <think> prefix are always emitted, so enable_thinking=False "
+        "would be silently ignored. Pass True (the default) or drop the argument."
+    )
     text = ""
     loss_mask: list[bool] = []
 

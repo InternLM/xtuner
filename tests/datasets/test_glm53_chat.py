@@ -2,6 +2,7 @@
 
 TestGlm53Rendering
     test_reasoning_effort_domain_matches_jinja  reasoning_effort 取值域与 jinja 一致
+    test_enable_thinking_false_rejected         enable_thinking=False 被显式拒绝（jinja 忽略该参数）
     test_all_generation_eos_are_supervised_at_assistant_boundaries  停止 token 计入 loss
     test_media_placeholder_matches_jinja        媒体占位符与 jinja 一致
 """
@@ -32,23 +33,25 @@ def _render_from_hf(tokenizer, messages, **kwargs):
 
 class TestGlm53Rendering:
     @pytest.mark.parametrize("reasoning_effort", ["low", "high", "max", "bogus"])
-    @pytest.mark.parametrize("enable_thinking", [False, True])
-    def test_reasoning_effort_domain_matches_jinja(self, tokenizer, reasoning_effort, enable_thinking):
+    def test_reasoning_effort_domain_matches_jinja(self, tokenizer, reasoning_effort):
         # jinja: reasoning_effort in ['low', 'high'] else 'max' -- "bogus" exercises the fallback.
         messages = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
-        tokenized = Glm53ChatMessages(messages=messages).tokenize(
-            tokenizer, reasoning_effort=reasoning_effort, enable_thinking=enable_thinking
-        )
-        hf_rendered = _render_from_hf(
-            tokenizer, messages, reasoning_effort=reasoning_effort, enable_thinking=enable_thinking
-        )
+        tokenized = Glm53ChatMessages(messages=messages).tokenize(tokenizer, reasoning_effort=reasoning_effort)
+        hf_rendered = _render_from_hf(tokenizer, messages, reasoning_effort=reasoning_effort)
         rendered = tokenizer.decode(tokenized["input_ids"], skip_special_tokens=False)
         assert rendered == hf_rendered + tokenizer.eos_token
-        slow_ids, slow_labels = glm53_tokenize_fn_slowspeed(
-            tokenizer, messages, reasoning_effort=reasoning_effort, enable_thinking=enable_thinking
-        )
+        slow_ids, slow_labels = glm53_tokenize_fn_slowspeed(tokenizer, messages, reasoning_effort=reasoning_effort)
         assert tokenized["input_ids"] == slow_ids
         assert tokenized["labels"] == slow_labels
+
+    def test_enable_thinking_false_rejected(self, tokenizer):
+        # 官方 jinja 完全忽略 enable_thinking（Reasoning Effort 头与未闭合 <think> 永远输出），
+        # False 会被静默忽略，因此 xtuner 侧显式拒绝而不是假装支持。
+        messages = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        with pytest.raises(AssertionError, match="enable_thinking"):
+            Glm53ChatMessages(messages=messages).tokenize(tokenizer, enable_thinking=False)
+        with pytest.raises(AssertionError, match="enable_thinking"):
+            glm53_tokenize_fn_slowspeed(tokenizer, messages, enable_thinking=False)
 
     def test_all_generation_eos_are_supervised_at_assistant_boundaries(self, tokenizer):
         # 助手轮边界上的停止 token 必须计入 loss，否则模型学不会停。

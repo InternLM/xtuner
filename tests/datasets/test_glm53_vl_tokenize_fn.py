@@ -11,6 +11,11 @@ TestGlm53VisualPlaceholderAndTokenSemantics
 TestGlm53MmTokenTypeIdsMatchesProcessorGolden
     test_image_only                                 图像模态标记与 HF processor 一致
     test_video_only                                 视频模态标记与 HF processor 一致
+TestGlm53NativeHFInputContract
+    test_full_image_input_matches_native_template   完整图像输入与原生模板/processor 一致
+    test_enable_thinking_false_rejected             enable_thinking=False 被显式拒绝（jinja 忽略该参数）
+    test_video_pixels_and_timestamps_match_native_template  视频像素/时间戳与原生模板一致
+    test_truncation_before_media_end_is_logged      截断切到媒体结束符前：记录 error 并继续
 TestGlm53MixedMediaAndTruncation
     test_glm53_mixed_media_fails_fast               图文混合视频未支持，必须快速失败
     test_glm53_visual_truncation_is_dropped         截断会切断视觉跨度时 cache 阶段就丢弃
@@ -285,9 +290,8 @@ class TestGlm53MmTokenTypeIdsMatchesProcessorGolden:
 class TestGlm53NativeHFInputContract:
     @pytest.mark.parametrize("media_count", [0, 1, 2])
     @pytest.mark.parametrize("generation", [False, True])
-    @pytest.mark.parametrize("enable_thinking", [False, True])
     def test_full_image_input_matches_native_template(
-        self, tokenize_fn, processor, image_fixture, media_count: int, generation: bool, enable_thinking: bool
+        self, tokenize_fn, processor, image_fixture, media_count: int, generation: bool
     ) -> None:
         item = _image_item(image_fixture)
         media = item["messages"][0]["content"][0]
@@ -303,7 +307,6 @@ class TestGlm53NativeHFInputContract:
                 {"role": "user", "content": "再说一次"},
                 {"role": "assistant", "content": "紫色。"},
             ]
-        tokenize_fn.enable_thinking = enable_thinking
         tokenize_fn.add_generation_prompt = generation
         tokenize_fn.state = "runtime"
         actual = tokenize_fn(item)
@@ -311,7 +314,7 @@ class TestGlm53NativeHFInputContract:
             item["messages"],
             tokenize=False,
             add_generation_prompt=generation,
-            enable_thinking=enable_thinking,
+            enable_thinking=True,
             reasoning_effort="max",
             clear_thinking=False,
         )
@@ -333,6 +336,15 @@ class TestGlm53NativeHFInputContract:
         cached = tokenize_fn(item)
         assert cached["num_tokens"] == len(actual["input_ids"])
         assert cached["num_img_tokens"] == actual["num_img_tokens"]
+
+    def test_enable_thinking_false_rejected(self, tokenize_fn, image_fixture) -> None:
+        # 官方模板忽略 enable_thinking；False 会被静默忽略，xtuner 侧显式拒绝（cache/runtime 同）。
+        tokenize_fn.enable_thinking = False
+        item = _image_item(image_fixture)
+        for state in ("runtime", "cache"):
+            tokenize_fn.state = state
+            with pytest.raises(AssertionError, match="enable_thinking"):
+                tokenize_fn(item)
 
     @pytest.mark.parametrize("source", ["padded", "numbered", "file"])
     def test_video_pixels_and_timestamps_match_native_template(
