@@ -37,11 +37,11 @@ default_config:
 
 case: 
    
-    qwen3-2b-vl-opd-k1:
+    qwen3-2b-vl-mopd-k1:
         -
             type: rl
             parameters:
-                config: autotest/config/rl_qwen3_2B_vl_opd_k1.py
+                config: autotest/config/rl_qwen3_2B_vl_mopd_k1.py
                 infer_backend: lmdeploy
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
@@ -55,7 +55,7 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-2b-vl-opd-k1/tracker.jsonl
+                base_metric: qwen3-2b-vl-mopd-k1/tracker.jsonl
                 check_metrics:
                     -
                        metric: response/rewards/mean
@@ -76,11 +76,11 @@ case:
                        aggregate: 80
             timeout: 7200
 
-    qwen3-2b-vl-opd-topk:
+    qwen3-2b-vl-mopd-topk:
         -
             type: rl
             parameters:
-                config: autotest/config/rl_qwen3_2B_vl_opd_topk.py
+                config: autotest/config/rl_qwen3_2B_vl_mopd_topk.py
                 infer_backend: lmdeploy
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
@@ -97,7 +97,7 @@ case:
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-2b-vl-opd-topk/tracker.jsonl
+                base_metric: qwen3-2b-vl-mopd-topk/tracker.jsonl
                 check_metrics:
                     -
                        metric: response/rewards/mean

@@ -1,12 +1,11 @@
+import json
 import os
-from copy import deepcopy
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLQwen3VLTokenizeFnConfig
-from xtuner.v1.model import Qwen3Dense4BConfig, Qwen3VLDense2BConfig, Qwen3VLDense4BConfig
-from xtuner.v1.module.rope import RopeParametersConfig
+from xtuner.v1.model import Qwen3VLDense2BConfig
 from xtuner.v1.rl.advantage import GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.agent_loop_manager import (
@@ -15,7 +14,11 @@ from xtuner.v1.rl.agent_loop_manager import (
     SyncProduceStrategyConfig,
     TaskSpecConfig,
 )
-from xtuner.v1.rl.distillation import DistillationConfig, TrainTeacherConfig
+from xtuner.v1.rl.distillation import (
+    DistillationConfig,
+    RolloutTeacherConfig,
+    RolloutTeacherLaunchConfig,
+)
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.judger import ComposedJudgerConfig, GEO3KJudgerConfig, GSM8KJudgerConfig
 from xtuner.v1.rl.loss import DistillationLossConfig
@@ -111,17 +114,20 @@ meta_data_path = os.environ["DATA_PATH"]
 eval_meta_data_path = os.environ.get("EVAL_DATA_PATH", "")
 nnode = int(os.environ.get("WORLD_SIZE", "1"))
 
-experimental_name = "qwen3_2b_vl_opd_topk"
+experimental_name = "qwen3_2b_vl_opd_k1"
 total_epochs = 15
 total_train_steps = 50
 train_batch_size = 128
-top_k = 64
+teacher_num_replicas = 1
+teacher_replica_num_workers = 1
+enable_prefix_caching = 1
 prompt_repeat_k = 1
 rollout_tp_size = 1
 rollout_ep_size = 1
 max_prompt_length = 1024
 max_response_length = 2048
 pack_max_length = max_prompt_length + max_response_length
+max_num_tokens = pack_max_length
 train_optimizer_steps = 1
 enable_evaluate = bool(eval_meta_data_path)
 evaluate_step = 5
@@ -129,7 +135,7 @@ eval_prompt_repeat_k = 1
 
 resources = AcceleratorResourcesConfig(
     accelerator="GPU",
-    num_workers=int(os.environ.get("XTUNER_RL_NUM_WORKERS", str(8 * nnode))),
+    num_workers=int(os.environ.get("XTUNER_RL_NUM_WORKERS", str(6 * nnode))),
     num_cpus_per_worker=12,
     cpu_memory_per_worker=16 * 1024**3,
 )
@@ -141,7 +147,7 @@ rollout_config = RolloutConfig(
     dtype="bfloat16",
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
-    gpu_memory_utilization=0.5,
+    gpu_memory_utilization=0.6,
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=False,
     rollout_max_batch_size_per_instance=2048,
@@ -149,41 +155,11 @@ rollout_config = RolloutConfig(
 
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
 fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1, reduce_dtype="float32")
-teacher_fsdp_cfg = FSDPConfig(
-    torch_compile=False,
-    cpu_offload=False,
-    ep_size=1,
-    reduce_dtype="float32",
-    recompute_ratio=0,
-    vision_recompute_ratio=0,
-    requires_grad=False,
-)
-
 model_cfg = Qwen3VLDense2BConfig()
 if hasattr(model_cfg, "balancing_loss_cfg"):
     model_cfg.balancing_loss_cfg = None
 if hasattr(model_cfg, "z_loss_cfg"):
     model_cfg.z_loss_cfg = None
-
-gsm8k_teacher_model_cfg = Qwen3Dense4BConfig()
-if hasattr(gsm8k_teacher_model_cfg, "balancing_loss_cfg"):
-    gsm8k_teacher_model_cfg.balancing_loss_cfg = None
-if hasattr(gsm8k_teacher_model_cfg, "z_loss_cfg"):
-    gsm8k_teacher_model_cfg.z_loss_cfg = None
-gsm8k_teacher_model_cfg.compile_cfg = False
-
-geo3k_teacher_model_cfg = Qwen3VLDense4BConfig()
-if hasattr(geo3k_teacher_model_cfg, "balancing_loss_cfg"):
-    geo3k_teacher_model_cfg.balancing_loss_cfg = None
-if hasattr(geo3k_teacher_model_cfg, "z_loss_cfg"):
-    geo3k_teacher_model_cfg.z_loss_cfg = None
-geo3k_teacher_model_cfg.compile_cfg = False
-geo3k_teacher_model_cfg.text_config.rope_parameters_cfg = RopeParametersConfig(
-    rope_theta=5000000.0,
-    rope_type="qwen3_vl",
-    mrope_section=[24, 20, 20],
-)
-
 optim_cfg = AdamWConfig(lr=1e-6, foreach=False, weight_decay=0.1, betas=(0.9, 0.98))
 loss_cfg = DistillationLossConfig(
     policy_loss_cfg={
@@ -200,11 +176,8 @@ loss_cfg = DistillationLossConfig(
     kl_loss_type="low_var_kl",
     mode="chunk",
     chunk_size=512,
-    loss_mode="forward_kl_topk",
-    use_policy_gradient=False,
-    top_k=top_k,
-    log_prob_min_clamp=-10.0,
-    loss_max_clamp=10.0,
+    loss_mode="k1",
+    use_policy_gradient=True,
     task_adv_weight=0.0,
     distillation_loss_weight=1.0,
 )
@@ -234,6 +207,9 @@ training_sample_params = SampleParams(
     top_k=0,
     top_p=1.0,
     temperature=1.0,
+    repetition_penalty=1.0,
+    presence_penalty=0.0,
+    frequency_penalty=0.0,
     min_tokens=0,
     skip_special_tokens=False,
     return_logprob=True,
@@ -266,6 +242,9 @@ if enable_evaluate:
         top_k=0,
         top_p=1.0,
         temperature=1.0,
+        repetition_penalty=1.0,
+        presence_penalty=0.0,
+        frequency_penalty=0.0,
         min_tokens=0,
         skip_special_tokens=False,
         return_logprob=True,
@@ -289,17 +268,37 @@ if enable_evaluate:
 distillation_config = DistillationConfig(
     loss_config=loss_cfg,
     teachers=[
-        TrainTeacherConfig(
+        RolloutTeacherConfig(
             name="gsm8k_teacher",
-            model_path=gsm8k_teacher_model_path,
-            model_cfg=gsm8k_teacher_model_cfg,
-            fsdp_cfg=deepcopy(teacher_fsdp_cfg),
+            num_replicas=teacher_num_replicas,
+            enable_prefix_caching=enable_prefix_caching,
+            launch_config=RolloutTeacherLaunchConfig(
+                model_path=gsm8k_teacher_model_path,
+                num_workers=teacher_replica_num_workers,
+                server_port=13141,
+                dtype="bfloat16",
+                tensor_parallel_size=teacher_replica_num_workers,
+                expert_parallel_size=1,
+                context_length=max_num_tokens,
+                max_batch_size=max_num_tokens,
+                gpu_memory_utilization=0.8,
+            ),
         ),
-        TrainTeacherConfig(
+        RolloutTeacherConfig(
             name="geo3k_teacher",
-            model_path=geo3k_teacher_model_path,
-            model_cfg=geo3k_teacher_model_cfg,
-            fsdp_cfg=deepcopy(teacher_fsdp_cfg),
+            num_replicas=teacher_num_replicas,
+            enable_prefix_caching=enable_prefix_caching,
+            launch_config=RolloutTeacherLaunchConfig(
+                model_path=geo3k_teacher_model_path,
+                num_workers=teacher_replica_num_workers,
+                server_port=13142,
+                dtype="bfloat16",
+                tensor_parallel_size=teacher_replica_num_workers,
+                expert_parallel_size=1,
+                context_length=max_num_tokens,
+                max_batch_size=max_num_tokens,
+                gpu_memory_utilization=0.8,
+            ),
         ),
     ],
     data_source_teacher_map={
@@ -329,4 +328,5 @@ trainer = RLColocateTrainerConfig(
     work_dir=work_dir,
     seed=1234,
     debug_rollout=False,
+    exp_tracker="jsonl",
 )
