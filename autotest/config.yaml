@@ -36,13 +36,54 @@ default_config:
                 - HF_HUB_OFFLINE=1
 
 case: 
-   
+    qwen3-2b-vl-opd-dapo:
+        -
+            type: rl
+            parameters:
+                config: autotest/config/rl_qwen3_2B_vl_opd_dapo.py
+                infer_backend: lmdeploy
+                launch_script: pip install lmdeploy==0.18.0;bash -x recipe/on_policy_distillation/scripts/run_sampled_token_opd.sh /mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-2B-Instruct /mnt/shared-storage-user/llmrazor-share/data/opd_train_meta.json 
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-2B-Instruct
+                    - TEACHER_MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-4B-Instruct-2507
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/opd_train_meta.json
+                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/opd_eval_meta.json
+                    - OPD_DATA_SOURCE=gsm8k
+                    - OPD_TEACHER_DATA_SOURCE=openai/gsm8k
+                    - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-2b-vl-opd-dapo/tracker.jsonl
+                check_metrics:
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.3
+                       method: relative
+                       operator: <
+                       aggregate: 80
+                    -
+                       metric: time/step
+                       threshold: 0.3
+                       method: relative
+                       operator: <
+                       aggregate: 80
+            timeout: 7200 
+
     qwen3-2b-vl-mopd-k1:
         -
             type: rl
             parameters:
                 config: autotest/config/rl_qwen3_2B_vl_mopd_k1.py
                 infer_backend: lmdeploy
+                launch_script: pip install lmdeploy==0.18.0;bash -x recipe/on_policy_distillation/scripts/run_sampled_token_mopd.sh /mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-2B-Instruct /mnt/shared-storage-user/llmrazor-share/data/opd_train_meta.json
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 memory_per_task: 1200
@@ -82,6 +123,7 @@ case:
             parameters:
                 config: autotest/config/rl_qwen3_2B_vl_mopd_topk.py
                 infer_backend: lmdeploy
+                launch_script: pip install lmdeploy==0.18.0;bash -x recipe/on_policy_distillation/scripts/run_sampled_token_mopd.sh /mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-2B-Instruct /mnt/shared-storage-user/llmrazor-share/data/opd_train_meta.json
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 num_nodes: 2
