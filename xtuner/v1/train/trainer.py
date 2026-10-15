@@ -435,6 +435,7 @@ class TrainerConfig(BaseModel):
     profile_memory_step: list[int] | None = None
     profile_time: bool = True
     profile_memory: bool = False
+    record_memory_history: bool = False
     intra_layer_micro_batch: int = 1
     seed: int = 42
     dist_backend: str | None = None
@@ -507,6 +508,7 @@ class Trainer:
         profile_memory_step (list[int] | None): Steps to profile memory, defaults to ``profile_step``.
         profile_time (bool): Whether to profile training time.
         profile_memory (bool): Whether to profile memory usage.
+        record_memory_history (bool): Record CUDA allocator history and save a snapshot on OOM.
         intra_layer_micro_batch (int): Intra-layer micro batch size.
         seed (int): Random seed for reproducibility.
         debug (bool): Whether to enable debug mode.
@@ -564,6 +566,7 @@ class Trainer:
         profile_memory_step: list[int] | None = None,
         profile_time: bool = True,
         profile_memory: bool = False,
+        record_memory_history: bool = False,
         intra_layer_micro_batch: int = 1,
         seed: int = 42,
         debug: bool = False,
@@ -612,6 +615,7 @@ class Trainer:
         self._profile_memory_step = profile_memory_step if profile_memory_step is not None else profile_step
         self._profile_time = profile_time
         self._profile_memory = profile_memory
+        self._record_memory_history = record_memory_history
         self._load_from = Path(load_from) if isinstance(load_from, str) else load_from
 
         is_hf_path, error_info = is_hf_model_path(load_from) if load_from is not None else False, None
@@ -655,6 +659,13 @@ class Trainer:
         self._meta = self._init_xtuner_meta(self.work_dir, auto_resume=self._auto_resume)
         self._log_dir = self._resolve_log_dir(log_dir)  # depends on exp_dir(work_dir and meta)
         self.logger, log_dir = self._init_logger(self._log_dir)  # depends on log_dir and init_dist(get_rank)
+
+        if record_memory_history:
+            if DEVICE != "cuda":
+                raise ValueError("record_memory_history requires CUDA")
+            from xtuner.v1.profiler.cuda_profile import record_memory_history_on_oom
+
+            record_memory_history_on_oom(self.exp_dir / self._PROFILE_MEMORY_PATH / "oom")
 
         # After init logger
         log_rank0.warning("`resume_cfg` is deprecated, please use `auto_resume` and `load_checkpoint_cfg` instead")
@@ -840,6 +851,7 @@ class Trainer:
             profile_memory_step=config.profile_memory_step,
             profile_time=config.profile_time,
             profile_memory=config.profile_memory,
+            record_memory_history=config.record_memory_history,
             intra_layer_micro_batch=config.intra_layer_micro_batch,
             seed=config.seed,
             backend=config.dist_backend,
@@ -1675,7 +1687,10 @@ class Trainer:
 
             if self._profile_memory and self._profile_memory_step and self._cur_step in self._profile_memory_step:
                 memory_dir = self.exp_dir / self._PROFILE_MEMORY_PATH / f"step-{self._cur_step}"
-                stack.enter_context(profiling_memory(memory_dir))
+                if self._record_memory_history:
+                    stack.enter_context(profiling_memory(memory_dir, keep_oom_history=True))
+                else:
+                    stack.enter_context(profiling_memory(memory_dir))
             yield
 
     def _compute_performance_metrics(

@@ -15,6 +15,7 @@ logger = get_logger()
 
 
 MEMORY_SNAPSHOT_MAX_ENTRIES = 10000000
+OOM_SNAPSHOT_MAX_ENTRIES = 100000
 
 
 def _rank() -> int:
@@ -28,6 +29,28 @@ def _should_profile_rank() -> bool:
     if ranks == "all":
         return True
     return _rank() in {int(rank.strip()) for rank in ranks.split(",") if rank.strip()}
+
+
+def record_memory_history_on_oom(snapshot_dir: Path) -> None:
+    """Record recent allocations on every rank and save the failing rank at
+    allocator OOM."""
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    torch.cuda.memory._record_memory_history(max_entries=OOM_SNAPSHOT_MAX_ENTRIES, stacks="python")
+    rank = _rank()
+    snapshot_path = snapshot_dir / f"rank{rank}_memory_snapshot.pickle"
+
+    def oom_observer(device: int, alloc: int, device_alloc: int, device_free: int) -> None:
+        # Dump inside the allocator callback, before exception unwinding releases tensors.
+        try:
+            torch.cuda.memory._dump_snapshot(str(snapshot_path))
+            logger.error(
+                f"CUDA OOM on rank {rank}, device {device}: requested {alloc} bytes, "
+                f"allocated {device_alloc} bytes, free {device_free} bytes; saved {snapshot_path}"
+            )
+        except Exception:
+            logger.exception(f"Failed to save CUDA OOM snapshot to {snapshot_path}")
+
+    torch._C._cuda_attach_out_of_memory_observer(oom_observer)  # type: ignore[attr-defined]
 
 
 class TimeProfiler:
@@ -87,11 +110,16 @@ class TimeProfiler:
 
 
 class MemoryProfiler:
-    def __init__(self, profile_dir: Path):
+    def __init__(self, profile_dir: Path, *, keep_oom_history: bool = False):
         torch.cuda.memory._record_memory_history(max_entries=MEMORY_SNAPSHOT_MAX_ENTRIES, stacks="python")
         self.profile_dir = profile_dir
+        self.keep_oom_history = keep_oom_history
 
     def close(self):
+        if self.keep_oom_history:
+            # The sampled step needs a larger trace, then restore the bounded OOM window.
+            torch.cuda.memory._record_memory_history(max_entries=OOM_SNAPSHOT_MAX_ENTRIES, stacks="python")
+            return
         try:
             torch.cuda.memory._record_memory_history(enabled=None)
         except TypeError:
@@ -111,7 +139,7 @@ class MemoryProfiler:
         output_dir.mkdir(exist_ok=True, parents=True)
         logger.info(f"Dumping memory snapshot to {output_dir}")
         begin = time.monotonic()
-        with open(self.profile_dir / f"rank{rank}_memory_snapshot.pickle", "wb") as output:
+        with open(output_dir / f"rank{rank}_memory_snapshot.pickle", "wb") as output:
             pickle.dump(torch.cuda.memory._snapshot(), output)
         logger.info(f"Finished dumping memory snapshot in {time.monotonic() - begin:.2f} seconds")
 
@@ -126,11 +154,11 @@ def profiling_time(profile_dir: Path):
 
 
 @contextmanager
-def profiling_memory(profile_dir: Path):
+def profiling_memory(profile_dir: Path, *, keep_oom_history: bool = False):
     if not _should_profile_rank():
         yield
         return
-    profiler = MemoryProfiler(profile_dir)
+    profiler = MemoryProfiler(profile_dir, keep_oom_history=keep_oom_history)
     try:
         try:
             yield

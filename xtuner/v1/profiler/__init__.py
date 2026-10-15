@@ -16,7 +16,7 @@ else:
         yield
 
     @contextmanager
-    def profiling_memory(profile_dir: Path):
+    def profiling_memory(profile_dir: Path, *, keep_oom_history: bool = False):
         yield
 
 
