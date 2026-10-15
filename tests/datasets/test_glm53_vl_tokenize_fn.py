@@ -18,6 +18,9 @@ TestGlm53NativeHFInputContract
 TestGlm53MixedMediaAndTruncation
     test_glm53_mixed_media_fails_fast               图文混合视频未支持，必须快速失败
     test_glm53_visual_truncation_is_dropped         截断会切断视觉跨度时 cache 阶段就丢弃
+TestGlm53MediaRoleContract
+    test_non_user_media_is_rejected                 system/assistant/tool 角色的图片显式拒绝
+    test_string_content_parts_are_tolerated         content 列表混排纯字符串不崩溃
 TestGlm53CacheInvalidation
     test_glm53_cache_invalidates_on_processor_or_pack_change  processor/pack 变化使缓存失效
     test_glm53_hash_covers_every_init_parameter  逐参数 hash 失效 + __init__ 参数分类完备性
@@ -431,6 +434,50 @@ class TestGlm53MixedMediaAndTruncation:
         short_fn.state = "runtime"
         with pytest.raises(AssertionError):
             short_fn(_image_item(image_fixture))
+
+
+class TestGlm53MediaRoleContract:
+    @pytest.mark.parametrize("state", ["cache", "runtime"])
+    @pytest.mark.parametrize("role", ["system", "assistant", "tool"])
+    def test_non_user_media_is_rejected(
+        self, tokenize_fn: Glm53VLTokenizeFunction, role: str, state: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 官方模板会为任意角色的媒体渲染占位标记，但训练管线只会加载/展开 user/pretrain 的
+        # 媒体。system/assistant/tool 角色的图片必须在入口显式拒绝（cache/runtime 同），而不是
+        # 静默训练一个占位符永远不会被展开的样本（飞书报告 M08~M11 的"显式拒绝"选项）。
+        assert Glm53VLTokenizeFunction.__call__ is BaseMLLMTokenizeFunction.__call__
+        load = Mock(side_effect=AssertionError("Rejected samples must fail before loading media"))
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn.load_image", load)
+        image = {"type": "image", "image": {"url": "unused.jpg", "image_wh": [448, 448]}}
+        messages = [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a"},
+        ]
+        if role == "system":
+            messages.insert(0, {"role": "system", "content": [image, {"type": "text", "text": "policy"}]})
+        elif role == "assistant":
+            messages[1]["content"] = [image, {"type": "text", "text": "a"}]
+        else:
+            messages.insert(1, {"role": "tool", "content": [image], "tool_call_id": "t1"})
+        tokenize_fn.state = state
+        with pytest.raises(NotImplementedError, match="user/pretrain"):
+            tokenize_fn({"messages": messages})
+        load.assert_not_called()
+
+    def test_string_content_parts_are_tolerated(self, tokenize_fn: Glm53VLTokenizeFunction) -> None:
+        # content 列表允许纯字符串与 text 字典混排（官方 jinja 按文本原样渲染）；media collector
+        # 不得对字符串块取 c["type"] 而崩溃（飞书报告 E01）。
+        item = {
+            "messages": [
+                {"role": "user", "content": ["prefix", {"type": "text", "text": "正文"}, "suffix"]},
+                {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+            ]
+        }
+        tokenize_fn.state = "cache"
+        cache_ret = tokenize_fn(item)
+        tokenize_fn.state = "runtime"
+        runtime_ret = tokenize_fn(item)
+        assert cache_ret["num_tokens"] == runtime_ret["num_tokens"] == len(runtime_ret["input_ids"])
 
 
 class TestGlm53CacheInvalidation:

@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
+from collections.abc import Mapping
 from typing import Any, Literal, TypeVar
 
 import torch
@@ -31,7 +32,11 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
             content = msg["content"]
             if isinstance(content, list):
                 for c in content:
-                    if c["type"] in ("image_url", "image"):
+                    if not isinstance(c, Mapping):
+                        # 纯字符串是文本块（chat template 按原文渲染），不是媒体引用。
+                        continue
+                    ctype = c.get("type")
+                    if ctype in ("image_url", "image"):
                         key = "image_url" if "image_url" in c else "image"
                         image_paths.append(c[key]["url"])
                         if "image_wh" in c[key]:
@@ -43,7 +48,7 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
                                 image_wh = image_wh[0]
                             image_wh_list.append(image_wh)
                             assert len(image_wh) == 2, f"image_wh should be [width, height], but got {image_wh}"
-                    if c["type"] in ("video_url", "video"):
+                    if ctype in ("video_url", "video"):
                         key = "video_url" if "video_url" in c else "video"
                         video_paths.append(c[key]["url"])
                         video_wh = c[key].get("image_wh")
@@ -201,13 +206,26 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
                 labels = labels[: self.max_length]
         return input_ids, labels
 
+    def collect_media(self, messages: list[dict]):
+        """Collect the media references of one sample.
+
+        Model families with a different media-role contract (e.g. GLM-5.3-Flash, whose
+        official template renders media in any role while the training pipeline can only
+        load user/pretrain media) override this hook.
+        """
+        return collect_image_video_paths_and_extra(messages)
+
     @with_proxy_attention_flops
     def __call__(self, item: dict, media_root: str = "", **kwargs) -> T | CacheItem:  # type: ignore[override]
         try:
-            self._image_path, self._video_path, extra_info = collect_image_video_paths_and_extra(item["messages"])
+            self._image_path, self._video_path, extra_info = self.collect_media(item["messages"])
             self._image_wh_list = extra_info["image_wh"]
             self._video_wh_list = extra_info["video_wh"]
             self._video_extra_info_list = extra_info["video_extra_info"]
+        except NotImplementedError:
+            # 显式支持边界（如 GLM-5.3 拒绝非 user/pretrain 角色的媒体）不做 cache 降级，
+            # 与混合图文/视频的拒绝保持一致：cache/runtime 都抛出。
+            raise
         except RuntimeError as e:
             if self.state == "cache":
                 print(f"!!!! RuntimeError: {e} of {self.data_name} when tokenize cache item. skip {item}!")

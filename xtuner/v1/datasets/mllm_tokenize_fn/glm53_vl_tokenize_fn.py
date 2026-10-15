@@ -22,6 +22,7 @@ preprocessing path makes internally. Verified bitwise-equal to the real processo
 
 import copy
 import os
+from collections.abc import Mapping
 from typing import Any, Literal
 
 import numpy as np
@@ -42,6 +43,7 @@ from .base_mllm_tokenize_fn import (
     BaseMLLMTokenizeFnConfig,
     BaseMLLMTokenizeFunction,
     OSSLoaderConfig,
+    collect_image_video_paths_and_extra,
     get_image_path,
     load_image,
 )
@@ -61,6 +63,13 @@ _PROCESSOR_CACHE: dict[str, Any] = {}
 # num_tokens by 2 per media item.
 _IMAGE_MARKER = "<|image|>"
 _VIDEO_MARKER = "<|video|>"
+
+# Roles whose image/video the training path can load, expand and supervise. The official
+# template renders media markers for ANY role, but only user/pretrain media is wired to the
+# loader; media in other roles must be rejected instead of silently training unexpanded
+# placeholder markers.
+_SUPPORTED_MEDIA_ROLES = ("user", "pretrain")
+_MEDIA_TYPES = ("image", "image_url", "video", "video_url")
 
 
 def _video_frame_source(video_file: str, extra: dict) -> tuple[int, float]:
@@ -209,6 +218,34 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             visual_pack_weight=visual_pack_weight,
             trim_memory_interval=trim_memory_interval,
         )
+
+    def collect_media(self, messages: list[dict]):
+        """Reject image/video in roles the training path cannot serve, then collect as usual.
+
+        The official template renders media markers in any role (``visible_text``), but the
+        loader/expansion below only handles user/pretrain media. Letting e.g. a system- or
+        tool-role image through would train the raw ``<|image|>`` marker text with no pixels
+        behind it, so the sample is rejected here (both cache and runtime) instead.
+        """
+        unsupported_roles = set()
+        for msg in messages:
+            role = msg.get("role")
+            if role in _SUPPORTED_MEDIA_ROLES:
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if isinstance(part, Mapping) and part.get("type") in _MEDIA_TYPES:
+                    unsupported_roles.add(role)
+                    break
+        if unsupported_roles:
+            raise NotImplementedError(
+                "GLM-5.3-Flash training only supports image/video media in user/pretrain "
+                f"messages, but found media in role(s) {sorted(unsupported_roles)}, "
+                f"data_name: {self.data_name}. Remove the media or split the sample."
+            )
+        return collect_image_video_paths_and_extra(messages)
 
     # ---- shared render/expand/tokenize, called by both cache and runtime paths ----
 
