@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from lagent.utils import create_object
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, write_train_meta
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, validate_train_fields, write_train_meta
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import create_task
@@ -274,12 +274,7 @@ class AgentInSandboxLoop(AgentLoop):
             if state.status != Status.COMPLETED or state.input_ids is None:
                 continue
             try:
-                labels = state.labels
-                if labels is None or len(labels) != len(state.input_ids):
-                    expected = 0 if labels is None else len(labels)
-                    raise ValueError(f"labels length mismatch: {expected} vs {len(state.input_ids)}")
-                if state.logprobs is not None and len(state.logprobs) != len(state.input_ids):
-                    raise ValueError(f"logprobs length mismatch: {len(state.logprobs)} vs {len(state.input_ids)}")
+                validate_train_fields(state)
             except Exception as exc:
                 self.logger.error(f"Canonicalize train fields failed for rollout_id={state.rollout_id}: {exc}")
                 state.status = Status.FAILED

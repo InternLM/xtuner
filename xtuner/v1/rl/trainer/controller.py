@@ -32,15 +32,18 @@ class _DPRankDispatch(TypedDict):
     rollout_items: list[RolloutState]
 
 
+class _DPRankPlan(TypedDict):
+    """Global sample mapping and local pack indices for one DP rank."""
+
+    global_indices: list[int]
+    plan: DPRankPackIndices
+
+
 class _PackPlan(TypedDict):
-    """Controller-side packing result of one fit batch.
+    """Index-only layout and packing metrics, independent of training
+    targets."""
 
-    dp_dispatches (dict[int, _DPRankDispatch]): One dispatch payload per DP rank.
-    plan_log (dict[str, float]): Plan-derived ``packing/*`` metrics, including the
-        wall time of ``_build_pack_plan`` itself.
-    """
-
-    dp_dispatches: dict[int, _DPRankDispatch]
+    dp_plans: dict[int, _DPRankPlan]
     plan_log: dict[str, float]
 
 
@@ -325,27 +328,22 @@ class TrainingController:
     def _build_pack_plan(
         self,
         rollout_items: list[RolloutState],
-        advantages: list[float],
         pack_max_length: int,
         worker_cfg: WorkerConfig,
         data_replicate_size: int,
     ) -> _PackPlan:
-        """Build the per-DP-rank pack plan and dispatch payloads without
-        uploading.
+        """Build an index-only per-DP-rank plan without training targets.
 
         Args:
             rollout_items (list[RolloutState]): Flat rollout states in training order.
-            advantages (list[float]): Scalar advantage per rollout state, aligned with
-                ``rollout_items``.
             pack_max_length (int): Maximum token budget of one pack.
             worker_cfg (WorkerConfig): Training worker config providing packing options.
             data_replicate_size (int): Number of workers holding one data replica.
 
         Returns:
-            _PackPlan: One dispatch payload per DP rank — local plan, local advantages
-            and this rank's rollout states — plus the plan-derived ``packing/*``
-            metrics including the wall time of this call. Uploading the payloads to
-            the Ray object store happens in ``fit``.
+            _PackPlan: Global sample indices and local pack indices per DP rank,
+            plus packing metrics. Payload assembly happens separately, once the
+            algorithm has produced its training targets.
         """
         plan_begin = time.perf_counter()
         lengths = []
@@ -366,14 +364,13 @@ class TrainingController:
         )
         packed_plan, padding_tokens = data_packer.pack(lengths)
 
-        dp_dispatches: dict[int, _DPRankDispatch] = {}
+        dp_plans: dict[int, _DPRankPlan] = {}
         for dp_rank, dp_plan in enumerate(packed_plan):
             global_indices = sorted({index for step in dp_plan for pack in step for index in pack})
             global_to_local = {global_index: local_index for local_index, global_index in enumerate(global_indices)}
-            dp_dispatches[dp_rank] = {
+            dp_plans[dp_rank] = {
                 "plan": [[[global_to_local[index] for index in pack] for pack in step] for step in dp_plan],
-                "advantages": [advantages[index] for index in global_indices],
-                "rollout_items": [rollout_items[index] for index in global_indices],
+                "global_indices": global_indices,
             }
         total_packs = sum(len(step) for dp_plan in packed_plan for step in dp_plan)
         total_tokens = real_tokens + padding_tokens
@@ -385,7 +382,26 @@ class TrainingController:
             "packing/num_optimizer_steps": float(len(packed_plan[0])),
             "packing/plan_time_s": time.perf_counter() - plan_begin,
         }
-        return {"dp_dispatches": dp_dispatches, "plan_log": plan_log}
+        return {"dp_plans": dp_plans, "plan_log": plan_log}
+
+    def _build_dispatches(
+        self,
+        rollout_items: list[RolloutState],
+        advantages: list[float],
+        pack_plan: _PackPlan,
+    ) -> dict[int, _DPRankDispatch]:
+        """Attach states and training targets to an already fixed sample
+        mapping."""
+        if len(rollout_items) != len(advantages):
+            raise ValueError(f"rollout_items and advantages lengths differ: {len(rollout_items)} vs {len(advantages)}")
+        return {
+            dp_rank: {
+                "plan": dp_plan["plan"],
+                "rollout_items": [rollout_items[index] for index in dp_plan["global_indices"]],
+                "advantages": [advantages[index] for index in dp_plan["global_indices"]],
+            }
+            for dp_rank, dp_plan in pack_plan["dp_plans"].items()
+        }
 
     def fit(
         self,
@@ -403,9 +419,8 @@ class TrainingController:
         worker_cfg = ray.get(self.workers[0].get_worker_cfg.remote())  # type: ignore[attr-defined]
         data_replicate_size = ray.get(self.workers[0].get_data_replicate_size.remote())  # type: ignore[attr-defined]
 
-        pack_plan = self._build_pack_plan(
-            rollout_items, prepared["advantages"], pack_max_length, worker_cfg, data_replicate_size
-        )
+        pack_plan = self._build_pack_plan(rollout_items, pack_max_length, worker_cfg, data_replicate_size)
+        dp_dispatches = self._build_dispatches(rollout_items, prepared["advantages"], pack_plan)
 
         # Pixel-value object refs must stay alive until every worker has consumed the
         # dispatch, so the finally clause releases them on both the success and the
@@ -414,7 +429,7 @@ class TrainingController:
         try:
             for worker_idx, worker in enumerate(self.workers):
                 dp_rank = worker_idx // data_replicate_size
-                dp_dispatch = pack_plan["dp_dispatches"][dp_rank]
+                dp_dispatch = dp_dispatches[dp_rank]
                 # Nested in a list so Ray does not dereference it before TrainingWorker.fit
                 # explicitly fetches it; one DP rank's replicas share the ref.
                 item_refs = [ray.put(dp_dispatch["rollout_items"])]

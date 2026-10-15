@@ -23,7 +23,7 @@ import torch
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, TeacherTargets
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter, RolloutTeacherConfig
 from xtuner.v1.rl.loss import DistillationLossConfig, GRPOLossConfig
-from xtuner.v1.rl.trainer.worker import TrainingWorker, TrainBatchAttr
+from xtuner.v1.rl.trainer.worker import TrainBatchAttr, TrainingWorker
 
 
 def _batch_attr(use_3d: bool) -> TrainBatchAttr:
@@ -152,7 +152,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
 
         items = worker._convert_rollout_items_to_train_items([state], [0.0], _batch_attr(False))
 
-        self.assertIsNone(items[0][0].position_ids)
+        torch.testing.assert_close(items[0][0].position_ids, torch.arange(4).reshape(1, -1))
 
     def test_text_positions_broadcast_to_3d_in_mixed_batches(self):
         worker = self._make_worker()
