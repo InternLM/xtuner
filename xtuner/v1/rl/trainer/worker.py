@@ -212,10 +212,11 @@ class WorkerConfig(BaseModel):
             updated weights to rollout workers. Defaults to 0.5.
         seed (int | None): Training worker random seed. When None, the RL
             trainer seed is used. Defaults to None.
-        pack_strategy (Literal["legacy", "greedy", "balance", "native"]): Index-only
+        pack_strategy (Literal["legacy", "greedy", "balance", "native", "lpt"]): Index-only
             packing strategy used by the controller-side packer. ``legacy`` exactly
             reproduces the previous greedy pack, interleaved DP allocation and
-            optimizer-step grouping. Defaults to "legacy".
+            optimizer-step grouping. ``lpt`` reproduces the baseline longest-processing-time
+            packer. Defaults to "legacy".
         pack_seed (int | None): Random seed for length-grouped packing strategies such
             as "balance". Defaults to None.
         offload_rollout_routed_experts (bool): Keep rollout routed experts on
@@ -258,7 +259,7 @@ class WorkerConfig(BaseModel):
     log_dir: str | Path | None = None
     update_weight_bucket_size_in_gb: float = 0.5  # 512MB
     seed: None | int = None  # if None, use RLTrainer seed
-    pack_strategy: Literal["legacy", "greedy", "balance", "native"] = "legacy"
+    pack_strategy: Literal["legacy", "greedy", "balance", "native", "lpt"] = "legacy"
     pack_seed: int | None = None
     distillation_config: DistillationConfig | None = None
     profile_step: list[int] | int | None = None  # 1-based global RL train_step ids to profile.
