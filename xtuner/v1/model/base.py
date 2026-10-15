@@ -2127,13 +2127,15 @@ class BaseModel(nn.Module):
             self._compile_overwrite(target, option)
 
     def _mark_dynamic(self, seq_ctx: SequenceContext, dim=0):
-        """`cu_seq_lens_q` and `cu_seq_lens_k` are dynamic shapes in each
-        fwd/bwd pass.
+        """Packed offsets on GPU and their optional CPU source change shape in
+        each fwd/bwd pass.
 
         Mark them as dynamic explicitly to avoid recompilation.
         """
         torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_q, dim)
         torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_k, dim)
+        if seq_ctx.cu_seq_lens_q_cpu is not None and seq_ctx.cu_seq_lens_q_cpu is not seq_ctx.cu_seq_lens_q:
+            torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_q_cpu, dim)
 
     def _init_world_mesh(self):
         device = DEVICE

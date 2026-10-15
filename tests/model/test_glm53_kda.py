@@ -312,6 +312,44 @@ class TestKDAModuleParity:
         expected = torch.cat([out1, out2], dim=1)
         torch.testing.assert_close(packed_out, expected, atol=1e-4, rtol=1e-4)
 
+    @pytest.mark.gpu
+    def test_cpu_packed_offsets_preserve_output_and_gradients(self):
+        torch.manual_seed(20261015)
+        module = _build_xtuner_kda().cuda().train()
+        ids = tuple(torch.zeros(1, length, dtype=torch.long) for length in (31, 66, 95))
+        cpu_context = SequenceContext.from_input_ids(ids, device="cpu").to("cuda")
+        gpu_context = SequenceContext(
+            input_ids=cpu_context.input_ids,
+            cu_seq_lens_q=cpu_context.cu_seq_lens_q,
+            cu_seq_lens_k=cpu_context.cu_seq_lens_k,
+            max_length_q=cpu_context.max_length_q,
+            max_length_k=cpu_context.max_length_k,
+            position_ids=cpu_context.position_ids,
+            device="cuda",
+        )
+        assert cpu_context.cu_seq_lens_q_cpu is not None
+        assert gpu_context.cu_seq_lens_q_cpu is None
+        hidden = torch.randn(1, 192, 64, device="cuda")
+        upstream = torch.randn_like(hidden)
+        results = []
+        for context in (gpu_context, cpu_context):
+            module.zero_grad(set_to_none=True)
+            x = hidden.detach().clone().requires_grad_()
+            output = module(x, context)["projected_output"]
+            output.backward(upstream)
+            results.append(
+                (
+                    output.detach().clone(),
+                    x.grad.detach().clone(),
+                    {name: p.grad.detach().clone() for name, p in module.named_parameters()},
+                )
+            )
+        expected, actual = results
+        torch.testing.assert_close(actual[0], expected[0], atol=1e-4, rtol=1e-4)
+        torch.testing.assert_close(actual[1], expected[1], atol=1e-4, rtol=1e-4)
+        for name in expected[2]:
+            torch.testing.assert_close(actual[2][name], expected[2][name], atol=1e-4, rtol=1e-4)
+
 
 class TestKDASequenceParallel(DistributedTestBase):
     @pytest.mark.gpu
@@ -407,6 +445,83 @@ class TestKDASequenceParallel(DistributedTestBase):
     @property
     def world_size(self) -> int:
         return 2
+
+
+class TestKDAUlyssesSequenceParallel8(DistributedTestBase):
+    @pytest.mark.gpu
+    def test_cpu_offsets_survive_sp_padding_and_match_non_sp(self, device="cuda"):
+        self.create_pg(device)
+        mesh = init_data_mesh(device, self.world_size)["sp"]
+        rank = mesh.get_local_rank()
+        torch.manual_seed(20261015)
+        module = _build_xtuner_kda(hidden_size=128, num_heads=8).to(device).train()
+        for parameter in module.parameters():
+            torch.distributed.broadcast(parameter.data, src=0)
+        reference = deepcopy(module)
+
+        lengths = (63, 65, 381)
+        context = (
+            SequenceContext.from_input_ids(
+                tuple(torch.zeros(1, length, dtype=torch.long) for length in lengths), device="cpu"
+            )
+            .to(device)
+            .split(mesh)
+        )
+        assert context.cu_seq_lens_q_cpu is not None
+        assert context.cu_seq_lens_q_cpu.tolist() == [0, 63, 128, 509, 512]
+        torch.testing.assert_close(context.cu_seq_lens_q.cpu(), context.cu_seq_lens_q_cpu, atol=0, rtol=0)
+        torch.testing.assert_close(context.copy().cu_seq_lens_q_cpu, context.cu_seq_lens_q_cpu, atol=0, rtol=0)
+        padded_offsets = torch.tensor([0, 63, 128, 509], dtype=torch.int32)
+        padded_context = (
+            SequenceContext(
+                input_ids=torch.zeros(1, 509, dtype=torch.long),
+                cu_seq_lens_q=padded_offsets,
+                cu_seq_lens_k=padded_offsets,
+                max_length_q=381,
+                max_length_k=381,
+                num_padding=3,
+                device="cpu",
+            )
+            .to(device)
+            .split(mesh)
+        )
+        assert padded_context.cu_seq_lens_q_cpu.tolist() == [0, 63, 128, 512]
+        torch.testing.assert_close(
+            padded_context.cu_seq_lens_q.cpu(), padded_context.cu_seq_lens_q_cpu, atol=0, rtol=0
+        )
+
+        full_context = SequenceContext(
+            input_ids=torch.zeros(1, 512, dtype=torch.long, device=device),
+            cu_seq_lens_q=context.cu_seq_lens_q,
+            cu_seq_lens_k=context.cu_seq_lens_k,
+            max_length_q=context.max_length_q,
+            max_length_k=context.max_length_k,
+            num_padding=3,
+            position_ids=torch.zeros(1, 512, dtype=torch.long, device=device),
+            device=device,
+        )
+        full_hidden = torch.randn(1, 512, 128, device=device)
+        torch.distributed.broadcast(full_hidden, src=0)
+        full_hidden.requires_grad_()
+        local_slice = slice(rank * 64, (rank + 1) * 64)
+        local_hidden = full_hidden.detach()[:, local_slice].clone().requires_grad_()
+        expected = reference(full_hidden, full_context)["projected_output"]
+        actual = module(local_hidden, context)["projected_output"]
+        _assert_fla_sp_parity(actual, expected[:, local_slice], full_hidden.dtype, "SP8 output")
+
+        upstream = torch.randn_like(expected)
+        torch.distributed.broadcast(upstream, src=0)
+        expected.backward(upstream)
+        actual.backward(upstream[:, local_slice].contiguous())
+        _assert_fla_sp_parity(local_hidden.grad, full_hidden.grad[:, local_slice], full_hidden.dtype, "SP8 input grad")
+        for name, parameter in module.named_parameters():
+            assert parameter.grad is not None
+            torch.distributed.all_reduce(parameter.grad, group=mesh.get_group())
+            _assert_fla_sp_parity(parameter.grad, reference.get_parameter(name).grad, full_hidden.dtype, name)
+
+    @property
+    def world_size(self) -> int:
+        return 8
 
 
 @pytest.mark.gpu
@@ -604,7 +719,9 @@ class TestKDAFLASequenceParallel(DistributedTestBase):
                         if compile_module:
                             torch._dynamo.reset()
                         plain_module = torch.compile(module, fullgraph=True) if compile_module else module
-                        forward_module = torch.compile(replay_module, fullgraph=True) if compile_module else replay_module
+                        forward_module = (
+                            torch.compile(replay_module, fullgraph=True) if compile_module else replay_module
+                        )
                         checkpointed = apply_activation_checkpointing(forward_module)
                         hidden = torch.randn(1, local_length, 64, device=device, dtype=dtype, requires_grad=True)
                         replay_hidden = hidden.detach().clone().requires_grad_()
