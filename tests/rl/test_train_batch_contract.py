@@ -145,7 +145,7 @@ class TestPackPlanDispatch(unittest.TestCase):
         states = [canonical_state(i) for i in range(5)]
         for state, length in zip(states, [6, 4, 7, 3, 8]):
             state.num_tokens = length
-        config = SimpleNamespace(optimizer_steps=2, pack_strategy="legacy", pack_seed=None)
+        config = SimpleNamespace(optimizer_steps=2, pack_strategy="greedy", pack_seed=None)
         with patch("xtuner.v1.rl.trainer.pack.XTUNER_DETERMINISTIC", True):
             plan = controller._build_pack_plan(states, 10, config, 2)
         self.assertEqual(plan["dp_plans"][0]["global_indices"], [0, 1, 4])
