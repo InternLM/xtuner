@@ -57,6 +57,7 @@ from xtuner.v1.model.utils import (
 from xtuner.v1.module import (
     GatedDeltaNetConfig,
     GreedyRouterConfig,
+    KDAConfig,
     LMHead,
     MHAConfig,
     MLAConfig,
@@ -1226,7 +1227,7 @@ class MoE(BaseModel):
         # 让 layers 是一个 nn.ModuleDict 方便做 pipeline parallel 的参数切分，
         # 这样可以保证部分 layer 被切掉后，idx 保持不变
         layers = nn.ModuleDict()
-        attention_config: GatedDeltaNetConfig | MLAConfig | MHAConfig | None = None
+        attention_config: GatedDeltaNetConfig | KDAConfig | MLAConfig | MHAConfig | None = None
         for layer_idx in range(config.num_hidden_layers):
             if config.layers_type[layer_idx] in ["full_attention", "sliding_attention"]:
                 attention_config = config.attention
@@ -1309,7 +1310,7 @@ class MoE(BaseModel):
         # Get attention config for MTP layers (use last layer's config)
         last_layer_idx = config.num_hidden_layers - 1
         layers_type_list = config.layers_type
-        attention_config: MLAConfig | MHAConfig | GatedDeltaNetConfig
+        attention_config: MLAConfig | MHAConfig | GatedDeltaNetConfig | KDAConfig
         if layers_type_list[last_layer_idx] in ["full_attention", "sliding_attention"]:
             attention_config = config.attention
         elif layers_type_list[last_layer_idx] == "linear_attention":
@@ -1587,7 +1588,17 @@ class MoE(BaseModel):
             # `_flatten()` collapses all Replicate dims into a 1D mesh whose
             # process group covers every rank across those dimensions, allowing
             # a single all_reduce regardless of how many Replicate dims exist.
-            if len(replicate_dim_names) > 1:
+            replica_mesh = self.world_mesh
+            if (
+                len(replicate_dim_names) == len(param.placements)
+                and replica_mesh is not None
+                and param.device_mesh.size() < replica_mesh.size()
+            ):
+                # Non-expert parameters are replicated on EP/ETP before FSDP. If
+                # ignored by FSDP, they also remain replicated over its DP dims,
+                # although the parameter still carries only the EP/ETP submesh.
+                flat_mesh = replica_mesh._flatten() if replica_mesh.ndim > 1 else replica_mesh
+            elif len(replicate_dim_names) > 1:
                 flat_mesh = param.device_mesh[replicate_dim_names]._flatten()
             else:
                 # In the case that only one replicate dim, in pt2.8 _flatten is worked due to a bug.

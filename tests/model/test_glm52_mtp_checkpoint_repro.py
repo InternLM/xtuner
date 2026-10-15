@@ -55,9 +55,10 @@ def _tiny_mtp_config(
             qk_rope_head_dim=4,
             v_head_dim=4,
             index_topk=4,
-            index_head_dim=4,
+            index_head_dim=16,  # Keep the tiny model on TileLang's supported BF16 MMA path.
             index_n_heads=2,
             indexer_types=["full", "shared", "full"],
+            sparse_mla_backend="torch",  # The TileLang sparse MLA kernel only supports production head widths.
         ),
         hf_head_dim=4,
         qk_head_dim=8,
