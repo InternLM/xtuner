@@ -70,16 +70,15 @@ class RLDataPacker:
         world_size (int): Total number of training workers.
         data_replicate_size (int): Number of workers holding one data replica.
         optimizer_steps (int): Configured optimizer steps per training iteration.
-        pack_strategy (Literal["legacy", "greedy", "balance", "native"]): Packing
-            strategy. ``legacy`` exactly reproduces the previous greedy pack,
-            interleaved DP allocation and optimizer-step grouping; ``greedy`` keeps the
-            greedy layout but assigns contiguous pack blocks per DP rank; ``balance``
+        pack_strategy (Literal["greedy", "balance", "native"]): Packing
+            strategy. ``greedy`` reproduces main's sequential greedy pack,
+            interleaved DP allocation and optimizer-step grouping; ``balance``
             length-groups samples before partitioning; ``native`` splits samples evenly
-            across DP ranks before packing. Defaults to "legacy".
+            across DP ranks before packing. Defaults to "greedy".
         pack_seed (int | None): Seed for randomized strategies such as ``balance``.
             Defaults to None.
 
-    Ordering is a per-strategy decision: ``legacy`` and ``greedy`` shuffle the visit
+    Ordering is a per-strategy decision: ``greedy`` shuffles the visit
     order before packing unless ``XTUNER_DETERMINISTIC`` is set, ``balance`` performs
     its own seeded length grouping, and ``native`` keeps the input order.
     """
@@ -90,7 +89,7 @@ class RLDataPacker:
         world_size: int,
         data_replicate_size: int,
         optimizer_steps: int,
-        pack_strategy: Literal["legacy", "greedy", "balance", "native"] = "legacy",
+        pack_strategy: Literal["greedy", "balance", "native"] = "greedy",
         pack_seed: int | None = None,
     ):
         self.pack_max_length = pack_max_length
@@ -101,7 +100,6 @@ class RLDataPacker:
         self.pack_seed = pack_seed
         self.split_size = 1024
         strategy_map = {
-            "legacy": self._legacy_pack,
             "greedy": self._greedy_pack,
             "balance": self._balance_pack,
             "native": self._native_pack,
@@ -137,7 +135,7 @@ class RLDataPacker:
         padding_tokens = self._count_padding_tokens(packed_data_indices, data_lengths)
         return packed_data_indices, padding_tokens
 
-    def _legacy_pack(
+    def _greedy_pack(
         self,
         data_indices: list[int],
         data_lengths: Sequence[int],
@@ -165,36 +163,6 @@ class RLDataPacker:
                     for step in range(actual_optimizer_steps)
                 ]
             )
-        return packed_data_indices
-
-    def _greedy_pack(
-        self,
-        data_indices: list[int],
-        data_lengths: Sequence[int],
-    ) -> PackedDataIndices:
-        if not XTUNER_DETERMINISTIC:
-            random.shuffle(data_indices)
-        visit_lengths = [data_lengths[index] for index in data_indices]
-        total_pack_indices = get_greedy_pack_infos(data_indices, visit_lengths, self.pack_max_length)
-        pad_num = math.ceil(len(total_pack_indices) / self.dp_size) * self.dp_size - len(total_pack_indices)
-        total_pack_indices.extend([[] for _ in range(pad_num)])
-
-        packs_per_dp = len(total_pack_indices) // self.dp_size
-        if packs_per_dp < self.optimizer_steps:
-            iters_per_step = 1
-            actual_optimizer_steps = packs_per_dp
-        else:
-            iters_per_step = math.ceil(packs_per_dp / self.optimizer_steps)
-            actual_optimizer_steps = math.ceil(packs_per_dp / iters_per_step)
-
-        packed_data_indices: PackedDataIndices = [
-            [[] for _ in range(actual_optimizer_steps)] for _ in range(self.dp_size)
-        ]
-        for dp_rank in range(self.dp_size):
-            for step_idx in range(actual_optimizer_steps):
-                start_idx = dp_rank * packs_per_dp + step_idx * iters_per_step
-                end_idx = min(start_idx + iters_per_step, packs_per_dp * (dp_rank + 1))
-                packed_data_indices[dp_rank][step_idx] = total_pack_indices[start_idx:end_idx]
         return packed_data_indices
 
     def _balance_pack(
