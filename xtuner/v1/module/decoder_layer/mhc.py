@@ -28,9 +28,10 @@ FFN sub-blocks with this ``hc_pre`` / sub_block / ``hc_post`` pattern.
 import os
 
 import torch
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from torch import Tensor
 
+from xtuner.v1.ops.fp32_linear import fp32_linear
 from xtuner.v1.utils.compile import maybe_compile
 
 
@@ -63,6 +64,7 @@ class MHCConfig(BaseModel):
     hc_mult: int
     hc_eps: float = 1e-6
     hc_sinkhorn_iters: int = 20
+    projection_block_size: int = Field(default=0, ge=0)
 
 
 def hc_split_sinkhorn(
@@ -135,6 +137,7 @@ def hc_pre(
     iters: int,
     eps: float,
     norm_eps: float = 1e-6,
+    projection_block_size: int = 0,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Reduce ``hc_mult`` streams down to one, returning the reduced state and
     the ``post``/``comb`` weights that the matching :func:`hc_post` call will
@@ -172,7 +175,7 @@ def hc_pre(
     # projection can round differently when SP changes the number of token rows,
     # perturbing the residual streams before attention even runs.
     flat_normed = torch.nn.functional.rms_norm(x_flat.float(), (x_flat.size(-1),), weight=None, eps=norm_eps)
-    mixes = torch.nn.functional.linear(flat_normed, hc_fn.float())
+    mixes = fp32_linear(flat_normed, hc_fn, block_size=projection_block_size)
 
     pre, post, comb = hc_split_sinkhorn(mixes, hc_scale, hc_base, hc_mult, iters, eps)
 
