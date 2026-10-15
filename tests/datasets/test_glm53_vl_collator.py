@@ -12,6 +12,7 @@ TestGlm53SequenceContextSplitKeepsMmAlignment
 """
 
 import os
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -84,16 +85,19 @@ class TestGlm53VlSftCollator:
     IMAGE_TOKEN_ID = 999
     MERGE_UNIT = 4
 
-    def test_oversized_media_sample_cannot_bypass_tokenize_validation(self) -> None:
+    def test_oversized_media_sample_is_truncated_with_error_log(self, monkeypatch) -> None:
+        mock_logger = Mock()
+        monkeypatch.setattr("xtuner.v1.datasets.collator.logger", mock_logger)
         item = _glm53_item(text_len=10, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=4)
-        with pytest.raises(ValueError, match="truncate at tokenize time"):
-            glm53_vl_sft_collator(
-                [[item]],
-                pack_max_length=4,
-                padding_token_idx=0,
-                image_token_id=self.IMAGE_TOKEN_ID,
-                merge_unit=self.MERGE_UNIT,
-            )
+        result = glm53_vl_sft_collator(
+            [[item]],
+            pack_max_length=4,
+            padding_token_idx=0,
+            image_token_id=self.IMAGE_TOKEN_ID,
+            merge_unit=self.MERGE_UNIT,
+        )
+        mock_logger.error.assert_called_once()
+        assert result[0]["seq_ctx"].input_ids.shape[-1] == 4
 
     def test_oversized_text_sample_keeps_text_truncation(self) -> None:
         item = _glm53_item(text_len=10, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=0)
