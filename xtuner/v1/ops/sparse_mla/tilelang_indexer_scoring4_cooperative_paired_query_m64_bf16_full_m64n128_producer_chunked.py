@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""Opt-in query-chunked BF16 scoring and DeepSelect with reusable GPU scratch."""
+"""Opt-in query-chunked BF16 scoring and DeepSelect with reusable GPU
+scratch."""
 
 import torch
 from torch import Tensor
@@ -30,8 +31,8 @@ def allocate_score_scratch(
 ) -> Tensor:
     """Allocate one aligned FP32 scratch; default capacity is ceil(Q/4).
 
-    Supply chunk_size for an explicit query capacity, or chunks for a
-    requested number of chunks. The two options are mutually exclusive.
+    Supply chunk_size for an explicit query capacity, or chunks for a requested number of chunks. The two options are
+    mutually exclusive.
     """
     capacity = _query_chunk_capacity(query_len, chunks, chunk_size)
     return full.allocate_scores(capacity, key_len, device)
@@ -53,19 +54,15 @@ def chunked_topk_interface(
 ) -> Tensor:
     """Return top-k IDs using sequential query chunks and one score scratch.
 
-    The installed DeepSelect requires zero starts. Ends retain their
-    original key indices when query views are sliced; do not recompute
-    ends from a chunk's local query indices. The result contains absolute
-    key IDs, with -1 padding on short/empty rows.
+    The installed DeepSelect requires zero starts. Ends retain their original key indices when query views are sliced;
+    do not recompute ends from a chunk's local query indices. The result contains absolute key IDs, with -1 padding on
+    short/empty rows.
 
-    Default behavior uses four chunks. Supply chunk_size=128 for a fixed
-    query capacity instead; chunks and chunk_size are mutually exclusive.
-    Pass score_scratch from allocate_score_scratch() and contiguous int32
-    out[Q,topk] to exclude allocation. Each chunk writes directly into an
-    out view. Scoring/selection and the next scratch reuse are ordered on
-    the current CUDA stream; there are no per-chunk synchronizations.
-    Zero-start validation performs one GPU-to-host boolean check before
-    chunk launches. Only the final IDs are returned; scratch is reusable.
+    Default behavior uses four chunks. Supply chunk_size=128 for a fixed query capacity instead; chunks and chunk_size
+    are mutually exclusive. Pass score_scratch from allocate_score_scratch() and contiguous int32 out[Q,topk] to
+    exclude allocation. Each chunk writes directly into an out view. Scoring/selection and the next scratch reuse are
+    ordered on the current CUDA stream; there are no per-chunk synchronizations. Zero-start validation performs one
+    GPU-to-host boolean check before chunk launches. Only the final IDs are returned; scratch is reusable.
     """
     import deep_select
 

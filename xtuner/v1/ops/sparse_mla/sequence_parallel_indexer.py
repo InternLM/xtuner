@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""Balance causal indexer work while preserving the attention sequence shards."""
+"""Balance causal indexer work while preserving the attention sequence
+shards."""
 
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
@@ -46,7 +47,8 @@ def causal_work_prefix(cu_seq_lens: tuple[int, ...], position: int, pool_size: i
 def balanced_query_partition(
     cu_seq_lens: tuple[int, ...], sp_size: int, pool_size: int, query_alignment: int = 1, per_query_work: int = 0
 ) -> IndexerSPPartition:
-    """Partition queries into contiguous intervals with approximately equal causal work.
+    """Partition queries into contiguous intervals with approximately equal
+    causal work.
 
     Args:
         cu_seq_lens (tuple[int, ...]): Global packed document boundaries.
@@ -203,7 +205,8 @@ def redistribute_indexer_queries(
     target: tuple[int, ...],
     mesh: DeviceMesh,
 ) -> tuple[Tensor, ...]:
-    """Move contiguous query rows between ownership schemes using only neighbor P2P.
+    """Move contiguous query rows between ownership schemes using only neighbor
+    P2P.
 
     Each source/target intersection follows the shortest path along the SP ranks. A
     boundary crossing more than one attention shard therefore uses multiple neighbor hops.
