@@ -297,6 +297,7 @@ train_worker_cfg = WorkerConfig(
     scheduler_steps=actor_scheduler_steps,
     pack_max_length=pack_max_length,
     critic_cfg=critic_cfg,
+    pack_strategy="lpt",
 )
 
 # 5. train agent loop manager
