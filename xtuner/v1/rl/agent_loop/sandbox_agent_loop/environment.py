@@ -61,7 +61,8 @@ class EnvironmentProvider(Protocol):
 
 
 class PoolEnvironment:
-    """Adapt the existing lazy SandboxPool without changing its allocation rules."""
+    """Adapt the existing lazy SandboxPool without changing its allocation
+    rules."""
 
     def __init__(self, pool: SandboxPool):
         self.pool = pool
@@ -85,7 +86,8 @@ class PoolEnvironment:
 
 
 class PoolEnvironmentProvider:
-    """Existing SandboxPool backend; config is a template, never a shared pool."""
+    """Existing SandboxPool backend; config is a template, never a shared
+    pool."""
 
     def __init__(self, pool: dict[str, Any], cleanup_timeout_sec: float = 60.0):
         if not isinstance(pool, dict):

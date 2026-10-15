@@ -1047,7 +1047,7 @@ class SandboxPool:
         )
 
     async def _release_group(self, name: str, group: list[_SandboxLease]) -> None:
-        errors = []
+        errors: list[Exception] = []
         for lease in reversed(list(group)):
             try:
                 if not lease.deleted:
