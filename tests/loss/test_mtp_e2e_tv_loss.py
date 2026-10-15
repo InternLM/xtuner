@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -72,3 +73,25 @@ def test_e2e_tv_can_detach_shared_lm_head():
     assert target.grad is None
     assert head_weight.grad is None
     assert all(draft.grad is not None and torch.count_nonzero(draft.grad) > 0 for draft in drafts)
+
+
+@pytest.mark.parametrize("detach_head", [False, True])
+def test_e2e_tv_empty_bf16_shard_matches_nonempty_loss_dtype(detach_head):
+    torch.manual_seed(2)
+    target = torch.randn(1, 8, 4, device=DEVICE, dtype=torch.bfloat16, requires_grad=True)
+    drafts = [torch.randn_like(target, requires_grad=True) for _ in range(2)]
+    head_weight = torch.randn(7, 4, device=DEVICE, dtype=torch.bfloat16, requires_grad=True)
+    ctx = _build_context(detach_head=detach_head)
+    nonempty_loss, _ = ctx.forward((target, drafts), head_weight)
+    ctx.loss_kwargs.loss_weight.zero_()
+    empty_loss, _ = ctx.forward((target, drafts), head_weight)
+
+    assert empty_loss.dtype == nonempty_loss.dtype == torch.float32
+    assert empty_loss.item() == 0
+    empty_loss.backward()
+    assert target.grad is None
+    if detach_head:
+        assert head_weight.grad is None
+    else:
+        assert head_weight.grad is not None and torch.count_nonzero(head_weight.grad) == 0
+    assert all(draft.grad is not None and torch.count_nonzero(draft.grad) == 0 for draft in drafts)
