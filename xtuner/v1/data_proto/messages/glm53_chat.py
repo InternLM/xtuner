@@ -3,9 +3,8 @@
 
 Same SFT loss-mask semantics as :mod:`glm52_chat` (``<|user|>``/``<|observation|>`` are the
 stop targets whose loss belongs to the previous assistant turn; a trailing assistant with no
-following role boundary gets an explicit ``<|endoftext|>``). Differs from GLM-5.2 in exactly the
-two places the official jinja (``chat_template.jinja``, macros ``emit_image``/``emit_video``/
-``emit_audio`` and the ``effective_reasoning_effort`` set-block) differs:
+following role boundary gets an explicit ``<|endoftext|>``). Matches these GLM-5.3 details
+in the official ``chat_template.jinja``:
 
 1. ``reasoning_effort`` domain is ``{low, high, max}`` instead of ``{high, max}``; any value
    outside ``{low, high}`` (including "max" itself) renders as "Max", matching the jinja's
@@ -15,6 +14,10 @@ two places the official jinja (``chat_template.jinja``, macros ``emit_image``/``
    real per-patch token spans): ``<|begin_of_image|><|image|><|end_of_image|>`` /
    ``<|begin_of_video|><|video|><|end_of_video|>`` / ``<|begin_of_audio|><|end_of_audio|>``,
    instead of GLM-5.2's ``<reminder>...</reminder>`` text (GLM-5.2 has no multimodal input).
+3. ``enable_thinking`` is accepted for API compatibility but, like the official template,
+   does not remove the reasoning-effort header or close the generation-time ``<think>`` prefix.
+   Because the flag has no effect, ``False`` is rejected with an ``AssertionError`` instead of
+   being silently ignored.
 """
 
 from collections.abc import Mapping
@@ -76,6 +79,11 @@ def render_glm53_chat(
     clear_thinking: bool = False,
 ) -> tuple[str, list[bool]]:
     """渲染 GLM-5.3-Flash 对话；结构与 GLM-5.2 相同，媒体渲染为两段式 placeholder 标记。"""
+    assert enable_thinking, (
+        "GLM-5.3's official chat template ignores enable_thinking: the Reasoning Effort header "
+        "and the generation-time <think> prefix are always emitted, so enable_thinking=False "
+        "would be silently ignored. Pass True (the default) or drop the argument."
+    )
     text = ""
     loss_mask: list[bool] = []
 
@@ -85,9 +93,9 @@ def render_glm53_chat(
         loss_mask.extend([loss] * len(value))
 
     append("[gMASK]<sop>", False)
-    if enable_thinking:
-        effective_reasoning_effort = reasoning_effort if reasoning_effort in ("low", "high") else "max"
-        append(f"<|system|>Reasoning Effort: {effective_reasoning_effort.capitalize()}", False)
+    # The official GLM53 template always emits these, including when enable_thinking=False.
+    effective_reasoning_effort = reasoning_effort if reasoning_effort in ("low", "high") else "max"
+    append(f"<|system|>Reasoning Effort: {effective_reasoning_effort.capitalize()}", False)
     if tools:
         append(_render_tools(tools), False)
 
@@ -118,7 +126,7 @@ def render_glm53_chat(
                 append(reasoning_content + "</think>", loss)
             else:
                 append("<think>", False)
-                append("</think>", loss and enable_thinking)
+                append("</think>", loss)
             if content.strip():
                 append(content.strip(), loss)
             if message.get("tool_calls"):
@@ -137,7 +145,7 @@ def render_glm53_chat(
 
     if add_generation_prompt:
         append("<|assistant|>", False)
-        append("<think>" if enable_thinking else "<think></think>", False)
+        append("<think>", False)
 
     return text, loss_mask
 

@@ -45,7 +45,7 @@ from .base_mllm_tokenize_fn import (
     get_image_path,
     load_image,
 )
-from .qwen3_vl_utils import Qwen3VLOSSLoader, pil_loader
+from .qwen3_vl_utils import Qwen3VLOSSLoader, pil_loader, sort_frames
 
 
 logger = get_logger()
@@ -94,7 +94,7 @@ def _read_video_frames(video_path: str, frame_indices: list[int]) -> list[Image.
     computed from ``fps`` + ``frames_indices`` alone).
     """
     if os.path.isdir(video_path):
-        files = sorted(os.listdir(video_path))
+        files = sort_frames(os.listdir(video_path))
         return [Image.open(os.path.join(video_path, files[i])).convert("RGB") for i in frame_indices]
 
     from decord import VideoReader
