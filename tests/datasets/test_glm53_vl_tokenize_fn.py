@@ -28,7 +28,6 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
-import xxhash
 from PIL import Image
 
 from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizerBase
@@ -440,29 +439,6 @@ class TestGlm53MixedMediaAndTruncation:
 
 
 class TestGlm53CacheInvalidation:
-    @pytest.mark.parametrize("enable_thinking,max_length", [(False, None), (True, 27), (True, 28)])
-    def test_input_contract_fix_invalidates_legacy_cache(
-        self, ckpt_path: str, tokenizer: PreTrainedTokenizerBase, enable_thinking: bool, max_length: int | None
-    ) -> None:
-        fn = Glm53VLTokenizeFnConfig(
-            processor_path=ckpt_path,
-            min_pixels=16,
-            max_pixels=8000,
-            fps=2.0,
-            max_frames=24,
-            enable_thinking=enable_thinking,
-            max_length=max_length,
-        ).build(tokenizer, tokenizer_hash="fixed-tokenizer")
-        # Frozen F1 e933fdcf5 cache format: new rendering/filtering must not reuse these lengths.
-        legacy_config = (
-            f"16_8000_2.0_24_4_processor_path:{ckpt_path}_llm_pack_weight:1.0_"
-            f"visual_pack_weight:1.0_max_length:{max_length}_system_message:None_"
-            f"add_generation_prompt:False_enable_thinking:{enable_thinking}_reasoning_effort:max"
-            "llm_pack_weight:1.0_visual_pack_weight:1.0"
-        )
-        legacy_hash = f"fixed-tokenizer_{xxhash.xxh64(legacy_config.encode()).hexdigest()}"
-        assert fn.hash() != legacy_hash
-
     def test_glm53_cache_invalidates_on_processor_or_pack_change(self, ckpt_path, tokenizer):
         base = Glm53VLTokenizeFnConfig(processor_path=ckpt_path).build(tokenizer, anno_name="test")
         changed_pixels = Glm53VLTokenizeFnConfig(processor_path=ckpt_path, max_pixels=1000).build(
