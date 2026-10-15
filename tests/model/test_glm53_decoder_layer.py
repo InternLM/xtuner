@@ -262,9 +262,8 @@ class TestGlm53DecoderLayerCompile:
 
     @pytest.mark.gpu
     def test_dense_layer_forward_compiles_with_dynamic_cu_seqlens(self):
-        # 训练把 cu_seq_lens 标记为 dynamic 以复用计算图，这让 FLA 内部的
-        # cu_seqlens.tolist() 成为数据依赖算子、inductor 无法 lower；KDA 的 FLA 入口
-        # 必须对 dynamo 不可见，否则任何含 KDA 的编译区都会整块编译失败。
+        # FLA chunk table has a data-dependent shape. The KDA custom op keeps it
+        # outside Dynamo, while its CPU offsets avoid reading boundaries from GPU.
         layer = Glm53DenseDecoderLayer(**_dense_kwargs(MHCConfig(hc_mult=HC_MULT, hc_sinkhorn_iters=2)), layer_idx=0)
         layer = layer.cuda().to(torch.bfloat16)
         seq_len = 128
@@ -272,6 +271,8 @@ class TestGlm53DecoderLayerCompile:
         seq_ctx = _seq_ctx(seq_len, "cuda")
         torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_q, 0)
         torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_k, 0)
+        assert seq_ctx.cu_seq_lens_q_cpu is not None
+        torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_q_cpu, 0)
 
         compiled = torch.compile(Glm53DenseDecoderLayer._forward, fullgraph=False)
         out = compiled(layer, streams, position_embeddings=(None, None), seq_ctx=seq_ctx)

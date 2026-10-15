@@ -21,6 +21,8 @@ class SequenceContext:
             Gets cumulative sequence length for query state.
         cu_seq_lens_k (`torch.LongTensor`, *optional*)
             Gets cumulative sequence length for key state.
+        cu_seq_lens_q_cpu (`torch.IntTensor | None`):
+            CPU source of query offsets, kept for packed KDA chunk tables.
         max_length_q (`torch.Tensor | int`, *optional*):
             Maximum sequence length for query state.
         max_length_k (`torch.Tensor | int`, *optional*):
@@ -30,6 +32,7 @@ class SequenceContext:
     input_ids: torch.LongTensor | None  # shape (1, seq_len)
     cu_seq_lens_q: torch.IntTensor
     cu_seq_lens_k: torch.IntTensor
+    cu_seq_lens_q_cpu: torch.IntTensor | None
     max_length_q: torch.Tensor
     max_length_k: torch.Tensor
     num_padding: int
@@ -94,12 +97,16 @@ class SequenceContext:
         raw_inputs_embeds: torch.FloatTensor | None = None,
         shard_start: int = 0,
         shard_size: int = 0,
+        cu_seq_lens_q_cpu: torch.IntTensor | None = None,
     ):
         # Only to distinguish parameters accepted by the constructor from attributes. For example, for `max_length_q`,
         # the argument can be an int, but as an attribute it can only be a tensor
         self.input_ids = input_ids
         self.cu_seq_lens_q = cu_seq_lens_q
         self.cu_seq_lens_k = cu_seq_lens_k
+        # Data collators build packed offsets on CPU; retain that source when the
+        # GPU copy is made so KDA need not synchronize to read document lengths.
+        self.cu_seq_lens_q_cpu = cu_seq_lens_q if cu_seq_lens_q.device.type == "cpu" else cu_seq_lens_q_cpu
         # force max_length_q and max_length_k be cpu tensors to avoid cuda synchronization
         # max_length_q and max_length_k should be unpacked to int in attention implementation
         if isinstance(max_length_q, int):
@@ -195,16 +202,18 @@ class SequenceContext:
             assert ids.shape[0] == 1, "input_ids must have batch size of 1"
         num_tokens = [x.numel() for x in input_ids]
 
-        cu_seq_lens = cast(torch.IntTensor, torch.cumsum(torch.LongTensor([0] + num_tokens), dim=0).to(device).int())
+        cu_seq_lens_cpu = cast(torch.IntTensor, torch.cumsum(torch.LongTensor([0] + num_tokens), dim=0).int())
+        cu_seq_lens = cast(torch.IntTensor, cu_seq_lens_cpu.to(device))
         return cls(
             input_ids=cast(torch.LongTensor, torch.cat(input_ids, dim=1).to(device)),
             cu_seq_lens_k=cu_seq_lens,
             cu_seq_lens_q=cu_seq_lens,
-            max_length_q=cast(int, (cu_seq_lens[1:] - cu_seq_lens[:-1]).max().item()),
-            max_length_k=cast(int, (cu_seq_lens[1:] - cu_seq_lens[:-1]).max().item()),
+            max_length_q=max(num_tokens),
+            max_length_k=max(num_tokens),
             block_table=block_table,
             sequence_parallel_mesh=sp_mesh,
             device=device,
+            cu_seq_lens_q_cpu=cu_seq_lens_cpu,
         )
 
     def split(self, sequence_parallel_mesh: DeviceMesh | None = None) -> Self:
@@ -233,7 +242,21 @@ class SequenceContext:
             else:
                 new_cu_seq_lens = self.cu_seq_lens_q.clone()
             new_cu_seq_lens = cast(torch.IntTensor, new_cu_seq_lens)
-            new_max_length = cast(int, max(self.seq_lens_q.max().item(), new_padding))
+            new_cu_seq_lens_cpu = self.cu_seq_lens_q_cpu
+            if new_cu_seq_lens_cpu is not None and new_padding > 0:
+                if self.num_padding > 0:
+                    new_cu_seq_lens_cpu = cast(torch.IntTensor, new_cu_seq_lens_cpu.clone())
+                    new_cu_seq_lens_cpu[-1] += new_padding
+                else:
+                    new_cu_seq_lens_cpu = cast(
+                        torch.IntTensor, torch.cat((new_cu_seq_lens_cpu, new_cu_seq_lens_cpu[-1:] + new_padding))
+                    )
+            lengths = (
+                new_cu_seq_lens_cpu[1:] - new_cu_seq_lens_cpu[:-1]
+                if new_cu_seq_lens_cpu is not None
+                else self.seq_lens_q
+            )
+            new_max_length = cast(int, max(lengths.max().item(), new_padding))
             num_non_padding = self.input_ids.shape[1] - self.num_padding
             start = sp_input_ids.shape[1] * sequence_parallel_mesh.get_local_rank()
             end = start + sp_input_ids.shape[1]
@@ -271,6 +294,7 @@ class SequenceContext:
                 input_ids=sp_input_ids,
                 cu_seq_lens_q=new_cu_seq_lens,
                 cu_seq_lens_k=new_cu_seq_lens,
+                cu_seq_lens_q_cpu=new_cu_seq_lens_cpu,
                 max_length_q=new_max_length,
                 max_length_k=new_max_length,
                 num_padding=sp_num_padding,
@@ -542,6 +566,9 @@ class SequenceContext:
             input_ids=overrides.get("input_ids", self.input_ids),
             cu_seq_lens_q=overrides.get("cu_seq_lens_q", self.cu_seq_lens_q),
             cu_seq_lens_k=overrides.get("cu_seq_lens_k", self.cu_seq_lens_k),
+            cu_seq_lens_q_cpu=overrides.get(
+                "cu_seq_lens_q_cpu", self.cu_seq_lens_q_cpu if "cu_seq_lens_q" not in overrides else None
+            ),
             max_length_q=overrides.get("max_length_q", self.max_length_q),
             max_length_k=overrides.get("max_length_k", self.max_length_k),
             num_padding=overrides.get("num_padding", self.num_padding),
@@ -584,6 +611,8 @@ class SequenceContext:
         else:
             self.cu_seq_lens_q = self.cu_seq_lens_q.to(device)  # type: ignore
             self.cu_seq_lens_k = self.cu_seq_lens_k.to(device)  # type: ignore
+        if self.cu_seq_lens_q.device.type == "cpu":
+            self.cu_seq_lens_q_cpu = self.cu_seq_lens_q
 
         if self.position_ids is not None and hasattr(self.position_ids, "to"):
             self.position_ids = self.position_ids.to(device)  # type: ignore
@@ -646,6 +675,7 @@ class SequenceContext:
             "input_ids": self.input_ids,
             "cu_seq_lens_q": self.cu_seq_lens_q,
             "cu_seq_lens_k": self.cu_seq_lens_k,
+            "cu_seq_lens_q_cpu": self.cu_seq_lens_q_cpu,
             "max_length_q": self.max_length_q,
             "max_length_k": self.max_length_k,
             "num_padding": self.num_padding,
