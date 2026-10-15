@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import math
 import random
 from collections.abc import Sequence
@@ -88,6 +89,79 @@ def get_greedy_pack_infos(data_indices: Sequence[int], num_tokens: Sequence[int]
     return [[int(data_indices[position]) for position in info["indices"]] for info in infos]
 
 
+def get_lpt_pack_infos(
+    data_indices: Sequence[int],
+    num_tokens: Sequence[int],
+    pack_max_length: int,
+    num_bins: int,
+    dp_size: int,
+) -> list[PackIndices]:
+    """Assign samples with the longest-processing-time heuristic.
+
+    Samples are placed from longest to shortest into the currently least-loaded pack that
+    still has room. Equal loads prefer the smaller pack index. When a sample fits in no
+    pack, ``num_bins`` grows by ``dp_size`` and the assignment restarts.
+
+    Args:
+        data_indices (Sequence[int]): Sample indices to place.
+        num_tokens (Sequence[int]): Training token length of each sample, aligned with
+            ``data_indices``.
+        pack_max_length (int): Maximum token budget of one pack.
+        num_bins (int): Initial number of packs. Grown by ``dp_size`` until every sample fits.
+        dp_size (int): Data parallel size. The returned pack count is a multiple of this.
+
+    Returns:
+        list[PackIndices]: One entry per pack, including empty packs. Indices inside a pack
+        follow assignment order.
+    """
+    if len(data_indices) != len(num_tokens):
+        raise ValueError("data_indices and num_tokens must have the same length")
+    if dp_size <= 0:
+        raise ValueError(f"dp_size must be positive, got {dp_size}")
+    for position, token_len in enumerate(num_tokens):
+        if token_len > pack_max_length:
+            raise ValueError(
+                f"Single sample {data_indices[position]} seq len {token_len} exceeds pack_max_length {pack_max_length}"
+            )
+
+    order = sorted(range(len(data_indices)), key=lambda position: num_tokens[position], reverse=True)
+    while True:
+        heap = [(0, bin_index) for bin_index in range(num_bins)]
+        heapq.heapify(heap)
+        bins: list[PackIndices] = [[] for _ in range(num_bins)]
+        feasible = True
+        for position in order:
+            load, bin_index = heap[0]
+            token_len = num_tokens[position]
+            if load + token_len <= pack_max_length:
+                heapq.heapreplace(heap, (load + token_len, bin_index))
+                bins[bin_index].append(int(data_indices[position]))
+            else:
+                feasible = False
+                break
+        if feasible:
+            return bins
+        num_bins += dp_size
+
+
+def _partition_packs(packs: list[PackIndices], max_updates: int) -> list[list[PackIndices]]:
+    """Split packs into optimizer steps as evenly as possible.
+
+    Earlier steps receive one extra pack when the count is not divisible by ``max_updates``.
+    """
+    if not packs:
+        return []
+    num_updates = min(len(packs), max_updates)
+    quotient, remainder = divmod(len(packs), num_updates)
+    chunks: list[list[PackIndices]] = []
+    offset = 0
+    for chunk_index in range(num_updates):
+        chunk_size = quotient + int(chunk_index < remainder)
+        chunks.append(packs[offset : offset + chunk_size])
+        offset += chunk_size
+    return chunks
+
+
 class RLDataPacker:
     """Build an index-only packing plan for RL training data.
 
@@ -101,12 +175,12 @@ class RLDataPacker:
         world_size (int): Total number of training workers.
         data_replicate_size (int): Number of workers holding one data replica.
         optimizer_steps (int): Configured optimizer steps per training iteration.
-        pack_strategy (Literal["legacy", "greedy", "balance", "native"]): Packing
+        pack_strategy (Literal["legacy", "greedy", "balance", "native", "lpt"]): Packing
             strategy. ``legacy`` reproduces main's sequential greedy pack,
             interleaved DP allocation and optimizer-step grouping; ``greedy`` fills
             spare capacity from a candidate buffer; ``balance`` length-groups samples
             before partitioning; ``native`` splits samples evenly
-            across DP ranks before packing. Defaults to "legacy".
+            across DP ranks before packing; ``lpt`` assigns longest samples to the least-loaded pack. Defaults to "legacy".
         pack_extra_buffer_size (int): Candidate buffer used by greedy gap filling.
             Zero disables gap filling. Defaults to 1000.
         pack_seed (int | None): Seed for randomized strategies such as ``balance``.
@@ -114,7 +188,8 @@ class RLDataPacker:
 
     Ordering is a per-strategy decision: ``legacy`` and ``greedy`` shuffle the visit
     order before packing unless ``XTUNER_DETERMINISTIC`` is set, ``balance`` performs
-    its own seeded length grouping, and ``native`` keeps the input order.
+    its own seeded length grouping, ``native`` keeps the input order, and ``lpt`` shuffles
+    finished packs unless ``XTUNER_DETERMINISTIC`` is set.
     """
 
     def __init__(
@@ -123,7 +198,7 @@ class RLDataPacker:
         world_size: int,
         data_replicate_size: int,
         optimizer_steps: int,
-        pack_strategy: Literal["legacy", "greedy", "balance", "native"] = "legacy",
+        pack_strategy: Literal["legacy", "greedy", "balance", "native", "lpt"] = "legacy",
         pack_seed: int | None = None,
         pack_extra_buffer_size: int = 1000,
     ):
@@ -142,6 +217,7 @@ class RLDataPacker:
             "greedy": self._greedy_pack,
             "balance": self._balance_pack,
             "native": self._native_pack,
+            "lpt": self._lpt_pack,
         }
         if pack_strategy not in strategy_map:
             raise ValueError(f"Unknown packing strategy: {pack_strategy}")
@@ -305,6 +381,29 @@ class RLDataPacker:
 
         self._align_pack_count(packed_data_indices, max_packs_per_step)
         return packed_data_indices
+
+    def _lpt_pack(
+        self,
+        data_indices: list[int],
+        data_lengths: Sequence[int],
+    ) -> PackedDataIndices:
+        num_tokens = [data_lengths[index] for index in data_indices]
+        min_bins = self.optimizer_steps * self.dp_size
+        cap_bins = math.ceil(math.ceil(sum(num_tokens) / self.pack_max_length) / self.dp_size) * self.dp_size
+        packs = get_lpt_pack_infos(
+            data_indices,
+            num_tokens,
+            self.pack_max_length,
+            max(min_bins, cap_bins),
+            self.dp_size,
+        )
+        # Length-sorted assignment correlates pack order with sequence length. Shuffle finished
+        # packs so optimizer steps are not length-stratified.
+        if not XTUNER_DETERMINISTIC:
+            random.shuffle(packs)
+        return [
+            _partition_packs(packs[dp_rank :: self.dp_size], self.optimizer_steps) for dp_rank in range(self.dp_size)
+        ]
 
     def _pack_indices(self, data_indices: Sequence[int], data_lengths: Sequence[int]) -> OptimizerStepPackIndices:
         scheduled_lengths = [self._get_scheduled_length(data_index, data_lengths) for data_index in data_indices]
