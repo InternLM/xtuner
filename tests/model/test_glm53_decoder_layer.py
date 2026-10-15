@@ -13,6 +13,8 @@ TestGlm53MoEDecoderLayer
     test_grad_flows_through_hc_params_and_experts        梯度能到达 hc_* 与专家
 TestGlm53DecoderLayerNormEpsilon
     test_configured_epsilon_matches_hf_residual_mix        两类层的两个 mHC 入口使用配置 epsilon
+TestGlm53DecoderLayerCompile
+    test_dense_layer_forward_compiles_with_dynamic_cu_seqlens  动态 cu_seqlens 下可编译
 """
 
 import pytest
@@ -253,3 +255,26 @@ class TestGlm53DecoderLayerNormEpsilon:
         # HF projects in FP32; allow one BF16 ULP at the input scale for the BF16 decoder.
         atol = torch.finfo(dtype).eps * streams.abs().max().item() if kind == "moe" else 1e-8
         torch.testing.assert_close(actual, expected, atol=atol, rtol=0)
+
+
+class TestGlm53DecoderLayerCompile:
+    """torch.compile 下含 KDA 的 decoder 层。"""
+
+    @pytest.mark.gpu
+    def test_dense_layer_forward_compiles_with_dynamic_cu_seqlens(self):
+        # 训练把 cu_seq_lens 标记为 dynamic 以复用计算图，这让 FLA 内部的
+        # cu_seqlens.tolist() 成为数据依赖算子、inductor 无法 lower；KDA 的 FLA 入口
+        # 必须对 dynamo 不可见，否则任何含 KDA 的编译区都会整块编译失败。
+        layer = Glm53DenseDecoderLayer(**_dense_kwargs(MHCConfig(hc_mult=HC_MULT, hc_sinkhorn_iters=2)), layer_idx=0)
+        layer = layer.cuda().to(torch.bfloat16)
+        seq_len = 128
+        streams = torch.randn(1, seq_len, HC_MULT, HIDDEN, device="cuda", dtype=torch.bfloat16)
+        seq_ctx = _seq_ctx(seq_len, "cuda")
+        torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_q, 0)
+        torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_k, 0)
+
+        compiled = torch.compile(Glm53DenseDecoderLayer._forward, fullgraph=False)
+        out = compiled(layer, streams, position_embeddings=(None, None), seq_ctx=seq_ctx)
+
+        assert out.shape == streams.shape
+        assert torch.isfinite(out).all()
