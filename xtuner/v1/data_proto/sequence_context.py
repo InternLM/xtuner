@@ -605,12 +605,15 @@ class SequenceContext:
             Self: The context with tensors moved to the target device.
         """
         self.input_ids = self.input_ids.to(device)  # type: ignore
+        # Keep shared training boundaries shared after transfer; the retained CPU
+        # offsets then describe both query and key without a second GPU copy.
+        shared_cu_seq_lens = self.cu_seq_lens_q is self.cu_seq_lens_k
         if device == "npu" or isinstance(device, torch.device) and device.type == "npu":
             self.cu_seq_lens_q = self.cu_seq_lens_q.cpu()  # type: ignore
-            self.cu_seq_lens_k = self.cu_seq_lens_k.cpu()  # type: ignore
+            self.cu_seq_lens_k = self.cu_seq_lens_q if shared_cu_seq_lens else self.cu_seq_lens_k.cpu()  # type: ignore
         else:
             self.cu_seq_lens_q = self.cu_seq_lens_q.to(device)  # type: ignore
-            self.cu_seq_lens_k = self.cu_seq_lens_k.to(device)  # type: ignore
+            self.cu_seq_lens_k = self.cu_seq_lens_q if shared_cu_seq_lens else self.cu_seq_lens_k.to(device)  # type: ignore
         if self.cu_seq_lens_q.device.type == "cpu":
             self.cu_seq_lens_q_cpu = self.cu_seq_lens_q
 
