@@ -11,7 +11,14 @@ from pydantic import BaseModel, ConfigDict
 from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, get_group_status, write_train_meta
+from xtuner.v1.data_proto.rl_data import (
+    RolloutState,
+    SampleParams,
+    Status,
+    get_group_status,
+    validate_train_fields,
+    write_train_meta,
+)
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.rollout.constants import AGENT_LOOP_RAY_GENERATE_MAX_CONCURRENCY
@@ -290,9 +297,9 @@ class AgentLoop(ABC):
         Prompt+response samples without ``input_ids`` are assembled in place into the
         unified full-sequence convention: ``input_ids``/``labels``/``logprobs`` share one
         length, where ``labels[j]`` is the prediction target of the token at position
-        ``j`` and the train controller applies the one-position shift at conversion time.
-        Samples that already carry ``input_ids`` satisfy the convention and are left
-        untouched. Non-completed samples are skipped. Failures mark the single sample as
+        ``j`` and the training worker applies the one-position shift at conversion time.
+        Samples that already carry ``input_ids`` are validated without rebuilding
+        their fields. Non-completed samples are skipped. Failures mark the single sample as
         ``Status.FAILED`` instead of raising into the producer. Agentic loops that only
         need to select their full-sequence states reuse this default validation.
 
@@ -350,13 +357,13 @@ class AgentLoop(ABC):
                 # 训练字段与摘要只通过 state 入口发布；已组装的全序列样本也在这里校验并生成 TrainMeta。
                 if state.input_ids is None or state.labels is None:
                     raise ValueError("Training input_ids and labels must be full and aligned")
+                validate_train_fields(state)
                 state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
+                write_train_meta(state)
             except Exception as exc:
                 self.logger.error(f"Canonicalize train fields failed for rollout_id={state.rollout_id}: {exc}")
                 state.status = Status.FAILED
                 state.error_msg = f"canonicalize_train_fields failed: {exc}"
-        for state in group:
-            write_train_meta(state)
         return group
 
     @overload
