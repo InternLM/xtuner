@@ -408,6 +408,19 @@ class TestConvertRolloutGroups(unittest.TestCase):
             )
         )
 
+    def test_noncontiguous_session_reuses_original_advantage(self):
+        controller = self._build_controller([1.5, -2.0])
+        states = [self._state(uid=i, reward={"score": score}) for i, score in enumerate([1.0, 3.0, 1.0])]
+        for state, session_id in zip(states, [10, 20, 10]):
+            state.session_id = session_id
+
+        rewards, representatives, indices = controller._cluster_group_rewards(states)
+
+        self.assertEqual(rewards, [1.0, 3.0])
+        self.assertEqual([state.rollout_id for state in representatives], [0, 1])
+        self.assertEqual(indices, [0, 1, 0])
+        self.assertEqual(controller._compute_group_advantages(rewards, representatives, indices), [1.5, -2.0, 1.5])
+
     def test_text_path_builds_shifted_training_tensors(self):
         # 文本主路径固定 token 布局：input_ids 去掉 response 最后一个 token，label/logprob 对齐预测位置。
         controller = self._build_controller([1.5])
