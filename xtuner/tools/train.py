@@ -161,6 +161,12 @@ def main():
 
     check_cfg(cfg, args)
 
+    if args.resume == 'auto':
+        from mmengine.runner import find_latest_checkpoint
+        args.resume = find_latest_checkpoint(args.work_dir)
+
+        print_log(f"Auto resumed from the latest checkpoint {args.resume}.", logger="current")
+
     if cfg.get("framework", "mmengine").lower() == "huggingface":
         # set default training_args
         if cfg.get("training_args", None) is None:
