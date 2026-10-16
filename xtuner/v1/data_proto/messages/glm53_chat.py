@@ -18,7 +18,10 @@ in the official ``chat_template.jinja``:
    does not remove the reasoning-effort header or close the generation-time ``<think>`` prefix.
    Because the flag has no effect, ``False`` is rejected with an ``AssertionError`` instead of
    being silently ignored.
-4. ``<|endoftext|>`` is appended only after the FINAL assistant message (the training stop
+4. A contiguous block of tool messages is rendered in the preceding assistant's ``tool_calls``
+   order when the official template's can_sort rule holds (every result id is present, unique
+   within the block, and matches a unique tool_call id); otherwise the message order is kept.
+5. ``<|endoftext|>`` is appended only after the FINAL assistant message (the training stop
    suffix). The official template never emits EOS mid-conversation, so assistant→system and
    assistant→assistant boundaries get no extra token; only ``<|user|>``/``<|observation|>``
    act as supervised stop targets.
@@ -72,6 +75,67 @@ def _visible_text(content: Any) -> str:
                 text += _MEDIA_PLACEHOLDER[item_type]
         return text
     return str(content)
+
+
+def _id_of(obj: Mapping[str, Any]) -> Any:
+    return obj.get("tool_call_id") or obj.get("id")
+
+
+def _is_list_of_outputs(message: Mapping[str, Any]) -> bool:
+    content = message.get("content")
+    return (
+        isinstance(content, list) and len(content) > 0 and isinstance(content[0], Mapping) and "output" in content[0]
+    )
+
+
+def _render_tool_block(messages: List[Dict[str, Any]], start: int, tools: Optional[List[Dict[str, Any]]]) -> str:
+    """Render the contiguous tool-message block starting at ``start``.
+
+    Results are emitted in the preceding assistant's ``tool_calls`` order when the official
+    template's can_sort rule holds: the block follows an assistant with tool_calls, every
+    result id is present, unique within the block, and matches a tool_call id, and the
+    tool_call ids themselves are present and unique. Any violation keeps the message order.
+    """
+    end = start
+    while end + 1 < len(messages) and messages[end + 1].get("role") == "tool":
+        end += 1
+    block = messages[start : end + 1]
+
+    tool_calls = None
+    if start > 0 and messages[start - 1].get("role") == "assistant":
+        tool_calls = messages[start - 1].get("tool_calls") or None
+
+    can_sort = bool(tool_calls)
+    if can_sort:
+        result_ids: list[Any] = []
+        for message in block:
+            if _is_list_of_outputs(message):
+                result_ids.extend(_id_of(entry) for entry in message["content"])
+            else:
+                result_ids.append(_id_of(message))
+        call_ids = [_id_of(tool_call) for tool_call in tool_calls or []]
+        if (
+            any(not result_id for result_id in result_ids)
+            or len(set(result_ids)) != len(result_ids)
+            or any(not call_id for call_id in call_ids)
+            or len(set(call_ids)) != len(call_ids)
+            or any(result_id not in call_ids for result_id in result_ids)
+        ):
+            can_sort = False
+
+    if not can_sort:
+        return "".join(_render_tool_result(message.get("content", ""), tools) for message in block)
+
+    text = ""
+    for call_id in call_ids:
+        for message in block:
+            if _is_list_of_outputs(message):
+                for entry in message["content"]:
+                    if _id_of(entry) == call_id:
+                        text += f"<tool_response>{entry['output']}</tool_response>"
+            elif _id_of(message) == call_id:
+                text += _render_tool_result(message.get("content", ""), tools)
+    return text
 
 
 def render_glm53_chat(
@@ -146,7 +210,8 @@ def render_glm53_chat(
                     index > 0 and messages[index - 1].get("role") == "assistant" and previous_assistant_loss
                 )
                 append(_NEXT_ROLE_STOP_TOKENS[role], boundary_loss)
-            append(_render_tool_result(message.get("content", ""), tools), False)
+                append(_render_tool_block(messages, index, tools), False)
+            # 块内后续 tool 消息已由块起点统一渲染（含按 tool_calls 顺序的重排）。
 
     if add_generation_prompt:
         append("<|assistant|>", False)
