@@ -17,7 +17,7 @@ from typing_extensions import Literal, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1._writer import get_writer
-from xtuner.v1.data_proto.rl_data import RolloutState
+from xtuner.v1.data_proto.rl_data import RolloutState, validate_train_group
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop_manager import (
@@ -29,7 +29,6 @@ from xtuner.v1.rl.agent_loop_manager import (
     ProduceBatchStatus,
 )
 from xtuner.v1.rl.agent_loop_manager.produce_utils import default_should_continue_fn
-from xtuner.v1.rl.agent_loop_manager.validation import validate_train_group
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.health_manager import RLHealthManager, _NoOpRLHealthManager

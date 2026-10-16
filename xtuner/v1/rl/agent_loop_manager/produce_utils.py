@@ -17,6 +17,7 @@ from xtuner.v1.data_proto.rl_data import (
     Status,
     calculate_group_effective_response_masks,
     get_group_status,
+    validate_rollout_group,
 )
 from xtuner.v1.rl.agent_loop import AgentLoopSpec
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
@@ -30,7 +31,6 @@ from xtuner.v1.rl.utils import (
 from xtuner.v1.utils import get_logger
 
 from .sampler import Sampler
-from .validation import validate_rollout_group
 
 
 if TYPE_CHECKING:

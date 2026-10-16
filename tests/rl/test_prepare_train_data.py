@@ -30,8 +30,8 @@ import torch
 from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     Status,
+    validate_train_group,
 )
-from xtuner.v1.rl.agent_loop_manager.validation import validate_train_group
 from xtuner.v1.rl.distillation import DistillationTrainerAdapter
 from xtuner.v1.rl.trainer.controller import TrainingController
 
