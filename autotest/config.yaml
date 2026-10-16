@@ -76,6 +76,22 @@ case:
                        method: relative
                        operator: <
                        aggregate: 80
+                    -
+                       metric: distillation/reduced_distillation_kl
+                       threshold: 0.03
+                       method: relative
+                       operator: <
+                       aggregate: 80
+                    -
+                       metric: eval/gsm8k/acc
+                       threshold: 0.01
+                       method: absolute
+                       operator: <
+                    -
+                       metric: eval/geo3k/acc
+                       threshold: 0.01
+                       method: absolute
+                       operator: <
             timeout: 7200 
 
     qwen3-2b-vl-mopd-k1:
@@ -117,6 +133,22 @@ case:
                        method: relative
                        operator: <
                        aggregate: 80
+                    -
+                       metric: distillation/reduced_distillation_kl
+                       threshold: 0.03
+                       method: relative
+                       operator: <
+                       aggregate: 80
+                    -
+                       metric: eval/gsm8k/acc
+                       threshold: 0.01
+                       method: absolute
+                       operator: <
+                    -
+                       metric: eval/geo3k/acc
+                       threshold: 0.01
+                       method: absolute
+                       operator: <
             timeout: 7200
 
     qwen3-2b-vl-mopd-topk:
@@ -161,6 +193,22 @@ case:
                        method: relative
                        operator: <
                        aggregate: 80
+                    -
+                       metric: distillation/reduced_distillation_kl
+                       threshold: 0.03
+                       method: relative
+                       operator: <
+                       aggregate: 80
+                    -
+                       metric: eval/gsm8k/acc
+                       threshold: 0.01
+                       method: absolute
+                       operator: <
+                    -
+                       metric: eval/geo3k/acc
+                       threshold: 0.01
+                       method: absolute
+                       operator: <
             timeout: 10800
    
     glm5-2-sft-30B-recompute:
