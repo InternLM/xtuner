@@ -16,6 +16,7 @@ from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, tensor_cache
 from torch.distributed.distributed_c10d import _resolve_process_group
 
+from .fla_compat import fla_state_layout_kwargs
 from .sequence_parallel_bwd import chunk_kda_bwd
 
 
@@ -185,7 +186,7 @@ def sequence_chunk_fwd(
         chunk_indices=indices,
         safe_gate=safe_gate,
         cp_context=context,
-        transpose_state_layout=transpose_state_layout,
+        **fla_state_layout_kwargs(chunk_kda_fwd, transpose_state_layout),
     )
     o, _, g_prefix, Aqk, Akk, *_, initial_state = result
     return o, g_prefix, Aqk, Akk, q_l2, q_rstd, k_l2, k_rstd, initial_state
