@@ -25,7 +25,7 @@ trainer = TrainerConfig(
 | Parameter | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `False` | Master switch. Disabled mode installs no wrappers, tensor hooks, events, timers, or polling thread. |
-| `level` | `"basic"` | `basic`: training stage markers; `detailed`: additionally module, gradient, EP/CP, and offload boundaries. |
+| `level` | `"basic"` | `basic`: training stage markers; `detailed`: additionally selected module, gradient, DeepEP dispatcher, and offload boundaries. |
 | `start_step` | `1` | First recorded global optimizer step, inclusive. |
 | `end_step` | `None` | Last recorded step, inclusive; `None` records until training ends. |
 | `ranks` | `None` | Selected global ranks; `None` means all ranks. This does not alter collective participation. |
@@ -38,10 +38,13 @@ Basic mode records data loading, input preparation, microbatch forward/backward,
 postprocessing, offload cleanup, gradient reduction/clipping, and optimizer
 boundaries. CPU return markers do not prove GPU completion.
 
-Detailed mode installs wrappers around XTuner decoder/attention module families,
-dispatcher methods, loaded CP helpers and selected custom-autograd functions, and
-offload methods. It records tensor gradient-ready boundaries without modifying
-gradients. Compiler-owned function attributes are not copied into wrappers:
+Detailed mode wraps only the explicit prototype module list:
+`Glm53DenseDecoderLayer`, `Glm53MoEDecoderLayer`, `KimiDeltaAttention`,
+`NoPEDSAMultiLatentAttention`, `MoEBlock`, and `KPoolIndexer`, plus DeepEP
+dispatcher methods and the existing offload methods. It does not scan loaded
+modules, replace CP helpers or custom-autograd functions, or patch DeepEP Buffer.
+Tensor gradient-ready boundaries are recorded without modifying gradients.
+Compiler-owned function attributes are not copied into wrappers:
 copying `_torchdynamo_orig_callable` from a bound compiled method can cause
 `torch.compiler.disable` to unwrap it into an unbound method and lose `self`.
 
@@ -61,7 +64,7 @@ The stack timer uses Python's process-wide faulthandler timer and must not be
 combined with another owner of that timer.
 
 When enabled, stream events record the caller's current stream, explicit offload
-copy streams, and the DeepEP Buffer communication stream where available. A
+copy streams. DeepEP internal communication streams are not recorded. A
 completed event proves progress only on that stream and its existing dependencies.
 The polling thread emits completion records and periodic pending-event heartbeats.
 `pending_at_close` means events were not observed complete before shutdown, not

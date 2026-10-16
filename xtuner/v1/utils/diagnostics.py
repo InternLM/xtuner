@@ -6,8 +6,8 @@ import functools
 import inspect
 import itertools
 import json
+import logging
 import socket
-import sys
 import threading
 import time
 from collections import deque
@@ -126,7 +126,10 @@ class TrainingDiagnostics:
         try:
             yield ctx
         except BaseException as exc:
-            self._emit("cpu_error", **ctx, error=repr(exc))
+            try:
+                self._emit("cpu_error", **ctx, error=repr(exc))
+            except Exception:
+                logging.getLogger(__name__).exception("Diagnostics write failed; preserving the training exception")
             raise
         else:
             self._emit("cpu_end", **ctx)
@@ -140,15 +143,21 @@ class TrainingDiagnostics:
         if not self.enabled or self.config.level != "detailed" or self._installed:
             return
         self._installed = True
-        # Use XTuner module families, including subclasses, rather than GLM class names.
-        families = ("xtuner.v1.module.decoder_layer", "xtuner.v1.module.attention")
+        selected = {
+            "Glm53DenseDecoderLayer",
+            "Glm53MoEDecoderLayer",
+            "KimiDeltaAttention",
+            "NoPEDSAMultiLatentAttention",
+            "MoEBlock",
+            "KPoolIndexer",
+        }
         for path, module in model.named_modules():
-            if any(cls.__module__.startswith(families) for cls in type(module).__mro__):
+            if type(module).__name__ in selected:
                 original = module.forward
                 wrapped = self._wrap(original, "module.forward", scope=path, gradients=True)
                 self._patch(module, "forward", torch.compiler.disable(wrapped))
             dispatcher = getattr(module, "dispatcher", None)
-            if dispatcher is not None:
+            if dispatcher is not None and "DeepEP" in type(dispatcher).__name__:
                 for name in (
                     "dispatch_preprocess",
                     "dispatch",
@@ -175,48 +184,6 @@ class TrainingDiagnostics:
             for name in names:
                 if hasattr(cls, name):
                     self._patch(cls, name, self._wrap(getattr(cls, name), "offload." + name))
-        # Patch already-loaded aliases too: modules commonly use `from ... import fn`.
-        targets: dict[Callable[..., Any], str] = {}
-        functions = {
-            "ulysses_all_to_all",
-            "gather_for_sequence_parallel",
-            "sequence_causal_conv1d",
-            "sequence_chunk_kda",
-            "redistribute_indexer_queries",
-        }
-        modules = [m for name, m in list(sys.modules.items()) if name.startswith("xtuner.v1.") and m is not None]
-        for module in modules:
-            for name, value in list(vars(module).items()):
-                if name in functions and inspect.isfunction(value):
-                    targets[value] = "CP." + name
-        replacements = {
-            fn: torch.compiler.disable(self._wrap(fn, name, gradients=True)) for fn, name in targets.items()
-        }
-        seen_classes: set[type[Any]] = set()
-        for module in modules:
-            for name, value in list(vars(module).items()):
-                if inspect.isfunction(value) and value in replacements:
-                    self._patch(module, name, replacements[value])
-                if (
-                    inspect.isclass(value)
-                    and value not in seen_classes
-                    and issubclass(value, torch.autograd.Function)
-                    and value.__module__.startswith(
-                        ("xtuner.v1.module.dispatcher.deepep", "xtuner.v1.ops.kda", "xtuner.v1.ops.sparse_mla")
-                    )
-                ):
-                    seen_classes.add(value)
-                    for method in ("forward", "backward"):
-                        fn = getattr(value, method)
-                        self._patch(value, method, staticmethod(self._wrap_autograd(fn, value.__name__, method)))
-        # DeepEP uses a stream outside ProcessGroupNCCL; do not infer its completion
-        # from the caller's current stream or Flight Recorder.
-        deep_ep = sys.modules.get("deep_ep")
-        buffer_type = getattr(deep_ep, "Buffer", None)
-        if buffer_type is not None and hasattr(buffer_type, "get_comm_stream"):
-            for name in ("dispatch", "combine"):
-                if hasattr(buffer_type, name):
-                    self._patch(buffer_type, name, self._wrap_buffer(getattr(buffer_type, name), name))
         self._emit("installed", rank=self.rank, patched_methods=len(self._patches))
 
     def close(self) -> None:
@@ -243,16 +210,18 @@ class TrainingDiagnostics:
             handle.remove()
         self._hooks.clear()
         with self._lock:
-            if self._pending:
-                self._emit(
-                    "pending_at_close",
-                    count=len(self._pending),
-                    note="Unpolled events at exit are not proof of a GPU hang",
-                )
-            self._pending.clear()
-            if self._file is not None:
-                self._file.close()
-                self._file = None
+            try:
+                if self._pending:
+                    self._emit(
+                        "pending_at_close",
+                        count=len(self._pending),
+                        note="Unpolled events at exit are not proof of a GPU hang",
+                    )
+            finally:
+                self._pending.clear()
+                if self._file is not None:
+                    self._file.close()
+                    self._file = None
 
     def _metadata(self) -> dict[str, Any]:
         phase = self.phase
@@ -310,18 +279,6 @@ class TrainingDiagnostics:
             with self.span(name, scope) as ctx:
                 assert ctx is not None
                 bound = signature.bind_partial(*args, **kwargs).arguments
-                for key in ("mesh", "group", "process_group"):
-                    group = bound.get(key)
-                    if group is not None:
-                        if hasattr(group, "get_group"):
-                            group = group.get_group()
-                        if isinstance(group, torch.distributed.ProcessGroup):
-                            self._emit(
-                                "group",
-                                **ctx,
-                                group_name=group.group_name,
-                                ranks=torch.distributed.get_process_group_ranks(group),
-                            )
                 if gradients:
                     self._grad_hooks((args, kwargs), ctx, "grad_input_ready")
                 result = fn(*args, **kwargs)
@@ -331,32 +288,6 @@ class TrainingDiagnostics:
                     if bound.get(key) is not None:
                         self._event("after_copy_stream", ctx, bound[key])
                 return result
-
-        return wrapped
-
-    def _wrap_buffer(self, fn: Callable[..., Any], name: str) -> Callable[..., Any]:
-        @functools.wraps(fn, updated=())
-        def wrapped(buffer: Any, *args: Any, **kwargs: Any) -> Any:
-            if not self.active:
-                return fn(buffer, *args, **kwargs)
-            with self.span("EP.buffer." + name) as ctx:
-                result = fn(buffer, *args, **kwargs)
-                assert ctx is not None
-                self._event("deepep_comm_stream", ctx, buffer.get_comm_stream())
-                return result
-
-        return wrapped
-
-    def _wrap_autograd(self, fn: Callable[..., Any], name: str, method: str) -> Callable[..., Any]:
-        @functools.wraps(fn, updated=())
-        def wrapped(ctx: Any, *args: Any, **kwargs: Any) -> Any:
-            if not self.active:
-                return fn(ctx, *args, **kwargs)
-            if method == "forward":
-                ctx._xtuner_diagnostic_scope = getattr(self._local, "scope", "unattributed")
-            scope = getattr(ctx, "_xtuner_diagnostic_scope", "unattributed")
-            with self.span(name + "." + method, scope):
-                return fn(ctx, *args, **kwargs)
 
         return wrapped
 

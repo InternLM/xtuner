@@ -863,128 +863,128 @@ class Trainer:
         return self
 
     def fit(self):
-        """Run training with optional diagnostics, restored on success or
-        failure."""
-        if not self._diagnostics_config.enabled:
-            return self._fit()
-        diagnostic = TrainingDiagnostics(self._diagnostics_config, self.exp_dir / "diagnostics", self.rank)
+        """Run the training loop with optional progress diagnostics."""
+        diagnostic = None
+        if self._diagnostics_config.enabled:
+            diagnostic = TrainingDiagnostics(self._diagnostics_config, self.exp_dir / "diagnostics", self.rank)
         self._diagnostics = diagnostic
         self._engine._diagnostics = diagnostic
         try:
-            diagnostic.install(self._engine.model)
-            return self._fit()
-        finally:
-            diagnostic.close()
-            self._diagnostics = None
-            self._engine._diagnostics = None
+            if diagnostic is not None:
+                diagnostic.install(self._engine.model)
+            if self._async_hf_export or self._async_checkpoint:
+                self._async_save_monitor.start()
 
-    def _fit(self):
-        """Run the training loop.
-
-        This method executes the main training loop, iterating through the dataset and performing training steps. It
-        handles data loading, forward pass, backward pass, optimization, logging, and checkpointing.
-        """
-        if self._async_hf_export or self._async_checkpoint:
-            self._async_save_monitor.start()
-
-        train_begin = time.time()
-        time_before_get_data = time.time()
-        for data_batch in self._data_iter():
-            time_before_train_step = time.time()
-
-            ProberList.set_step(self._cur_step + 1)
-            DEVICE_MODULE.reset_peak_memory_stats()
-
-            with self._maybe_profiling():
-                if self._diagnostics is not None:
-                    self._diagnostics.mark("prepare_input_begin")
-                engine_input = self._prepare_model_input(data_batch)
-                if self._diagnostics is not None:
-                    self._diagnostics.mark("prepare_input_end")
-                train_step_info = self._engine.train_step(engine_input)
-                hooks = self.hooks_config.get_hooks(HookStage.AFTER_TRAIN_STEP)
-                for hook in hooks:
-                    hook(
-                        train_step_info=train_step_info,
-                        step=self.cur_step,
-                        epoch=self._cur_epoch,
-                        total_step=self.total_step,
-                        total_epoch=self.total_epoch,
-                    )
-
-                if self._diagnostics is not None:
-                    self._diagnostics.mark("grad_reduce_begin")
-                grad_norm = self._engine.clip_grad_norm(do_clip=self._do_clip, dtype=self._grad_norm_dtype)
-                if self._diagnostics is not None:
-                    self._diagnostics.mark("grad_reduce_end")
-                if self._offload_optimizer_first_step:
-                    self._engine.put_optimizer_to_device(DEVICE)
-                    self._offload_optimizer_first_step = False
-                if self._diagnostics is not None:
-                    self._diagnostics.mark("optimizer_begin")
-                self._engine.step_optimizer(grad_norm)
-                if self._diagnostics is not None:
-                    self._diagnostics.mark("optimizer_end")
-
-            time_after_train_step = time.time()
-            ProberList.after_step()
-
-            data_time = time_before_train_step - time_before_get_data
-            step_time = time_after_train_step - time_before_train_step
-
-            internal_metrics = self._maybe_pop_model_internal_metrics(engine_input)
-
-            self._cur_step += 1
-            step_tokens = train_step_info["step_consumed_tokens"]
-            self._local_total_consumed_tokens += step_tokens
-            self._train_time = time_after_train_step - train_begin
-
-            # Compute training metrics
-            training_metrics = self._compute_performance_metrics(
-                local_step_consumed_tokens=step_tokens,
-                local_step_seqlen_tokens=train_step_info["step_seqlen_tokens"],
-                local_step_consumed_img_tokens=train_step_info.get("step_consumed_img_tokens"),
-                step_time=step_time,
-            )
-
-            # TODO: This log should be move before lr_scheduler.step, but for CI BC, keep it temporarily
-            self._log_step(
-                train_step_info=train_step_info,
-                training_metrics=training_metrics,
-                grad_norm=grad_norm.item(),
-                data_time=data_time,
-                step_time=step_time,
-                internal_metrics=internal_metrics,
-            )
-
-            self._lr_scheduler.step()
-            self._maybe_check_health()
-            self._maybe_save_hf()
-            ckpt_saved = self._maybe_save(is_snapshot=False)
-            if not ckpt_saved:
-                _ = self._maybe_save(is_snapshot=True)
-
+            train_begin = time.time()
             time_before_get_data = time.time()
+            for data_batch in self._data_iter():
+                time_before_train_step = time.time()
 
-            if self.cur_step % 50 == 0:
-                gc.collect()
+                ProberList.set_step(self._cur_step + 1)
+                DEVICE_MODULE.reset_peak_memory_stats()
 
-        if self._async_hf_export:
-            self._wait_for_pending_async_hf()
-            self._engine.model.destroy_async_hf_resources()
+                with self._maybe_profiling():
+                    if self._diagnostics is not None:
+                        self._diagnostics.mark("prepare_input_begin")
+                    engine_input = self._prepare_model_input(data_batch)
+                    if self._diagnostics is not None:
+                        self._diagnostics.mark("prepare_input_end")
+                    train_step_info = self._engine.train_step(engine_input)
+                    hooks = self.hooks_config.get_hooks(HookStage.AFTER_TRAIN_STEP)
+                    for hook in hooks:
+                        hook(
+                            train_step_info=train_step_info,
+                            step=self.cur_step,
+                            epoch=self._cur_epoch,
+                            total_step=self.total_step,
+                            total_epoch=self.total_epoch,
+                        )
 
-        if self._async_checkpoint:
-            self._wait_for_pending_checkpoint()
-            self._engine.destroy_async_checkpoint_pg()
+                    if self._diagnostics is not None:
+                        self._diagnostics.mark("grad_reduce_begin")
+                    grad_norm = self._engine.clip_grad_norm(do_clip=self._do_clip, dtype=self._grad_norm_dtype)
+                    if self._diagnostics is not None:
+                        self._diagnostics.mark("grad_reduce_end")
+                    if self._offload_optimizer_first_step:
+                        self._engine.put_optimizer_to_device(DEVICE)
+                        self._offload_optimizer_first_step = False
+                    if self._diagnostics is not None:
+                        self._diagnostics.mark("optimizer_begin")
+                    self._engine.step_optimizer(grad_norm)
+                    if self._diagnostics is not None:
+                        self._diagnostics.mark("optimizer_end")
 
-        # TODO: Should use flush rather than close
-        if self._async_hf_export or self._async_checkpoint:
-            self._async_save_monitor.stop()
-        self._exp_tracker.close()
-        if self._metrics_recorder:
-            self._metrics_recorder.close()
-        log_rank0.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
-        dist.barrier()
+                time_after_train_step = time.time()
+                ProberList.after_step()
+
+                data_time = time_before_train_step - time_before_get_data
+                step_time = time_after_train_step - time_before_train_step
+
+                internal_metrics = self._maybe_pop_model_internal_metrics(engine_input)
+
+                self._cur_step += 1
+                step_tokens = train_step_info["step_consumed_tokens"]
+                self._local_total_consumed_tokens += step_tokens
+                self._train_time = time_after_train_step - train_begin
+
+                # Compute training metrics
+                training_metrics = self._compute_performance_metrics(
+                    local_step_consumed_tokens=step_tokens,
+                    local_step_seqlen_tokens=train_step_info["step_seqlen_tokens"],
+                    local_step_consumed_img_tokens=train_step_info.get("step_consumed_img_tokens"),
+                    step_time=step_time,
+                )
+
+                # TODO: This log should be move before lr_scheduler.step, but for CI BC, keep it temporarily
+                self._log_step(
+                    train_step_info=train_step_info,
+                    training_metrics=training_metrics,
+                    grad_norm=grad_norm.item(),
+                    data_time=data_time,
+                    step_time=step_time,
+                    internal_metrics=internal_metrics,
+                )
+
+                self._lr_scheduler.step()
+                self._maybe_check_health()
+                self._maybe_save_hf()
+                ckpt_saved = self._maybe_save(is_snapshot=False)
+                if not ckpt_saved:
+                    _ = self._maybe_save(is_snapshot=True)
+
+                time_before_get_data = time.time()
+
+                if self.cur_step % 50 == 0:
+                    gc.collect()
+
+            if self._async_hf_export:
+                self._wait_for_pending_async_hf()
+                self._engine.model.destroy_async_hf_resources()
+
+            if self._async_checkpoint:
+                self._wait_for_pending_checkpoint()
+                self._engine.destroy_async_checkpoint_pg()
+
+            # TODO: Should use flush rather than close
+            if self._async_hf_export or self._async_checkpoint:
+                self._async_save_monitor.stop()
+            self._exp_tracker.close()
+            if self._metrics_recorder:
+                self._metrics_recorder.close()
+            log_rank0.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
+            dist.barrier()
+        finally:
+            training_error = sys.exc_info()[1]
+            try:
+                if diagnostic is not None:
+                    diagnostic.close()
+            except Exception:
+                if training_error is None:
+                    raise
+                log_rank0.exception("Diagnostics cleanup failed; preserving the training exception")
+            finally:
+                self._diagnostics = None
+                self._engine._diagnostics = None
 
     def _prepare_model_input(self, data_batch) -> list[ModelItem]:
         seq_ctx_list: list[SequenceContext] = []

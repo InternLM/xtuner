@@ -78,7 +78,7 @@ class TestTrainingDiagnostics:
         original = vars(Operator)["forward"]
         d = TrainingDiagnostics(DiagnosticsConfig(enabled=True, level="detailed"), tmp_path, 0)
         d.set_step(1)
-        d._patch(Operator, "forward", staticmethod(d._wrap_autograd(Operator.forward, "op", "forward")))
+        d._patch(Operator, "forward", staticmethod(d._wrap(Operator.forward, "op.forward")))
         try:
             with pytest.raises(ValueError, match="test failure"):
                 Operator.forward(SimpleNamespace(), 1)
@@ -130,3 +130,19 @@ class TestTrainingDiagnostics:
         records = [json.loads(line) for line in (tmp_path / "rank0.jsonl").read_text().splitlines()]
         assert sum(r["kind"] == "event_capacity_reached" for r in records) == 1
         assert records[-1]["kind"] == "pending_at_close"
+
+    def test_logging_failure_preserves_original_exception(self, tmp_path):
+        d = TrainingDiagnostics(DiagnosticsConfig(enabled=True, level="detailed"), tmp_path, 0)
+        d.set_step(1)
+        original_emit = d._emit
+
+        def emit(kind, **fields):
+            if kind == "cpu_error":
+                raise OSError("disk full")
+            original_emit(kind, **fields)
+
+        with patch.object(d, "_emit", side_effect=emit):
+            with pytest.raises(ValueError, match="original training error"):
+                with d.span("forward"):
+                    raise ValueError("original training error")
+        d.close()
