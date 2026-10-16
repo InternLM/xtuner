@@ -28,7 +28,7 @@ import ray
 import torch
 import torch.distributed as dist
 from mmengine.runner import set_random_seed
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from ray.actor import ActorClass, ActorProxy
 from torch.distributed.device_mesh import init_device_mesh
 from typing_extensions import NotRequired
@@ -217,6 +217,8 @@ class WorkerConfig(BaseModel):
             reproduces the previous greedy pack, interleaved DP allocation and
             optimizer-step grouping. ``lpt`` reproduces the baseline longest-processing-time
             packer. Defaults to "legacy".
+        pack_extra_buffer_size (int): Candidate buffer used by greedy chunk packing;
+            zero disables gap filling. Defaults to 1000.
         pack_seed (int | None): Random seed for length-grouped packing strategies such
             as "balance". Defaults to None.
         offload_rollout_routed_experts (bool): Keep rollout routed experts on
@@ -260,6 +262,7 @@ class WorkerConfig(BaseModel):
     update_weight_bucket_size_in_gb: float = 0.5  # 512MB
     seed: None | int = None  # if None, use RLTrainer seed
     pack_strategy: Literal["legacy", "greedy", "balance", "native", "lpt"] = "legacy"
+    pack_extra_buffer_size: int = Field(default=1000, ge=0)
     pack_seed: int | None = None
     distillation_config: DistillationConfig | None = None
     profile_step: list[int] | int | None = None  # 1-based global RL train_step ids to profile.
@@ -317,7 +320,7 @@ class WorkerConfig(BaseModel):
 
 class TrainBatchAttr(TypedDict):
     """Attributes of one training batch, derived once by the controller from
-    the ``write_train_meta`` fields of its rollout states.
+    the lightweight metadata written by AgentLoop canonicalization.
 
     The controller scans the batch meta and passes this single structure across the
     Ray boundary so workers materialize packs uniformly: cross-rank collectives stay
