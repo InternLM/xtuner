@@ -18,6 +18,8 @@ TestGlm53NativeHFInputContract
 TestGlm53MixedMediaAndTruncation
     test_glm53_mixed_media_fails_fast               图文混合视频未支持，必须快速失败
     test_glm53_visual_truncation_is_dropped         截断会切断视觉跨度时 cache 阶段就丢弃
+TestGlm53MediaRoleContract
+    test_non_user_media_is_discarded                system/assistant/tool 角色的图片按脏样本丢弃/占位
 TestGlm53CacheInvalidation
     test_glm53_cache_invalidates_on_processor_or_pack_change  processor/pack 变化使缓存失效
     test_glm53_hash_covers_every_init_parameter  逐参数 hash 失效 + __init__ 参数分类完备性
@@ -431,6 +433,43 @@ class TestGlm53MixedMediaAndTruncation:
         short_fn.state = "runtime"
         with pytest.raises(AssertionError):
             short_fn(_image_item(image_fixture))
+
+
+class TestGlm53MediaRoleContract:
+    @pytest.mark.parametrize("role", ["system", "assistant", "tool"])
+    def test_non_user_media_is_discarded(
+        self, tokenize_fn: Glm53VLTokenizeFunction, role: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 官方模板会为任意角色的媒体渲染占位标记，但训练管线只会加载/展开 user/pretrain 的
+        # 媒体。system/assistant/tool 角色的图片按脏样本处理：cache 警告并丢弃（num_tokens=0），
+        # runtime 抛出由上游换成无 loss 占位样本——而不是静默训练占位符永不展开的样本，
+        # 也不因单条脏数据中断训练（飞书报告 M08~M11）。
+        assert Glm53VLTokenizeFunction.__call__ is BaseMLLMTokenizeFunction.__call__
+        load = Mock(side_effect=AssertionError("Rejected samples must be discarded before loading media"))
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn.load_image", load)
+        logger_mock = Mock()
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn.logger", logger_mock)
+        image = {"type": "image", "image": {"url": "unused.jpg", "image_wh": [448, 448]}}
+        messages = [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a"},
+        ]
+        if role == "system":
+            messages.insert(0, {"role": "system", "content": [image, {"type": "text", "text": "policy"}]})
+        elif role == "assistant":
+            messages[1]["content"] = [image, {"type": "text", "text": "a"}]
+        else:
+            messages.insert(1, {"role": "tool", "content": [image], "tool_call_id": "t1"})
+        tokenize_fn.state = "cache"
+        ret = tokenize_fn({"messages": messages})
+        assert ret["num_tokens"] == 0
+        assert logger_mock.warning.called
+        assert "user/pretrain" in logger_mock.warning.call_args[0][0]
+        load.assert_not_called()
+        tokenize_fn.state = "runtime"
+        with pytest.raises(NotImplementedError, match="user/pretrain"):
+            tokenize_fn({"messages": messages})
+        load.assert_not_called()
 
 
 class TestGlm53CacheInvalidation:
