@@ -136,7 +136,7 @@ T = TypeVar("T", bound=BaseMLLMDataItem)
 
 
 class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
-    collect_image_video_paths_and_extra = staticmethod(collect_image_video_paths_and_extra)
+    allow_all_roles = False
 
     def __init__(
         self,
@@ -219,7 +219,9 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
     @with_proxy_attention_flops
     def __call__(self, item: dict, media_root: str = "", **kwargs) -> T | CacheItem:  # type: ignore[override]
         try:
-            self._image_path, self._video_path, extra_info = self.collect_image_video_paths_and_extra(item["messages"])
+            self._image_path, self._video_path, extra_info = collect_image_video_paths_and_extra(
+                item["messages"], allow_all_roles=self.allow_all_roles
+            )
             self._image_wh_list = extra_info["image_wh"]
             self._video_wh_list = extra_info["video_wh"]
             self._video_extra_info_list = extra_info["video_extra_info"]

@@ -22,7 +22,6 @@ preprocessing path makes internally. Verified bitwise-equal to the real processo
 
 import copy
 import os
-from functools import partial
 from typing import Any, Literal
 
 import numpy as np
@@ -43,7 +42,6 @@ from .base_mllm_tokenize_fn import (
     BaseMLLMTokenizeFnConfig,
     BaseMLLMTokenizeFunction,
     OSSLoaderConfig,
-    collect_image_video_paths_and_extra,
     get_image_path,
     load_image,
 )
@@ -125,7 +123,7 @@ def _expand_marker(text: str, loss_mask: list[bool], marker: str, expansions: li
 
 
 class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
-    collect_image_video_paths_and_extra = partial(collect_image_video_paths_and_extra, allow_all_roles=True)
+    allow_all_roles = True
 
     def __init__(
         self,

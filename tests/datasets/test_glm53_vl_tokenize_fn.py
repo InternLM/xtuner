@@ -40,7 +40,10 @@ from PIL import Image
 from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizerBase
 from transformers.video_utils import VideoMetadata
 from xtuner.v1.datasets.mllm_tokenize_fn import Glm53VLTokenizeFnConfig, Glm53VLTokenizeFunction
-from xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn import BaseMLLMTokenizeFunction
+from xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn import (
+    BaseMLLMTokenizeFunction,
+    collect_image_video_paths_and_extra,
+)
 from xtuner.v1.datasets.mllm_tokenize_fn.qwen3_vl_utils import sort_frames
 
 
@@ -451,7 +454,9 @@ class TestGlm53MediaRoleContract:
         else:
             messages.insert(1, {"role": "tool", "content": [image], "tool_call_id": "t1"})
 
-        image_paths, video_paths, extra = tokenize_fn.collect_image_video_paths_and_extra(messages)
+        image_paths, video_paths, extra = collect_image_video_paths_and_extra(
+            messages, allow_all_roles=tokenize_fn.allow_all_roles
+        )
 
         assert image_paths == ["unused.jpg"]
         assert video_paths == []
@@ -473,7 +478,7 @@ class TestGlm53MediaRoleContract:
             {"role": "tool", "content": [image("tool-a.jpg")], "tool_call_id": "a"},
         ]
 
-        image_paths, _, _ = tokenize_fn.collect_image_video_paths_and_extra(messages)
+        image_paths, _, _ = collect_image_video_paths_and_extra(messages, allow_all_roles=tokenize_fn.allow_all_roles)
 
         # HF apply_chat_template also collects media in input order before rendering the Jinja template.
         assert image_paths == ["system.jpg", "user.jpg", "assistant.jpg", "tool-b.jpg", "tool-a.jpg"]
