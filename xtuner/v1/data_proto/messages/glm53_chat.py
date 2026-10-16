@@ -14,6 +14,9 @@ in the official ``chat_template.jinja``:
    real per-patch token spans): ``<|begin_of_image|><|image|><|end_of_image|>`` /
    ``<|begin_of_video|><|video|><|end_of_video|>`` / ``<|begin_of_audio|><|end_of_audio|>``,
    instead of GLM-5.2's ``<reminder>...</reminder>`` text (GLM-5.2 has no multimodal input).
+   The placeholders are emitted for media in ANY role's content (user/system/assistant/tool),
+   exactly like the official ``visible_text`` macro; whether the training pipeline can load a
+   given role's media is the data layer's concern (see ``Glm53VLTokenizeFunction.collect_media``).
 3. ``enable_thinking`` is accepted for API compatibility but, like the official template,
    does not remove the reasoning-effort header or close the generation-time ``<think>`` prefix.
    Because the flag has no effect, ``False`` is rejected with an ``AssertionError`` instead of
@@ -41,7 +44,6 @@ from xtuner.v1.utils import IGNORE_INDEX
 
 from .glm52_chat import (
     _NEXT_ROLE_STOP_TOKENS,
-    _assistant_content_and_reasoning,
     _render_tool_calls,
     _render_tools,
     _tokenize_with_loss_mask,
@@ -81,15 +83,23 @@ def _visible_text(content: Any) -> str:
     return str(content)
 
 
+def _assistant_content_and_reasoning(message: Mapping[str, Any]) -> tuple[str, str | None]:
+    """GLM-5.3 variant of the glm52 helper: assistant media renders as
+    placeholder markers (GLM-5.2 degrades them to ``<reminder>`` text, which
+    the GLM-5.3 template never emits)."""
+    content = _visible_text(message.get("content", ""))
+    reasoning_content = message.get("reasoning_content")
+    if isinstance(reasoning_content, str):
+        return content, reasoning_content
+    if "</think>" in content:
+        reasoning_content = content.split("</think>")[0].split("<think>")[-1]
+        content = content.split("</think>")[-1]
+        return content, reasoning_content
+    return content, None
+
+
 def _id_of(obj: Mapping[str, Any]) -> Any:
     return obj.get("tool_call_id") or obj.get("id")
-
-
-def _is_list_of_outputs(message: Mapping[str, Any]) -> bool:
-    content = message.get("content")
-    return (
-        isinstance(content, list) and len(content) > 0 and isinstance(content[0], Mapping) and "output" in content[0]
-    )
 
 
 def _is_tool_reference_list(value: Any) -> TypeGuard[List[Mapping[str, Any]]]:
@@ -98,6 +108,13 @@ def _is_tool_reference_list(value: Any) -> TypeGuard[List[Mapping[str, Any]]]:
         and len(value) > 0
         and isinstance(value[0], Mapping)
         and value[0].get("type") == "tool_reference"
+    )
+
+
+def _is_list_of_outputs(message: Mapping[str, Any]) -> bool:
+    content = message.get("content")
+    return (
+        isinstance(content, list) and len(content) > 0 and isinstance(content[0], Mapping) and "output" in content[0]
     )
 
 

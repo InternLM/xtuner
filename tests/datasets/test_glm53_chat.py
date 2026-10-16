@@ -7,7 +7,9 @@ TestGlm53Rendering
     test_media_placeholder_matches_jinja        媒体占位符与 jinja 一致
 TestGlm53OfficialTemplateContract
     test_render_matches_official_jinja          飞书失败报告样例逐字符对齐官方 jinja + fast/slow 一致
+    test_can_sort_fallback_keeps_message_order  排序前提被破坏时回退为消息顺序
     test_no_eos_and_no_loss_at_mid_conversation_boundaries  对话中间无 EOS、边界 token 无 loss
+    test_tool_results_are_never_supervised      tool 结果不计入 loss
 """
 
 import os
@@ -109,6 +111,26 @@ _CONTRACT_CASES = {
             {"role": "assistant", "content": "ASSISTANT_ANSWER"},
         ]
     },
+    "assistant_image_probe": {
+        "messages": [
+            {"role": "user", "content": "USER_INPUT"},
+            {"role": "assistant", "content": [_IMAGE_PART]},
+        ]
+    },
+    "system_image_probe": {
+        "messages": [
+            {"role": "system", "content": [_IMAGE_PART]},
+            {"role": "user", "content": "USER_INPUT"},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ]
+    },
+    # 音频占位符在模板层有定义（运行时支持范围不在此断言）。
+    "audio_placeholder_probe": {
+        "messages": [
+            {"role": "user", "content": [{"type": "audio"}]},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ]
+    },
 }
 
 # can_sort 前提被破坏时，官方模板回退为消息顺序；这些样例与上面的排序样例互为对照。
@@ -141,6 +163,7 @@ _FALLBACK_CASES = {
         "tools": _TOOLS,
     },
 }
+
 
 GLM_5_3_FLASH_PATH = os.environ["GLM_5_3_FLASH_PATH"]
 GLM53_TEMPLATE_DEFAULTS = {"enable_thinking": True, "reasoning_effort": "max", "clear_thinking": False}
@@ -239,6 +262,21 @@ class TestGlm53OfficialTemplateContract:
         assert tokenized["input_ids"] == slow_ids
         assert tokenized["labels"] == slow_labels
 
+    @pytest.mark.parametrize("case_name", list(_FALLBACK_CASES))
+    def test_can_sort_fallback_keeps_message_order(self, tokenizer, case_name):
+        # 结果 id 缺失/重复/不匹配或没有前序 tool_calls 时，官方模板不排序，保持消息顺序。
+        case = _FALLBACK_CASES[case_name]
+        messages, tools = case["messages"], case.get("tools")
+
+        text, _ = render_glm53_chat(messages, tools=tools, **GLM53_TEMPLATE_DEFAULTS)
+        hf_rendered = _render_from_hf(tokenizer, messages, tools=tools)
+        assert text == hf_rendered + tokenizer.eos_token
+
+        tokenized = Glm53ChatMessages(messages=messages, tools=tools).tokenize(tokenizer)
+        slow_ids, slow_labels = glm53_tokenize_fn_slowspeed(tokenizer, messages, tools=tools)
+        assert tokenized["input_ids"] == slow_ids
+        assert tokenized["labels"] == slow_labels
+
     def test_no_eos_and_no_loss_at_mid_conversation_boundaries(self, tokenizer):
         # 官方模板从不在对话中间输出 EOS；assistant→system/assistant 的边界 token
         # （<|system|>/<|assistant|>）不是生成停止目标，不计入 loss。
@@ -254,21 +292,6 @@ class TestGlm53OfficialTemplateContract:
             boundary_id = tokenizer.convert_tokens_to_ids(boundary_token)
             boundary_index = tokenized["input_ids"].index(boundary_id)
             assert tokenized["labels"][boundary_index] == -100
-
-    @pytest.mark.parametrize("case_name", list(_FALLBACK_CASES))
-    def test_can_sort_fallback_keeps_message_order(self, tokenizer, case_name):
-        # 结果 id 缺失/重复/不匹配或没有前序 tool_calls 时，官方模板不排序，保持消息顺序。
-        case = _FALLBACK_CASES[case_name]
-        messages, tools = case["messages"], case.get("tools")
-
-        text, _ = render_glm53_chat(messages, tools=tools, **GLM53_TEMPLATE_DEFAULTS)
-        hf_rendered = _render_from_hf(tokenizer, messages, tools=tools)
-        assert text == hf_rendered + tokenizer.eos_token
-
-        tokenized = Glm53ChatMessages(messages=messages, tools=tools).tokenize(tokenizer)
-        slow_ids, slow_labels = glm53_tokenize_fn_slowspeed(tokenizer, messages, tools=tools)
-        assert tokenized["input_ids"] == slow_ids
-        assert tokenized["labels"] == slow_labels
 
     def test_tool_results_are_never_supervised(self, tokenizer):
         for case_name in ("tool_results_reversed", "tool_aggregate_reversed"):
