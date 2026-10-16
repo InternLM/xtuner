@@ -72,6 +72,7 @@ from xtuner.v1.utils import (
 from xtuner.v1.utils.async_save_monitor import AsyncSaveMonitor, AsyncSaveWatchItem
 from xtuner.v1.utils.check_health import check_health
 from xtuner.v1.utils.device import get_device, get_torch_device_module
+from xtuner.v1.utils.diagnostics import DiagnosticsConfig, TrainingDiagnostics
 from xtuner.v1.utils.internal_metrics import (
     InternalMetrics,
     InternalMetricsConfig,
@@ -445,6 +446,7 @@ class TrainerConfig(BaseModel):
     grad_norm_dtype: torch.dtype = torch.float32
     hooks_config: HooksConfig = HooksConfig()
     internal_metrics_cfg: InternalMetricsConfig | None = None
+    diagnostics: DiagnosticsConfig = DiagnosticsConfig()
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
@@ -575,7 +577,10 @@ class Trainer:
         trainer_cfg: TrainerConfig | None = None,
         hooks_config: HooksConfig = HooksConfig(),
         internal_metrics_cfg: InternalMetricsConfig | None = None,
+        diagnostics: DiagnosticsConfig | None = None,
     ):
+        self._diagnostics_config = diagnostics or DiagnosticsConfig()
+        self._diagnostics: TrainingDiagnostics | None = None
         self._do_clip = do_clip
         self._grad_norm_dtype = grad_norm_dtype
         self._dataloader_config = dataloader_cfg
@@ -851,12 +856,29 @@ class Trainer:
             hooks_config=config.hooks_config,
             trainer_cfg=config,
             internal_metrics_cfg=config.internal_metrics_cfg,
+            diagnostics=config.diagnostics,
         )
         self._config = config
         self._print_training_config()
         return self
 
     def fit(self):
+        """Run training with optional diagnostics, restored on success or
+        failure."""
+        if not self._diagnostics_config.enabled:
+            return self._fit()
+        diagnostic = TrainingDiagnostics(self._diagnostics_config, self.exp_dir / "diagnostics", self.rank)
+        self._diagnostics = diagnostic
+        self._engine._diagnostics = diagnostic
+        try:
+            diagnostic.install(self._engine.model)
+            return self._fit()
+        finally:
+            diagnostic.close()
+            self._diagnostics = None
+            self._engine._diagnostics = None
+
+    def _fit(self):
         """Run the training loop.
 
         This method executes the main training loop, iterating through the dataset and performing training steps. It
@@ -874,7 +896,11 @@ class Trainer:
             DEVICE_MODULE.reset_peak_memory_stats()
 
             with self._maybe_profiling():
+                if self._diagnostics is not None:
+                    self._diagnostics.mark("prepare_input_begin")
                 engine_input = self._prepare_model_input(data_batch)
+                if self._diagnostics is not None:
+                    self._diagnostics.mark("prepare_input_end")
                 train_step_info = self._engine.train_step(engine_input)
                 hooks = self.hooks_config.get_hooks(HookStage.AFTER_TRAIN_STEP)
                 for hook in hooks:
@@ -886,11 +912,19 @@ class Trainer:
                         total_epoch=self.total_epoch,
                     )
 
+                if self._diagnostics is not None:
+                    self._diagnostics.mark("grad_reduce_begin")
                 grad_norm = self._engine.clip_grad_norm(do_clip=self._do_clip, dtype=self._grad_norm_dtype)
+                if self._diagnostics is not None:
+                    self._diagnostics.mark("grad_reduce_end")
                 if self._offload_optimizer_first_step:
                     self._engine.put_optimizer_to_device(DEVICE)
                     self._offload_optimizer_first_step = False
+                if self._diagnostics is not None:
+                    self._diagnostics.mark("optimizer_begin")
                 self._engine.step_optimizer(grad_norm)
+                if self._diagnostics is not None:
+                    self._diagnostics.mark("optimizer_end")
 
             time_after_train_step = time.time()
             ProberList.after_step()
@@ -1499,6 +1533,9 @@ class Trainer:
     def _data_iter(self):
         data_iter = iter(self._dataloader)
         while self._cur_step < self.total_step:
+            if self._diagnostics is not None:
+                self._diagnostics.set_step(self._cur_step + 1)
+                self._diagnostics.mark("data_next_begin")
             try:
                 data = next(data_iter)
             except StopIteration:
@@ -1507,6 +1544,8 @@ class Trainer:
                 data_iter = iter(self._dataloader)
                 data = next(data_iter)
 
+            if self._diagnostics is not None:
+                self._diagnostics.mark("data_next_end")
             yield data
 
     def _get_checkpoint_path(self, epoch: int, step: int, is_snapshot: bool = False) -> Path:
