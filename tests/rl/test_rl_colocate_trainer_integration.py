@@ -8,12 +8,13 @@ import ray
 
 from transformers import AutoTokenizer
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, write_train_meta
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.model import get_model_config_from_hf
+from xtuner.v1.rl.agent_loop.agent_loop import AgentLoop
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
@@ -269,7 +270,7 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
                     labels=[-100] * len(prompt_ids) + response_ids,
                 )
                 # Controller scheduling only consumes the lightweight train meta fields.
-                write_train_meta(state)
+                AgentLoop._write_train_meta(None, state)
                 group.append(state)
             rollout_groups.append(group)
 
