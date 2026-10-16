@@ -352,10 +352,13 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         return sampled.tolist(), (grid_t, grid_h, grid_w)
 
     def calc_num_tokens_video_get_item(self, data_item: dict) -> CacheItem:
-        assert len(self._video_extra_info_list) == len(self._video_path), (
-            "GLM-5.3-Flash video cache prediction requires origin_video_length/origin_fps "
-            f"metadata for every video, data_name: {self.data_name}."
-        )
+        if len(self._video_extra_info_list) != len(self._video_path):
+            # 单条样本缺视频元数据属脏数据；RuntimeError 由 __call__ 转成警告+丢弃（cache），
+            # 不能用 assert——cache worker 进程里 AssertionError 逃逸会杀死 worker 并挂住主进程。
+            raise RuntimeError(
+                "GLM-5.3-Flash video cache prediction requires origin_video_length/origin_fps "
+                f"metadata for every video, data_name: {self.data_name}."
+            )
         grids: list[list[int]] = []
         metadata_list = []
         for video_file, (width, height), extra in zip(
