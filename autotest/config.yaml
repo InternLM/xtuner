@@ -42,7 +42,7 @@ case:
             parameters:
                 config: autotest/config/rl_qwen3_2B_vl_opd_dapo.py
                 infer_backend: lmdeploy
-                launch_script: pip install lmdeploy==0.18.0;bash -x recipe/on_policy_distillation/scripts/run_sampled_token_opd.sh /mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-2B-Instruct /mnt/shared-storage-user/llmrazor-share/data/opd_train_meta.json 
+                launch_script: pip install lmdeploy==0.18.0;bash -x recipe/on_policy_distillation/scripts/run_sampled_token_opd.sh /mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-2B-Instruct /mnt/shared-storage-user/llmrazor-share/model/Qwen3-4B-Instruct-2507 /mnt/shared-storage-user/llmrazor-share/data/opd_train_meta.json 
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 memory_per_task: 1200
