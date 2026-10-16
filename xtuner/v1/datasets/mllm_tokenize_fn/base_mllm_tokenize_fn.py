@@ -136,6 +136,8 @@ T = TypeVar("T", bound=BaseMLLMDataItem)
 
 
 class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
+    collect_image_video_paths_and_extra = staticmethod(collect_image_video_paths_and_extra)
+
     def __init__(
         self,
         tokenizer,
@@ -201,13 +203,6 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
                 labels = labels[: self.max_length]
         return input_ids, labels
 
-    def collect_media(self, messages: list[dict]):
-        """Collect the media references of one sample.
-
-        Model families with a different media-collection contract can override this hook.
-        """
-        return collect_image_video_paths_and_extra(messages)
-
     def _discard_damaged_sample(self, reason: str) -> CacheItem:
         """单条脏数据/未支持媒体边界的统一出口。
 
@@ -224,7 +219,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
     @with_proxy_attention_flops
     def __call__(self, item: dict, media_root: str = "", **kwargs) -> T | CacheItem:  # type: ignore[override]
         try:
-            self._image_path, self._video_path, extra_info = self.collect_media(item["messages"])
+            self._image_path, self._video_path, extra_info = self.collect_image_video_paths_and_extra(item["messages"])
             self._image_wh_list = extra_info["image_wh"]
             self._video_wh_list = extra_info["video_wh"]
             self._video_extra_info_list = extra_info["video_extra_info"]

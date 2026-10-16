@@ -451,7 +451,7 @@ class TestGlm53MediaRoleContract:
         else:
             messages.insert(1, {"role": "tool", "content": [image], "tool_call_id": "t1"})
 
-        image_paths, video_paths, extra = tokenize_fn.collect_media(messages)
+        image_paths, video_paths, extra = tokenize_fn.collect_image_video_paths_and_extra(messages)
 
         assert image_paths == ["unused.jpg"]
         assert video_paths == []
@@ -473,7 +473,7 @@ class TestGlm53MediaRoleContract:
             {"role": "tool", "content": [image("tool-a.jpg")], "tool_call_id": "a"},
         ]
 
-        image_paths, _, _ = tokenize_fn.collect_media(messages)
+        image_paths, _, _ = tokenize_fn.collect_image_video_paths_and_extra(messages)
 
         # HF apply_chat_template also collects media in input order before rendering the Jinja template.
         assert image_paths == ["system.jpg", "user.jpg", "assistant.jpg", "tool-b.jpg", "tool-a.jpg"]

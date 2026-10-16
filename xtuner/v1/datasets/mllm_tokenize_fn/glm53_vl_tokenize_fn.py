@@ -189,6 +189,8 @@ def _expand_marker(text: str, loss_mask: list[bool], marker: str, expansions: li
 
 
 class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
+    collect_image_video_paths_and_extra = staticmethod(collect_image_video_paths_and_extra)
+
     def __init__(
         self,
         tokenizer,
@@ -275,10 +277,6 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             visual_pack_weight=visual_pack_weight,
             trim_memory_interval=trim_memory_interval,
         )
-
-    def collect_media(self, messages: list[dict]):
-        """Collect image/video references from all roles in input order."""
-        return collect_image_video_paths_and_extra(messages)
 
     # ---- shared render/expand/tokenize, called by both cache and runtime paths ----
 
