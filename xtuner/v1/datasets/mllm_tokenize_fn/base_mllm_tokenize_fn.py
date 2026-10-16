@@ -214,9 +214,8 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
     def collect_media(self, messages: list[dict]):
         """Collect the media references of one sample.
 
-        Model families with a different media-role contract (e.g. GLM-5.3-Flash, whose
-        official template renders media in any role while the training pipeline can only
-        load user/pretrain media) override this hook.
+        Model families with a different media-role contract (e.g. GLM-5.3-Flash, whose official template renders media
+        in any role while the training pipeline can only load user/pretrain media) override this hook.
         """
         return collect_image_video_paths_and_extra(messages)
 

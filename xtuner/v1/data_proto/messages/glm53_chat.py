@@ -35,7 +35,7 @@ in the official ``chat_template.jinja``:
 """
 
 from collections.abc import Mapping
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, TypeGuard
 
 from pydantic import BaseModel, ConfigDict
 
@@ -84,8 +84,9 @@ def _visible_text(content: Any) -> str:
 
 
 def _assistant_content_and_reasoning(message: Mapping[str, Any]) -> tuple[str, str | None]:
-    """GLM-5.3 variant of the glm52 helper: assistant media renders as placeholder markers
-    (GLM-5.2 degrades them to ``<reminder>`` text, which the GLM-5.3 template never emits)."""
+    """GLM-5.3 variant of the glm52 helper: assistant media renders as
+    placeholder markers (GLM-5.2 degrades them to ``<reminder>`` text, which
+    the GLM-5.3 template never emits)."""
     content = _visible_text(message.get("content", ""))
     reasoning_content = message.get("reasoning_content")
     if isinstance(reasoning_content, str):
@@ -101,7 +102,7 @@ def _id_of(obj: Mapping[str, Any]) -> Any:
     return obj.get("tool_call_id") or obj.get("id")
 
 
-def _is_tool_reference_list(value: Any) -> bool:
+def _is_tool_reference_list(value: Any) -> TypeGuard[List[Mapping[str, Any]]]:
     return (
         isinstance(value, list)
         and len(value) > 0
@@ -117,7 +118,7 @@ def _is_list_of_outputs(message: Mapping[str, Any]) -> bool:
     )
 
 
-def _tool_references_to_response(refs: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]]) -> str:
+def _tool_references_to_response(refs: List[Mapping[str, Any]], tools: Optional[List[Dict[str, Any]]]) -> str:
     text = "<tool_response><tools>\n"
     for ref in refs:
         for tool in tools or []:
@@ -135,9 +136,10 @@ def _render_output_entry(entry: Mapping[str, Any], tools: Optional[List[Dict[str
 
 
 def _render_tool_response(message: Mapping[str, Any], tools: Optional[List[Dict[str, Any]]]) -> str:
-    """GLM-5.3's ``render_tool_response`` macro: structured outputs render their visible
-    content and nested ``tool_reference`` lists expand tool definitions (GLM-5.2's official
-    template stringifies both, so the shared glm52 helper cannot be reused here)."""
+    """GLM-5.3's ``render_tool_response`` macro: structured outputs render
+    their visible content and nested ``tool_reference`` lists expand tool
+    definitions (GLM-5.2's official template stringifies both, so the shared
+    glm52 helper cannot be reused here)."""
     content = message.get("content", "")
     if isinstance(content, str):
         return f"<tool_response>{content}</tool_response>"

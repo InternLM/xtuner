@@ -503,8 +503,8 @@ class TestGlm53MediaRoleContract:
 
 
 class TestGlm53DirtyDataDoesNotHalt:
-    """单条脏数据在 cache 阶段必须警告并丢弃（num_tokens=0），不能让异常逃逸——cache 构建跑在
-    worker 子进程里（jsonl.py 的 tokenize_worker 没有异常捕获），逃逸的异常会杀死 worker 并让
+    """单条脏数据在 cache 阶段必须警告并丢弃（num_tokens=0），不能让异常逃逸——cache 构建跑在 worker
+    子进程里（jsonl.py 的 tokenize_worker 没有异常捕获），逃逸的异常会杀死 worker 并让
     主进程永远阻塞在结果队列上，整个训练启动挂住。runtime 侧抛出即可，上游换成无 loss 占位样本。"""
 
     def test_bad_image_wh_is_discarded(

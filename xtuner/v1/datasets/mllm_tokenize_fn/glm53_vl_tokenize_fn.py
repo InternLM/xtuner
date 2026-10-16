@@ -220,7 +220,8 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         )
 
     def collect_media(self, messages: list[dict]):
-        """Reject image/video in roles the training path cannot serve, then collect as usual.
+        """Reject image/video in roles the training path cannot serve, then
+        collect as usual.
 
         The official template renders media markers in any role (``visible_text``), but the
         loader/expansion below only handles user/pretrain media. Letting e.g. a system- or
@@ -229,7 +230,7 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         inert placeholder (runtime) by ``BaseMLLMTokenizeFunction.__call__`` -- a single
         dirty sample never halts training.
         """
-        unsupported_roles = set()
+        unsupported_roles: set[str] = set()
         for msg in messages:
             role = msg.get("role")
             if role in _SUPPORTED_MEDIA_ROLES:
@@ -239,7 +240,7 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 continue
             for part in content:
                 if isinstance(part, Mapping) and part.get("type") in _MEDIA_TYPES:
-                    unsupported_roles.add(role)
+                    unsupported_roles.add(str(role))
                     break
         if unsupported_roles:
             raise NotImplementedError(
