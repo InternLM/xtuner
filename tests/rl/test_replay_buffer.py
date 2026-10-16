@@ -282,6 +282,39 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 assert reusable.mm_info["pixel_values"] is pixel_values
                 assert reusable.extra_fields == {"train_prompt_ids": [101, 102]}
 
+    async def test_partial_response_token_expiry_without_labels(self):
+        for config_name, config_cls in REPLAY_BUFFER_CONFIGS:
+            for steps, threshold, should_expire in (
+                ([0, 0], 4, True),
+                ([0, 4], 4, False),
+                ([], 4, False),
+                ([0, 0], None, False),
+            ):
+                with self.subTest(config=config_name, steps=steps, threshold=threshold):
+                    buffer = config_cls().build()
+                    response_ids = [11, 12][: len(steps)]
+                    state = make_rollout_state(
+                        1,
+                        status=Status.ABORTED,
+                        response_ids=response_ids,
+                        response_model_steps=steps,
+                    )
+                    self.assertIsNone(state.labels)
+                    await buffer.put(
+                        [state],
+                        "task",
+                        current_train_step=5,
+                        stale_threshold=10,
+                        token_stale_threshold=threshold,
+                        expired_groups_retryable=True,
+                    )
+                    expected_status = Status.EXPIRED if should_expire else Status.ABORTED
+                    group = (await buffer.get(1, "task", expected_status))[0]
+                    self.assertEqual(group[0].status, expected_status)
+                    self.assertEqual(group[0].response_ids, [] if should_expire else response_ids)
+                    self.assertEqual(group[0].response_model_steps, [] if should_expire else steps)
+                    self.assertIsNone(group[0].labels)
+
     async def test_common_put_token_expiry_preserves_fresh_group_members(self):
         # token expiry 只清理真正全 token 过期的 state，外层 group 仍进入 EXPIRED pool。
         for config_name, replay_buffer_config_cls in REPLAY_BUFFER_CONFIGS:

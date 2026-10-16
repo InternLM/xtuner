@@ -439,6 +439,7 @@ class TrainingController:
         # 每个 session 只计一次，避免 rewards/* 与 advantage 被 segment 数放大。
         # session_id 只由 agentic loop / XTUNER_DETERMINISTIC 写入；普通 RL 回退到 rollout_id。
         rewards_by_session: dict[Any, float] = {}
+        cluster_index_by_session: dict[Any, int] = {}
         session_representatives: list[RolloutState] = []
         cluster_indices: list[int | None] = []
         for state in group:
@@ -453,9 +454,10 @@ class TrainingController:
             reward = float(state.reward["score"])
             session_key = state.session_id if state.session_id is not None else state.rollout_id
             if session_key not in rewards_by_session:
+                cluster_index_by_session[session_key] = len(session_representatives)
                 rewards_by_session[session_key] = reward
                 session_representatives.append(state)
-            cluster_indices.append(len(session_representatives) - 1)
+            cluster_indices.append(cluster_index_by_session[session_key])
         return list(rewards_by_session.values()), session_representatives, cluster_indices
 
     def _compute_group_advantages(
