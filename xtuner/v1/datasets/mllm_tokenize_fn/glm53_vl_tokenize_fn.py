@@ -33,7 +33,7 @@ from transformers import AutoProcessor
 from transformers.models.glm5_next.image_processing_glm5_next import smart_resize as image_smart_resize
 from transformers.models.glm5_next.video_processing_glm5_next import smart_resize as video_smart_resize
 from transformers.video_utils import VideoMetadata
-from xtuner.v1.data_proto.messages.glm53_chat import _tokenize_with_loss_mask, render_glm53_chat
+from xtuner.v1.data_proto.messages.glm53_chat import _tokenize_with_loss_mask, glm53_media_messages, render_glm53_chat
 from xtuner.v1.utils import get_logger
 
 from ..data_item import CacheItem, Glm53VLDataItem
@@ -42,6 +42,7 @@ from .base_mllm_tokenize_fn import (
     BaseMLLMTokenizeFnConfig,
     BaseMLLMTokenizeFunction,
     OSSLoaderConfig,
+    collect_image_video_paths_and_extra,
     get_image_path,
     load_image,
 )
@@ -137,8 +138,8 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         llm_pack_weight: float = 1.0,
         visual_pack_weight: float = 1.0,
         add_generation_prompt: bool = False,
-        enable_thinking: bool = True,
         reasoning_effort: Literal["low", "high", "max"] = "max",
+        clear_thinking: bool = False,
         tokenizer_hash: str | None = None,
         hash: str | None = None,
         debug: bool = False,
@@ -178,8 +179,8 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 **oss_loader_cfg.backend_kwargs,
             )
         self.add_generation_prompt = add_generation_prompt
-        self.enable_thinking = enable_thinking
         self.reasoning_effort = reasoning_effort
+        self.clear_thinking = clear_thinking
         self.system_message = system_message
         self.data_name = os.path.basename(anno_name)
 
@@ -194,7 +195,8 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             f"processor_path:{processor_path}_llm_pack_weight:{llm_pack_weight}_"
             f"visual_pack_weight:{visual_pack_weight}_max_length:{max_length}_"
             f"system_message:{system_message}_add_generation_prompt:{add_generation_prompt}_"
-            f"enable_thinking:{enable_thinking}_reasoning_effort:{reasoning_effort}"
+            f"reasoning_effort:{reasoning_effort}_"
+            f"clear_thinking:{clear_thinking}_glm53_protocol:3"
         )
 
         super().__init__(
@@ -220,9 +222,15 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             messages,
             tools=data_item.get("tools"),
             add_generation_prompt=self.add_generation_prompt,
-            enable_thinking=self.enable_thinking,
             reasoning_effort=self.reasoning_effort,
+            clear_thinking=self.clear_thinking,
         )
+
+    def _collect_media(self, item: dict):
+        messages = list(item["messages"])
+        if self.system_message is not None and (not messages or messages[0].get("role") != "system"):
+            messages = [{"role": "system", "content": self.system_message}, *messages]
+        return collect_image_video_paths_and_extra(glm53_media_messages(messages))
 
     def _finalize(self, text: str, loss_mask: list[bool]) -> tuple[list[int], list[int], list[int]]:
         input_ids, labels = _tokenize_with_loss_mask(self.tokenizer, text, loss_mask)
@@ -475,8 +483,8 @@ class Glm53VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     fps: float | None = None
     max_frames: int | None = None
     add_generation_prompt: bool = False
-    enable_thinking: bool = True
     reasoning_effort: Literal["low", "high", "max"] = "max"
+    clear_thinking: bool = False
     visual_pack_weight: float = 1.0
 
     def build(
@@ -496,8 +504,8 @@ class Glm53VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             llm_pack_weight=self.llm_pack_weight,
             visual_pack_weight=self.visual_pack_weight,
             add_generation_prompt=self.add_generation_prompt,
-            enable_thinking=self.enable_thinking,
             reasoning_effort=self.reasoning_effort,
+            clear_thinking=self.clear_thinking,
             tokenizer_hash=tokenizer_hash,
             hash=self.hash,
             debug=self.debug,

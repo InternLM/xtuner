@@ -371,8 +371,8 @@ _HASH_PARAMS = {
     "llm_pack_weight",
     "visual_pack_weight",
     "add_generation_prompt",
-    "enable_thinking",
     "reasoning_effort",
+    "clear_thinking",
 }
 
 # 不影响 cache 输出的参数：
@@ -405,6 +405,6 @@ _ALT_VALUES = {
     "llm_pack_weight": {"llm_pack_weight": 0.5},
     "visual_pack_weight": {"visual_pack_weight": 0.5},
     "add_generation_prompt": {"add_generation_prompt": True},
-    "enable_thinking": {"enable_thinking": False},
     "reasoning_effort": {"reasoning_effort": "low"},
+    "clear_thinking": {"clear_thinking": True},
 }
