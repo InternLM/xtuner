@@ -234,7 +234,7 @@ class TrainingController:
                 counts[target] = counts.get(target, 0) + 1
         return {key: sums[key] / counts[key] for key in sums}
 
-    def _prepare_advantages(self, prepared: _PreparedBatch, pack_plan: _PackPlan) -> list[float] | list[list[float]]:
+    def _prepare_advantages(self, prepared: _PreparedBatch, pack_plan: _PackPlan) -> list[float]:
         """Prepare targets after packing indices are fixed, without changing
         sample order or placing targets inside the plan."""
         advantages: list[float] = []
@@ -635,9 +635,14 @@ class TrainingController:
                     for worker in self.workers
                 ]
                 value_batches = ray.get(value_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
-            sample_advantages, token_advantages, token_returns = self._compute_advantages(
-                rollout_groups, rollout_items, pack_plan, value_batches, data_replicate_size
-            )
+            if use_gae:
+                sample_advantages, token_advantages, token_returns = self._compute_advantages(
+                    rollout_groups, rollout_items, pack_plan, value_batches, data_replicate_size
+                )
+            else:
+                sample_advantages = self._prepare_advantages(prepared, pack_plan)
+                token_advantages = None
+                token_returns = None
             # 3. Optional. Critic fit. Each worker trains the value head on its samples' token returns.
             if has_critic:
                 critic_handles = []
