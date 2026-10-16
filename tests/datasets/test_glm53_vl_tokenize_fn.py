@@ -16,12 +16,16 @@ TestGlm53NativeHFInputContract
     test_enable_thinking_false_rejected             enable_thinking=False 被显式拒绝（jinja 忽略该参数）
     test_video_pixels_and_timestamps_match_native_template  视频像素/时间戳与原生模板一致
 TestGlm53MixedMediaAndTruncation
-    test_glm53_mixed_media_fails_fast               图文混合视频未支持，必须快速失败
+    test_glm53_mixed_media_is_discarded             图文混合视频未支持：cache 警告丢弃、runtime 占位，不中断训练
     test_glm53_visual_truncation_is_dropped         截断会切断视觉跨度时 cache 阶段就丢弃
 TestGlm53MediaRoleContract
     test_media_is_collected_from_all_roles           system/assistant/tool 角色的图片也会被收集
     test_media_collection_preserves_input_order     媒体按原始消息顺序收集，与 HF 一致
     test_string_content_parts_are_tolerated         content 列表混排纯字符串不崩溃
+TestGlm53DirtyDataDoesNotHalt
+    test_bad_image_wh_is_discarded                  image_wh 形状非法：cache 丢弃、runtime 抛错
+    test_missing_video_metadata_is_discarded        视频缺元数据：cache 警告丢弃、不挂起 worker
+    test_config_error_still_raises_in_cache         配置错误（enable_thinking=False）不被丢弃通道吞掉
 TestGlm53CacheInvalidation
     test_glm53_cache_invalidates_on_processor_or_pack_change  processor/pack 变化使缓存失效
     test_glm53_hash_covers_every_init_parameter  逐参数 hash 失效 + __init__ 参数分类完备性
@@ -396,13 +400,17 @@ class TestGlm53NativeHFInputContract:
 
 
 class TestGlm53MixedMediaAndTruncation:
-    @pytest.mark.parametrize("state", ["cache", "runtime"])
-    def test_glm53_mixed_media_fails_fast(
-        self, tokenize_fn: Glm53VLTokenizeFunction, state: str, monkeypatch: pytest.MonkeyPatch
+    def test_glm53_mixed_media_is_discarded(
+        self, tokenize_fn: Glm53VLTokenizeFunction, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # 图文+视频混合样本是未支持边界：cache 阶段 log warning 并按损坏样本丢弃（num_tokens=0，
+        # 打包前过滤），runtime 仍抛出、由上游数据集换成无 loss 占位样本——两种状态都不中断训练，
+        # 且都必须发生在加载任何媒体之前。
         assert Glm53VLTokenizeFunction.__call__ is BaseMLLMTokenizeFunction.__call__
-        load = Mock(side_effect=AssertionError("Mixed samples must fail before loading media"))
+        load = Mock(side_effect=AssertionError("Mixed samples must be discarded before loading media"))
         monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn.load_image", load)
+        logger_mock = Mock()
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn.logger", logger_mock)
         item = {
             "messages": [
                 {
@@ -422,7 +430,13 @@ class TestGlm53MixedMediaAndTruncation:
                 }
             ]
         }
-        tokenize_fn.state = state
+        tokenize_fn.state = "cache"
+        ret = tokenize_fn(item)
+        assert ret["num_tokens"] == 0
+        assert logger_mock.warning.called
+        assert "Mixed image and video" in logger_mock.warning.call_args[0][0]
+        load.assert_not_called()
+        tokenize_fn.state = "runtime"
         with pytest.raises(NotImplementedError, match="Mixed image and video"):
             tokenize_fn(item)
         load.assert_not_called()
@@ -498,6 +512,51 @@ class TestGlm53MediaRoleContract:
         tokenize_fn.state = "runtime"
         runtime_ret = tokenize_fn(item)
         assert cache_ret["num_tokens"] == runtime_ret["num_tokens"] == len(runtime_ret["input_ids"])
+
+
+class TestGlm53DirtyDataDoesNotHalt:
+    """单条脏数据在 cache 阶段必须警告并丢弃（num_tokens=0），不能让异常逃逸——cache 构建跑在 worker
+    子进程里（jsonl.py 的 tokenize_worker 没有异常捕获），逃逸的异常会杀死 worker 并让
+    主进程永远阻塞在结果队列上，整个训练启动挂住。runtime 侧抛出即可，上游换成无 loss 占位样本。"""
+
+    def test_bad_image_wh_is_discarded(
+        self, tokenize_fn: Glm53VLTokenizeFunction, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # image_wh 形状非法（长度不是 2）：collector 抛 RuntimeError，cache 走既有丢弃通道。
+        logger_mock = Mock()
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn.logger", logger_mock)
+        item = _image_item("unused.jpg")
+        item["messages"][0]["content"][0]["image"]["image_wh"] = [448]
+        tokenize_fn.state = "cache"
+        assert tokenize_fn(item)["num_tokens"] == 0
+        tokenize_fn.state = "runtime"
+        with pytest.raises(RuntimeError, match="image_wh"):
+            tokenize_fn(item)
+
+    def test_missing_video_metadata_is_discarded(
+        self, tokenize_fn: Glm53VLTokenizeFunction, video_fixture: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 视频缺 origin_video_length/origin_fps 元数据：cache 阶段警告并丢弃，不能 assert 逃逸。
+        logger_mock = Mock()
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn.logger", logger_mock)
+        item = _video_item(video_fixture)
+        del item["messages"][0]["content"][0]["video"]["origin_video_length"]
+        del item["messages"][0]["content"][0]["video"]["origin_fps"]
+        tokenize_fn.state = "cache"
+        assert tokenize_fn(item)["num_tokens"] == 0
+        assert logger_mock.warning.called
+        assert "origin_video_length" in logger_mock.warning.call_args[0][0]
+        tokenize_fn.state = "runtime"
+        with pytest.raises((RuntimeError, AssertionError), match="origin_video_length"):
+            tokenize_fn(item)
+
+    def test_config_error_still_raises_in_cache(self, tokenize_fn: Glm53VLTokenizeFunction) -> None:
+        # 配置错误不是脏数据：enable_thinking=False 的 AssertionError 必须继续暴露（每条样本
+        # 都会触发，若被丢弃通道吞掉会静默掏空整个数据集）。
+        tokenize_fn.enable_thinking = False
+        tokenize_fn.state = "cache"
+        with pytest.raises(AssertionError, match="enable_thinking"):
+            tokenize_fn({"messages": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}]})
 
 
 class TestGlm53CacheInvalidation:
