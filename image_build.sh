@@ -15,7 +15,7 @@ export DEEPSELECT_URL=https://github.com/deepseek-ai/DeepSelect@0f03b68748b30486
 export FLASHMLA_URL=https://github.com/deepseek-ai/FlashMLA@9241ae3ef9bac614dd25e45e507e089f888280e0
 
 export TORCH_VERSION=${TORCH_VERSION:-"2.9.1"}
-export LMDEPLOY_VERSION="${LMDEPLOY_VERSION:-0.17.0}"
+export LMDEPLOY_VERSION="${LMDEPLOY_VERSION:-0.18.0}"
 # export LMDEPLOY_URL="${LMDEPLOY_URL:-https://github.com/InternLM/lmdeploy@a52688dc6cc08a79d6998aa8331b8b15e469b4c4}"
 export PPA_SOURCE="https://mirrors.aliyun.com"
 export DEFAULT_PYPI_URL=${DEFAULT_PYPI_URL:-"https://mirrors.aliyun.com/pypi/simple"}
