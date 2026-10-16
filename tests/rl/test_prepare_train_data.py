@@ -33,9 +33,9 @@ from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     SampleParams,
     Status,
+    validate_train_group,
 )
 from xtuner.v1.rl.agent_loop_manager.produce_utils import take_train_batch
-from xtuner.v1.rl.agent_loop_manager.validation import validate_train_group
 from xtuner.v1.rl.distillation import DistillationTrainerAdapter, RolloutTeacherScorer
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.trainer.controller import TrainingController
