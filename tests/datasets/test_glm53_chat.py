@@ -62,6 +62,12 @@ def _render_from_hf(tokenizer, messages, **kwargs):
     return tokenizer.apply_chat_template(messages, tokenize=False, **{**GLM53_TEMPLATE_DEFAULTS, **kwargs})
 
 
+def _token_index_after_context(tokenizer, rendered, context, token):
+    context_end = rendered.index(context) + len(context)
+    token_start = rendered.index(token, context_end)
+    return len(tokenizer.encode(rendered[:token_start], add_special_tokens=False))
+
+
 class TestGlm53Rendering:
     @pytest.mark.parametrize("reasoning_effort", ["low", "high", "max", "bogus"])
     def test_reasoning_effort_domain_matches_jinja(self, tokenizer, reasoning_effort):
@@ -144,18 +150,81 @@ class TestGlm53OfficialTemplateContract:
         assert tokenized["input_ids"] == slow_ids
         assert tokenized["labels"] == slow_labels
 
-    def test_no_eos_and_no_loss_at_mid_conversation_boundaries(self, tokenizer):
-        # 官方模板从不在对话中间输出 EOS；assistant→system/assistant 的边界 token
-        # （<|system|>/<|assistant|>）不是生成停止目标，不计入 loss。
-        for case_name in ("assistant_then_system", "consecutive_assistants"):
-            messages = _CONTRACT_CASES[case_name]["messages"]
-            tokenized = Glm53ChatMessages(messages=messages).tokenize(tokenizer)
-            eos_id = tokenizer.convert_tokens_to_ids("<|endoftext|>")
-            assert tokenized["input_ids"].count(eos_id) == 1
-            assert tokenized["input_ids"][-1] == eos_id
-            assert tokenized["labels"][-1] == eos_id
+    @pytest.mark.parametrize(
+        ("messages", "boundary_token", "boundary_is_supervised"),
+        [
+            (
+                [
+                    {"role": "user", "content": "Question"},
+                    {"role": "assistant", "content": "BOUNDARY_SENTINEL"},
+                    {"role": "system", "content": "New policy"},
+                    {"role": "assistant", "content": "Final answer"},
+                ],
+                "<|system|>",
+                False,
+            ),
+            (
+                [
+                    {"role": "user", "content": "Question"},
+                    {"role": "assistant", "content": "BOUNDARY_SENTINEL"},
+                    {"role": "assistant", "content": "Second assistant turn"},
+                ],
+                "<|assistant|>",
+                False,
+            ),
+            (
+                [
+                    {"role": "user", "content": "First question"},
+                    {"role": "assistant", "content": "BOUNDARY_SENTINEL"},
+                    {"role": "user", "content": "Second question"},
+                    {"role": "assistant", "content": "Final answer"},
+                ],
+                "<|user|>",
+                True,
+            ),
+            (
+                [
+                    {"role": "user", "content": "Question"},
+                    {
+                        "role": "assistant",
+                        "content": "BOUNDARY_SENTINEL",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "lookup", "arguments": {}},
+                            }
+                        ],
+                    },
+                    {"role": "tool", "tool_call_id": "call_1", "content": "result"},
+                    {"role": "assistant", "content": "Final answer"},
+                ],
+                "<|observation|>",
+                True,
+            ),
+        ],
+    )
+    def test_mid_conversation_boundaries_use_their_actual_occurrence(
+        self, tokenizer, messages, boundary_token, boundary_is_supervised
+    ):
+        official_text = _render_from_hf(tokenizer, messages)
+        rendered, _ = render_glm53_chat(messages, **GLM53_TEMPLATE_DEFAULTS)
+        assert rendered == official_text + tokenizer.eos_token
+        assert tokenizer.eos_token not in official_text
 
-            boundary_token = "<|system|>" if case_name == "assistant_then_system" else "<|assistant|>"
-            boundary_id = tokenizer.convert_tokens_to_ids(boundary_token)
-            boundary_index = tokenized["input_ids"].index(boundary_id)
+        tokenized = Glm53ChatMessages(messages=messages).tokenize(tokenizer)
+        slow_ids, slow_labels = glm53_tokenize_fn_slowspeed(tokenizer, messages)
+        assert tokenized["input_ids"] == slow_ids
+        assert tokenized["labels"] == slow_labels
+        eos_id = tokenizer.convert_tokens_to_ids("<|endoftext|>")
+        assert tokenized["input_ids"].count(eos_id) == 1
+        assert tokenized["input_ids"][-1] == eos_id
+        assert tokenized["labels"][-1] == eos_id
+
+        boundary_index = _token_index_after_context(tokenizer, official_text, "BOUNDARY_SENTINEL", boundary_token)
+        boundary_id = tokenizer.convert_tokens_to_ids(boundary_token)
+        assert tokenized["input_ids"][boundary_index] == boundary_id
+        if boundary_is_supervised:
+            assert tokenized["labels"][boundary_index] == boundary_id
+        else:
             assert tokenized["labels"][boundary_index] == -100
