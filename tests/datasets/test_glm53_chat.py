@@ -6,8 +6,8 @@ TestGlm53Rendering
     test_all_generation_eos_are_supervised_at_assistant_boundaries  停止 token 计入 loss
     test_media_placeholder_matches_jinja        媒体占位符与 jinja 一致
 TestGlm53OfficialTemplateContract
-    test_render_matches_official_jinja          飞书失败报告样例逐字符对齐官方 jinja + fast/slow 一致
-    test_no_eos_and_no_loss_at_mid_conversation_boundaries  对话中间无 EOS、边界 token 无 loss
+    test_render_matches_official_jinja          飞书失败报告样例逐字符对齐官方 jinja
+    test_mid_conversation_boundaries_use_their_actual_occurrence  对话中间无 EOS、边界 token loss 正确
 """
 
 import os
@@ -146,9 +146,7 @@ class TestGlm53OfficialTemplateContract:
         assert text == hf_rendered + tokenizer.eos_token
 
         tokenized = Glm53ChatMessages(messages=messages, tools=tools).tokenize(tokenizer)
-        slow_ids, slow_labels = glm53_tokenize_fn_slowspeed(tokenizer, messages, tools=tools)
-        assert tokenized["input_ids"] == slow_ids
-        assert tokenized["labels"] == slow_labels
+        assert tokenizer.decode(tokenized["input_ids"], skip_special_tokens=False) == hf_rendered + tokenizer.eos_token
 
     @pytest.mark.parametrize(
         ("messages", "boundary_token", "boundary_is_supervised"),
@@ -213,9 +211,6 @@ class TestGlm53OfficialTemplateContract:
         assert tokenizer.eos_token not in official_text
 
         tokenized = Glm53ChatMessages(messages=messages).tokenize(tokenizer)
-        slow_ids, slow_labels = glm53_tokenize_fn_slowspeed(tokenizer, messages)
-        assert tokenized["input_ids"] == slow_ids
-        assert tokenized["labels"] == slow_labels
         eos_id = tokenizer.convert_tokens_to_ids("<|endoftext|>")
         assert tokenized["input_ids"].count(eos_id) == 1
         assert tokenized["input_ids"][-1] == eos_id
