@@ -30,6 +30,7 @@ _TOOL_CALLS = [
     {"function": {"arguments": {}, "name": "a"}, "id": "a", "type": "function"},
     {"function": {"arguments": {}, "name": "b"}, "id": "b", "type": "function"},
 ]
+_IMAGE_PART = {"type": "image", "image": {"url": "unused.jpg", "image_wh": [112, 112]}}
 
 # 飞书《glm5.3 flash训推chat template一致性》失败报告（2026-10-15）的渲染层样例。
 _CONTRACT_CASES = {
@@ -76,6 +77,37 @@ _CONTRACT_CASES = {
             {"role": "assistant", "content": "ASSISTANT_ANSWER"},
         ],
         "tools": _TOOLS,
+    },
+    # 结构化 output 渲染可见文本，而不是 Python 字符串化。
+    "tool_structured_text": {
+        "messages": [
+            {"role": "tool", "content": [{"output": [{"type": "text", "text": "done"}]}]},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ]
+    },
+    # output 内嵌套的 tool_reference 展开匹配的工具定义。
+    "tool_nested_reference": {
+        "messages": [
+            {"role": "tool", "content": [{"output": [{"type": "tool_reference", "name": "a"}]}]},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ],
+        "tools": _TOOLS,
+    },
+    # tool/assistant/system 角色的媒体渲染为三段式标记（渲染层；数据层能否加载另说）。
+    "tool_image_probe": {
+        "messages": [
+            {"role": "user", "content": "USER_INPUT"},
+            {"role": "assistant", "content": "", "tool_calls": [_TOOL_CALLS[0]]},
+            {"role": "tool", "content": [_IMAGE_PART], "tool_call_id": "a"},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ],
+        "tools": _TOOLS,
+    },
+    "tool_nested_image_probe": {
+        "messages": [
+            {"role": "tool", "content": [{"output": [_IMAGE_PART]}]},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ]
     },
 }
 

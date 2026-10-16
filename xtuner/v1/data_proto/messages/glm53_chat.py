@@ -21,6 +21,10 @@ in the official ``chat_template.jinja``:
 4. A contiguous block of tool messages is rendered in the preceding assistant's ``tool_calls``
    order when the official template's can_sort rule holds (every result id is present, unique
    within the block, and matches a unique tool_call id); otherwise the message order is kept.
+   Structured ``{"output": ...}`` entries render their output through ``visible_text`` and a
+   nested ``tool_reference`` list expands the matching tool definitions into
+   ``<tool_response><tools>...</tools></tool_response>`` (GLM-5.2's official template has
+   neither behavior, so these live here rather than in :mod:`glm52_chat`).
 5. ``<|endoftext|>`` is appended only after the FINAL assistant message (the training stop
    suffix). The official template never emits EOS mid-conversation, so assistant→system and
    assistant→assistant boundaries get no extra token; only ``<|user|>``/``<|observation|>``
@@ -28,7 +32,7 @@ in the official ``chat_template.jinja``:
 """
 
 from collections.abc import Mapping
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, TypeGuard
 
 from pydantic import BaseModel, ConfigDict
 
@@ -39,9 +43,9 @@ from .glm52_chat import (
     _NEXT_ROLE_STOP_TOKENS,
     _assistant_content_and_reasoning,
     _render_tool_calls,
-    _render_tool_result,
     _render_tools,
     _tokenize_with_loss_mask,
+    _tool_to_json,
 )
 
 
@@ -88,6 +92,47 @@ def _is_list_of_outputs(message: Mapping[str, Any]) -> bool:
     )
 
 
+def _is_tool_reference_list(value: Any) -> TypeGuard[List[Mapping[str, Any]]]:
+    return (
+        isinstance(value, list)
+        and len(value) > 0
+        and isinstance(value[0], Mapping)
+        and value[0].get("type") == "tool_reference"
+    )
+
+
+def _tool_references_to_response(refs: List[Mapping[str, Any]], tools: Optional[List[Dict[str, Any]]]) -> str:
+    text = "<tool_response><tools>\n"
+    for ref in refs:
+        for tool in tools or []:
+            tool = tool["function"] if "function" in tool else tool
+            if tool.get("name") == ref.get("name"):
+                text += _tool_to_json(tool) + "\n"
+    return text + "</tools></tool_response>"
+
+
+def _render_output_entry(entry: Mapping[str, Any], tools: Optional[List[Dict[str, Any]]]) -> str:
+    output = entry.get("output")
+    if _is_tool_reference_list(output):
+        return _tool_references_to_response(output, tools)
+    return f"<tool_response>{_visible_text(output)}</tool_response>"
+
+
+def _render_tool_response(message: Mapping[str, Any], tools: Optional[List[Dict[str, Any]]]) -> str:
+    """GLM-5.3's ``render_tool_response`` macro: structured outputs render
+    their visible content and nested ``tool_reference`` lists expand tool
+    definitions (GLM-5.2's official template stringifies both, so the shared
+    glm52 helper cannot be reused here)."""
+    content = message.get("content", "")
+    if isinstance(content, str):
+        return f"<tool_response>{content}</tool_response>"
+    if _is_tool_reference_list(content):
+        return _tool_references_to_response(content, tools)
+    if _is_list_of_outputs(message):
+        return "".join(_render_output_entry(entry, tools) for entry in content)
+    return f"<tool_response>{_visible_text(content)}</tool_response>"
+
+
 def _render_tool_block(messages: List[Dict[str, Any]], start: int, tools: Optional[List[Dict[str, Any]]]) -> str:
     """Render the contiguous tool-message block starting at ``start``.
 
@@ -124,7 +169,7 @@ def _render_tool_block(messages: List[Dict[str, Any]], start: int, tools: Option
             can_sort = False
 
     if not can_sort:
-        return "".join(_render_tool_result(message.get("content", ""), tools) for message in block)
+        return "".join(_render_tool_response(message, tools) for message in block)
 
     text = ""
     for call_id in call_ids:
@@ -132,9 +177,9 @@ def _render_tool_block(messages: List[Dict[str, Any]], start: int, tools: Option
             if _is_list_of_outputs(message):
                 for entry in message["content"]:
                     if _id_of(entry) == call_id:
-                        text += f"<tool_response>{entry['output']}</tool_response>"
+                        text += _render_output_entry(entry, tools)
             elif _id_of(message) == call_id:
-                text += _render_tool_result(message.get("content", ""), tools)
+                text += _render_tool_response(message, tools)
     return text
 
 
