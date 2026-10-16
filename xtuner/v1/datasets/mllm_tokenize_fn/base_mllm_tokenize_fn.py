@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
+from collections.abc import Mapping
 from typing import Any, Literal, TypeVar
 
 import torch
@@ -31,7 +32,11 @@ def collect_image_video_paths_and_extra(messages: list[dict], allow_all_roles: b
             content = msg["content"]
             if isinstance(content, list):
                 for c in content:
-                    if c["type"] in ("image_url", "image"):
+                    if not isinstance(c, Mapping):
+                        # 纯字符串是文本块（chat template 按原文渲染），不是媒体引用。
+                        continue
+                    ctype = c.get("type")
+                    if ctype in ("image_url", "image"):
                         key = "image_url" if "image_url" in c else "image"
                         image_paths.append(c[key]["url"])
                         if "image_wh" in c[key]:
@@ -43,7 +48,7 @@ def collect_image_video_paths_and_extra(messages: list[dict], allow_all_roles: b
                                 image_wh = image_wh[0]
                             image_wh_list.append(image_wh)
                             assert len(image_wh) == 2, f"image_wh should be [width, height], but got {image_wh}"
-                    if c["type"] in ("video_url", "video"):
+                    if ctype in ("video_url", "video"):
                         key = "video_url" if "video_url" in c else "video"
                         video_paths.append(c[key]["url"])
                         video_wh = c[key].get("image_wh")

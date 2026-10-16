@@ -21,6 +21,7 @@ TestGlm53MixedMediaAndTruncation
 TestGlm53MediaRoleContract
     test_media_is_collected_from_all_roles           system/assistant/tool 角色的图片也会被收集
     test_media_collection_preserves_input_order     媒体按原始消息顺序收集，与 HF 一致
+    test_string_content_parts_are_tolerated         content 列表混排纯字符串不崩溃
 TestGlm53CacheInvalidation
     test_glm53_cache_invalidates_on_processor_or_pack_change  processor/pack 变化使缓存失效
     test_glm53_hash_covers_every_init_parameter  逐参数 hash 失效 + __init__ 参数分类完备性
@@ -482,6 +483,21 @@ class TestGlm53MediaRoleContract:
 
         # HF apply_chat_template also collects media in input order before rendering the Jinja template.
         assert image_paths == ["system.jpg", "user.jpg", "assistant.jpg", "tool-b.jpg", "tool-a.jpg"]
+
+    def test_string_content_parts_are_tolerated(self, tokenize_fn: Glm53VLTokenizeFunction) -> None:
+        # content 列表允许纯字符串与 text 字典混排（官方 jinja 按文本原样渲染）；media collector
+        # 不得对字符串块取 c["type"] 而崩溃（飞书报告 E01）。
+        item = {
+            "messages": [
+                {"role": "user", "content": ["prefix", {"type": "text", "text": "正文"}, "suffix"]},
+                {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+            ]
+        }
+        tokenize_fn.state = "cache"
+        cache_ret = tokenize_fn(item)
+        tokenize_fn.state = "runtime"
+        runtime_ret = tokenize_fn(item)
+        assert cache_ret["num_tokens"] == runtime_ret["num_tokens"] == len(runtime_ret["input_ids"])
 
 
 class TestGlm53CacheInvalidation:
