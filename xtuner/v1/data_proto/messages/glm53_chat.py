@@ -226,8 +226,10 @@ def glm53_tokenize_fn_slowspeed(
             # 没有 EOS；去掉它才能保持 token 级前缀对齐。
             generation_ids = tokenizer.encode("<|assistant|><think>", add_special_tokens=False)
             eos_id = tokenizer.convert_tokens_to_ids(_END_OF_TEXT)
-            assert prefix_ids[-len(generation_ids) - 1] == eos_id
-            del prefix_ids[-len(generation_ids) - 1]
+            eos_index = len(prefix_ids) - len(generation_ids) - 1
+            if eos_index < 0 or prefix_ids[eos_index] != eos_id:
+                raise ValueError("Could not align the final EOS in the GLM-5.3-Flash assistant prefix.")
+            del prefix_ids[eos_index]
         message_ids = tokenizer.encode(message_text, add_special_tokens=False)
         content_ids = message_ids[len(prefix_ids) :]
         if not content_ids:
