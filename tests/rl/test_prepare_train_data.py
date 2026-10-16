@@ -5,15 +5,15 @@ trainer、Ray worker、模型或 rollout backend：
 
 - loop 侧 ``canonicalize_train_fields``：基类为 prompt+response 型样本构造统一全序列字段
   （``input_ids``/``labels``/``logprobs`` 等长、未 shift）并写轻量 train meta；
-  localhost/sandbox 各自覆写为 trace 全序列字段的校验（失败置 FAILED，不上抛）。
+  localhost/sandbox 复用基类 metadata 计算，训练字段由 trainer 入口检查。
 - controller 侧 ``TrainingController._prepare_rollout_items``：只消费轻量 meta 字段
-  （``num_tokens``/``supervised_tokens``/``train_prompt_length`` 等），完成组校验、组级
-  advantage、``data_info`` 统计与 items-advantages 配对 shuffle，不构造任何训练张量。
+  （``num_tokens``/``supervised_tokens``/``train_prompt_length`` 等），完成组级
+  reward 分组；pack_plan 固定后再计算 advantage，不构造训练张量。
 - token 级张量构造与 pack 物化在 training worker 侧（见 ``test_training_worker_rank.py``）；
   index-only 打包计划见 ``test_pack.py``。
 
 当前测试点：
-- 无效 rollout group 会被跳过；缺 reward 在 task_adv_weight>0 时 fail fast，=0 时零 advantage 参训。
+- 无效 rollout group 由 trainer 入口丢弃；缺 reward 在 task_adv_weight>0 时 fail fast，=0 时零 advantage 参训。
 - 同一个 prompt 下多个 response 各自使用对应 reward / advantage；advantage 统计只计监督位。
 - controller 依赖 write_train_meta 写入的 meta 字段，缺失时 fail fast。
 - shuffle 只打乱调度顺序，items 与 advantages 的配对关系保持不变。
@@ -30,8 +30,8 @@ import torch
 from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     Status,
-    write_train_meta,
 )
+from xtuner.v1.rl.agent_loop_manager.validation import validate_train_group
 from xtuner.v1.rl.distillation import DistillationTrainerAdapter
 from xtuner.v1.rl.trainer.controller import TrainingController
 
@@ -167,13 +167,13 @@ class TestAgentLoopCanonicalizeTrainFields(unittest.TestCase):
         self.assertEqual((state.input_ids, state.labels, state.logprobs), before)
         loop.tokenizer.assert_not_called()
 
-    def test_existing_full_sequence_fields_are_validated(self):
+    def test_existing_full_sequence_fields_are_validated_at_admission(self):
         loop = self._make_loop()
         state = self._state(input_ids=[30, 31, 40], labels=[40], logprobs=None)
         loop.canonicalize_train_fields([state])
-        self.assertEqual(state.status, Status.FAILED)
-        self.assertIn("labels length mismatch", state.error_msg)
-        self.assertIn(f"rollout_id={state.rollout_id}", state.error_msg)
+        self.assertEqual(state.status, Status.COMPLETED)
+        with self.assertRaisesRegex(ValueError, "labels length mismatch"):
+            validate_train_group([state], task_name="test")
         loop.tokenizer.assert_not_called()
 
     def test_non_completed_state_is_skipped(self):
@@ -230,29 +230,21 @@ class TestAgentLoopCanonicalizeTrainFields(unittest.TestCase):
         self.assertEqual(state.extra_fields["train_prompt_length"], 1)
         self.assertEqual(state.extra_fields["supervised_tokens"], 2)
 
-    def test_missing_prompt_ids_marks_sample_failed(self):
-        # 构造失败容错：单个样本置 FAILED，不上抛到 producer。
+    def test_missing_prompt_ids_propagates_construction_error(self):
         loop = self._make_loop()
         state = self._state()
         state.prompt_ids = None
+        with self.assertRaisesRegex(AssertionError, "Prompt ids cannot be None or empty"):
+            loop.canonicalize_train_fields([state])
+        self.assertEqual(state.status, Status.COMPLETED)
 
-        loop.canonicalize_train_fields([state])
-
-        self.assertEqual(state.status, Status.FAILED)
-        self.assertIn("canonicalize_train_fields failed", state.error_msg)
-        loop.logger.error.assert_called_once()
-
-    def test_failure_is_isolated_within_group(self):
+    def test_construction_error_stops_the_group(self):
         loop = self._make_loop()
-        bad = self._state(uid=1)
+        bad, good = self._state(uid=1), self._state(uid=2)
         bad.prompt_ids = None
-        good = self._state(uid=2)
-
-        loop.canonicalize_train_fields([bad, good])
-
-        self.assertEqual(bad.status, Status.FAILED)
-        self.assertEqual(good.status, Status.COMPLETED)
-        self.assertEqual(good.input_ids, [10, 11, 12, 20, 21, 22])
+        with self.assertRaises(AssertionError):
+            loop.canonicalize_train_fields([bad, good])
+        self.assertIsNone(good.input_ids)
 
 
 class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
@@ -305,7 +297,7 @@ class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
                 self.assertIsNone(state.error_msg)
                 loop.logger.error.assert_not_called()
 
-    def test_labels_length_mismatch_marks_sample_failed(self):
+    def test_labels_length_mismatch_rejected_at_admission(self):
         for loop_cls in self.AGENTIC_LOOP_CLASSES:
             with self.subTest(loop_cls=loop_cls.__name__):
                 loop = self._make_loop(loop_cls)
@@ -313,11 +305,11 @@ class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
 
                 loop.canonicalize_train_fields([state])
 
-                self.assertEqual(state.status, Status.FAILED)
-                self.assertIn("canonicalize_train_fields failed", state.error_msg)
-                loop.logger.error.assert_called_once()
+                self.assertEqual(state.status, Status.COMPLETED)
+                with self.assertRaisesRegex(ValueError, "labels length mismatch"):
+                    validate_train_group([state], task_name="test")
 
-    def test_missing_labels_marks_sample_failed(self):
+    def test_missing_labels_rejected_at_admission(self):
         for loop_cls in self.AGENTIC_LOOP_CLASSES:
             with self.subTest(loop_cls=loop_cls.__name__):
                 loop = self._make_loop(loop_cls)
@@ -325,10 +317,11 @@ class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
 
                 loop.canonicalize_train_fields([state])
 
-                self.assertEqual(state.status, Status.FAILED)
-                self.assertIn("labels length mismatch", state.error_msg)
+                self.assertEqual(state.status, Status.COMPLETED)
+                with self.assertRaisesRegex(ValueError, "labels length mismatch"):
+                    validate_train_group([state], task_name="test")
 
-    def test_logprobs_length_mismatch_marks_sample_failed(self):
+    def test_logprobs_length_mismatch_rejected_at_admission(self):
         for loop_cls in self.AGENTIC_LOOP_CLASSES:
             with self.subTest(loop_cls=loop_cls.__name__):
                 loop = self._make_loop(loop_cls)
@@ -340,8 +333,9 @@ class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
 
                 loop.canonicalize_train_fields([state])
 
-                self.assertEqual(state.status, Status.FAILED)
-                self.assertIn("logprobs length mismatch", state.error_msg)
+                self.assertEqual(state.status, Status.COMPLETED)
+                with self.assertRaisesRegex(ValueError, "logprobs length mismatch"):
+                    validate_train_group([state], task_name="test")
 
     def test_writes_train_meta_for_valid_states(self):
         for loop_cls in self.AGENTIC_LOOP_CLASSES:
@@ -420,10 +414,12 @@ class TestPrepareRolloutItems(unittest.TestCase):
 
     def _prepare(self, controller, data_groups):
         prepared = controller._prepare_rollout_items(data_groups, rollout_idx=0)
+        plan = {"dp_plans": {}, "plan_log": {}}
+        advantages = controller._prepare_advantages(prepared, plan)
         return (
             prepared["rollout_items"],
-            prepared["advantages"],
-            controller._build_trainer_log_info(prepared, pack_plan={"dp_plans": {}, "plan_log": {}}, log_infos=[]),
+            advantages,
+            controller._build_trainer_log_info(prepared, pack_plan=plan, log_infos=[], advantages=advantages),
             prepared["batch_attr"]["use_3d_position_ids"],
         )
 
@@ -474,8 +470,16 @@ class TestPrepareRolloutItems(unittest.TestCase):
             if state.logprobs is not None:
                 state.logprobs = [0.0] * len(resolved_prompt_ids) + list(state.logprobs)
         if write_meta:
-            write_train_meta(state)
+            AgentLoop._write_train_meta(None, state)
         return state
+
+    def test_prepare_defers_estimator_until_after_plan(self):
+        controller = self._build_controller([1.0])
+        prepared = controller._prepare_rollout_items([[self._state()]], rollout_idx=0)
+        self.assertEqual(controller.advantage_estimator.calls, [])
+        self.assertNotIn("advantages", prepared)
+        self.assertEqual(controller._prepare_advantages(prepared, {"dp_plans": {}, "plan_log": {}}), [1.0])
+        self.assertEqual(len(controller.advantage_estimator.calls), 1)
 
     def test_returns_items_with_per_sample_advantages(self):
         # controller 只做调度准备：states 原样透传，advantage 逐样本对齐，不构造训练张量。
@@ -574,7 +578,7 @@ class TestPrepareRolloutItems(unittest.TestCase):
         controller = self._build_controller([1.0])
         state = self._state(write_meta=False)
 
-        with self.assertRaisesRegex(ValueError, "write_train_meta"):
+        with self.assertRaisesRegex(ValueError, "canonicalization"):
             self._prepare(controller, [[state]])
 
     def test_use_3d_position_ids_follows_batch_meta(self):

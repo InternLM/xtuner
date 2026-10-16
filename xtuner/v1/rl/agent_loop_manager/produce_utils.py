@@ -17,8 +17,6 @@ from xtuner.v1.data_proto.rl_data import (
     Status,
     calculate_group_effective_response_masks,
     get_group_status,
-    validate_response_model_steps,
-    validate_train_fields,
 )
 from xtuner.v1.rl.agent_loop import AgentLoopSpec
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
@@ -32,6 +30,7 @@ from xtuner.v1.rl.utils import (
 from xtuner.v1.utils import get_logger
 
 from .sampler import Sampler
+from .validation import validate_rollout_group
 
 
 if TYPE_CHECKING:
@@ -153,15 +152,14 @@ class BaseProduceContext:
                 enable_partial_rollout=enable_partial_rollout,
             )
         elapsed = time.perf_counter() - start
-        for item in result:
-            extra_fields = getattr(item, "extra_fields", None)
-            if extra_fields is None:
-                extra_fields = {}
-                setattr(item, "extra_fields", extra_fields)
-            extra_fields[GROUP_GENERATE_TIME_KEY] = elapsed
+        if isinstance(result, list):
+            for item in result:
+                if isinstance(item, RolloutState):
+                    item.extra_fields[GROUP_GENERATE_TIME_KEY] = elapsed
         return result
 
     async def put_generated_group(self, group: list[RolloutState]) -> bool:
+        validate_rollout_group(group, task_name=self.task_name)
         produced_tokens = sum(len(item.response_ids or []) - len(item.response_model_steps or []) for item in group)
         initial_status = get_group_status(group)
 
@@ -589,15 +587,14 @@ async def take_train_batch(
     current_train_step: int,
     pause_time_s: float = 0.0,
 ) -> ProduceBatchResult:
+    """Take rollout results and apply the existing per-task token-staleness
+    masks."""
     batch_by_task, consumed_counts = await replay_buffer.take_batch(task_batch_sizes)
-
-    # Validate before any mask calculation, including batches with staleness disabled.
-    # Custom generate_group implementations may bypass AgentLoop canonicalization.
+    # Use the existing task field to retain attribution through sorting/debug saves.
     for task_name, groups in batch_by_task.items():
         for group in groups:
-            for item in group:
-                validate_train_fields(item, task_name=task_name)
-                validate_response_model_steps(item, task_name=task_name)
+            for state in group:
+                state.task_name = task_name
 
     for task in task_runners:
         if task.token_stale_threshold is None:

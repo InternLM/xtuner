@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, Sequence, TypedDict, cast
 
 import ray
 import torch
@@ -28,7 +28,7 @@ class _DPRankDispatch(TypedDict):
     ``fit``."""
 
     plan: DPRankPackIndices
-    advantages: list[float]
+    advantages: list[float | list[float]]
     rollout_items: list[RolloutState]
 
 
@@ -47,11 +47,19 @@ class _PackPlan(TypedDict):
     plan_log: dict[str, float]
 
 
+class _GroupRewardInfo(TypedDict):
+    """Reward clusters and sample mapping for one original rollout group."""
+
+    rewards: list[float]
+    representatives: list[RolloutState]
+    cluster_indices: list[int | None]
+
+
 class _PreparedBatch(TypedDict):
     """Outputs of ``_prepare_rollout_items`` consumed by the fit phases."""
 
     rollout_items: list[RolloutState]
-    advantages: list[float]
+    reward_groups: list[_GroupRewardInfo]
     batch_attr: TrainBatchAttr
     cluster_rewards: list[float]
     distillation_reward_observations: list[tuple[RolloutState, float]]
@@ -168,11 +176,22 @@ class TrainingController:
             return [float(cluster_advantages[index].item()) if index is not None else 0.0 for index in cluster_indices]
         return [0.0] * len(cluster_indices)
 
+    def _prepare_advantages(self, prepared: _PreparedBatch, pack_plan: _PackPlan) -> list[float] | list[list[float]]:
+        """Prepare targets after packing indices are fixed, without changing
+        sample order or placing targets inside the plan."""
+        advantages: list[float] = []
+        for group in prepared["reward_groups"]:
+            advantages.extend(
+                self._compute_group_advantages(group["rewards"], group["representatives"], group["cluster_indices"])
+            )
+        return advantages
+
     def _build_trainer_log_info(
         self,
         prepared: _PreparedBatch,
         pack_plan: _PackPlan,
         log_infos: list[WorkerLogItem],
+        advantages: Sequence[float | list[float]],
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
     ) -> dict[str, float]:
@@ -186,6 +205,7 @@ class TrainingController:
             prepared (_PreparedBatch): Output of ``_prepare_rollout_items``.
             pack_plan (_PackPlan): Output of ``_build_pack_plan``.
             log_infos (list[WorkerLogItem]): Per-worker training logs of the batch.
+            advantages: Final scalar or token advantages in global sample order.
             raw_rewards_sum (float): Producer-side raw reward sum used by ``raw_rewards/mean``.
             raw_rewards_count (int): Producer-side raw reward count used by ``raw_rewards/mean``.
 
@@ -197,11 +217,16 @@ class TrainingController:
         response_len_list: list[float] = []
         tool_turns_list: list[int] = []
         training_tokens = 0
-        for state, advantage in zip(prepared["rollout_items"], prepared["advantages"]):
+        for state, advantage in zip(prepared["rollout_items"], advantages):
             # Advantage metrics count one entry per supervised position, matching the
             # per-position advantage layout built by the worker conversion.
             supervised_positions = int(state.extra_fields["supervised_tokens"])
-            advantages_list.extend([advantage] * supervised_positions)
+            if isinstance(advantage, list):
+                labels = state.labels
+                assert labels is not None
+                advantages_list.extend(value for value, label in zip(advantage, labels[1:]) if label != -100)
+            else:
+                advantages_list.extend([advantage] * supervised_positions)
             prompt_len_list.append(int(state.extra_fields["train_prompt_length"]))
             response_len_list.append(supervised_positions)
             turns = state.extra_fields.get("agent_tool_turns")
@@ -257,12 +282,11 @@ class TrainingController:
         return info_dict
 
     def _prepare_rollout_items(self, rollout_groups: list[list[RolloutState]], rollout_idx: int) -> _PreparedBatch:
-        """Cluster rewards, estimate advantages and validate the train meta
-        fields without building training tensors.
+        """Flatten samples and retain reward/group mappings without estimating
+        advantages or building training tensors.
 
         Groups arrive pre-filtered: the replay buffer selects by ``Status.COMPLETED``
-        and sample alignment is guaranteed by ``canonicalize_train_fields`` on the
-        rollout side, so no group-level validation happens here; missing train meta
+        and sample alignment is guaranteed by the trainer entry check, so no group-level validation happens here; missing train meta
         fields still fail fast.
 
         Args:
@@ -270,14 +294,14 @@ class TrainingController:
             rollout_idx (int): Global rollout (train step) id written into ``batch_attr``.
 
         Returns:
-            _PreparedBatch: Flat rollout items in training order with aligned
-            advantages, reward clusters for the step statistics, and the batch-level
+            _PreparedBatch: Flat rollout items in training order with original
+            reward/group mappings, reward clusters for statistics, and the batch-level
             ``TrainBatchAttr`` derived in the same single pass over the states.
         """
         cluster_rewards_list: list[float] = []
         distillation_reward_observations: list[tuple[RolloutState, float]] = []
         rollout_items: list[RolloutState] = []
-        advantages: list[float] = []
+        reward_groups: list[_GroupRewardInfo] = []
         use_3d_position_ids = False
         has_rollout_logprobs = False
         has_routed_experts = False
@@ -288,17 +312,19 @@ class TrainingController:
             cluster_rewards_list.extend(cluster_rewards)
             distillation_reward_observations.extend(zip(session_representatives, cluster_rewards))
 
-            # Phase 2: group-level advantage estimation scattered back to members.
-            sample_advantages = self._compute_group_advantages(
-                cluster_rewards, session_representatives, cluster_indices
+            reward_groups.append(
+                {
+                    "rewards": cluster_rewards,
+                    "representatives": session_representatives,
+                    "cluster_indices": cluster_indices,
+                }
             )
-            for state, advantage in zip(group, sample_advantages):
+            for state in group:
                 rollout_items.append(state)
-                advantages.append(advantage)
                 use_3d_position_ids = use_3d_position_ids or _state_uses_3d_position_ids(state)
                 has_rollout_logprobs = has_rollout_logprobs or _state_has_rollout_logprobs(state)
                 has_routed_experts = has_routed_experts or _state_has_routed_experts(state)
-                # 只读 AgentLoop 规范化时写入的轻量 meta 字段（write_train_meta），不触碰
+                # 只读 AgentLoop 规范化时写入的轻量 meta 字段（AgentLoop canonicalization），不触碰
                 # input_ids/labels 等重载荷；meta 缺失说明样本未过 canonicalize，直接 fail fast。
                 if (
                     state.extra_fields.get("supervised_tokens") is None
@@ -306,13 +332,13 @@ class TrainingController:
                     or state.num_tokens is None
                 ):
                     raise ValueError(
-                        "Rollout state is missing the train meta fields written by write_train_meta: "
+                        "Rollout state is missing the train meta fields written by AgentLoop canonicalization: "
                         f"rollout_id={state.rollout_id}"
                     )
 
         return {
             "rollout_items": rollout_items,
-            "advantages": advantages,
+            "reward_groups": reward_groups,
             "batch_attr": {
                 "rollout_idx": rollout_idx,
                 "use_3d_position_ids": use_3d_position_ids,
@@ -348,7 +374,7 @@ class TrainingController:
         real_tokens = 0
         for state in rollout_items:
             assert state.num_tokens is not None, (
-                f"Rollout state is missing num_tokens written by write_train_meta: rollout_id={state.rollout_id}"
+                f"Rollout state is missing num_tokens written by AgentLoop canonicalization: rollout_id={state.rollout_id}"
             )
             lengths.append(state.num_tokens)
             real_tokens += state.num_tokens
@@ -359,6 +385,7 @@ class TrainingController:
             optimizer_steps=worker_cfg.optimizer_steps,
             pack_strategy=worker_cfg.pack_strategy,
             pack_seed=worker_cfg.pack_seed,
+            pack_extra_buffer_size=worker_cfg.pack_extra_buffer_size,
         )
         packed_plan, padding_tokens = data_packer.pack(lengths)
 
@@ -385,13 +412,19 @@ class TrainingController:
     def _build_dispatches(
         self,
         rollout_items: list[RolloutState],
-        advantages: list[float],
+        advantages: Sequence[float | list[float]],
         pack_plan: _PackPlan,
     ) -> dict[int, _DPRankDispatch]:
         """Attach states and training targets to an already fixed sample
         mapping."""
         if len(rollout_items) != len(advantages):
             raise ValueError(f"rollout_items and advantages lengths differ: {len(rollout_items)} vs {len(advantages)}")
+        for state, advantage in zip(rollout_items, advantages):
+            if isinstance(advantage, list) and len(advantage) != state.num_tokens:
+                raise ValueError(
+                    f"Token advantage length mismatch for rollout_id={state.rollout_id}: "
+                    f"{len(advantage)} vs num_tokens={state.num_tokens}"
+                )
         return {
             dp_rank: {
                 "plan": dp_plan["plan"],
@@ -418,13 +451,14 @@ class TrainingController:
         data_replicate_size = ray.get(self.workers[0].get_data_replicate_size.remote())  # type: ignore[attr-defined]
 
         pack_plan = self._build_pack_plan(rollout_items, pack_max_length, worker_cfg, data_replicate_size)
-        dp_dispatches = self._build_dispatches(rollout_items, prepared["advantages"], pack_plan)
 
         # Pixel-value object refs must stay alive until every worker has consumed the
         # dispatch, so the finally clause releases them on both the success and the
         # failure path.
         handles: list[ray.ObjectRef] = []
         try:
+            advantages = self._prepare_advantages(prepared, pack_plan)
+            dp_dispatches = self._build_dispatches(rollout_items, advantages, pack_plan)
             for worker_idx, worker in enumerate(self.workers):
                 dp_rank = worker_idx // data_replicate_size
                 dp_dispatch = dp_dispatches[dp_rank]
@@ -454,6 +488,7 @@ class TrainingController:
             prepared,
             pack_plan,
             log_infos,
+            advantages,
             raw_rewards_sum=raw_rewards_sum,
             raw_rewards_count=raw_rewards_count,
         )

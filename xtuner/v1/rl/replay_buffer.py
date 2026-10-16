@@ -18,7 +18,6 @@ from xtuner.v1.data_proto.rl_data import (
     refresh_seq_staleness,
     reset_rollout_response,
     update_sample_version,
-    validate_response_model_steps,
 )
 from xtuner.v1.rl.rollout.trace_store import release_and_discard_rollout_groups
 from xtuner.v1.rl.utils import (
@@ -521,8 +520,6 @@ class ReplayBuffer:
         if model_step is not None:
             for item in items:
                 update_sample_version(item, model_step)
-        for item in items:
-            validate_response_model_steps(item, task_name=task_name)
         status = self._apply_staleness_lifecycle(
             items,
             current_train_step=current_train_step,
