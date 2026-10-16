@@ -22,6 +22,15 @@ from xtuner.v1.data_proto.messages.glm53_chat import glm53_tokenize_fn_slowspeed
 GLM_5_3_FLASH_PATH = os.environ["GLM_5_3_FLASH_PATH"]
 GLM53_TEMPLATE_DEFAULTS = {"enable_thinking": True, "reasoning_effort": "max", "clear_thinking": False}
 
+_TOOLS = [
+    {"type": "function", "function": {"name": "a", "parameters": {"type": "object"}}},
+    {"type": "function", "function": {"name": "b", "parameters": {"type": "object"}}},
+]
+_TOOL_CALLS = [
+    {"function": {"arguments": {}, "name": "a"}, "id": "a", "type": "function"},
+    {"function": {"arguments": {}, "name": "b"}, "id": "b", "type": "function"},
+]
+
 _CONTRACT_CASES = {
     # content 列表混排纯字符串与 text 字典（jinja 均按文本渲染）。
     "text_content_parts": {
@@ -46,6 +55,111 @@ _CONTRACT_CASES = {
             {"role": "assistant", "content": "first"},
             {"role": "assistant", "content": "second"},
         ]
+    },
+    # 分散 tool 结果按 tool_calls 顺序重排。
+    "tool_results_reversed": {
+        "messages": [
+            {"role": "user", "content": "USER_INPUT"},
+            {"role": "assistant", "content": "", "tool_calls": _TOOL_CALLS},
+            {"role": "tool", "content": "B", "tool_call_id": "b"},
+            {"role": "tool", "content": "A", "tool_call_id": "a"},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ],
+        "tools": _TOOLS,
+    },
+    # 单条 tool 消息聚合多个 output 时同样按调用序重排。
+    "tool_aggregate_reversed": {
+        "messages": [
+            {"role": "assistant", "content": "", "tool_calls": _TOOL_CALLS},
+            {"role": "tool", "content": [{"id": "b", "output": "B"}, {"id": "a", "output": "A"}]},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ],
+        "tools": _TOOLS,
+    },
+}
+
+# can_sort 前提被破坏时，官方模板回退为消息顺序；这些样例与上面的排序样例互为对照。
+_FALLBACK_CASES = {
+    "dup_result_id": {
+        "messages": [
+            {"role": "assistant", "content": "", "tool_calls": _TOOL_CALLS},
+            {"role": "tool", "content": "B", "tool_call_id": "a"},
+            {"role": "tool", "content": "A", "tool_call_id": "a"},
+            {"role": "assistant", "content": "done"},
+        ],
+        "tools": _TOOLS,
+    },
+    "unmatched_result_id": {
+        "messages": [
+            {"role": "assistant", "content": "", "tool_calls": _TOOL_CALLS},
+            {"role": "tool", "content": "B", "tool_call_id": "b"},
+            {"role": "tool", "content": "X", "tool_call_id": "zzz"},
+            {"role": "assistant", "content": "done"},
+        ],
+        "tools": _TOOLS,
+    },
+    "no_preceding_tool_calls": {
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "tool", "content": "B", "tool_call_id": "b"},
+            {"role": "tool", "content": "A", "tool_call_id": "a"},
+            {"role": "assistant", "content": "done"},
+        ],
+        "tools": _TOOLS,
+    },
+}
+
+# 块内携带媒体时 XTuner 有意不启用 can_sort 重排（见 glm53_chat 模块 docstring 第 4 条）；
+# id 均满足 can_sort，纯文本对照见 _CONTRACT_CASES 的 tool_results_reversed / tool_aggregate_reversed。
+_MEDIA_BLOCK_CASES = {
+    "tool_results_media_reversed": {
+        "messages": [
+            {"role": "assistant", "content": "", "tool_calls": _TOOL_CALLS},
+            {
+                "role": "tool",
+                "tool_call_id": "b",
+                "content": [
+                    {"type": "text", "text": "RESULT_B"},
+                    {"type": "image_url", "image_url": {"url": "IMG_B"}},
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "a",
+                "content": [
+                    {"type": "text", "text": "RESULT_A"},
+                    {"type": "image_url", "image_url": {"url": "IMG_A"}},
+                ],
+            },
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ],
+        "tools": _TOOLS,
+    },
+    "tool_aggregate_media_reversed": {
+        "messages": [
+            {"role": "assistant", "content": "", "tool_calls": _TOOL_CALLS},
+            {
+                "role": "tool",
+                "content": [
+                    {
+                        "id": "b",
+                        "output": [
+                            {"type": "text", "text": "RESULT_B"},
+                            {"type": "image_url", "image_url": {"url": "IMG_B"}},
+                        ],
+                    },
+                    {
+                        "id": "a",
+                        "output": [
+                            {"type": "text", "text": "RESULT_A"},
+                            {"type": "image_url", "image_url": {"url": "IMG_A"}},
+                        ],
+                    },
+                ],
+            },
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ],
+        "tools": _TOOLS,
     },
 }
 
@@ -222,3 +336,45 @@ class TestGlm53OfficialTemplateContract:
             assert tokenized["labels"][boundary_index] == boundary_id
         else:
             assert tokenized["labels"][boundary_index] == -100
+
+    @pytest.mark.parametrize("case_name", list(_FALLBACK_CASES))
+    def test_can_sort_fallback_keeps_message_order(self, tokenizer, case_name):
+        # 结果 id 缺失/重复/不匹配或没有前序 tool_calls 时，官方模板不排序，保持消息顺序。
+        case = _FALLBACK_CASES[case_name]
+        messages, tools = case["messages"], case.get("tools")
+
+        text, _ = render_glm53_chat(messages, tools=tools, **GLM53_TEMPLATE_DEFAULTS)
+        hf_rendered = _render_from_hf(tokenizer, messages, tools=tools)
+        assert text == hf_rendered + tokenizer.eos_token
+
+        tokenized = Glm53ChatMessages(messages=messages, tools=tools).tokenize(tokenizer)
+        slow_ids, slow_labels = glm53_tokenize_fn_slowspeed(tokenizer, messages, tools=tools)
+        assert tokenized["input_ids"] == slow_ids
+        assert tokenized["labels"] == slow_labels
+
+    @pytest.mark.parametrize("case_name", list(_MEDIA_BLOCK_CASES))
+    def test_media_block_keeps_message_order(self, tokenizer, case_name):
+        # 块内携带媒体时保持消息顺序：媒体 payload 与 marker 按位置配对（collector 按消息
+        # 顺序收集、_expand_marker 按出现顺序替换），重排会把图像换到别的 tool 结果上。
+        # 此处有意与官方 jinja 偏离——官方推理栈的媒体配对同样按位置
+        # （processing_utils.get_text_with_replacements），该组合在上游无自洽定义；
+        # 对官方渲染的断言固定其行为作为对照。
+        case = _MEDIA_BLOCK_CASES[case_name]
+        messages, tools = case["messages"], case.get("tools")
+
+        text, _ = render_glm53_chat(messages, tools=tools, **GLM53_TEMPLATE_DEFAULTS)
+        assert text.index("RESULT_B") < text.index("RESULT_A")
+
+        hf_rendered = _render_from_hf(tokenizer, messages, tools=tools)
+        assert hf_rendered.index("RESULT_A") < hf_rendered.index("RESULT_B")
+
+    def test_tool_results_are_never_supervised(self, tokenizer):
+        for case_name in ("tool_results_reversed", "tool_aggregate_reversed"):
+            case = _CONTRACT_CASES[case_name]
+            tokenized = Glm53ChatMessages(messages=case["messages"], tools=case["tools"]).tokenize(tokenizer)
+            response_id = tokenizer.convert_tokens_to_ids("<|observation|>")
+            start = tokenized["input_ids"].index(response_id)
+            end = tokenized["input_ids"].index(tokenizer.convert_tokens_to_ids("<|assistant|>"), start)
+            # start 处的 <|observation|> 是前一条 assistant 的停止目标（计入其 loss）；
+            # 其后的 tool 结果内容完全不监督。
+            assert all(label == -100 for label in tokenized["labels"][start + 1 : end])

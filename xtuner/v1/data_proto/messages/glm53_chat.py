@@ -18,7 +18,17 @@ in the official ``chat_template.jinja``:
    does not remove the reasoning-effort header or close the generation-time ``<think>`` prefix.
    Because the flag has no effect, ``False`` is rejected with an ``AssertionError`` instead of
    being silently ignored.
-4. ``<|endoftext|>`` is appended only after the FINAL assistant message (the training stop
+4. A contiguous block of tool messages is rendered in the preceding assistant's ``tool_calls``
+   order when the official template's can_sort rule holds (every result id is present, unique
+   within the block, and matches a unique tool_call id); otherwise the message order is kept.
+   A block containing media always keeps the message order: media payloads pair to markers
+   positionally (the data collector walks messages in order and
+   ``glm53_vl_tokenize_fn._expand_marker`` pairs the i-th payload with the i-th marker), so
+   reordering would silently swap payloads. The official template reorders media blocks too,
+   but the official inference stack pairs images to markers positionally as well
+   (``transformers.processing_utils.get_text_with_replacements``), so that combination is
+   ill-defined upstream rather than a behavior training must mirror.
+5. ``<|endoftext|>`` is appended only after the FINAL assistant message (the training stop
    suffix). The official template never emits EOS mid-conversation, so assistant→system and
    assistant→assistant boundaries get no extra token; only ``<|user|>``/``<|observation|>``
    act as supervised stop targets.
@@ -72,6 +82,88 @@ def _visible_text(content: Any) -> str:
                 text += _MEDIA_PLACEHOLDER[item_type]
         return text
     return str(content)
+
+
+def _id_of(obj: Mapping[str, Any]) -> Any:
+    return obj.get("tool_call_id") or obj.get("id")
+
+
+def _is_list_of_outputs(message: Mapping[str, Any]) -> bool:
+    content = message.get("content")
+    return (
+        isinstance(content, list) and len(content) > 0 and isinstance(content[0], Mapping) and "output" in content[0]
+    )
+
+
+def _contains_media(content: Any) -> bool:
+    """Media items anywhere in ``content``: top-level parts or nested ``{output: ...}`` entries."""
+    if isinstance(content, Mapping):
+        if content.get("type") in _MEDIA_PLACEHOLDER:
+            return True
+        return _contains_media(content.get("output"))
+    if isinstance(content, list):
+        return any(_contains_media(item) for item in content)
+    return False
+
+
+def _render_tool_block(messages: List[Dict[str, Any]], start: int, tools: Optional[List[Dict[str, Any]]]) -> str:
+    """Render the contiguous tool-message block starting at ``start``.
+
+    Results are emitted in the preceding assistant's ``tool_calls`` order when the official
+    template's can_sort rule holds: the block follows an assistant with tool_calls, every
+    result id is present, unique within the block, and matches a tool_call id, and the
+    tool_call ids themselves are present and unique. Any violation keeps the message order,
+    as does any block containing media: media payloads pair to markers positionally (the
+    collector walks messages in order), so reordering such a block would attach payloads to
+    the wrong markers.
+    """
+    end = start
+    while end + 1 < len(messages) and messages[end + 1].get("role") == "tool":
+        end += 1
+    block = messages[start : end + 1]
+
+    tool_calls = None
+    if start > 0 and messages[start - 1].get("role") == "assistant":
+        tool_calls = messages[start - 1].get("tool_calls") or None
+
+    can_sort = bool(tool_calls)
+    if can_sort:
+        result_ids: list[Any] = []
+        for message in block:
+            if _is_list_of_outputs(message):
+                result_ids.extend(_id_of(entry) for entry in message["content"])
+            else:
+                result_ids.append(_id_of(message))
+        call_ids = [_id_of(tool_call) for tool_call in tool_calls or []]
+        if (
+            any(not result_id for result_id in result_ids)
+            or len(set(result_ids)) != len(result_ids)
+            or any(not call_id for call_id in call_ids)
+            or len(set(call_ids)) != len(call_ids)
+            or any(result_id not in call_ids for result_id in result_ids)
+        ):
+            can_sort = False
+    if can_sort and any(_contains_media(message.get("content")) for message in block):
+        # 媒体 payload 与 marker 是位置式配对：collector 按 messages 顺序收集，
+        # glm53_vl_tokenize_fn._expand_marker 把第 i 个 payload 换给第 i 个 marker。
+        # 重排只改 marker 顺序，会把图像换到别的 tool 结果上，且占位符计数校验发现不了。
+        # 官方模板无视媒体照样重排，但官方推理栈的媒体配对同样按位置
+        # （transformers processing_utils.get_text_with_replacements），该组合在上游无自洽定义。
+        can_sort = False
+
+    if not can_sort:
+        return "".join(_render_tool_result(message.get("content", ""), tools) for message in block)
+
+    text = ""
+    for call_id in call_ids:
+        for message in block:
+            if _is_list_of_outputs(message):
+                for entry in message["content"]:
+                    if _id_of(entry) == call_id:
+                        text += f"<tool_response>{entry['output']}</tool_response>"
+            elif _id_of(message) == call_id:
+                text += _render_tool_result(message.get("content", ""), tools)
+    return text
 
 
 def render_glm53_chat(
@@ -146,7 +238,8 @@ def render_glm53_chat(
                     index > 0 and messages[index - 1].get("role") == "assistant" and previous_assistant_loss
                 )
                 append(_NEXT_ROLE_STOP_TOKENS[role], boundary_loss)
-            append(_render_tool_result(message.get("content", ""), tools), False)
+                append(_render_tool_block(messages, index, tools), False)
+            # 块内后续 tool 消息已由块起点统一渲染（含按 tool_calls 顺序的重排）。
 
     if add_generation_prompt:
         append("<|assistant|>", False)
