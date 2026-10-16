@@ -123,6 +123,8 @@ def _expand_marker(text: str, loss_mask: list[bool], marker: str, expansions: li
 
 
 class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
+    allow_all_roles = True
+
     def __init__(
         self,
         tokenizer,

@@ -18,6 +18,9 @@ TestGlm53NativeHFInputContract
 TestGlm53MixedMediaAndTruncation
     test_glm53_mixed_media_fails_fast               图文混合视频未支持，必须快速失败
     test_glm53_visual_truncation_is_dropped         截断会切断视觉跨度时 cache 阶段就丢弃
+TestGlm53MediaRoleContract
+    test_media_is_collected_from_all_roles           system/assistant/tool 角色的图片也会被收集
+    test_media_collection_preserves_input_order     媒体按原始消息顺序收集，与 HF 一致
 TestGlm53CacheInvalidation
     test_glm53_cache_invalidates_on_processor_or_pack_change  processor/pack 变化使缓存失效
     test_glm53_hash_covers_every_init_parameter  逐参数 hash 失效 + __init__ 参数分类完备性
@@ -37,7 +40,10 @@ from PIL import Image
 from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizerBase
 from transformers.video_utils import VideoMetadata
 from xtuner.v1.datasets.mllm_tokenize_fn import Glm53VLTokenizeFnConfig, Glm53VLTokenizeFunction
-from xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn import BaseMLLMTokenizeFunction
+from xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn import (
+    BaseMLLMTokenizeFunction,
+    collect_image_video_paths_and_extra,
+)
 from xtuner.v1.datasets.mllm_tokenize_fn.qwen3_vl_utils import sort_frames
 
 
@@ -431,6 +437,51 @@ class TestGlm53MixedMediaAndTruncation:
         short_fn.state = "runtime"
         with pytest.raises(AssertionError):
             short_fn(_image_item(image_fixture))
+
+
+class TestGlm53MediaRoleContract:
+    @pytest.mark.parametrize("role", ["system", "assistant", "tool"])
+    def test_media_is_collected_from_all_roles(self, tokenize_fn: Glm53VLTokenizeFunction, role: str) -> None:
+        image = {"type": "image", "image": {"url": "unused.jpg", "image_wh": [448, 448]}}
+        messages = [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a"},
+        ]
+        if role == "system":
+            messages.insert(0, {"role": "system", "content": [image, {"type": "text", "text": "policy"}]})
+        elif role == "assistant":
+            messages[1]["content"] = [image, {"type": "text", "text": "a"}]
+        else:
+            messages.insert(1, {"role": "tool", "content": [image], "tool_call_id": "t1"})
+
+        image_paths, video_paths, extra = collect_image_video_paths_and_extra(
+            messages, allow_all_roles=tokenize_fn.allow_all_roles
+        )
+
+        assert image_paths == ["unused.jpg"]
+        assert video_paths == []
+        assert extra["image_wh"] == [[448, 448]]
+
+    def test_media_collection_preserves_input_order(self, tokenize_fn: Glm53VLTokenizeFunction) -> None:
+        def image(url: str) -> dict:
+            return {"type": "image", "image": {"url": url, "image_wh": [448, 448]}}
+
+        messages = [
+            {"role": "system", "content": [image("system.jpg")]},
+            {"role": "user", "content": [image("user.jpg")]},
+            {
+                "role": "assistant",
+                "content": [image("assistant.jpg")],
+                "tool_calls": [{"id": "a"}, {"id": "b"}],
+            },
+            {"role": "tool", "content": [image("tool-b.jpg")], "tool_call_id": "b"},
+            {"role": "tool", "content": [image("tool-a.jpg")], "tool_call_id": "a"},
+        ]
+
+        image_paths, _, _ = collect_image_video_paths_and_extra(messages, allow_all_roles=tokenize_fn.allow_all_roles)
+
+        # HF apply_chat_template also collects media in input order before rendering the Jinja template.
+        assert image_paths == ["system.jpg", "user.jpg", "assistant.jpg", "tool-b.jpg", "tool-a.jpg"]
 
 
 class TestGlm53CacheInvalidation:
