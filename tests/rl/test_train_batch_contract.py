@@ -5,11 +5,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, Status, validate_rollout_group, validate_train_group
 from xtuner.v1.rl.agent_loop.agent_loop import AgentLoop
 from xtuner.v1.rl.agent_loop_manager.produce_utils import ProduceBatchResult, _TaskRunner, take_train_batch
 from xtuner.v1.rl.agent_loop_manager.producer import ProduceProgress
-from xtuner.v1.rl.agent_loop_manager.validation import validate_rollout_group, validate_train_group
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.train.rl_trainer import BaseRLTrainer
