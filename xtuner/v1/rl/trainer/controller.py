@@ -461,15 +461,17 @@ class TrainingController:
         try:
             advantages = self._prepare_advantages(prepared, pack_plan)
             dp_dispatches = self._build_dispatches(rollout_items, advantages, pack_plan)
+            # Nested in a list so Ray does not dereference it before TrainingWorker.fit
+            # explicitly fetches it; one DP rank's replicas share the ref.
+            item_refs_by_dp = {
+                dp_rank: [ray.put(dispatch["rollout_items"])] for dp_rank, dispatch in dp_dispatches.items()
+            }
             for worker_idx, worker in enumerate(self.workers):
                 dp_rank = worker_idx // data_replicate_size
                 dp_dispatch = dp_dispatches[dp_rank]
-                # Nested in a list so Ray does not dereference it before TrainingWorker.fit
-                # explicitly fetches it; one DP rank's replicas share the ref.
-                item_refs = [ray.put(dp_dispatch["rollout_items"])]
                 handles.append(
                     worker.fit.remote(  # type: ignore[attr-defined]
-                        rollout_item_refs=item_refs,
+                        rollout_item_refs=item_refs_by_dp[dp_rank],
                         advantages=dp_dispatch["advantages"],
                         pack_plan=dp_dispatch["plan"],
                         batch_attr=prepared["batch_attr"],
