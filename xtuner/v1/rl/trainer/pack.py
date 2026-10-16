@@ -6,6 +6,7 @@ from typing import Literal, TypeAlias
 import numpy as np
 import torch
 
+from xtuner.v1.datasets.packing import get_pack_chunk_infos, get_pack_infos_by_soft_split
 from xtuner.v1.datasets.sampler import get_length_grouped_indices
 from xtuner.v1.utils import XTUNER_DETERMINISTIC
 
@@ -38,23 +39,13 @@ def get_greedy_pack_infos(data_indices: Sequence[int], num_tokens: Sequence[int]
     if len(data_indices) != len(num_tokens):
         raise ValueError("data_indices and num_tokens must have the same length")
 
-    pack_infos: list[PackIndices] = []
-    current_indices: PackIndices = []
-    current_len = 0
-
-    for data_index, token_len in zip(data_indices, num_tokens):
-        if current_len + token_len <= target:
-            current_indices.append(int(data_index))
-            current_len += token_len
-        else:
-            if current_indices:
-                pack_infos.append(current_indices)
-            current_indices = [int(data_index)]
-            current_len = token_len
-
-    if current_indices:
-        pack_infos.append(current_indices)
-    return pack_infos
+    infos = get_pack_infos_by_soft_split(
+        inds=list(range(len(data_indices))),
+        dataset_id=0,
+        num_tokens=np.asarray(num_tokens),
+        pack_max_length=target,
+    )
+    return [[int(data_indices[position]) for position in info["indices"]] for info in infos]
 
 
 class RLDataPacker:
@@ -70,15 +61,18 @@ class RLDataPacker:
         world_size (int): Total number of training workers.
         data_replicate_size (int): Number of workers holding one data replica.
         optimizer_steps (int): Configured optimizer steps per training iteration.
-        pack_strategy (Literal["greedy", "balance", "native"]): Packing
-            strategy. ``greedy`` reproduces main's sequential greedy pack,
-            interleaved DP allocation and optimizer-step grouping; ``balance``
-            length-groups samples before partitioning; ``native`` splits samples evenly
-            across DP ranks before packing. Defaults to "greedy".
+        pack_strategy (Literal["legacy", "greedy", "balance", "native"]): Packing
+            strategy. ``legacy`` reproduces main's sequential greedy pack,
+            interleaved DP allocation and optimizer-step grouping; ``greedy`` fills
+            spare capacity from a candidate buffer; ``balance`` length-groups samples
+            before partitioning; ``native`` splits samples evenly
+            across DP ranks before packing. Defaults to "legacy".
+        pack_extra_buffer_size (int): Candidate buffer used by greedy gap filling.
+            Zero disables gap filling. Defaults to 1000.
         pack_seed (int | None): Seed for randomized strategies such as ``balance``.
             Defaults to None.
 
-    Ordering is a per-strategy decision: ``greedy`` shuffles the visit
+    Ordering is a per-strategy decision: ``legacy`` and ``greedy`` shuffle the visit
     order before packing unless ``XTUNER_DETERMINISTIC`` is set, ``balance`` performs
     its own seeded length grouping, and ``native`` keeps the input order.
     """
@@ -89,17 +83,22 @@ class RLDataPacker:
         world_size: int,
         data_replicate_size: int,
         optimizer_steps: int,
-        pack_strategy: Literal["greedy", "balance", "native"] = "greedy",
+        pack_strategy: Literal["legacy", "greedy", "balance", "native"] = "legacy",
         pack_seed: int | None = None,
+        pack_extra_buffer_size: int = 1000,
     ):
         self.pack_max_length = pack_max_length
         self.world_size = world_size
         self.data_replicate_size = data_replicate_size
         self.optimizer_steps = optimizer_steps
         self.dp_size = self.world_size // self.data_replicate_size
+        if pack_extra_buffer_size < 0:
+            raise ValueError("pack_extra_buffer_size must be non-negative")
+        self.pack_extra_buffer_size = pack_extra_buffer_size
         self.pack_seed = pack_seed
         self.split_size = 1024
         strategy_map = {
+            "legacy": self._legacy_pack,
             "greedy": self._greedy_pack,
             "balance": self._balance_pack,
             "native": self._native_pack,
@@ -135,15 +134,47 @@ class RLDataPacker:
         padding_tokens = self._count_padding_tokens(packed_data_indices, data_lengths)
         return packed_data_indices, padding_tokens
 
-    def _greedy_pack(
-        self,
-        data_indices: list[int],
-        data_lengths: Sequence[int],
-    ) -> PackedDataIndices:
+    def _legacy_pack(self, data_indices: list[int], data_lengths: Sequence[int]) -> PackedDataIndices:
         if not XTUNER_DETERMINISTIC:
             random.shuffle(data_indices)
         visit_lengths = [data_lengths[index] for index in data_indices]
         total_pack_indices = get_greedy_pack_infos(data_indices, visit_lengths, self.pack_max_length)
+        # Interleaved DP allocation over a DP-multiple pack list, then per-rank
+        # sequential optimizer-step grouping: this is the exact schedule the previous
+        # controller + `iters_per_step` worker regrouping produced.
+        pad_num = math.ceil(len(total_pack_indices) / self.dp_size) * self.dp_size - len(total_pack_indices)
+        total_pack_indices.extend([[] for _ in range(pad_num)])
+
+        packs_per_dp = len(total_pack_indices) // self.dp_size
+        iters_per_step = max(1, math.ceil(packs_per_dp / self.optimizer_steps))
+        actual_optimizer_steps = math.ceil(packs_per_dp / iters_per_step)
+
+        packed_data_indices: PackedDataIndices = []
+        for dp_rank in range(self.dp_size):
+            dp_pack_indices = total_pack_indices[dp_rank :: self.dp_size]
+            packed_data_indices.append(
+                [
+                    dp_pack_indices[step * iters_per_step : (step + 1) * iters_per_step]
+                    for step in range(actual_optimizer_steps)
+                ]
+            )
+        return packed_data_indices
+
+    def _greedy_pack(self, data_indices: list[int], data_lengths: Sequence[int]) -> PackedDataIndices:
+        if not XTUNER_DETERMINISTIC:
+            random.shuffle(data_indices)
+        visit_lengths = [data_lengths[index] for index in data_indices]
+        lengths = np.asarray(visit_lengths)
+        infos = get_pack_chunk_infos(
+            # SFT consumes this list from its tail; reverse a private position list.
+            inds=list(reversed(range(len(data_indices)))),
+            dataset_id=0,
+            target=self.pack_max_length,
+            pack_extra_buffer_size=self.pack_extra_buffer_size,
+            num_tokens=lengths,
+            proxy_attn_flops=lengths,
+        )
+        total_pack_indices = [[data_indices[position] for position in info["indices"]] for info in infos]
         # Interleaved DP allocation over a DP-multiple pack list, then per-rank
         # sequential optimizer-step grouping: this is the exact schedule the previous
         # controller + `iters_per_step` worker regrouping produced.

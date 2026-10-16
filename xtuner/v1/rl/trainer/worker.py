@@ -26,7 +26,7 @@ import ray
 import torch
 import torch.distributed as dist
 from mmengine.runner import set_random_seed
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from ray.actor import ActorClass, ActorProxy
 from torch.distributed.device_mesh import init_device_mesh
 from typing_extensions import NotRequired
@@ -207,10 +207,12 @@ class WorkerConfig(BaseModel):
             updated weights to rollout workers. Defaults to 0.5.
         seed (int | None): Training worker random seed. When None, the RL
             trainer seed is used. Defaults to None.
-        pack_strategy (Literal["greedy", "balance", "native"]): Index-only
-            packing strategy used by the controller-side packer. ``greedy`` exactly
+        pack_strategy (Literal["legacy", "greedy", "balance", "native"]): Index-only
+            packing strategy used by the controller-side packer. ``legacy`` exactly
             reproduces the previous greedy pack, interleaved DP allocation and
-            optimizer-step grouping. Defaults to "greedy".
+            optimizer-step grouping. Defaults to "legacy".
+        pack_extra_buffer_size (int): Candidate buffer used by greedy chunk packing;
+            zero disables gap filling. Defaults to 1000.
         pack_seed (int | None): Random seed for length-grouped packing strategies such
             as "balance". Defaults to None.
         offload_rollout_routed_experts (bool): Keep rollout routed experts on
@@ -252,7 +254,8 @@ class WorkerConfig(BaseModel):
     log_dir: str | Path | None = None
     update_weight_bucket_size_in_gb: float = 0.5  # 512MB
     seed: None | int = None  # if None, use RLTrainer seed
-    pack_strategy: Literal["greedy", "balance", "native"] = "greedy"
+    pack_strategy: Literal["legacy", "greedy", "balance", "native"] = "legacy"
+    pack_extra_buffer_size: int = Field(default=1000, ge=0)
     pack_seed: int | None = None
     distillation_config: DistillationConfig | None = None
     profile_step: list[int] | int | None = None  # 1-based global RL train_step ids to profile.
@@ -301,7 +304,7 @@ class WorkerConfig(BaseModel):
 
 class TrainBatchAttr(TypedDict):
     """Attributes of one training batch, derived once by the controller from
-    the ``write_train_meta`` fields of its rollout states.
+    the lightweight metadata written by AgentLoop canonicalization.
 
     The controller scans the batch meta and passes this single structure across the
     Ray boundary so workers materialize packs uniformly: cross-rank collectives stay
@@ -321,6 +324,14 @@ class TrainBatchAttr(TypedDict):
     use_3d_position_ids: bool
     pack_loss_keys: list[str]
     has_routed_experts: bool
+
+
+class _TrainItem(TypedDict):
+    """CPU sample input and loss tensors, before any training context is
+    built."""
+
+    seq_ctx: SequenceContext
+    loss_inputs: dict[str, torch.Tensor | None]
 
 
 class WorkerTrainLogItem(TypedDict, total=False):
@@ -757,9 +768,15 @@ class TrainingWorker(SingleAcceleratorWorker):
     def _convert_rollout_items_to_train_items(
         self,
         rollout_items: list[RolloutState],
-        advantages: list[float],
+        advantages: Sequence[float | list[float]],
         batch_attr: TrainBatchAttr,
-    ) -> list[tuple[SequenceContext, BaseRLLossContext]]:
+    ) -> list[_TrainItem]:
+        """Convert unshifted states into CPU items in unchanged sample order.
+
+        Apply input_ids[:-1], labels[1:] and logprobs[1:] once. Broadcast scalar advantages or use aligned token
+        targets; mask unsupervised positions. Prepare position, multimodal and teacher inputs without building a loss
+        context or applying the plan. Final pack contexts are built by packing.
+        """
         return [
             self._convert_one_rollout_state(state, advantage, batch_attr["use_3d_position_ids"])
             for state, advantage in zip(rollout_items, advantages)
@@ -768,15 +785,11 @@ class TrainingWorker(SingleAcceleratorWorker):
     def _convert_one_rollout_state(
         self,
         state: RolloutState,
-        advantage_val: float,
+        advantage_val: float | list[float],
         use_3d_position_ids: bool,
-    ) -> tuple[SequenceContext, BaseRLLossContext]:
-        input_ids = state.input_ids
-        labels = state.labels
-        assert input_ids is not None and labels is not None and len(input_ids) == len(labels), (
-            f"Rollout state is not canonicalized for training: {state}"
-        )
-        input_len = len(input_ids)
+    ) -> _TrainItem:
+        input_ids = cast(list[int], state.input_ids)
+        labels = cast(list[int], state.labels)
         shifted_labels = labels[1:]
 
         input_ids_t = cast(torch.LongTensor, torch.tensor(input_ids[:-1], dtype=torch.int64).unsqueeze(0))
@@ -784,19 +797,18 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         rollout_logprobs: torch.Tensor | None = None
         if state.logprobs is not None:
-            assert len(state.logprobs) == input_len, f"{len(state.logprobs)} vs {input_len}, data: {state}"
             rollout_logprobs = torch.tensor(state.logprobs[1:], dtype=torch.float32).unsqueeze(0)
-            assert rollout_logprobs.size() == shifted_labels_t.size(), (
-                f"{rollout_logprobs.size()} vs {shifted_labels_t.size()}"
-            )
 
-        # Keep the advantage layout aligned with input_ids (response excludes EOS).
-        # Prompt positions predict prompt tokens whose shifted labels are -100, so their
-        # advantage is 0; the last entry of response_ids (EOS) is only a label, never an input.
-        advantages = torch.tensor(
-            [[0.0 if label == -100 else advantage_val for label in shifted_labels]],
-            dtype=torch.float32,
-        )
+        if isinstance(advantage_val, list):
+            if len(advantage_val) != len(shifted_labels):
+                raise ValueError(
+                    f"Token advantage length mismatch for rollout_id={state.rollout_id}: "
+                    f"{len(advantage_val)} vs shifted_labels={len(shifted_labels)}"
+                )
+            token_advantages = [value if label != -100 else 0.0 for value, label in zip(advantage_val, shifted_labels)]
+        else:
+            token_advantages = [advantage_val if label != -100 else 0.0 for label in shifted_labels]
+        advantages = torch.tensor([token_advantages], dtype=torch.float32)
 
         position_ids = state.position_ids
         if use_3d_position_ids and (position_ids is None or position_ids.ndim != 3):
@@ -817,18 +829,13 @@ class TrainingWorker(SingleAcceleratorWorker):
         }
         loss_inputs.update(self._distillation.rollout_teacher_targets(state, shifted_labels=shifted_labels))
 
-        # Build the per-item loss context on CPU with everything convertible at this
-        # stage (shifted_labels / advantages / rollout_logprobs / teacher targets);
-        # packing concatenates the loss_kwargs tensors and `_fit` does the device transfer.
-        loss_ctx = self.config.loss_cfg.build(data=loss_inputs, device="cpu")
-        assert loss_ctx is not None
-        return seq_ctx, loss_ctx
+        return {"seq_ctx": seq_ctx, "loss_inputs": loss_inputs}
 
     @ray_method
     def fit(
         self,
         rollout_item_refs: list[ray.ObjectRef],
-        advantages: list[float],
+        advantages: Sequence[float | list[float]],
         pack_plan: DPRankPackIndices,
         batch_attr: TrainBatchAttr,
     ) -> WorkerLogItem:
@@ -838,7 +845,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             rollout_item_refs (list[ray.ObjectRef]): Nested per-DP object refs; element
                 zero wraps this DP rank's ``RolloutState`` list and is shared by all
                 data replicas of the rank.
-            advantages (list[float]): Scalar advantage per rollout state, aligned with
+            advantages: Scalar or shifted-token advantages per rollout state, aligned with
                 the dereferenced state list.
             pack_plan (DPRankPackIndices): Local ``[optimizer_step][pack][sample]`` plan
                 whose indices address the dereferenced state list.
@@ -868,10 +875,17 @@ class TrainingWorker(SingleAcceleratorWorker):
 
     def _pack_train_items(
         self,
-        items: list[tuple[SequenceContext, BaseRLLossContext]],
+        items: list[_TrainItem],
         plan: DPRankPackIndices,
         batch_attr: TrainBatchAttr,
     ) -> list[list[tuple[SequenceContext, BaseRLLossContext]]]:
+        """Materialize local [optimizer_step][pack][sample_index] plans on CPU.
+
+        Indices address items. Concatenate and pad sequence/loss tensors to pack_max_length, including empty all-
+        padding packs. Batch and teacher configuration define required extra fields on every pack. Build one loss
+        context per final pack; do not shift again or recompute advantages. Return [optimizer_step][pack]
+        (SequenceContext, loss context) pairs. Device transfer and SP splitting happen later in _fit.
+        """
         template_keys = list(batch_attr["pack_loss_keys"])
         for key in self._configured_teacher_loss_keys():
             if key not in template_keys:
@@ -907,27 +921,31 @@ class TrainingWorker(SingleAcceleratorWorker):
 
     def _pack_one_batch(
         self,
-        pack_items: list[tuple[SequenceContext, BaseRLLossContext]],
+        pack_items: list[_TrainItem],
         template_keys: list[str],
         use_3d_position_ids: bool,
         has_routed_experts: bool,
     ) -> tuple[SequenceContext, BaseRLLossContext]:
         real_tokens = 0
-        for seq_ctx, _ in pack_items:
-            input_ids = seq_ctx.input_ids
+        for item in pack_items:
+            input_ids = item["seq_ctx"].input_ids
             assert input_ids is not None, "Packed seq_ctx.input_ids must not be None"
             real_tokens += input_ids.shape[1]
         padding_len = self.config.pack_max_length - real_tokens
         assert padding_len >= 0, f"Pack tokens {real_tokens} exceed pack_max_length {self.config.pack_max_length}"
 
         if pack_items:
-            loss_kwargs_list = [loss_ctx.loss_kwargs for _, loss_ctx in pack_items]
+            loss_inputs_list = [item["loss_inputs"] for item in pack_items]
             loss_inputs: dict[str, torch.Tensor | None] = {
-                "shifted_labels": torch.cat([kwargs.shifted_labels for kwargs in loss_kwargs_list], dim=1),
-                "advantages": torch.cat([kwargs.advantages for kwargs in loss_kwargs_list], dim=1),
+                "shifted_labels": torch.cat(
+                    [cast(torch.Tensor, inputs["shifted_labels"]) for inputs in loss_inputs_list], dim=1
+                ),
+                "advantages": torch.cat(
+                    [cast(torch.Tensor, inputs["advantages"]) for inputs in loss_inputs_list], dim=1
+                ),
             }
             for key in template_keys:
-                values = [getattr(kwargs, key, None) for kwargs in loss_kwargs_list]
+                values = [inputs.get(key) for inputs in loss_inputs_list]
                 present = [value is not None for value in values]
                 if not all(present):
                     raise ValueError(f"Required pack field {key} must be present on every sample: {present}")
@@ -945,7 +963,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             for key in template_keys:
                 loss_inputs[key] = self._pack_padding_loss_input(key, padding_len)
 
-        seq_ctx_list = [seq_ctx for seq_ctx, _ in pack_items]
+        seq_ctx_list = [item["seq_ctx"] for item in pack_items]
         if padding_len > 0:
             seq_ctx_list.append(
                 self._pack_padding_seq_ctx(

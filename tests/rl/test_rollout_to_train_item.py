@@ -1,8 +1,8 @@
 """TrainingWorker rollout-to-train-item 转换的 contract 测试。
 
-``TrainingWorker._convert_rollout_items_to_train_items`` 是 RolloutState -> (seq_ctx, loss_ctx)
+``TrainingWorker._convert_rollout_items_to_train_items`` 是 RolloutState -> (seq_ctx, loss_inputs)
 的唯一入口：shift、scalar advantage 逐监督位广播、rollout logprob shift、position 布局统一、
-seq_ctx 构造、teacher target 对齐与 CPU per-item loss_ctx 构建都在这一步完成。本文件只测该
+seq_ctx 构造、teacher target 对齐与 CPU per-item loss_inputs 构建都在这一步完成。本文件只测该
 纯转换逻辑，不启动 Ray、模型或 rollout backend。
 
 当前测试点：
@@ -10,8 +10,8 @@ seq_ctx 构造、teacher target 对齐与 CPU per-item loss_ctx 构建都在这�
 - scalar advantage 广播：prompt 占位与 labels=-100 的语义洞位为 0，监督位为 group advantage。
 - use_3d_position_ids=True 时文本样本广播出三轴 MRoPE 位置；False 时保持 1D。
 - VLM 样本：prompt 段 3D position 续写 response、mm_info/pixel_values 透传、routed_experts 挂到 seq_ctx。
-- 蒸馏：rollout teacher target 对齐结果进入 loss_ctx（sampled 无 target_token_ids，topk 有）。
-- input_ids/labels/logprobs 不对齐时 fail fast。
+- 蒸馏：rollout teacher target 对齐结果进入 loss_inputs（sampled 无 target_token_ids，topk 有）。
+- token advantage 与 shifted labels 等长，语义洞与 prompt 不参与监督。
 """
 
 import unittest
@@ -112,8 +112,8 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
         items = worker._convert_rollout_items_to_train_items([state], [1.5], _batch_attr(False))
 
         self.assertEqual(len(items), 1)
-        seq_ctx, loss_ctx = items[0]
-        loss_kwargs = loss_ctx.loss_kwargs
+        seq_ctx = items[0]["seq_ctx"]
+        loss_kwargs = SimpleNamespace(**items[0]["loss_inputs"])
         self.assertEqual(seq_ctx.input_ids.tolist(), [[10, 11, 12, 20, 21]])
         self.assertEqual(loss_kwargs.shifted_labels.tolist(), [[-100, -100, 20, -100, 22]])
         torch.testing.assert_close(
@@ -138,11 +138,11 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
         items = worker._convert_rollout_items_to_train_items([first, second], [1.5, -2.0], _batch_attr(False))
 
         torch.testing.assert_close(
-            items[0][1].loss_kwargs.advantages,
+            items[0]["loss_inputs"].get("advantages"),
             torch.tensor([[0.0, 0.0, 1.5, 1.5]], dtype=torch.float32),
         )
         torch.testing.assert_close(
-            items[1][1].loss_kwargs.advantages,
+            items[1]["loss_inputs"].get("advantages"),
             torch.tensor([[0.0, 0.0, -2.0, 0.0]], dtype=torch.float32),
         )
 
@@ -152,7 +152,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
 
         items = worker._convert_rollout_items_to_train_items([state], [0.0], _batch_attr(False))
 
-        torch.testing.assert_close(items[0][0].position_ids, torch.arange(4).reshape(1, -1))
+        torch.testing.assert_close(items[0]["seq_ctx"].position_ids, torch.arange(4).reshape(1, -1))
 
     def test_text_positions_broadcast_to_3d_in_mixed_batches(self):
         worker = self._make_worker()
@@ -160,7 +160,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
 
         items = worker._convert_rollout_items_to_train_items([state], [0.0], _batch_attr(True))
 
-        position_ids = items[0][0].position_ids
+        position_ids = items[0]["seq_ctx"].position_ids
         self.assertEqual(tuple(position_ids.shape), (3, 1, 4))
         torch.testing.assert_close(
             position_ids,
@@ -182,7 +182,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
 
         items = worker._convert_rollout_items_to_train_items([state], [0.25], _batch_attr(True))
 
-        seq_ctx = items[0][0]
+        seq_ctx = items[0]["seq_ctx"]
         self.assertEqual(seq_ctx.input_ids.tolist(), [[100, 101, 102]])
         self.assertEqual(tuple(seq_ctx.position_ids.shape), (3, 1, 3))
         self.assertIs(seq_ctx.pixel_values, pixel_values)
@@ -221,7 +221,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
 
         items = worker._convert_rollout_items_to_train_items([state], [0.0], _batch_attr(False))
 
-        loss_kwargs = items[0][1].loss_kwargs
+        loss_kwargs = SimpleNamespace(**items[0]["loss_inputs"])
         self.assertEqual(loss_kwargs.shifted_labels.tolist(), [[-100, 20, -100, 22]])
         self.assertEqual(
             loss_kwargs.target_token_ids.tolist(),
@@ -252,30 +252,23 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
 
         items = worker._convert_rollout_items_to_train_items([state], [0.0], _batch_attr(False))
 
-        loss_kwargs = items[0][1].loss_kwargs
-        self.assertIsNone(loss_kwargs.target_token_ids)
+        loss_kwargs = SimpleNamespace(**items[0]["loss_inputs"])
+        self.assertIsNone(getattr(loss_kwargs, "target_token_ids", None))
         torch.testing.assert_close(
             loss_kwargs.teacher_logprobs,
             torch.tensor([[0.0, 0.0, -0.7, -0.9]], dtype=torch.float32),
         )
 
-    def test_mismatched_logprobs_fail_fast(self):
+    def test_token_advantages_mask_prompt_and_semantic_holes(self):
         worker = self._make_worker()
-        state = self._state(
-            input_ids=[30, 31, 40, 41, 42],
-            labels=[-100, -100, 40, 41, 42],
-            logprobs=[0.0, -0.1, -0.2, -0.3],
-        )
+        state = self._state(supervised_mask=[1, 0, 1])
+        items = worker._convert_rollout_items_to_train_items([state], [[1, 2, 3, 4, 5]], _batch_attr(False))
+        torch.testing.assert_close(items[0]["loss_inputs"]["advantages"], torch.tensor([[0.0, 0.0, 3.0, 0.0, 5.0]]))
 
-        with self.assertRaises(AssertionError):
-            worker._convert_rollout_items_to_train_items([state], [1.0], _batch_attr(False))
-
-    def test_misaligned_labels_fail_fast(self):
+    def test_token_advantages_require_shifted_length(self):
         worker = self._make_worker()
-        state = self._state(input_ids=[30, 31, 40])
-
-        with self.assertRaises(AssertionError):
-            worker._convert_rollout_items_to_train_items([state], [1.0], _batch_attr(False))
+        with self.assertRaisesRegex(ValueError, "Token advantage length mismatch"):
+            worker._convert_rollout_items_to_train_items([self._state()], [[1.0]], _batch_attr(False))
 
 
 if __name__ == "__main__":

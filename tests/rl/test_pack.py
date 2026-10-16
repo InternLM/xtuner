@@ -3,7 +3,7 @@
 Packer 只产出 ``[dp][optimizer_step][pack][sample_index]`` 索引计划与 padding 统计，
 不触碰样本数据。测试覆盖设计约束：每个 index 恰好出现一次、pack 不超长、DP/step 维度
 pack 数一致、optimizer steps 多于 pack 数、data-replica 分组、deterministic seed、
-padding 统计，以及 greedy 策略与重构前 controller greedy pack + interleaved DP 分配 +
+padding 统计，以及 legacy 策略与重构前 controller greedy pack + interleaved DP 分配 +
 worker ``iters_per_step`` 重分组的精确等价性。
 """
 
@@ -57,7 +57,7 @@ class TestRLDataPacker(unittest.TestCase):
         world_size: int = 4,
         data_replicate_size: int = 1,
         optimizer_steps: int = 2,
-        pack_strategy: str = "greedy",
+        pack_strategy: str = "legacy",
         pack_seed: int | None = None,
     ) -> RLDataPacker:
         return RLDataPacker(
@@ -94,7 +94,8 @@ class TestRLDataPacker(unittest.TestCase):
             counts = {len(rank[step]) for rank in plan}
             self.assertEqual(len(counts), 1)
 
-    def test_greedy_matches_previous_schedule(self):
+    @patch("xtuner.v1.rl.trainer.pack.XTUNER_DETERMINISTIC", True)
+    def test_legacy_matches_previous_schedule(self):
         # lengths 刻意制造多 pack、非整除与 DP 填充场景。
         lengths = [10, 8, 6, 30, 12, 4, 7, 20, 2, 9]
         packer = self._make_packer(world_size=4, optimizer_steps=2)
@@ -106,7 +107,8 @@ class TestRLDataPacker(unittest.TestCase):
         total_packs = sum(len(packs) for rank in plan for packs in rank)
         self.assertEqual(padding, total_packs * self.PACK_MAX_LENGTH - sum(lengths))
 
-    def test_greedy_regroups_when_packs_fewer_than_optimizer_steps(self):
+    @patch("xtuner.v1.rl.trainer.pack.XTUNER_DETERMINISTIC", True)
+    def test_legacy_regroups_when_packs_fewer_than_optimizer_steps(self):
         # packs_per_dp=2 < optimizer_steps=4：旧 worker iters_per_step=ceil(2/4)=1，
         # 实际只训练 2 个 step。
         lengths = [32, 32, 32, 32]
@@ -118,6 +120,7 @@ class TestRLDataPacker(unittest.TestCase):
         self.assertEqual(len(plan[0]), 2)
         self.assertEqual(padding, 4 * self.PACK_MAX_LENGTH - sum(lengths))
 
+    @patch("xtuner.v1.rl.trainer.pack.XTUNER_DETERMINISTIC", True)
     def test_single_pack_interleaves_across_dp(self):
         # 全部样本拼进一个 pack 时，interleaved 分配把唯一 pack 给 rank0，其余 rank 全空 pack。
         lengths = [8, 4]
@@ -130,6 +133,7 @@ class TestRLDataPacker(unittest.TestCase):
         self.assertEqual(plan[1][0], [[]])
         self.assertEqual(padding, 4 * self.PACK_MAX_LENGTH - sum(lengths))
 
+    @patch("xtuner.v1.rl.trainer.pack.XTUNER_DETERMINISTIC", True)
     def test_data_replicate_size_divides_world(self):
         # world=8、replicate=2 → dp=4，各 replica group 共享同一 plan。
         lengths = [10, 10, 10, 10, 10, 10]
@@ -156,31 +160,47 @@ class TestRLDataPacker(unittest.TestCase):
 
     def test_shuffled_indices_use_matching_lengths(self):
         lengths = [2, 8, 8]
-        packer = RLDataPacker(10, 2, 1, 2, pack_strategy="greedy")
-        with (
-            patch("xtuner.v1.rl.trainer.pack.XTUNER_DETERMINISTIC", False),
-            patch(
-                "xtuner.v1.rl.trainer.pack.random.shuffle",
-                side_effect=lambda indices: indices.__setitem__(slice(None), [1, 2, 0]),
-            ),
-        ):
-            plan, padding = packer.pack(lengths)
-        packs = [pack for rank in plan for step in rank for pack in step]
-        self.assertEqual(sorted(index for pack in packs for index in pack), [0, 1, 2])
-        self.assertTrue(all(sum(lengths[i] for i in pack) <= 10 for pack in packs))
-        self.assertEqual(padding, len(packs) * 10 - sum(lengths))
-        self.assertEqual(lengths, [2, 8, 8])
-        self.assertEqual(len({len(rank) for rank in plan}), 1)
-        for step in range(len(plan[0])):
-            self.assertEqual(len({len(rank[step]) for rank in plan}), 1)
+        for strategy in ("legacy", "greedy"):
+            with self.subTest(strategy=strategy):
+                packer = RLDataPacker(10, 2, 1, 2, pack_strategy=strategy)
+                with (
+                    patch("xtuner.v1.rl.trainer.pack.XTUNER_DETERMINISTIC", False),
+                    patch(
+                        "xtuner.v1.rl.trainer.pack.random.shuffle",
+                        side_effect=lambda indices: indices.__setitem__(slice(None), [1, 2, 0]),
+                    ),
+                ):
+                    plan, padding = packer.pack(lengths)
+                packs = [pack for rank in plan for step in rank for pack in step]
+                self.assertEqual(sorted(index for pack in packs for index in pack), [0, 1, 2])
+                self.assertTrue(all(sum(lengths[i] for i in pack) <= 10 for pack in packs))
+                self.assertEqual(padding, len(packs) * 10 - sum(lengths))
+                self.assertEqual(lengths, [2, 8, 8])
+                self.assertEqual(len({len(rank) for rank in plan}), 1)
+                for step in range(len(plan[0])):
+                    self.assertEqual(len({len(rank[step]) for rank in plan}), 1)
+
+    def test_greedy_fills_gaps_from_sft_candidate_buffer(self):
+        lengths = [6, 7, 4]
+        with patch("xtuner.v1.rl.trainer.pack.XTUNER_DETERMINISTIC", True):
+            legacy, old_padding = RLDataPacker(10, 1, 1, 1, pack_strategy="legacy").pack(lengths)
+            greedy, new_padding = RLDataPacker(10, 1, 1, 1, pack_strategy="greedy").pack(lengths)
+        self.assertEqual(legacy, [[[[0], [1], [2]]]])
+        self.assertEqual(greedy, [[[[0, 2], [1]]]])
+        self.assertEqual((old_padding, new_padding), (13, 3))
+
+    def test_zero_buffer_keeps_sequential_pack_order(self):
+        lengths = [6, 7, 4]
+        with patch("xtuner.v1.rl.trainer.pack.XTUNER_DETERMINISTIC", True):
+            legacy = RLDataPacker(10, 1, 1, 1, pack_strategy="legacy").pack(lengths)
+            greedy = RLDataPacker(10, 1, 1, 1, pack_strategy="greedy", pack_extra_buffer_size=0).pack(lengths)
+        self.assertEqual(legacy, greedy)
 
     def test_unknown_strategy_raises(self):
         with self.assertRaisesRegex(ValueError, "Unknown packing strategy"):
             self._make_packer(pack_strategy="unknown")
-        with self.assertRaisesRegex(ValueError, "Unknown packing strategy"):
-            self._make_packer(pack_strategy="legacy")
 
-    def test_greedy_matches_main_across_replica_and_step_layouts(self):
+    def test_legacy_matches_main_across_replica_and_step_layouts(self):
         # main controller: packs[dp_rank::dp_size]; worker: ceil(packs_per_dp / steps).
         for dp_size in (1, 2, 4):
             for replicas in (1, 2):
@@ -197,6 +217,7 @@ class TestRLDataPacker(unittest.TestCase):
                                 plan, _ = packer.pack(lengths)
                             self.assertEqual(plan, _greedy_reference_plan(lengths, 32, dp_size, steps))
 
+    @patch("xtuner.v1.rl.trainer.pack.XTUNER_DETERMINISTIC", True)
     def test_greedy_interleaves_instead_of_contiguous_dp_blocks(self):
         lengths = [32] * 12
         packer = self._make_packer(pack_strategy="greedy")
