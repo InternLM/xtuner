@@ -146,3 +146,30 @@ class TestTrainingDiagnostics:
                 with d.span("forward"):
                     raise ValueError("original training error")
         d.close()
+
+    def test_config_context_dispatch_and_exception_cleanup(self, tmp_path):
+        from xtuner.v1.profiler.prober import ProberList
+
+        trainer = SimpleNamespace(exp_dir=tmp_path, rank=0, _engine=SimpleNamespace(model=torch.nn.Linear(2, 2)))
+        cfg = DiagnosticsConfig(enabled=True)
+        previous_probers = ProberList.prober_list
+        with pytest.raises(ValueError, match="training error"):
+            with cfg.record(trainer):
+                ProberList.record_progress("data_next_begin", step=3)
+                ProberList.record_progress("forward_begin", 0)
+                with pytest.raises(RuntimeError, match="Only one"):
+                    with cfg.record(trainer):
+                        pytest.fail("Nested session unexpectedly accepted")
+                raise ValueError("training error")
+        assert ProberList._diagnostics is None
+        assert ProberList.prober_list is previous_probers
+        records = [json.loads(line) for line in (tmp_path / "diagnostics/rank0.jsonl").read_text().splitlines()]
+        assert [(r["step"], r["phase"]) for r in records] == [(3, "data_next_begin"), (3, "forward_begin")]
+        ProberList.record_progress("optimizer_end")
+
+    def test_disabled_context_does_not_install(self, tmp_path):
+        trainer = SimpleNamespace(exp_dir=tmp_path, rank=0)
+        with patch.object(TrainingDiagnostics, "install", side_effect=AssertionError("installed")):
+            with DiagnosticsConfig().record(trainer):
+                pass
+        assert not (tmp_path / "diagnostics").exists()

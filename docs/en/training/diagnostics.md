@@ -7,9 +7,9 @@ boundaries. They complement PyTorch NCCL Flight Recorder; they are not a kernel
 profiler and do not change checkpoint or learning-rate scheduling.
 
 ```python
-from xtuner.v1.train import DiagnosticsConfig, TrainerConfig
+from xtuner.v1.train import DiagnosticsConfig, Trainer, TrainerConfig
 
-trainer = TrainerConfig(
+trainer_cfg = TrainerConfig(
     # ... existing training settings ...
     diagnostics=DiagnosticsConfig(
         enabled=True,
@@ -21,6 +21,21 @@ trainer = TrainerConfig(
     ),
 )
 ```
+
+The SFT CLI manages the recording lifecycle around `trainer.fit()`. Direct Python
+callers opt in explicitly using the same context:
+
+```python
+trainer = Trainer.from_config(trainer_cfg)
+with trainer_cfg.diagnostics.record(trainer):
+    trainer.fit()
+```
+
+Calling `trainer.fit()` alone does not activate diagnostics. Training-stage events
+are dispatched through `ProberList.record_progress`; enabling and step/rank
+filtering stay inside the diagnostics component. Existing tensor probers keep
+their own setup and schedule. No new training method or wrapper around `fit` is
+installed, and its loop is not reindented for diagnostics.
 
 | Parameter | Default | Meaning |
 | --- | --- | --- |

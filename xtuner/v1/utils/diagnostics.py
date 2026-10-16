@@ -8,16 +8,21 @@ import itertools
 import json
 import logging
 import socket
+import sys
 import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+if TYPE_CHECKING:
+    from xtuner.v1.train.trainer import Trainer
 
 
 class DiagnosticsConfig(BaseModel):
@@ -48,6 +53,38 @@ class DiagnosticsConfig(BaseModel):
         if self.cuda_events and self.level != "detailed":
             raise ValueError("cuda_events requires level='detailed'")
         return self
+
+    @contextmanager
+    def record(self, trainer: "Trainer") -> Iterator[None]:
+        """Manage diagnostics around a training call.
+
+        Args:
+            trainer (Trainer): Trainer whose model and experiment directory are recorded.
+
+        Yields:
+            None: The caller runs the unchanged training entry point.
+        """
+        if not self.enabled or (self.ranks is not None and trainer.rank not in self.ranks):
+            yield
+            return
+        from xtuner.v1.profiler.prober import ProberList
+
+        if ProberList._diagnostics is not None:
+            raise RuntimeError("Only one diagnostics session may be active per process")
+        diagnostic = TrainingDiagnostics(self, trainer.exp_dir / "diagnostics", trainer.rank)
+        ProberList._diagnostics = diagnostic
+        try:
+            diagnostic.install(trainer._engine.model)
+            yield
+        finally:
+            training_error = sys.exc_info()[1]
+            ProberList._diagnostics = None
+            try:
+                diagnostic.close()
+            except Exception:
+                if training_error is None:
+                    raise
+                logging.getLogger(__name__).exception("Diagnostics cleanup failed; preserving training exception")
 
 
 class TrainingDiagnostics:
