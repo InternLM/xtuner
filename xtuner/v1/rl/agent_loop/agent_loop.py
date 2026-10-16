@@ -16,8 +16,6 @@ from xtuner.v1.data_proto.rl_data import (
     SampleParams,
     Status,
     get_group_status,
-    validate_train_fields,
-    write_train_meta,
 )
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
@@ -291,79 +289,93 @@ class AgentLoop(ABC):
         group = await self._teacher_scorer.on_group_ready(group)
         return self.canonicalize_train_fields(group)
 
-    def canonicalize_train_fields(self, group: list[RolloutState]) -> list[RolloutState]:
-        """Canonicalize the training token fields of one rollout group.
+    def _write_train_meta(self, rollout_state: RolloutState) -> None:
+        """Write the controller-facing lightweight train metadata in place.
 
-        Prompt+response samples without ``input_ids`` are assembled in place into the
-        unified full-sequence convention: ``input_ids``/``labels``/``logprobs`` share one
-        length, where ``labels[j]`` is the prediction target of the token at position
-        ``j`` and the training worker applies the one-position shift at conversion time.
-        Samples that already carry ``input_ids`` are validated without rebuilding
-        their fields. Non-completed samples are skipped. Failures mark the single sample as
-        ``Status.FAILED`` instead of raising into the producer. Agentic loops that only
-        need to select their full-sequence states reuse this default validation.
+        Agent loops call this once the canonical training fields (``input_ids``/``labels``/
+        ``logprobs``) are finalized, so downstream scheduling only consumes scalar statistics
+        instead of token-level fields. It also publishes ``TrainMeta`` through
+        ``RolloutState.set_training_fields``. Samples that are not ``COMPLETED`` or that lack
+        aligned ``input_ids``/``labels`` are left untouched; the function is idempotent.
 
         Args:
-            group (list[RolloutState]): One group of rollout states after generation,
-                judging, and filtering.
+            rollout_state (RolloutState): Rollout state updated in place: ``num_tokens``
+                becomes the shifted training length (``len(input_ids) - 1``) and
+                ``extra_fields`` gains ``train_prompt_length``, ``train_response_length``,
+                ``supervised_tokens``, ``position_layout``, ``has_rollout_logprobs`` and
+                ``has_routed_experts``.
+        """
+        if rollout_state.status != Status.COMPLETED:
+            return
+        input_ids = rollout_state.input_ids
+        labels = rollout_state.labels
+        if input_ids is None or labels is None:
+            return
+        rollout_state.set_training_fields(input_ids=input_ids, labels=labels, logprobs=rollout_state.logprobs)
+        shifted_labels = labels[1:]
+        supervised_tokens = sum(1 for label in shifted_labels if label != -100)
+        # prompt_len 统计原始输入 prompt 长度（VLM 的 prompt 在 train_prompt_ids）；prompt_ids
+        # 缺失时退回 shifted_labels 的非监督位计数，与 controller 既有 data_info 口径一致。
+        prompt_ids = rollout_state.extra_fields.get("train_prompt_ids") or rollout_state.prompt_ids
+        prompt_length = len(prompt_ids) if prompt_ids else len(shifted_labels) - supervised_tokens
+        position_ids = rollout_state.position_ids
+        rollout_state.extra_fields["train_prompt_length"] = prompt_length
+        rollout_state.extra_fields["train_response_length"] = len(rollout_state.response_ids or [])
+        rollout_state.extra_fields["supervised_tokens"] = supervised_tokens
+        rollout_state.extra_fields["position_layout"] = (
+            "mrope_3d" if position_ids is not None and position_ids.ndim == 3 else "1d"
+        )
+        # 批级 presence 标志：controller 只读布尔位即可判定 pack 模板（rollout logprobs 的
+        # IS 指标 collective、routed experts dummy 填充），不需要触碰 token 级字段。
+        rollout_state.extra_fields["has_rollout_logprobs"] = rollout_state.logprobs is not None
+        rollout_state.extra_fields["has_routed_experts"] = rollout_state.routed_experts is not None
 
-        Returns:
-            list[RolloutState]: The same group with canonical training fields.
+    def canonicalize_train_fields(self, group: list[RolloutState]) -> list[RolloutState]:
+        """Build full, unshifted training fields and write lightweight
+        metadata.
+
+        Already assembled sequences are preserved. Construction errors propagate; the producer checks public results
+        and the trainer checks training fields.
         """
         for state in group:
             if state.status != Status.COMPLETED:
                 continue
-            try:
-                if state.input_ids is None:
-                    if not state.response:
-                        raise ValueError("response must be non-empty")
-                    is_vlm_model = "train_prompt_ids" in state.extra_fields
-                    if is_vlm_model:
-                        # TODO(hha): VLM, 不好的设计，后续要去掉
-                        prompt_ids = state.extra_fields["train_prompt_ids"]
+            if state.input_ids is None:
+                if not state.response:
+                    raise ValueError("response must be non-empty")
+                prompt_ids = state.extra_fields.get("train_prompt_ids", state.prompt_ids)
+                assert prompt_ids is not None and len(prompt_ids) > 0, (
+                    f"Prompt ids cannot be None or empty in data: {state}"
+                )
+                response_ids: list[int]
+                if state.response_ids is not None:
+                    resp_ids_raw = state.response_ids
+                    if isinstance(resp_ids_raw, torch.Tensor):
+                        response_ids = resp_ids_raw.flatten().tolist()
                     else:
-                        prompt_ids = state.prompt_ids
-                    assert prompt_ids is not None and len(prompt_ids) > 0, (
-                        f"Prompt ids cannot be None or empty in data: {state}"
+                        response_ids = cast(list[int], resp_ids_raw)
+                else:
+                    assert state.response is not None, "response item cannot be None"
+                    response_ids = self.tokenizer(state.response, return_tensors="pt")["input_ids"].flatten().tolist()
+                if not response_ids:
+                    raise ValueError("response_ids must be non-empty")
+                # 归一化写回：Tensor 展平为 list、tokenizer 兜底结果也落到 response_ids，后续消费者零分支。
+                state.response_ids = response_ids
+
+                if state.logprobs is not None:
+                    assert len(state.logprobs) == len(response_ids), (
+                        f"{len(state.logprobs)} vs {len(response_ids)}, data: {state}"
                     )
+                    # 只有 response 部分有 logprobs, 前面补 0 对齐全序列
+                    state.logprobs = [0.0] * len(prompt_ids) + list(state.logprobs)
 
-                    response_ids: list[int]
-                    if state.response_ids is not None:
-                        resp_ids_raw = state.response_ids
-                        if isinstance(resp_ids_raw, torch.Tensor):
-                            response_ids = resp_ids_raw.flatten().tolist()
-                        else:
-                            response_ids = cast(list[int], resp_ids_raw)
-                    else:
-                        assert state.response is not None, "response item cannot be None"
-                        response_ids = (
-                            self.tokenizer(state.response, return_tensors="pt")["input_ids"].flatten().tolist()
-                        )
-                    if not response_ids:
-                        raise ValueError("response_ids must be non-empty")
-                    # 归一化写回：Tensor 展平为 list、tokenizer 兜底结果也落到 response_ids，后续消费者零分支。
-                    state.response_ids = response_ids
-
-                    if state.logprobs is not None:
-                        assert len(state.logprobs) == len(response_ids), (
-                            f"{len(state.logprobs)} vs {len(response_ids)}, data: {state}"
-                        )
-                        # 只有 response 部分有 logprobs, 前面补 0 对齐全序列
-                        state.logprobs = [0.0] * len(prompt_ids) + list(state.logprobs)
-
-                    # 返回的 routed_experts 不包括 eos 的值，实际上也不需要，训练输入会去掉最后一位
-                    state.input_ids = list(prompt_ids) + response_ids
-                    state.labels = [-100] * len(prompt_ids) + list(response_ids)
-                # 训练字段与摘要只通过 state 入口发布；已组装的全序列样本也在这里校验并生成 TrainMeta。
-                if state.input_ids is None or state.labels is None:
-                    raise ValueError("Training input_ids and labels must be full and aligned")
-                validate_train_fields(state)
-                state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
-                write_train_meta(state)
-            except Exception as exc:
-                self.logger.error(f"Canonicalize train fields failed for rollout_id={state.rollout_id}: {exc}")
-                state.status = Status.FAILED
-                state.error_msg = f"canonicalize_train_fields failed: {exc}"
+                # 返回的 routed_experts 不包括 eos 的值，实际上也不需要，训练输入会去掉最后一位
+                state.input_ids = list(prompt_ids) + response_ids
+                state.labels = [-100] * len(prompt_ids) + list(response_ids)
+            # 训练字段与摘要只通过 state 入口发布；已组装的全序列样本也在这里校验并生成 TrainMeta。
+            if state.input_ids is None or state.labels is None:
+                raise ValueError("Training input_ids and labels must be full and aligned")
+            self._write_train_meta(state)
         return group
 
     @overload

@@ -16,6 +16,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.rl.agent_loop.agent_loop import AgentLoop
 from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import (
     AgentLoopManager,
     AgentLoopManagerConfig,
@@ -33,7 +34,7 @@ from xtuner.v1.rl.agent_loop_manager.produce_utils import (
     _TaskRunner,
 )
 from xtuner.v1.rl.agent_loop_manager.producer import SyncProduceStrategyConfig
-from xtuner.v1.train.rl_trainer import _migrate_legacy_is_valid_sample_fn
+from xtuner.v1.train.rl_trainer import BaseRLTrainer, _migrate_legacy_is_valid_sample_fn
 
 
 class _FakeSampler:
@@ -320,7 +321,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             _migrate_legacy_is_valid_sample_fn(cfg, MagicMock())
 
     async def test_take_train_batch_applies_token_staleness_mask(self):
-        # 启用 token staleness 时，公开 produce_batch 路径应把过期 token 的监督清出 labels（只清零不恢复）。
+        # take_train_batch 先烙制 staleness mask，训练入口检查后保留该 mask。
         state = RolloutState(
             rollout_id=1,
             group_id=1,
@@ -332,7 +333,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             response_model_steps=[0, 4],
             status=Status.COMPLETED,
         )
-        state.set_training_fields(input_ids=[1, 2, 3, 4], labels=[-100, -100, 3, 4], logprobs=None)
+        AgentLoop._write_train_meta(None, state)
         strategy = _FakeProduceStrategy(token_stale_threshold=4)
         replay_buffer = _FakeReplayBuffer(
             rollout_states_by_task={"task": [[state]]},
@@ -354,6 +355,9 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         )
 
         result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
+        self.assertEqual(result.rollout_states[0][0].labels, [-100, -100, -100, 4])
+        trainer = SimpleNamespace(logger=MagicMock(), agent_loop_manager=manager)
+        await asyncio.to_thread(BaseRLTrainer._prepare_train_batch, trainer, result.rollout_states, 5, result)
 
         trained_state = result.rollout_states[0][0]
         self.assertEqual(trained_state.labels, [-100, -100, -100, 4])
@@ -372,8 +376,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             logprobs=[0.0, -0.1],
             status=Status.COMPLETED,
         )
-        assert state.input_ids is not None and state.labels is not None
-        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
+        AgentLoop._write_train_meta(None, state)
         strategy = _FakeProduceStrategy(token_stale_threshold=4)
         manager = AgentLoopManager(
             task_runners=[
@@ -394,6 +397,9 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         )
 
         result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
+        self.assertEqual(result.rollout_states[0][0].labels, [-100, 2])
+        trainer = SimpleNamespace(logger=MagicMock(), agent_loop_manager=manager)
+        await asyncio.to_thread(BaseRLTrainer._prepare_train_batch, trainer, result.rollout_states, 5, result)
 
         self.assertEqual(result.rollout_states[0][0].labels, [-100, 2])
 
@@ -412,8 +418,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             labels=[-100, -100, 30, -100, 40],
             status=Status.COMPLETED,
         )
-        assert state.input_ids is not None and state.labels is not None
-        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
+        AgentLoop._write_train_meta(None, state)
         strategy = _FakeProduceStrategy(token_stale_threshold=4)
         manager = AgentLoopManager(
             task_runners=[
@@ -434,6 +439,9 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         )
 
         result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
+        self.assertEqual(result.rollout_states[0][0].labels, [-100, -100, -100, -100, 40])
+        trainer = SimpleNamespace(logger=MagicMock(), agent_loop_manager=manager)
+        await asyncio.to_thread(BaseRLTrainer._prepare_train_batch, trainer, result.rollout_states, 5, result)
 
         trained_state = result.rollout_states[0][0]
         self.assertEqual(trained_state.labels, [-100, -100, -100, -100, 40])
@@ -453,7 +461,8 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             labels=[-100, -100, 4, 5, -100],
             status=Status.COMPLETED,
         )
-        state.set_training_fields(input_ids=[1, 2, 3, 4, 5], labels=[-100, -100, 4, 5, -100], logprobs=None)
+        state.response_model_steps = [0, 0, 0]
+        AgentLoop._write_train_meta(None, state)
         manager = AgentLoopManager(
             task_runners=[
                 _TaskRunner(
@@ -473,6 +482,9 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         )
 
         result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
+        self.assertEqual(result.rollout_states[0][0].labels, [-100, -100, 4, 5, -100])
+        trainer = SimpleNamespace(logger=MagicMock(), agent_loop_manager=manager)
+        await asyncio.to_thread(BaseRLTrainer._prepare_train_batch, trainer, result.rollout_states, 5, result)
 
         self.assertEqual(result.rollout_states[0][0].labels, [-100, -100, 4, 5, -100])
 
