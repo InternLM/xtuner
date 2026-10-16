@@ -19,7 +19,8 @@ TestGlm53MixedMediaAndTruncation
     test_glm53_mixed_media_fails_fast               图文混合视频未支持，必须快速失败
     test_glm53_visual_truncation_is_dropped         截断会切断视觉跨度时 cache 阶段就丢弃
 TestGlm53MediaRoleContract
-    test_non_user_media_is_discarded                system/assistant/tool 角色的图片按脏样本丢弃/占位
+    test_media_is_collected_from_all_roles           system/assistant/tool 角色的图片也会被收集
+    test_media_collection_preserves_input_order     媒体按原始消息顺序收集，与 HF 一致
 TestGlm53CacheInvalidation
     test_glm53_cache_invalidates_on_processor_or_pack_change  processor/pack 变化使缓存失效
     test_glm53_hash_covers_every_init_parameter  逐参数 hash 失效 + __init__ 参数分类完备性
@@ -437,18 +438,7 @@ class TestGlm53MixedMediaAndTruncation:
 
 class TestGlm53MediaRoleContract:
     @pytest.mark.parametrize("role", ["system", "assistant", "tool"])
-    def test_non_user_media_is_discarded(
-        self, tokenize_fn: Glm53VLTokenizeFunction, role: str, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # 官方模板会为任意角色的媒体渲染占位标记，但训练管线只会加载/展开 user/pretrain 的
-        # 媒体。system/assistant/tool 角色的图片按脏样本处理：cache 警告并丢弃（num_tokens=0），
-        # runtime 抛出由上游换成无 loss 占位样本——而不是静默训练占位符永不展开的样本，
-        # 也不因单条脏数据中断训练（飞书报告 M08~M11）。
-        assert Glm53VLTokenizeFunction.__call__ is BaseMLLMTokenizeFunction.__call__
-        load = Mock(side_effect=AssertionError("Rejected samples must be discarded before loading media"))
-        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn.load_image", load)
-        logger_mock = Mock()
-        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn.logger", logger_mock)
+    def test_media_is_collected_from_all_roles(self, tokenize_fn: Glm53VLTokenizeFunction, role: str) -> None:
         image = {"type": "image", "image": {"url": "unused.jpg", "image_wh": [448, 448]}}
         messages = [
             {"role": "user", "content": "q"},
@@ -460,16 +450,33 @@ class TestGlm53MediaRoleContract:
             messages[1]["content"] = [image, {"type": "text", "text": "a"}]
         else:
             messages.insert(1, {"role": "tool", "content": [image], "tool_call_id": "t1"})
-        tokenize_fn.state = "cache"
-        ret = tokenize_fn({"messages": messages})
-        assert ret["num_tokens"] == 0
-        assert logger_mock.warning.called
-        assert "user/pretrain" in logger_mock.warning.call_args[0][0]
-        load.assert_not_called()
-        tokenize_fn.state = "runtime"
-        with pytest.raises(NotImplementedError, match="user/pretrain"):
-            tokenize_fn({"messages": messages})
-        load.assert_not_called()
+
+        image_paths, video_paths, extra = tokenize_fn.collect_media(messages)
+
+        assert image_paths == ["unused.jpg"]
+        assert video_paths == []
+        assert extra["image_wh"] == [[448, 448]]
+
+    def test_media_collection_preserves_input_order(self, tokenize_fn: Glm53VLTokenizeFunction) -> None:
+        def image(url: str) -> dict:
+            return {"type": "image", "image": {"url": url, "image_wh": [448, 448]}}
+
+        messages = [
+            {"role": "system", "content": [image("system.jpg")]},
+            {"role": "user", "content": [image("user.jpg")]},
+            {
+                "role": "assistant",
+                "content": [image("assistant.jpg")],
+                "tool_calls": [{"id": "a"}, {"id": "b"}],
+            },
+            {"role": "tool", "content": [image("tool-b.jpg")], "tool_call_id": "b"},
+            {"role": "tool", "content": [image("tool-a.jpg")], "tool_call_id": "a"},
+        ]
+
+        image_paths, _, _ = tokenize_fn.collect_media(messages)
+
+        # HF apply_chat_template also collects media in input order before rendering the Jinja template.
+        assert image_paths == ["system.jpg", "user.jpg", "assistant.jpg", "tool-b.jpg", "tool-a.jpg"]
 
 
 class TestGlm53CacheInvalidation:

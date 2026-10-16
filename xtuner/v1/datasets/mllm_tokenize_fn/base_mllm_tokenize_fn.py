@@ -204,8 +204,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
     def collect_media(self, messages: list[dict]):
         """Collect the media references of one sample.
 
-        Model families with a different media-role contract (e.g. GLM-5.3-Flash, whose official template renders media
-        in any role while the training pipeline can only load user/pretrain media) override this hook.
+        Model families with a different media-collection contract can override this hook.
         """
         return collect_image_video_paths_and_extra(messages)
 
@@ -230,7 +229,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
             self._video_wh_list = extra_info["video_wh"]
             self._video_extra_info_list = extra_info["video_extra_info"]
         except NotImplementedError as e:
-            # 模型家族的显式媒体边界（如 GLM-5.3 拒绝非 user/pretrain 角色的媒体）：按脏样本处理。
+            # 模型家族显式不支持的数据边界按脏样本处理。
             return self._discard_damaged_sample(str(e))
         except RuntimeError as e:
             if self.state == "cache":
