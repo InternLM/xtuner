@@ -13,12 +13,20 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from .dtypes import load_dtype_map
+
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--shard-size-gb", type=float, default=float(os.getenv("MODEL_NORMALIZE_SHARD_SIZE_GB", "4")))
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--dtype-map",
+        type=Path,
+        default=None,
+        help="JSON map of tensor name -> dtype used to align storage dtypes with the reference release",
+    )
     parser.add_argument(
         "--base-model-dir",
         type=Path,
@@ -140,8 +148,16 @@ def _run_repack(args: argparse.Namespace) -> None:
         from .repack import repack
     except ModuleNotFoundError as exc:
         raise RuntimeError("repack requires the 'safetensors' package") from exc
+    dtype_map = load_dtype_map(args.dtype_map)
+    if dtype_map:
+        print(f"[model_normalize] aligning dtypes to {len(dtype_map)} reference entries")
     _prepare_output(args.source, args.output, args.overwrite)
-    repack(args.source, args.output, shard_size_bytes=int(args.shard_size_gb * 1024**3))
+    repack(
+        args.source,
+        args.output,
+        shard_size_bytes=int(args.shard_size_gb * 1024**3),
+        dtype_map=dtype_map,
+    )
     _apply_base_model_assets(args.base_model_dir, args.output)
 
 
@@ -168,9 +184,23 @@ def _run_fp8(args: argparse.Namespace) -> None:
         raise ValueError("--max-save-workers must be positive")
     if args.block_size < 1:
         raise ValueError("--block-size must be positive")
+    dtype_map = load_dtype_map(args.dtype_map)
+    if dtype_map:
+        print(f"[model_normalize] aligning dtypes to {len(dtype_map)} reference entries")
     _prepare_output(args.source, args.output, args.overwrite)
+    quantization_config = None
     if args.reference is not None:
         predicate = _reference_predicate(args.reference)
+        ref_config = args.reference / "config.json"
+        if ref_config.is_file():
+            quantization_config = json.loads(ref_config.read_text(encoding="utf-8")).get(
+                "quantization_config"
+            )
+            if quantization_config:
+                print(
+                    "[model_normalize] reusing quantization_config from "
+                    f"{ref_config} to match the reference release"
+                )
     else:
         predicate = build_heuristic_predicate()
         print(f"[model_normalize] using heuristic policy ({len(DEFAULT_QUANTIZE_PATTERNS)} patterns)")
@@ -182,6 +212,8 @@ def _run_fp8(args: argparse.Namespace) -> None:
             should_quantize=predicate,
             block_size=args.block_size,
             max_workers=args.max_save_workers,
+            quantization_config=quantization_config,
+            dtype_map=dtype_map,
         )
         repack(staging, args.output, shard_size_bytes=int(args.shard_size_gb * 1024**3))
     _apply_base_model_assets(args.base_model_dir, args.output)

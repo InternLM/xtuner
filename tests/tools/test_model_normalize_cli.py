@@ -189,3 +189,70 @@ def test_apply_base_model_assets_missing_dir_raises(tmp_path):
 
     with pytest.raises(FileNotFoundError):
         _apply_base_model_assets(tmp_path / "does-not-exist", tmp_path / "output")
+
+
+def test_load_dtype_map_accepts_string_and_pair_values(tmp_path):
+    from xtuner.tools.model_normalize.dtypes import load_dtype_map
+
+    path = tmp_path / "map.json"
+    path.write_text(json.dumps({"a.weight": "BF16", "b.weight": ["F32", [2, 2]]}))
+    assert load_dtype_map(path) == {"a.weight": "BF16", "b.weight": "F32"}
+    assert load_dtype_map(None) == {}
+
+
+def test_alignable_dtype_ignores_fp8_and_integer_targets():
+    from xtuner.tools.model_normalize.dtypes import alignable_dtype
+
+    dtype_map = {"a.weight": "BF16", "b.weight": "F8_E4M3", "c.weight": "I64"}
+    assert alignable_dtype(dtype_map, "a.weight") == "BF16"
+    assert alignable_dtype(dtype_map, "b.weight") is None
+    assert alignable_dtype(dtype_map, "c.weight") is None
+    assert alignable_dtype(dtype_map, "missing.weight") is None
+
+
+def test_align_tensor_casts_f32_to_bf16_and_skips_matching_dtype():
+    torch = pytest.importorskip("torch")
+    from xtuner.tools.model_normalize.dtypes import align_tensor
+
+    tensor = torch.zeros(2, 2, dtype=torch.float32)
+    casted, changed = align_tensor(tensor, "BF16")
+    assert changed
+    assert casted.dtype == torch.bfloat16
+    same, changed_again = align_tensor(casted, "BF16")
+    assert not changed_again
+    assert same.dtype == torch.bfloat16
+
+
+def test_repack_applies_dtype_map(tmp_path):
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("safetensors")
+    from safetensors.torch import load_file, save_file
+
+    from xtuner.tools.model_normalize.repack import repack
+
+    source = tmp_path / "source"
+    source.mkdir()
+    key = "model.language_model.layers.0.self_attn.q_conv1d.weight"
+    save_file(
+        {
+            key: torch.zeros(8192, 1, 4, dtype=torch.float32),
+            "model.language_model.layers.0.hc_attn_base": torch.zeros(24, dtype=torch.float32),
+        },
+        source / "model-00001-of-00001.safetensors",
+    )
+
+    target = tmp_path / "target"
+    repack(
+        source,
+        target,
+        shard_size_bytes=1024**3,
+        dtype_map={key: "BF16", "model.language_model.layers.0.hc_attn_base": "F32"},
+    )
+
+    written = load_file(target / "model-00001-of-00001.safetensors")
+    assert written[key].dtype == torch.bfloat16
+    assert written["model.language_model.layers.0.hc_attn_base"].dtype == torch.float32
+
+    index = json.loads((target / "model.safetensors.index.json").read_text())
+    # 8192 * 1 * 4 elements in bf16 + 24 elements in fp32
+    assert index["metadata"]["total_size"] == 8192 * 4 * 2 + 24 * 4

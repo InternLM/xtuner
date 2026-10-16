@@ -33,6 +33,17 @@ user-supplied release assets applied *after* conversion completes:
 When `--base-model-dir` is omitted, conversion behavior is unchanged. A
 source-supplied `generation_config.json` remains in the output as-is.
 
+## Reference dtype alignment
+
+`repack` and `to-fp8` accept `--dtype-map <json>`, a JSON object mapping tensor
+names to dtypes (`{"model.layers.0.self_attn.q_conv1d.weight": "BF16"}`;
+`[dtype, shape]` values are accepted too). Tensors whose entry names a real
+float dtype (`BF16`, `F16`, `F32`) are cast to it; FP8 targets and entries for
+absent tensors are ignored, and quantized tensors in the FP8 path are left to
+the converter. Use it when a training export stores some weights in a wider
+dtype than the released reference model, so the product matches the reference
+on storage dtype as well as on keys and shapes.
+
 ## FP8 conversion
 
 For a reference-guided conversion:

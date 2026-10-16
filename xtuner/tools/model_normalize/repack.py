@@ -27,6 +27,8 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from tqdm import tqdm
 
+from .dtypes import align_tensor, alignable_dtype
+
 
 # safetensors dtype string -> bytes per element. Covers the dtypes we emit.
 _DTYPE_BYTES = {
@@ -55,7 +57,12 @@ class _TensorEntry:
     nbytes: int
 
 
-def repack(source: Path, target: Path, shard_size_bytes: int = 4 * 1024**3) -> None:
+def repack(
+    source: Path,
+    target: Path,
+    shard_size_bytes: int = 4 * 1024**3,
+    dtype_map: dict[str, str] | None = None,
+) -> None:
     """Repack ``source`` safetensors into ~``shard_size_bytes`` standard shards.
 
     Args:
@@ -65,6 +72,8 @@ def repack(source: Path, target: Path, shard_size_bytes: int = 4 * 1024**3) -> N
             recoverable on failure).
         shard_size_bytes (int): Soft upper bound for each output shard. A
             tensor larger than this bound goes into its own shard.
+        dtype_map (dict[str, str] | None): Optional ``tensor name -> dtype`` map
+            used to align storage dtypes with a reference release.
     """
     source = source.resolve()
     target = target.resolve()
@@ -78,6 +87,7 @@ def repack(source: Path, target: Path, shard_size_bytes: int = 4 * 1024**3) -> N
 
     new_weight_map: dict[str, str] = {}
     total_size = 0
+    casts: dict[str, int] = {}
 
     for shard_idx, shard in enumerate(tqdm(plan, desc="writing shards")):
         shard_name = f"model-{shard_idx + 1:05d}-of-{num_shards:05d}.safetensors"
@@ -91,13 +101,23 @@ def repack(source: Path, target: Path, shard_size_bytes: int = 4 * 1024**3) -> N
         for src_file, names in by_source.items():
             with safe_open(source / src_file, framework="pt") as f:
                 for name in names:
-                    tensors[name] = f.get_tensor(name)
+                    tensor = f.get_tensor(name)
+                    target_dtype = alignable_dtype(dtype_map or {}, name)
+                    if target_dtype is not None:
+                        before = str(tensor.dtype).replace("torch.", "")
+                        tensor, casted = align_tensor(tensor, target_dtype)
+                        if casted:
+                            key = f"{before}->{str(tensor.dtype).replace('torch.', '')}"
+                            casts[key] = casts.get(key, 0) + 1
+                    tensors[name] = tensor
 
         save_file(tensors, target / shard_name)
 
-        for entry in shard:
-            new_weight_map[entry.name] = shard_name
-            total_size += entry.nbytes
+        # Report the size that was actually written: ``entry.nbytes`` reflects
+        # the *source* dtype, which is stale when a dtype map casts tensors.
+        for name, tensor in tensors.items():
+            new_weight_map[name] = shard_name
+            total_size += tensor.numel() * tensor.element_size()
 
     _copy_non_shard_files(source, target)
 
@@ -107,6 +127,9 @@ def repack(source: Path, target: Path, shard_size_bytes: int = 4 * 1024**3) -> N
     }
     with open(target / "model.safetensors.index.json", "w") as f:
         json.dump(index, f, indent=2)
+
+    if casts:
+        print(f"[model_normalize] dtype alignment applied: {casts}")
 
 
 def _scan_tensors(source: Path) -> list[_TensorEntry]:

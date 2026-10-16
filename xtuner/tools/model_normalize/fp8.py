@@ -33,6 +33,8 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from tqdm import tqdm
 
+from .dtypes import align_tensor, alignable_dtype
+
 
 FP8_TYPES = {
     torch.float8_e4m3fn,
@@ -50,6 +52,8 @@ def convert(
     block_size: int = 128,
     float8_dtype: torch.dtype = torch.float8_e4m3fn,
     max_workers: int = 4,
+    quantization_config: dict | None = None,
+    dtype_map: dict[str, str] | None = None,
 ) -> None:
     """Quantize an HF safetensors checkpoint to FP8 in-place into ``target``.
 
@@ -64,6 +68,15 @@ def convert(
         block_size (int): Block size for per-block scaling (default 128).
         float8_dtype (torch.dtype): Target FP8 dtype (default ``e4m3fn``).
         max_workers (int): Max parallel save workers.
+        quantization_config (dict | None): Metadata block written into the
+            output ``config.json``. When omitted, a locally derived block is
+            used (without a ``scale_fmt`` declaration, because the stored
+            scales are plain float32). Pass the reference model's
+            ``quantization_config`` to keep the product aligned with a
+            released model.
+        dtype_map (dict[str, str] | None): Optional ``tensor name -> dtype`` map
+            applied to tensors that are *not* quantized, so their storage
+            dtype matches the reference release.
     """
     with open(source / "model.safetensors.index.json") as f:
         index = json.load(f)
@@ -80,18 +93,27 @@ def convert(
         if not should_quantize(param_name):
             modules_to_not_convert.add(module_name)
 
-    quantization_config = {
-        "activation_scheme": "dynamic",
-        "fmt": "e4m3",
-        "quant_method": "fp8",
-        "scale_fmt": "ue8m0",
-        "weight_block_size": [block_size, block_size],
-        "modules_to_not_convert": sorted(modules_to_not_convert),
-    }
+    if quantization_config is None:
+        quantization_config = {
+            "activation_scheme": "dynamic",
+            "fmt": "e4m3",
+            "quant_method": "fp8",
+            "weight_block_size": [block_size, block_size],
+            "modules_to_not_convert": sorted(modules_to_not_convert),
+        }
+    else:
+        quantization_config = dict(quantization_config)
+        declared = list(quantization_config.get("weight_block_size", []))
+        if declared != [block_size, block_size]:
+            raise ValueError(
+                "reference quantization_config declares weight_block_size "
+                f"{declared}, which does not match --block-size {block_size}"
+            )
 
     executor = ProcessPoolExecutor(max_workers=max_workers)
     pending = []
     new_weight_map: dict[str, str] = {}
+    casts: dict[str, int] = {}
 
     for filename in tqdm(sorted(set(original_weight_map.values()))):
         filepath = source / filename
@@ -102,6 +124,13 @@ def convert(
             new_weight_map[key] = filename
             tensor = safetensor_fh.get_tensor(key)
             if not should_quantize(key):
+                target_dtype = alignable_dtype(dtype_map or {}, key)
+                if target_dtype is not None:
+                    before = str(tensor.dtype).replace("torch.", "")
+                    tensor, casted = align_tensor(tensor, target_dtype)
+                    if casted:
+                        pair = f"{before}->{str(tensor.dtype).replace('torch.', '')}"
+                        casts[pair] = casts.get(pair, 0) + 1
                 new_shard[key] = tensor
                 continue
 
@@ -131,6 +160,9 @@ def convert(
     hf_config["quantization_config"] = quantization_config
     with open(target / "config.json", "w") as f:
         json.dump(hf_config, f, indent=2)
+
+    if casts:
+        print(f"[model_normalize] dtype alignment applied: {casts}")
 
 
 def compile_union(patterns: list[str]) -> re.Pattern:
