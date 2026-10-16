@@ -16,7 +16,7 @@ from xtuner.v1.data_proto.messages.glm53_chat import glm53_tokenize_fn_slowspeed
 
 
 GLM_5_3_FLASH_PATH = os.environ["GLM_5_3_FLASH_PATH"]
-GLM53_TEMPLATE_DEFAULTS = {"enable_thinking": True, "reasoning_effort": "max", "clear_thinking": False}
+GLM53_TEMPLATE_DEFAULTS = {"reasoning_effort": "max", "clear_thinking": False}
 
 
 @pytest.fixture(scope="module")
