@@ -22,6 +22,7 @@ preprocessing path makes internally. Verified bitwise-equal to the real processo
 
 import copy
 import os
+from functools import partial
 from typing import Any, Literal
 
 import numpy as np
@@ -42,6 +43,7 @@ from .base_mllm_tokenize_fn import (
     BaseMLLMTokenizeFnConfig,
     BaseMLLMTokenizeFunction,
     OSSLoaderConfig,
+    collect_image_video_paths_and_extra,
     get_image_path,
     load_image,
 )
@@ -61,72 +63,6 @@ _PROCESSOR_CACHE: dict[str, Any] = {}
 # num_tokens by 2 per media item.
 _IMAGE_MARKER = "<|image|>"
 _VIDEO_MARKER = "<|video|>"
-
-
-def collect_image_video_paths_and_extra(messages: list[dict]):
-    """Collect GLM-5.3 media from every message role in input order."""
-    image_paths = []
-    image_wh_list = []
-    video_wh_list = []
-    video_extra_info_list = []
-    video_paths = []
-    for msg in messages:
-        content = msg["content"]
-        if isinstance(content, list):
-            for c in content:
-                if c["type"] in ("image_url", "image"):
-                    key = "image_url" if "image_url" in c else "image"
-                    image_paths.append(c[key]["url"])
-                    if "image_wh" in c[key]:
-                        image_wh = c[key]["image_wh"]
-                        if isinstance(image_wh[0], (list, tuple)):
-                            assert len(image_wh) == 1, (
-                                f"Only one image size is supported for each image. but got {image_wh}"
-                            )
-                            image_wh = image_wh[0]
-                        image_wh_list.append(image_wh)
-                        assert len(image_wh) == 2, f"image_wh should be [width, height], but got {image_wh}"
-                if c["type"] in ("video_url", "video"):
-                    key = "video_url" if "video_url" in c else "video"
-                    video_paths.append(c[key]["url"])
-                    video_wh = c[key].get("image_wh")
-                    if video_wh is not None:
-                        if isinstance(video_wh[0], (list, tuple)):
-                            assert len(video_wh) == 1, (
-                                f"Only one video size is supported for each video. but got {video_wh}"
-                            )
-                            video_wh = video_wh[0]
-                        video_wh_list.append(video_wh)
-                        assert len(video_wh) == 2, f"video_wh should be [width, height], but got {video_wh}"
-
-                    video_extra_dict = {}
-
-                    if "origin_video_length" in c[key]:
-                        video_extra_dict["origin_video_length"] = c[key]["origin_video_length"]
-                    if "origin_fps" in c[key]:
-                        video_extra_dict["origin_fps"] = c[key]["origin_fps"]
-                    if "processed_video_length" in c[key]:
-                        video_extra_dict["processed_video_length"] = c[key]["processed_video_length"]
-                    if "processed_fps" in c[key]:
-                        video_extra_dict["processed_fps"] = c[key]["processed_fps"]
-                    if "frames_timestamp" in c[key]:
-                        video_extra_dict["frames_timestamp"] = c[key]["frames_timestamp"]
-                    if len(video_extra_dict) > 0:
-                        video_extra_info_list.append(video_extra_dict)
-
-    if len(image_wh_list) > 0:
-        assert len(image_wh_list) == len(image_paths), "If image_wh is provided, it should match the number of images."
-    if len(video_wh_list) > 0:
-        assert len(video_wh_list) == len(video_paths), "If video_wh is provided, it should match the number of videos."
-    if len(video_extra_info_list) > 0:
-        assert len(video_extra_info_list) == len(video_paths), (
-            "If video_extra_info is provided, it should match the number of videos."
-        )
-    return (
-        image_paths,
-        video_paths,
-        {"image_wh": image_wh_list, "video_wh": video_wh_list, "video_extra_info": video_extra_info_list},
-    )
 
 
 def _video_frame_source(video_file: str, extra: dict) -> tuple[int, float]:
@@ -189,7 +125,7 @@ def _expand_marker(text: str, loss_mask: list[bool], marker: str, expansions: li
 
 
 class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
-    collect_image_video_paths_and_extra = staticmethod(collect_image_video_paths_and_extra)
+    collect_image_video_paths_and_extra = partial(collect_image_video_paths_and_extra, allow_all_roles=True)
 
     def __init__(
         self,

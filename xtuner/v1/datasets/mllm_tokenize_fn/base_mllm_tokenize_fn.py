@@ -20,14 +20,14 @@ logger = get_logger()
 IMAGE_TOKEN_ALIAS = "XTUNER-ALIAS-ALIAS-XTUNER-2025"
 
 
-def collect_image_video_paths_and_extra(messages: list[dict]):
+def collect_image_video_paths_and_extra(messages: list[dict], allow_all_roles: bool = False):
     image_paths = []
     image_wh_list = []
     video_wh_list = []
     video_extra_info_list = []
     video_paths = []
     for msg in messages:
-        if msg["role"] == "user" or msg["role"] == "pretrain":
+        if allow_all_roles or msg["role"] == "user" or msg["role"] == "pretrain":
             content = msg["content"]
             if isinstance(content, list):
                 for c in content:
