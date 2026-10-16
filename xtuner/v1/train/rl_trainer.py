@@ -17,7 +17,7 @@ from typing_extensions import Literal, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1._writer import get_writer
-from xtuner.v1.data_proto.rl_data import RolloutState, is_valid_for_training
+from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop_manager import (
@@ -29,6 +29,7 @@ from xtuner.v1.rl.agent_loop_manager import (
     ProduceBatchStatus,
 )
 from xtuner.v1.rl.agent_loop_manager.produce_utils import default_should_continue_fn
+from xtuner.v1.rl.agent_loop_manager.validation import validate_train_group
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.health_manager import RLHealthManager, _NoOpRLHealthManager
@@ -39,6 +40,7 @@ from xtuner.v1.rl.replay_buffer import (
     _snapshot_nested_objectrefs,
 )
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
+from xtuner.v1.rl.rollout.trace_store import release_and_discard_rollout_groups
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.rollout.worker_registry import WorkerLifecycleState
 from xtuner.v1.rl.trace import TraceConfig, close_trace, configure_trace
@@ -925,6 +927,58 @@ class BaseRLTrainer:
         """Release training traces when no concurrent rollout owner exists."""
         self._release_all_trace_sessions()
 
+    def _prepare_train_batch(
+        self,
+        train_batch: list[list[RolloutState]],
+        train_step: int,
+        produce_result: ProduceBatchResult | None = None,
+    ) -> tuple[int, int]:
+        """Drop invalid groups before training; preserve the labels from batch
+        retrieval.
+
+        Evaluation never enters this path. Staleness is already handled by take_train_batch, and debug replay preserves
+        its saved label masks.
+        """
+        valid_groups = []
+        rejected_groups = []
+        rejected_samples = 0
+        for group in train_batch:
+            task_name = (group[0].task_name if group else None) or "train"
+            try:
+                validate_train_group(group, task_name=task_name)
+            except ValueError as exc:
+                self.logger.warning(
+                    f"Discard invalid training group: task={task_name!r}, "
+                    f"rollout_ids={[state.rollout_id for state in group]}, reason={exc}"
+                )
+                rejected_groups.append(group)
+                rejected_samples += len(group)
+                continue
+
+            valid_groups.append(group)
+
+        if rejected_groups:
+            asyncio_run(release_and_discard_rollout_groups(rejected_groups))
+        train_batch[:] = valid_groups
+        if produce_result is not None:
+            produce_result.rollout_states[:] = valid_groups
+        if produce_result is not None and produce_result.task_results is not None:
+            kept_states = {id(state) for group in valid_groups for state in group}
+            for result in produce_result.task_results.values():
+                result.rollout_states[:] = [
+                    group for group in result.rollout_states if group and id(group[0]) in kept_states
+                ]
+        self.logger.info(
+            f"Training field check: kept_groups={len(valid_groups)}, "
+            f"discarded_groups={len(rejected_groups)}, discarded_samples={rejected_samples}"
+        )
+        if not valid_groups:
+            raise ValueError(
+                f"No valid training data remains after checking training fields: train_step={train_step}, "
+                f"discarded_groups={len(rejected_groups)}, discarded_samples={rejected_samples}"
+            )
+        return len(rejected_groups), rejected_samples
+
     def _train_one_batch(
         self,
         train_batch: list[list[RolloutState]],
@@ -935,7 +989,9 @@ class BaseRLTrainer:
         onload_train_before_train: bool = False,
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
+        produce_result: ProduceBatchResult | None = None,
     ) -> TrainInfo:
+        dropped_groups, dropped_samples = self._prepare_train_batch(train_batch, train_step, produce_result)
         train_sample_count = sum(len(group) for group in train_batch)
         self.logger.info(f"generate {train_sample_count} samples for training")
 
@@ -966,6 +1022,8 @@ class BaseRLTrainer:
                 raw_rewards_count=raw_rewards_count,
             )
 
+        data_info["invalid_train_groups"] = dropped_groups
+        data_info["invalid_train_samples"] = dropped_samples
         self._release_trace_sessions_after_train_batch(train_batch)
 
         return {
@@ -1183,8 +1241,6 @@ class BaseRLTrainer:
         valid_groups = []
 
         for group in data_groups:
-            if not is_valid_for_training(group, self.logger):
-                continue
             valid_groups.append(group)
             for data in group:
                 reward = data.reward.get("score") if data.reward is not None else None
@@ -1525,6 +1581,7 @@ class RLColocateTrainer(BaseRLTrainer):
                         onload_train_before_train=True,
                         raw_rewards_sum=produce_result.raw_rewards_sum,
                         raw_rewards_count=produce_result.raw_rewards_count,
+                        produce_result=produce_result,
                     )
                 else:
                     self._save_debug_rollout_batch(train_batch, train_step)
@@ -1823,6 +1880,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                             step_timer_dict,
                             raw_rewards_sum=produce_result.raw_rewards_sum,
                             raw_rewards_count=produce_result.raw_rewards_count,
+                            produce_result=produce_result,
                         )
                         sync_model_step = train_step
 

@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from lagent.utils import create_object
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, validate_train_fields, write_train_meta
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import create_task
@@ -252,35 +252,13 @@ class AgentInSandboxLoop(AgentLoop):
         return self.canonicalize_train_fields(samples)
 
     def canonicalize_train_fields(self, group: list[RolloutState]) -> list[RolloutState]:
-        """Validate the canonical training fields of one sandbox agentic
-        rollout group.
+        """Preserve trace-exported unshifted fields and write train metadata.
 
-        Each segment state carries ``input_ids``/``labels``/``logprobs`` exported from
-        the trace store as one unshifted full sequence, so there is nothing left to
-        assemble. Canonicalization only re-checks the unified convention (``labels``
-        present and of equal length, ``logprobs`` either ``None`` or of equal length)
-        per segment state and marks a violating sample ``Status.FAILED`` instead of
-        raising into the producer. States without ``input_ids`` (eval-mode states) carry
-        no training fields and are skipped.
-
-        Args:
-            group (list[RolloutState]): One flattened group of segment rollout states
-                after generation, judging, and filtering.
-
-        Returns:
-            list[RolloutState]: The same group with validated training fields.
+        Eval states without training fields are left untouched. The trainer checks full training fields before
+        consuming a group.
         """
         for state in group:
-            if state.status != Status.COMPLETED or state.input_ids is None:
-                continue
-            try:
-                validate_train_fields(state)
-            except Exception as exc:
-                self.logger.error(f"Canonicalize train fields failed for rollout_id={state.rollout_id}: {exc}")
-                state.status = Status.FAILED
-                state.error_msg = f"canonicalize_train_fields failed: {exc}"
-        for state in group:
-            write_train_meta(state)
+            self._write_train_meta(state)
         return group
 
     # NOTE: A single sandbox session may yield multiple trainable segments, so this returns a list
