@@ -30,6 +30,7 @@ TestGlm53DirtyDataDoesNotHalt
     test_image_geometry_type_error_is_discarded     image_wh 字符串数字：几何预测 TypeError 走丢弃通道
     test_non_mapping_media_value_is_discarded       image 值是字符串：collector TypeError 走丢弃通道
     test_config_error_still_raises_in_cache         配置错误（enable_thinking=False）不被丢弃通道吞掉
+    test_non_positive_pixel_limits_rejected_at_config_build  max_pixels/min_pixels<=0 构造期拒绝，不进每样本丢弃通道
     test_literal_image_token_in_pure_text_is_discarded  纯文本含字面 <|image|>：cache 丢弃、runtime 抛错
     test_literal_marker_before_media_escapes_count_checks_is_discarded  字面标记在真实媒体前+真实标记被截断：旧计数校验放行，渲染前丢弃
     test_literal_marker_in_renderer_text_sources_is_discarded  tool 输出/reasoning/tool_calls/tools 定义中的字面标记同样在源头丢弃
@@ -48,6 +49,7 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image
+from pydantic import ValidationError
 
 from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizerBase
 from transformers.video_utils import VideoMetadata
@@ -639,6 +641,17 @@ class TestGlm53DirtyDataDoesNotHalt:
         tokenize_fn.state = "cache"
         with pytest.raises(AssertionError, match="enable_thinking"):
             tokenize_fn({"messages": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}]})
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("min_pixels", 0), ("max_pixels", 0), ("max_pixels", -1)],
+    )
+    def test_non_positive_pixel_limits_rejected_at_config_build(self, ckpt_path: str, field: str, value: int) -> None:
+        # max_pixels=0 曾能构造：每张图都在 HF smart_resize 抛 ValueError——恰好落在
+        # _DIRTY_DATA_ERRORS 里，cache 阶段被当成单条脏样本静默丢弃，所有图片样本无声消失。
+        # 这类配置错误必须在构造期以 ValidationError 暴露，到不了每样本丢弃通道。
+        with pytest.raises(ValidationError, match=field):
+            Glm53VLTokenizeFnConfig(processor_path=ckpt_path, **{field: value})
 
     def test_literal_image_token_in_pure_text_is_discarded(
         self, tokenize_fn: Glm53VLTokenizeFunction, monkeypatch: pytest.MonkeyPatch

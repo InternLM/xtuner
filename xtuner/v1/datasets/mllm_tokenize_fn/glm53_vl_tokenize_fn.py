@@ -29,7 +29,7 @@ from typing import Any, Literal
 import numpy as np
 import torch
 from PIL import Image
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from transformers import AutoProcessor
 from transformers.models.glm5_next.image_processing_glm5_next import smart_resize as image_smart_resize
@@ -536,8 +536,11 @@ class Glm53VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     # construction raise at validation time; defaulted here to the name the renderer implements.
     chat_template: str = "glm5.3"
     processor_path: str
-    min_pixels: int | None = None
-    max_pixels: int | None = None
+    # 非正的像素上限曾在构造期放行、到每张图的 HF smart_resize 才抛 ValueError——落在
+    # _DIRTY_DATA_ERRORS 里被 cache 当成单条脏样本静默丢弃，所有图片样本无声消失。配置错误
+    # 必须在构造期暴露，靠这里拦住，不靠每样本的丢弃通道。
+    min_pixels: int | None = Field(default=None, gt=0)
+    max_pixels: int | None = Field(default=None, gt=0)
     oss_loader_cfg: OSSLoaderConfig | None = None
     fps: float | None = None
     max_frames: int | None = None
