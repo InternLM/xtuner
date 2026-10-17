@@ -287,9 +287,11 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         logger.debug(f"[Dataset] Start loading [{self.name}]{self.path} with sample_ratio={sample_ratio}.")
 
         self._has_chunk = isinstance(tokenize_fn, LongTextPretrainTokenizeFunction)
+        self._cached = False
 
         tok_cache_dir: str | None = None  # set inside cache_dir branch when tokenize_fn is CachableTokenizeFunction
         if cache_tag is not None and (cached := self._get_cached_tag(cache_tag, tokenize_fn)) is not None:
+            self._cached = True
             logger.debug(f"[Dataset] Load cached [{self.name}]{self.path} of cache tags {cache_tag}.")
             offset_path = cached["offsets"]
             meta_path = cached.get("jsonl_meta")
@@ -377,6 +379,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 _meta_file = os.path.join(tok_cache_dir, "jsonl_meta")
                 if os.path.exists(_meta_file):
                     logger.debug(f"Loading tokenize meta from cache: {_meta_file}")
+                    self._cached = True
                     _meta = load_dict_from_npy_dir(_meta_file, mmap=enable_mmap_shared)
                 else:
                     _meta = self.count_tokens(offsets, tok_cache_dir)
@@ -835,3 +838,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
 
     def get_state_dict(self):
         return {}
+
+    @property
+    def cached(self) -> bool:
+        return self._cached
