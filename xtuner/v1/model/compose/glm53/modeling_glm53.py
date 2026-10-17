@@ -142,23 +142,57 @@ class Glm53ForConditionalGeneration(BaseComposeModel):
         # consumption time instead of in the dataloader workers. The plan is produced by
         # the tokenize side only under XTUNER_LAZY_MEDIA=1 and is decoded by the SAME
         # load_image/EXIF/image_processor calls (per-sample grouping preserved) with the
-        # processed grids asserted equal to the tokenize-time prediction. Tensors stay on
-        # CPU exactly like the eager path; the tower moves them to the module device.
+        # processed grids asserted equal to the tokenize-time prediction.
         if seq_ctx.pixel_values is None and seq_ctx.media_plan is not None:
-            from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import materialize_image_plan
+            from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import (
+                lazy_media_shared_decode,
+                materialize_image_plan,
+            )
 
-            pixel_values, image_grid_thw = materialize_image_plan(seq_ctx.media_plan)
-            # Mirror the eager device split exactly: SequenceContext.to leaves pixel_values
-            # on CPU (the tower's patch embed does its own H2D) but moves image_grid_thw to
-            # the accelerator, where the tower derives cu_seqlens (grid_thw.device).
-            grid_device = (
-                seq_ctx.image_grid_thw.device
-                if seq_ctx.image_grid_thw is not None
-                else inputs_embeds.device
-            )
-            seq_ctx = seq_ctx.copy(
-                pixel_values=pixel_values, image_grid_thw=image_grid_thw.to(grid_device)
-            )
+            sp_group = sp_mesh.get_group() if sp_mesh is not None else None
+            if sp_group is not None and dist.get_world_size(sp_group) > 1 and lazy_media_shared_decode():
+                # V2b: every SP rank holds the SAME media plan (packs are replicated under
+                # SP), so shapes are locally computable and only the SP-group's first rank
+                # decodes; the exact bits are then broadcast. Non-decoding ranks receive
+                # bitwise-identical tensors to what local materialization would produce,
+                # with 1/N of the decode CPU and 1/N of the PCIe H2D traffic. Both
+                # collectives run once per image pack on every rank; text-only packs skip
+                # uniformly on all ranks, so the collective sequence stays identical.
+                patch_embed = self.vision_tower.patch_embed
+                patch_dim = (
+                    patch_embed.in_channels
+                    * patch_embed.temporal_patch_size
+                    * patch_embed.patch_size**2
+                )
+                plan_images = seq_ctx.media_plan["images"]
+                rows = sum(grid[0] * grid[1] * grid[2] for grid in (entry["grid"] for entry in plan_images))
+                pixel_values = torch.empty((rows, patch_dim), dtype=torch.float32, device=inputs_embeds.device)
+                image_grid_thw = torch.empty((len(plan_images), 3), dtype=torch.int64, device=inputs_embeds.device)
+                src = dist.get_process_group_ranks(sp_group)[0]
+                if dist.get_rank(sp_group) == 0:
+                    local_pixel, local_grid = materialize_image_plan(seq_ctx.media_plan)
+                    if local_pixel.dtype != torch.float32 or local_grid.dtype != torch.int64:
+                        raise RuntimeError(
+                            "V2b allocation assumptions broken: materialized dtypes "
+                            f"{local_pixel.dtype}/{local_grid.dtype} != float32/int64"
+                        )
+                    pixel_values.copy_(local_pixel)
+                    image_grid_thw.copy_(local_grid)
+                dist.broadcast(pixel_values, src=src, group=sp_group)
+                dist.broadcast(image_grid_thw, src=src, group=sp_group)
+            else:
+                pixel_values, image_grid_thw = materialize_image_plan(seq_ctx.media_plan)
+                # Mirror the eager device split exactly: SequenceContext.to leaves
+                # pixel_values on CPU (the tower's patch embed does its own H2D) but moves
+                # image_grid_thw to the accelerator (the tower derives cu_seqlens on
+                # grid_thw.device).
+                grid_device = (
+                    seq_ctx.image_grid_thw.device
+                    if seq_ctx.image_grid_thw is not None
+                    else inputs_embeds.device
+                )
+                image_grid_thw = image_grid_thw.to(grid_device)
+            seq_ctx = seq_ctx.copy(pixel_values=pixel_values, image_grid_thw=image_grid_thw)
 
         has_image = seq_ctx.pixel_values is not None
         has_video = seq_ctx.pixel_values_videos is not None
