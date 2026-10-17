@@ -346,7 +346,15 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
                 f"but got {weight.shape}."
             )
 
-    def forward(self, input: torch.Tensor, tokens_per_expert, decoding: bool = False) -> torch.Tensor:
+    def forward(
+        self,
+        input: torch.Tensor,
+        tokens_per_expert,
+        decoding: bool = False,
+        tokens_per_expert_cpu=None,
+        **kwargs,
+    ) -> torch.Tensor:
+        del tokens_per_expert_cpu, kwargs
         weight = self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
 
         self._check_shape(weight)
