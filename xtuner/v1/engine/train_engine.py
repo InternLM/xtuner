@@ -176,6 +176,10 @@ class TrainEngine:
 
         model = model.fully_shard(self.fsdp_cfg)
 
+        if os.environ.get("XTUNER_FSDP_UNSHARD_ASYNC_OP", "0") == "1":
+            model._set_unshard_async_op(True)  # type: ignore[attr-defined]
+            log_rank0.info("[FSDP] unshard_async_op=True (all-gather on compute stream)")
+
         if dist.get_rank() == 0:
             log_rank0.info(model)
         return model
