@@ -138,6 +138,18 @@ class Glm53ForConditionalGeneration(BaseComposeModel):
         assert input_ids is not None
         inputs_embeds = self.language_model.embed_tokens(input_ids)  # type: ignore[attr-defined]
 
+        # Lazy-media candidate: materialize this micro-batch's images right here at
+        # consumption time instead of in the dataloader workers. The plan is produced by
+        # the tokenize side only under XTUNER_LAZY_MEDIA=1 and is decoded by the SAME
+        # load_image/EXIF/image_processor calls (per-sample grouping preserved) with the
+        # processed grids asserted equal to the tokenize-time prediction. Tensors stay on
+        # CPU exactly like the eager path; the tower moves them to the module device.
+        if seq_ctx.pixel_values is None and seq_ctx.media_plan is not None:
+            from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import materialize_image_plan
+
+            pixel_values, image_grid_thw = materialize_image_plan(seq_ctx.media_plan)
+            seq_ctx = seq_ctx.copy(pixel_values=pixel_values, image_grid_thw=image_grid_thw)
+
         has_image = seq_ctx.pixel_values is not None
         has_video = seq_ctx.pixel_values_videos is not None
 

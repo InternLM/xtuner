@@ -53,6 +53,76 @@ logger = get_logger()
 # Shared across datasets that use the same processor_path, mirroring qwen3_vl_tokenize_fn.py.
 _PROCESSOR_CACHE: dict[str, Any] = {}
 
+# ---- lazy media (candidate variant "lazy-sync-a2") --------------------------------------------
+#
+# XTUNER_LAZY_MEDIA=1 keeps the cache/pack path untouched (identical num_tokens / pack
+# fingerprint) and changes only the runtime sample payload: instead of decoding images inside
+# the dataloader worker, multi_modal_get_item emits a serializable media plan (resolved local
+# paths + predicted grids + processor settings) and omits pixel_values. The plan travels
+# through pack/collator/SequenceContext as plain data and is materialized right before the
+# vision tower consumes it (Glm53ForConditionalGeneration._prepare_llm_inputs) by
+# materialize_image_plan below, using the SAME load_image / apply_exif_orientation /
+# image_processor calls as the eager path and asserting predicted == processed grids.
+
+LAZY_MEDIA_ENV = "XTUNER_LAZY_MEDIA"
+
+
+def lazy_media_enabled() -> bool:
+    """Return whether lazy image materialization is enabled for this process."""
+    return os.environ.get(LAZY_MEDIA_ENV, "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def materialize_image_plan(media_plan: dict) -> tuple[torch.Tensor, torch.Tensor]:
+    """Decode the images of one media plan and produce eager-path-equivalent tensors.
+
+    Reproduces ``multi_modal_get_item``'s eager media stage exactly: one image_processor
+    call per source sample over that sample's images (the same grouping the eager path
+    uses; per-sample results are concatenated exactly like the collator does), via
+    load_image -> apply_exif_orientation -> image_processor, and verifies that the
+    processed ``image_grid_thw`` matches the geometry-only grids predicted at tokenize
+    time; a mismatch would mean the pack's placeholders no longer describe the media.
+
+    Args:
+        media_plan (dict): Plan produced by ``multi_modal_get_item`` under lazy media; keys
+            ``images`` (flat list of {"path": str, "grid": [int, int, int]} in pack order),
+            ``sample_sizes`` (list[int]): images per source sample in pack order,
+            ``processor_path`` (str), ``min_pixels`` (int | None), ``max_pixels`` (int | None).
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: ``(pixel_values, image_grid_thw)`` on CPU,
+        equal to what the eager tokenize path + collator would have produced.
+    """
+    processor_path = media_plan["processor_path"]
+    if processor_path not in _PROCESSOR_CACHE:
+        _PROCESSOR_CACHE[processor_path] = AutoProcessor.from_pretrained(processor_path, trust_remote_code=True)
+    image_processor = copy.deepcopy(_PROCESSOR_CACHE[processor_path]).image_processor
+    min_pixels = media_plan.get("min_pixels")
+    max_pixels = media_plan.get("max_pixels")
+    if min_pixels is not None:
+        image_processor.min_image_tokens = min_pixels
+    if max_pixels is not None:
+        image_processor.max_image_tokens = max_pixels
+
+    decoded: list[Any] = [apply_exif_orientation(load_image(entry["path"])) for entry in media_plan["images"]]
+    pixel_parts: list[torch.Tensor] = []
+    grid_parts: list[torch.Tensor] = []
+    offset = 0
+    for sample_size in media_plan["sample_sizes"]:
+        processed = image_processor(images=decoded[offset : offset + sample_size], return_tensors="pt")
+        pixel_parts.append(processed["pixel_values"])
+        grid_parts.append(processed["image_grid_thw"])
+        offset += sample_size
+    pixel_values = torch.cat(pixel_parts, dim=0)
+    image_grid_thw = torch.cat(grid_parts, dim=0)
+    predicted = torch.tensor([entry["grid"] for entry in media_plan["images"]], dtype=image_grid_thw.dtype)
+    if not torch.equal(image_grid_thw, predicted):
+        raise RuntimeError(
+            "LAZY_MEDIA grid mismatch: processed image_grid_thw\n"
+            f"{image_grid_thw.tolist()}\ndiffers from tokenize-time prediction\n{predicted.tolist()}\n"
+            f"paths: {[entry['path'] for entry in media_plan['images']]}"
+        )
+    return pixel_values, image_grid_thw
+
 # `replace_image_token`/`replace_video_token` (HF) only replace the single INNER placeholder
 # token; the `<|begin_of_image|>`/`<|end_of_image|>` (or `..._video...`) wrapper that
 # render_glm53_chat/the jinja template emits around it stays untouched in the final sequence.
@@ -153,6 +223,8 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         self.processor = copy.deepcopy(_PROCESSOR_CACHE[processor_path])
         self.image_processor = self.processor.image_processor
         self.video_processor = self.processor.video_processor
+        # Kept for the lazy-media plan so the deferred consumer rebuilds this exact processor.
+        self.processor_path = processor_path
 
         if min_pixels is not None:
             self.image_processor.min_image_tokens = min_pixels
@@ -259,6 +331,9 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         return self._cache_item(input_ids, num_img_tokens, data_item)
 
     def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> Glm53VLDataItem:
+        if lazy_media_enabled():
+            return self._lazy_multi_modal_get_item(data_item, media_root)
+
         images = []
         for image_file in self._image_path:
             image_path_ = get_image_path(image_file, media_root)
@@ -303,6 +378,59 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             pixel_values=pixel_values,
             image_grid_thw=image_grid_thw,
             mm_token_type_ids=torch.tensor(mm_token_type_ids, dtype=torch.long).unsqueeze(0),
+        )
+
+    def _lazy_multi_modal_get_item(self, data_item: dict, media_root: str) -> Glm53VLDataItem:
+        # Same text/placeholder/truncation semantics as the eager path; the ONLY deltas are
+        # that image_grid_thw comes from geometry-only prediction (identical values asserted
+        # at materialization time) and that pixel_values are replaced by a serializable
+        # media plan decoded later at micro-batch consumption.
+        if len(self._image_wh_list) != len(self._image_path):
+            # Deferred decode needs per-image geometry from the annotation; without it the
+            # eager path is the only valid one. Surface as an unsupported boundary exactly
+            # like other per-model-family limits (upstream turns it into a discard).
+            raise NotImplementedError(
+                f"{type(self).__name__} lazy media requires image_wh for every image; "
+                f"got {len(self._image_wh_list)} sizes for {len(self._image_path)} images."
+            )
+        grids = [self._predict_image_grid(w, h) for w, h in self._image_wh_list]
+        image_grid_thw = torch.tensor(grids)
+
+        text, loss_mask = self._render_base(data_item)
+        image_inputs = {"image_grid_thw": image_grid_thw}
+        expansions = [self.processor.replace_image_token(image_inputs, i) for i in range(len(grids))]
+        text, loss_mask = _expand_marker(text, loss_mask, _IMAGE_MARKER, expansions)
+        input_ids, labels, mm_token_type_ids = self._finalize(text, loss_mask)
+
+        num_img_tokens = (image_grid_thw[:, 1] * image_grid_thw[:, 2]).tolist()
+        input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
+        mm_token_type_ids = mm_token_type_ids[: len(input_ids)]
+        placeholder_count = input_ids.count(self.processor.image_token_id)
+        assert placeholder_count == sum(num_img_tokens) // self.merge_unit, (
+            f"GLM-5.3-Flash image placeholder count {placeholder_count} != expected "
+            f"{sum(num_img_tokens) // self.merge_unit}, data_name: {self.data_name}, "
+            f"data_id: {data_item.get('id', '')}. Discard this data."
+        )
+
+        media_plan = {
+            "images": [
+                {"path": get_image_path(image_file, media_root), "grid": list(grid)}
+                for image_file, grid in zip(self._image_path, grids)
+            ],
+            "sample_sizes": [len(self._image_path)],
+            "processor_path": self.processor_path,
+            "min_pixels": self.image_processor.min_image_tokens,
+            "max_pixels": self.image_processor.max_image_tokens,
+        }
+        return Glm53VLDataItem(
+            input_ids=input_ids,
+            labels=labels,
+            num_tokens=len(input_ids),
+            num_imgs=[len(self._image_path)],
+            num_img_tokens=num_img_tokens,
+            image_grid_thw=image_grid_thw,
+            mm_token_type_ids=torch.tensor(mm_token_type_ids, dtype=torch.long).unsqueeze(0),
+            media_plan=media_plan,
         )
 
     def _cache_item(self, input_ids: list[int], num_img_tokens: list[int], data_item: dict) -> CacheItem:
