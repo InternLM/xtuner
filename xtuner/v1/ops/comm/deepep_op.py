@@ -85,7 +85,10 @@ def get_low_latency_buffer(
     if _buffer is None:
         # NOTES: for best performance, the QP number **must** be equal to the number of the local experts
         assert num_experts % group.size() == 0
-        num_qps_per_rank = max(num_experts // group.size(), Buffer.num_sms // 2)
+        # The internode normal kernels device-assert `num_qps == num_sms // 2 or num_qps >= num_sms`; with EP16 and
+        # 256 experts, `max(16, num_sms // 2)` = 16 satisfies neither and traps as "unspecified launch failure".
+        # Following DeepEP's tests/test_internode.py, take at least `num_sms` QPs.
+        num_qps_per_rank = max(num_experts // group.size(), Buffer.num_sms)
         _buffer = Buffer(
             group,
             num_nvl_bytes,
