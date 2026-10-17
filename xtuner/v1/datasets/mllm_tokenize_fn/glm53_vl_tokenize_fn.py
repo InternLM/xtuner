@@ -259,7 +259,11 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         return self._cache_item(input_ids, num_img_tokens, data_item)
 
     def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> Glm53VLDataItem:
-        images = []
+        # Process each image before loading the next one so full-resolution PIL images
+        # do not accumulate alongside the processed tensors. Preserve the media order
+        # when concatenating the per-image processor outputs.
+        pixel_values_list = []
+        image_grid_list = []
         for image_file in self._image_path:
             image_path_ = get_image_path(image_file, media_root)
             if self.oss_loader is not None and "s3://" in image_path_:
@@ -269,11 +273,15 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
                 image = load_image(image_path_)
             image = apply_exif_orientation(image)
-            images.append(image)
+            processed_i = self.image_processor(images=[image], return_tensors="pt")
+            pixel_values_list.append(processed_i["pixel_values"])
+            image_grid_list.append(processed_i["image_grid_thw"])
+            del image, processed_i
 
-        processed = self.image_processor(images=images, return_tensors="pt")
-        pixel_values = processed["pixel_values"]
-        image_grid_thw = processed["image_grid_thw"]
+        pixel_values = torch.cat(pixel_values_list, dim=0)
+        image_grid_thw = torch.cat(image_grid_list, dim=0)
+        num_images = len(pixel_values_list)
+        del pixel_values_list, image_grid_list
 
         text, loss_mask = self._render_base(data_item)
         image_inputs = {"image_grid_thw": image_grid_thw}
@@ -298,7 +306,7 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             input_ids=input_ids,
             labels=labels,
             num_tokens=len(input_ids),
-            num_imgs=[len(images)],
+            num_imgs=[num_images],
             num_img_tokens=num_img_tokens,
             pixel_values=pixel_values,
             image_grid_thw=image_grid_thw,
