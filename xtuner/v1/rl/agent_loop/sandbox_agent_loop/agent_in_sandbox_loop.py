@@ -248,7 +248,43 @@ class AgentInSandboxLoop(AgentLoop):
         samples = [sample for sample_group in sample_groups for sample in sample_group]
         samples = _drop_failed_train_samples(samples, self.mode)
         samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
-        return await self._teacher_scorer.on_group_ready(samples)
+        samples = await self._teacher_scorer.on_group_ready(samples)
+        return self.canonicalize_train_fields(samples)
+
+    def canonicalize_train_fields(self, group: list[RolloutState]) -> list[RolloutState]:
+        """Validate the canonical training fields of one sandbox agentic
+        rollout group.
+
+        Each segment state carries ``input_ids``/``labels``/``logprobs`` exported from
+        the trace store as one unshifted full sequence, so there is nothing left to
+        assemble. Canonicalization only re-checks the unified convention (``labels``
+        present and of equal length, ``logprobs`` either ``None`` or of equal length)
+        per segment state and marks a violating sample ``Status.FAILED`` instead of
+        raising into the producer. States without ``input_ids`` (eval-mode states) carry
+        no training fields and are skipped.
+
+        Args:
+            group (list[RolloutState]): One flattened group of segment rollout states
+                after generation, judging, and filtering.
+
+        Returns:
+            list[RolloutState]: The same group with validated training fields.
+        """
+        for state in group:
+            if state.status != Status.COMPLETED or state.input_ids is None:
+                continue
+            try:
+                labels = state.labels
+                if labels is None or len(labels) != len(state.input_ids):
+                    expected = 0 if labels is None else len(labels)
+                    raise ValueError(f"labels length mismatch: {expected} vs {len(state.input_ids)}")
+                if state.logprobs is not None and len(state.logprobs) != len(state.input_ids):
+                    raise ValueError(f"logprobs length mismatch: {len(state.logprobs)} vs {len(state.input_ids)}")
+            except Exception as exc:
+                self.logger.error(f"Canonicalize train fields failed for rollout_id={state.rollout_id}: {exc}")
+                state.status = Status.FAILED
+                state.error_msg = f"canonicalize_train_fields failed: {exc}"
+        return group
 
     # NOTE: A single sandbox session may yield multiple trainable segments, so this returns a list
     # rather than the base class's single RolloutState. The base contract is never exercised for
@@ -285,6 +321,12 @@ class AgentInSandboxLoop(AgentLoop):
         if self.mode == "eval":
             self._fill_eval_rollout_state(rollout_state, item)
             return [rollout_state]
+
+        # prompt_ids 切片只对纯文本 trace 成立；train_prompt_ids（VLM 扩充版 prompt）一旦存在，
+        # trace input_ids 与 prompt_ids 的长度约定即失效，宁可快速失败也不静默产出错位训练字段。
+        assert "train_prompt_ids" not in rollout_state.extra_fields, (
+            f"Agentic trace rollout does not support multimodal samples, rollout_id={rollout_state.rollout_id}"
+        )
 
         response_message = _response_message(item.artifacts, required=item.status == RolloutStatus.COMPLETED)
         rollout_state.status = Status.COMPLETED if item.status == RolloutStatus.COMPLETED else Status.FAILED
@@ -337,11 +379,11 @@ class AgentInSandboxLoop(AgentLoop):
             data = await trace_store.export_training_trace.remote(str(rollout_state.session_id), prompt_text)
             segment_state.input_ids = data["input_ids"]
             segment_state.labels = data["labels"]
-            # Agentic training consumes input_ids/labels directly. response_ids is
-            # filled here only so rollout throughput logging can print rollout_tgs.
-            segment_state.response_ids = [
-                token_id for token_id, label in zip(data["input_ids"][1:], data["labels"][1:]) if label != -100
-            ]
+            # Unified response_ids convention: the contiguous suffix of input_ids after the prompt
+            # (env-injected tokens included), aligned with response_model_steps for per-token
+            # staleness; also the token count used by rollout throughput logging.
+            prompt_len = len(segment_state.prompt_ids or [])
+            segment_state.response_ids = list(data["input_ids"][prompt_len:])
             segment_state.logprobs = data["logprobs"]
             # ``routed_experts`` is a per-node list for a MoE trace or ``None`` for a dense one; trace_store's
             # ``_resolve_routed_experts`` already enforces the all-or-nothing invariant (a trace mixing MoE turns with
@@ -370,7 +412,6 @@ class AgentInSandboxLoop(AgentLoop):
         rollout_state.response_ids = None
         rollout_state.logprobs = None
         rollout_state.routed_experts = None
-        rollout_state.response_mask = None
         rollout_state.response_model_steps = None
         rollout_state.extra_fields["origin_data_source"] = item.data_source
         rollout_state.extra_fields["agent_status"] = item.status.value
