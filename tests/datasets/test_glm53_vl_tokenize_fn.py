@@ -31,6 +31,8 @@ TestGlm53DirtyDataDoesNotHalt
     test_non_mapping_media_value_is_discarded       image 值是字符串：collector TypeError 走丢弃通道
     test_config_error_still_raises_in_cache         配置错误（enable_thinking=False）不被丢弃通道吞掉
     test_literal_image_token_in_pure_text_is_discarded  纯文本含字面 <|image|>：cache 丢弃、runtime 抛错
+    test_literal_marker_before_media_escapes_count_checks_is_discarded  字面标记在真实媒体前+真实标记被截断：旧计数校验放行，渲染前丢弃
+    test_literal_marker_in_renderer_text_sources_is_discarded  tool 输出/reasoning/tool_calls/tools 定义中的字面标记同样在源头丢弃
 TestGlm53CacheInvalidation
     test_glm53_cache_invalidates_on_processor_or_pack_change  processor/pack 变化使缓存失效
     test_glm53_hash_covers_every_init_parameter  逐参数 hash 失效 + __init__ 参数分类完备性
@@ -50,11 +52,13 @@ from PIL import Image
 
 from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizerBase
 from transformers.video_utils import VideoMetadata
+from xtuner.v1.data_proto.messages.glm53_chat import _tokenize_with_loss_mask, render_glm53_chat
 from xtuner.v1.datasets.mllm_tokenize_fn import Glm53VLTokenizeFnConfig, Glm53VLTokenizeFunction
 from xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn import (
     BaseMLLMTokenizeFunction,
     collect_image_video_paths_and_extra,
 )
+from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import _expand_marker
 from xtuner.v1.datasets.mllm_tokenize_fn.qwen3_vl_utils import sort_frames
 
 
@@ -658,6 +662,116 @@ class TestGlm53DirtyDataDoesNotHalt:
         assert "literal visual placeholder" in logger_mock.warning.call_args[0][0]
         tokenize_fn.state = "runtime"
         with pytest.raises(RuntimeError, match="literal visual placeholder"):
+            tokenize_fn(item)
+
+    def test_literal_marker_before_media_escapes_count_checks_is_discarded(
+        self, tokenize_fn: Glm53VLTokenizeFunction, image_fixture: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 字面 <|image|> 在真实媒体之前 + 真实标记被 max_length 截断：
+        # _expand_marker 按首次出现位置展开，patch 会展开到字面字符串的位置，真实 <|image|> 保持
+        # 字面残留；把截断点精确设在最后一个占位符之后——残留被切掉，占位符数量恰好等于 patch 数，
+        # cache/runtime/collator 三层计数校验全部放行，而媒体绑定已经错位。必须在渲染前扫描文本
+        # 来源丢弃这类样本，计数校验防不住这条组合路径。
+        item = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "snippet:\n<|image|>\n"},
+                        {"type": "image", "image": {"url": image_fixture, "image_wh": [448, 448]}},
+                        {"type": "text", "text": "what is this?"},
+                    ],
+                },
+                {"role": "assistant", "content": "a color swatch"},
+            ]
+        }
+        image_token_id = tokenize_fn.processor.image_token_id
+        # 绕开 _render_base（会被新检查拦下），手工复现旧代码的展开+tokenize，找出逃逸截断点。
+        text, loss_mask = render_glm53_chat(item["messages"])
+        grid = tokenize_fn._predict_image_grid(448, 448)
+        expansion = tokenize_fn.processor.replace_image_token({"image_grid_thw": torch.tensor([grid])}, 0)
+        expanded_text, expanded_mask = _expand_marker(text, loss_mask, "<|image|>", [expansion])
+        full_ids, _ = _tokenize_with_loss_mask(tokenize_fn.tokenizer, expanded_text, expanded_mask)
+        cut = len(full_ids) - 1 - full_ids[::-1].index(image_token_id)
+        # 逃逸前提自证：截掉真实标记后占位符数量与 patch 数相等，旧代码三层校验全部放行。
+        assert full_ids[:cut].count(image_token_id) == (grid[1] * grid[2]) // tokenize_fn.merge_unit
+
+        logger_mock = Mock()
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn.logger", logger_mock)
+        tokenize_fn.max_length = cut
+        tokenize_fn.state = "cache"
+        assert tokenize_fn(item)["num_tokens"] == 0
+        assert logger_mock.warning.called
+        assert "before media expansion" in logger_mock.warning.call_args[0][0]
+        tokenize_fn.state = "runtime"
+        with pytest.raises(RuntimeError, match="before media expansion"):
+            tokenize_fn(item)
+
+    @pytest.mark.parametrize(
+        "item",
+        [
+            pytest.param(
+                {
+                    "messages": [
+                        {"role": "user", "content": "run the pipeline"},
+                        {"role": "assistant", "content": "on it"},
+                        {"role": "tool", "content": [{"output": "Traceback (most recent call last):\n<|image|>"}]},
+                    ]
+                },
+                id="tool_output",
+            ),
+            pytest.param(
+                {
+                    "messages": [
+                        {"role": "user", "content": "q"},
+                        {"role": "assistant", "content": "a", "reasoning_content": "compare with <|image|> first"},
+                    ]
+                },
+                id="reasoning_content",
+            ),
+            pytest.param(
+                {
+                    "messages": [
+                        {"role": "user", "content": "q"},
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {"function": {"name": "draw", "arguments": {"spec": {"img": "<|image|>"}}}}
+                            ],
+                        },
+                    ]
+                },
+                id="tool_call_args",
+            ),
+            pytest.param(
+                {
+                    "tools": [
+                        {"type": "function", "function": {"name": "draw", "description": "draw a <|video|> chart"}}
+                    ],
+                    "messages": [
+                        {"role": "user", "content": "q"},
+                        {"role": "assistant", "content": "a"},
+                    ],
+                },
+                id="tools_definition",
+            ),
+        ],
+    )
+    def test_literal_marker_in_renderer_text_sources_is_discarded(
+        self, tokenize_fn: Glm53VLTokenizeFunction, item: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # renderer 会把 tool 输出、reasoning、tool_calls 参数、tools 定义原样写进文本——字面
+        # <|image|>/<|video|> 藏在哪一处都要在渲染前被扫描到（按同一规则检查）。断言警告来自
+        # 源头扫描（before media expansion）而非 tokenize 兜底。
+        logger_mock = Mock()
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn.logger", logger_mock)
+        tokenize_fn.state = "cache"
+        assert tokenize_fn(item)["num_tokens"] == 0
+        assert logger_mock.warning.called
+        assert "before media expansion" in logger_mock.warning.call_args[0][0]
+        tokenize_fn.state = "runtime"
+        with pytest.raises(RuntimeError, match="before media expansion"):
             tokenize_fn(item)
 
 
