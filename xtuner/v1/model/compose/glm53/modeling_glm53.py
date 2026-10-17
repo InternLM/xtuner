@@ -28,6 +28,17 @@ from .vision_utils import flatten_video_grid_thw
 GLM53_COMPILE_CFG: dict[str, TorchCompileOption] = {}
 
 
+def _materialize_or_join(media_plan: dict) -> tuple[torch.Tensor, torch.Tensor]:
+    """Materialize now, or join the V2c prefetch future already attached to the plan."""
+    from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import materialize_image_plan
+    from xtuner.v1.train.lazy_media_prefetch import take_media_future
+
+    future = take_media_future(media_plan)
+    if future is not None:
+        return future.result()
+    return materialize_image_plan(media_plan)
+
+
 class Glm53ForConditionalGeneration(BaseComposeModel):
     config: Glm53BaseConfig
 
@@ -144,10 +155,7 @@ class Glm53ForConditionalGeneration(BaseComposeModel):
         # load_image/EXIF/image_processor calls (per-sample grouping preserved) with the
         # processed grids asserted equal to the tokenize-time prediction.
         if seq_ctx.pixel_values is None and seq_ctx.media_plan is not None:
-            from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import (
-                lazy_media_shared_decode,
-                materialize_image_plan,
-            )
+            from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import lazy_media_shared_decode
 
             sp_group = sp_mesh.get_group() if sp_mesh is not None else None
             if sp_group is not None and dist.get_world_size(sp_group) > 1 and lazy_media_shared_decode():
@@ -170,7 +178,7 @@ class Glm53ForConditionalGeneration(BaseComposeModel):
                 image_grid_thw = torch.empty((len(plan_images), 3), dtype=torch.int64, device=inputs_embeds.device)
                 src = dist.get_process_group_ranks(sp_group)[0]
                 if dist.get_rank(sp_group) == 0:
-                    local_pixel, local_grid = materialize_image_plan(seq_ctx.media_plan)
+                    local_pixel, local_grid = _materialize_or_join(seq_ctx.media_plan)
                     if local_pixel.dtype != torch.float32 or local_grid.dtype != torch.int64:
                         raise RuntimeError(
                             "V2b allocation assumptions broken: materialized dtypes "
@@ -181,7 +189,7 @@ class Glm53ForConditionalGeneration(BaseComposeModel):
                 dist.broadcast(pixel_values, src=src, group=sp_group)
                 dist.broadcast(image_grid_thw, src=src, group=sp_group)
             else:
-                pixel_values, image_grid_thw = materialize_image_plan(seq_ctx.media_plan)
+                pixel_values, image_grid_thw = _materialize_or_join(seq_ctx.media_plan)
                 # Mirror the eager device split exactly: SequenceContext.to leaves
                 # pixel_values on CPU (the tower's patch embed does its own H2D) but moves
                 # image_grid_thw to the accelerator (the tower derives cu_seqlens on
