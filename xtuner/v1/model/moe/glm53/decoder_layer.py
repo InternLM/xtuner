@@ -27,7 +27,7 @@ from typing_extensions import override
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.module import AttnOutputs, RouterResults
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
-from xtuner.v1.module.decoder_layer.mhc import MHCConfig, hc_post, hc_pre
+from xtuner.v1.module.decoder_layer.mhc import MHCConfig, hc_post, hc_pre, hc_pre_checkpointed
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
     MoEDecoderLayer,
     _prepare_rollout_routed_experts_for_router,
@@ -129,7 +129,8 @@ class Glm53DenseDecoderLayer(DenseDecoderLayer):
         # HF uses the text RMS epsilon when normalizing flattened mHC streams.
         fn, scale, base = _unshard_hc_site(self, "attn")
         residual = hidden_states
-        x, post, comb = hc_pre(
+        pre_fn = hc_pre_checkpointed if self.mhc_cfg.checkpoint_pre else hc_pre
+        x, post, comb = pre_fn(
             hidden_states,
             fn,
             scale,
@@ -148,7 +149,8 @@ class Glm53DenseDecoderLayer(DenseDecoderLayer):
         # ---- ffn site
         fn, scale, base = _unshard_hc_site(self, "ffn")
         residual = hidden_states
-        x, post, comb = hc_pre(
+        pre_fn = hc_pre_checkpointed if self.mhc_cfg.checkpoint_pre else hc_pre
+        x, post, comb = pre_fn(
             hidden_states,
             fn,
             scale,
@@ -216,7 +218,8 @@ class Glm53MoEDecoderLayer(MoEDecoderLayer):
         # ---- attention site: hidden_states is [B, S, hc_mult, hidden_size]
         fn, scale, base = _unshard_hc_site(self, "attn")
         attn_residual = hidden_states
-        x, post, comb = hc_pre(
+        pre_fn = hc_pre_checkpointed if self.mhc_cfg.checkpoint_pre else hc_pre
+        x, post, comb = pre_fn(
             hidden_states,
             fn,
             scale,
@@ -239,7 +242,8 @@ class Glm53MoEDecoderLayer(MoEDecoderLayer):
         # ---- ffn site
         fn, scale, base = _unshard_hc_site(self, "ffn")
         ffn_residual = hidden_states
-        x, post, comb = hc_pre(
+        pre_fn = hc_pre_checkpointed if self.mhc_cfg.checkpoint_pre else hc_pre
+        x, post, comb = pre_fn(
             hidden_states,
             fn,
             scale,

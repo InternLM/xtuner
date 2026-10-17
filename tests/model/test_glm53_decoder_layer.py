@@ -192,6 +192,43 @@ class TestGlm53MoEDecoderLayer:
 
 
 @pytest.mark.gpu
+@pytest.mark.parametrize("kind", ["dense", "moe"])
+def test_checkpointed_hc_pre_preserves_decoder_forward_and_gradients(kind: str) -> None:
+    torch.manual_seed(23)
+    layer_cls = Glm53DenseDecoderLayer if kind == "dense" else Glm53MoEDecoderLayer
+    kwargs = _dense_kwargs if kind == "dense" else _moe_kwargs
+    dtype = torch.float32 if kind == "dense" else torch.bfloat16
+    mhc = MHCConfig(hc_mult=HC_MULT, hc_sinkhorn_iters=2)
+    reference = layer_cls(**kwargs(mhc), layer_idx=0).cuda().to(dtype)
+    if kind == "moe":
+        _init_uninitialized_moe_params(reference)
+    checkpointed = layer_cls(**kwargs(mhc.model_copy(update={"checkpoint_pre": True})), layer_idx=0).cuda().to(dtype)
+    checkpointed.load_state_dict(reference.state_dict())
+
+    inputs = torch.randn(1, 7, HC_MULT, HIDDEN, device="cuda", dtype=dtype)
+    ref_input = inputs.detach().clone().requires_grad_()
+    ckpt_input = inputs.detach().clone().requires_grad_()
+    ref_output = reference(ref_input, position_embeddings=(None, None), seq_ctx=_seq_ctx(7, "cuda"))["hidden_states"]
+    ckpt_output = checkpointed(ckpt_input, position_embeddings=(None, None), seq_ctx=_seq_ctx(7, "cuda"))[
+        "hidden_states"
+    ]
+    ref_output.float().square().mean().backward()
+    ckpt_output.float().square().mean().backward()
+
+    tolerance = 1e-2 if kind == "moe" else 1e-5
+    torch.testing.assert_close(ckpt_output, ref_output, atol=tolerance, rtol=tolerance)
+    torch.testing.assert_close(ckpt_input.grad, ref_input.grad, atol=tolerance, rtol=tolerance)
+    for (name, ref_param), (ckpt_name, ckpt_param) in zip(
+        reference.named_parameters(), checkpointed.named_parameters(), strict=True
+    ):
+        assert name == ckpt_name
+        if ref_param.grad is None:
+            assert ckpt_param.grad is None, name
+        else:
+            torch.testing.assert_close(ckpt_param.grad, ref_param.grad, atol=tolerance, rtol=tolerance)
+
+
+@pytest.mark.gpu
 class TestGlm53DecoderLayerNormEpsilon:
     """通过真实 decoder 前向，对照 HF 的 mHC 残差混合，覆盖四处 epsilon 接线。"""
 
@@ -262,9 +299,8 @@ class TestGlm53DecoderLayerCompile:
 
     @pytest.mark.gpu
     def test_dense_layer_forward_compiles_with_dynamic_cu_seqlens(self):
-        # 训练把 cu_seq_lens 标记为 dynamic 以复用计算图，这让 FLA 内部的
-        # cu_seqlens.tolist() 成为数据依赖算子、inductor 无法 lower；KDA 的 FLA 入口
-        # 必须对 dynamo 不可见，否则任何含 KDA 的编译区都会整块编译失败。
+        # FLA chunk table has a data-dependent shape. The KDA custom op keeps it
+        # outside Dynamo, while its CPU offsets avoid reading boundaries from GPU.
         layer = Glm53DenseDecoderLayer(**_dense_kwargs(MHCConfig(hc_mult=HC_MULT, hc_sinkhorn_iters=2)), layer_idx=0)
         layer = layer.cuda().to(torch.bfloat16)
         seq_len = 128
@@ -272,6 +308,8 @@ class TestGlm53DecoderLayerCompile:
         seq_ctx = _seq_ctx(seq_len, "cuda")
         torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_q, 0)
         torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_k, 0)
+        assert seq_ctx.cu_seq_lens_q_cpu is not None
+        torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_q_cpu, 0)
 
         compiled = torch.compile(Glm53DenseDecoderLayer._forward, fullgraph=False)
         out = compiled(layer, streams, position_embeddings=(None, None), seq_ctx=seq_ctx)

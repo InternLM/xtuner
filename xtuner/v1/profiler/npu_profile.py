@@ -38,7 +38,7 @@ class MemoryProfiler:
 
 
 @contextmanager
-def profiling_memory(profile_dir: Path):
+def profiling_memory(profile_dir: Path, *, keep_oom_history: bool = False):
     profiler = MemoryProfiler(profile_dir)
     yield
     try:

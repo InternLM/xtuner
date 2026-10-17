@@ -98,7 +98,13 @@ class MTPLossConfig(CELossConfig):
             return None
 
         shifted_labels = data["shifted_labels"]
-        cu_seq_lens = data["seq_ctx"].cu_seq_lens_k
+        seq_ctx = data["seq_ctx"]
+        cu_seq_lens = seq_ctx.cu_seq_lens_k
+        # Label rolling only reads boundaries on the host. Reuse the collator's
+        # CPU offsets when query and key share the packed layout.
+        cu_seq_lens_cpu = getattr(seq_ctx, "cu_seq_lens_q_cpu", None)
+        if cu_seq_lens_cpu is not None and cu_seq_lens is getattr(seq_ctx, "cu_seq_lens_q", None):
+            cu_seq_lens = cu_seq_lens_cpu
 
         # cu_seq_lens[-1] may be larger than shifted_labels.shape[-1] when seq_ctx
         # was split for sequence parallelism (padding is added to make the sequence

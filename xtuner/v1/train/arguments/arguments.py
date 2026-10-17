@@ -90,6 +90,9 @@ class TrainingArguments(BaseModel):
     work_dir: Annotated[Path | str | None, Parameter(group=training_group, help="working directory of trainer")] = (
         "work_dir"
     )
+    record_memory_history: Annotated[
+        bool, Parameter(group=training_group, help="save CUDA allocator memory history at OOM")
+    ] = False
     global_batch_size: Annotated[
         int | None, Parameter(group=training_group, help="Global training batch size, defaults to `dp` size")
     ] = None
@@ -166,6 +169,7 @@ class TrainingArguments(BaseModel):
             total_epoch=self.epoch_num,
             resume_cfg=resume_cfg,
             work_dir=self.work_dir,
+            record_memory_history=self.record_memory_history,
             async_checkpoint=self.async_checkpoint,
         )
 
