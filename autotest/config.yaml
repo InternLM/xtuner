@@ -1390,6 +1390,113 @@ case:
                        aggregate: 80
             timeout: 10800
 
+    # OPD (on-policy distillation) e2e: rollout-teacher sampled-token MOPD.
+    # launch_script starts the two teacher HTTP servers, injects resolved
+    # endpoints via XTUNER_OPD_TEACHER_ENDPOINTS_JSON, then runs run_rl.sh.
+    # Student 6 workers + 2 teachers x 1 replica x 1 worker = single 8-GPU node.
+    qwen3-vl-2b-opd-lmdeploy-mopd-rollout-teacher:
+        -
+            type: rl
+            parameters:
+                config: recipe/on_policy_distillation/config/rl_qwen3_vl_2b_sampled_token_mopd_rollout_teacher.py
+                infer_backend: lmdeploy
+                launch_script: recipe/on_policy_distillation/scripts/run_sampled_token_mopd.sh
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/models--Qwen--Qwen3-VL-2B-Instruct/snapshots/89644892e4d85e24eaac8bacfd4f463576704203
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/on_policy_distillation/gsm8k_geo3k_train.json
+                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/on_policy_distillation/gsm8k_geo3k_eval.json
+                    - GSM8K_TEACHER_MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-4B-Instruct-2507
+                    - GEO3K_TEACHER_MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-4B-Instruct
+                    - OPD_CONFIG_PATH=recipe/on_policy_distillation/config/rl_qwen3_vl_2b_sampled_token_mopd_rollout_teacher.py
+                    - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_USE_FA3=1
+                    - TOTAL_TRAIN_STEPS=50
+                    - TRAIN_BATCH_SIZE=128
+                    - EVALUATE_STEP=5
+                    - XTUNER_RL_NUM_WORKERS=6
+                    - MOPD_TEACHER_NUM_REPLICAS=1
+                    - MOPD_TEACHER_REPLICA_NUM_WORKERS=1
+            assert_info:
+                # Thresholds are first-pass values vs the docstring reference
+                # table in the config; tighten after recording a CI baseline.
+                base_metric: qwen3-vl-2b-opd-lmdeploy-mopd-rollout-teacher/tracker.jsonl
+                check_metrics:
+                    -
+                       metric: distillation/reduced_distillation_kl
+                       threshold: 0.05
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.15
+                       method: absolute
+                       operator: <
+                    -
+                       metric: eval/gsm8k/acc
+                       threshold: 0.15
+                       method: absolute
+                       operator: <
+                    -
+                       metric: eval/geo3k/acc
+                       threshold: 0.15
+                       method: absolute
+                       operator: <
+            timeout: 14400
+
+    # OPD (on-policy distillation) e2e: training-engine Top-K teachers. No
+    # teacher HTTP servers; teachers load inside TrainingWorkers, so the plain
+    # ci_run_rl.sh path works without launch_script.
+    qwen3-vl-2b-opd-lmdeploy-topk-train-teacher:
+        -
+            type: rl
+            parameters:
+                config: recipe/on_policy_distillation/config/rl_qwen3_vl_2b_topk_mopd_train_teacher.py
+                infer_backend: lmdeploy
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/models--Qwen--Qwen3-VL-2B-Instruct/snapshots/89644892e4d85e24eaac8bacfd4f463576704203
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/on_policy_distillation/gsm8k_geo3k_train.json
+                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/on_policy_distillation/gsm8k_geo3k_eval.json
+                    - GSM8K_TEACHER_MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-4B-Instruct-2507
+                    - GEO3K_TEACHER_MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-4B-Instruct
+                    - XTUNER_USE_FA3=1
+                    - TOTAL_TRAIN_STEPS=50
+                    - TRAIN_BATCH_SIZE=128
+                    - EVALUATE_STEP=5
+                    - OPD_TOP_K=64
+                    - XTUNER_RL_NUM_WORKERS=8
+            assert_info:
+                # Thresholds are first-pass values vs the docstring reference
+                # table in the config; tighten after recording a CI baseline.
+                base_metric: qwen3-vl-2b-opd-lmdeploy-topk-train-teacher/tracker.jsonl
+                check_metrics:
+                    -
+                       metric: distillation/reduced_topk_opd_kl
+                       threshold: 0.05
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.15
+                       method: absolute
+                       operator: <
+                    -
+                       metric: eval/gsm8k/acc
+                       threshold: 0.15
+                       method: absolute
+                       operator: <
+                    -
+                       metric: eval/geo3k/acc
+                       threshold: 0.15
+                       method: absolute
+                       operator: <
+            timeout: 10800
+
     qwen3-rl-lmdeploy:
         -
             type: rl
