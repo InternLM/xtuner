@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any, Literal, TypeVar
 
 import torch
@@ -231,14 +231,10 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
             return CacheItem(num_tokens=0, num_img_tokens=[0])
         raise NotImplementedError(reason)
 
-    def _calc_cache_item(self, calc_fn: Callable[[dict], CacheItem], item: dict) -> CacheItem:
-        try:
-            return calc_fn(item)
-        except _DIRTY_DATA_ERRORS as e:
-            return self._discard_damaged_sample(f"{type(e).__name__}: {e} of {self.data_name}")
-
     @with_proxy_attention_flops
     def __call__(self, item: dict, media_root: str = "", **kwargs) -> T | CacheItem:  # type: ignore[override]
+        # 公开接口按“采集媒体 → 拒绝不支持的组合 → cache 或 runtime → 返回”线性展开：状态判断
+        # 只出现一次，cache 的异常出口（try 包住三种计算）与 runtime 的内存整理各自只出现一次。
         try:
             self._image_path, self._video_path, extra_info = collect_image_video_paths_and_extra(
                 item["messages"], allow_all_roles=self.allow_all_roles
@@ -246,41 +242,39 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
             self._image_wh_list = extra_info["image_wh"]
             self._video_wh_list = extra_info["video_wh"]
             self._video_extra_info_list = extra_info["video_extra_info"]
-        except NotImplementedError as e:
-            # 模型家族显式不支持的数据边界按脏样本处理。
-            return self._discard_damaged_sample(str(e))
-        except _DIRTY_DATA_ERRORS as e:
-            if self.state == "cache":
-                return self._discard_damaged_sample(f"{type(e).__name__}: {e} of {self.data_name}")
-            raise RuntimeError(f"!!!! {type(e).__name__}: {e} of {self.data_name}") from e
+        except (NotImplementedError, *_DIRTY_DATA_ERRORS) as e:
+            # 模型家族显式不支持的数据边界与单条脏数据统一走丢弃通道；runtime 侧不能吞——
+            # NotImplementedError 原样上抛（上游按不支持边界处理），其余包 RuntimeError 暴露。
+            if self.state != "cache":
+                if isinstance(e, NotImplementedError):
+                    raise
+                raise RuntimeError(f"!!!! {type(e).__name__}: {e} of {self.data_name}") from e
+            return self._discard_damaged_sample(f"{type(e).__name__}: {e} of {self.data_name}")
         if len(self._image_path) > 0 and len(self._video_path) > 0:
             return self._discard_damaged_sample(
                 "Mixed image and video samples in one record are not supported by "
                 f"{type(self).__name__}; please split them into separate records. "
                 f"data_name: {self.data_name}, data_id: {item.get('id', '')}."
             )
+        if self.state == "cache":
+            try:
+                if len(self._image_path) > 0:
+                    return self.calc_num_tokens_multi_modal_get_item(item)
+                if len(self._video_path) > 0:
+                    return self.calc_num_tokens_video_get_item(item)
+                return self.calc_num_tokens_pure_text_get_item(item)
+            except _DIRTY_DATA_ERRORS as e:
+                return self._discard_damaged_sample(f"{type(e).__name__}: {e} of {self.data_name}")
         if len(self._image_path) > 0:
-            if self.state == "cache":
-                ret = self._calc_cache_item(self.calc_num_tokens_multi_modal_get_item, item)
-            else:
-                ret = self.multi_modal_get_item(item, media_root)
-                if self._trim_memory_counter % self._trim_memory_interval == 0:
-                    trim_memory()
-                self._trim_memory_counter += 1
+            ret = self.multi_modal_get_item(item, media_root)
         elif len(self._video_path) > 0:
-            if self.state == "cache":
-                ret = self._calc_cache_item(self.calc_num_tokens_video_get_item, item)
-            else:
-                ret = self.video_get_item(item, media_root)
-                if self._trim_memory_counter % self._trim_memory_interval == 0:
-                    trim_memory()
-                self._trim_memory_counter += 1
+            ret = self.video_get_item(item, media_root)
         else:
-            if self.state == "cache":
-                ret = self._calc_cache_item(self.calc_num_tokens_pure_text_get_item, item)
-            else:
-                ret = self.pure_text_get_item(item)
-
+            ret = self.pure_text_get_item(item)
+        if len(self._image_path) > 0 or len(self._video_path) > 0:
+            if self._trim_memory_counter % self._trim_memory_interval == 0:
+                trim_memory()
+            self._trim_memory_counter += 1
         return ret
 
     def hash(self) -> str:

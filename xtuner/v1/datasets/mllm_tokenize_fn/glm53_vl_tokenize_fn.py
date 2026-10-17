@@ -494,8 +494,8 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         # 样本）拦截字面 <|image|>/<|video|>，这里兜住其余路径漏进的字面占位 token——它会被
         # create_mm_token_type_ids 标成视觉类型，混进含真实媒体的 pack 后 splice 计数错位、
         # collator 断言崩溃（线上 256 卡 Step 8 事故的根因）。在 splice 掩码能区分字面/真实
-        # 占位符的正确修复落地前，这类样本按脏数据丢弃：cache 由 _calc_cache_item 转成警告 +
-        # num_tokens=0，runtime 抛出后由上游数据集换无 loss 占位样本——两种状态都不中断训练。
+        # 占位符的正确修复落地前，这类样本按脏数据丢弃：cache 由 __call__ 的脏数据捕获转成
+        # 警告 + num_tokens=0，runtime 抛出后由上游数据集换无 loss 占位样本——两种状态都不中断训练。
         n_literal = input_ids.count(self.processor.image_token_id)
         if n_literal > 0:
             raise RuntimeError(
