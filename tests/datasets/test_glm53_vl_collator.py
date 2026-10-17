@@ -13,6 +13,8 @@ TestGlm53VlCollatorCastsMediaToBf16
     test_image_media_is_bf16_after_collate            图像媒体 collate 后为 bf16、grid 仍 int64
     test_video_media_is_bf16_after_collate            视频媒体同型
     test_multi_item_pack_cast_preserves_order_and_values  拼包逐段数值一致
+TestGlm53PlaceholderPackWalksLossPath
+    test_glm53_placeholder_pack_walks_ce_loss_path  占位 pack 走完 CE loss 路径：0 loss、可 backward
 TestGlm53SequenceContextSplitKeepsMmAlignment
     test_glm53_sequence_context_split_keeps_mm_alignment  SP 切分保持模态标记对齐
 """
@@ -32,6 +34,7 @@ from xtuner.v1.datasets.collator import (
     qwen3_vl_sft_collator,
 )
 from xtuner.v1.datasets.config import DataloaderConfig
+from xtuner.v1.loss.ce_loss import CELossConfig, LMHeadLossContext
 from xtuner.v1.utils import IGNORE_INDEX
 
 
@@ -320,6 +323,42 @@ class TestGlm53VlCollatorCastsMediaToBf16:
         assert seq_ctx.pixel_values is not None
         assert seq_ctx.pixel_values.dtype == torch.float32
         assert torch.equal(seq_ctx.pixel_values, ref)
+
+
+class TestGlm53PlaceholderPackWalksLossPath:
+    IMAGE_TOKEN_ID = 999
+    MERGE_UNIT = 4
+
+    def test_glm53_placeholder_pack_walks_ce_loss_path(self):
+        # 占位项（labels 全 IGNORE）走完 CE loss 路径：0 loss、可 backward，而非 NaN。
+        bad = _glm53_item(text_len=6, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=0)
+        bad["input_ids"][1] = self.IMAGE_TOKEN_ID
+        result = glm53_vl_sft_collator(
+            [[bad]],
+            pack_max_length=16,
+            padding_token_idx=0,
+            image_token_id=self.IMAGE_TOKEN_ID,
+            merge_unit=self.MERGE_UNIT,
+        )
+        loss_cfg = CELossConfig(ignore_idx=IGNORE_INDEX)
+        loss_ctx = loss_cfg.build(result[0])
+        assert loss_ctx is not None
+
+        # transform 阶段：全 IGNORE → loss_weight 全 0，分母 0 时靠 +1e-12 不出 NaN/Inf。
+        LMHeadLossContext.build_batches([loss_ctx])
+        assert loss_ctx.loss_kwargs.loss_weight is not None
+        assert float(loss_ctx.loss_kwargs.loss_weight.abs().sum()) == 0.0
+
+        # loss 前向 + backward：0 loss、有限值、梯度有限（跟随 shifted_labels 的 device）。
+        device = loss_ctx.loss_kwargs.shifted_labels.device
+        hidden = torch.randn(1, 16, 8, requires_grad=True, device=device)
+        head_weight = torch.randn(32, 8, device=device)
+        loss, _ = loss_ctx.forward(hidden, head_weight)
+        assert torch.isfinite(loss)
+        assert float(loss) == 0.0
+        loss.backward()
+        assert hidden.grad is not None
+        assert torch.isfinite(hidden.grad).all()
 
 
 @pytest.fixture
