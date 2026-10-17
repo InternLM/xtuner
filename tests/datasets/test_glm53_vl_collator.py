@@ -8,7 +8,7 @@ TestGlm53VlSftCollator
     test_glm53_collator_image_video_batch            图像/视频混批各自聚合
     test_glm53_collator_pure_text_sample_has_no_media 纯文本样本不带媒体字段
     test_glm53_collator_drops_placeholder_mismatch_sample  占位符计数不符的样本打包前丢弃、不崩溃
-    test_glm53_collator_all_corrupt_pack_raises      整包都坏属系统性问题，仍报错暴露
+    test_glm53_collator_all_corrupt_pack_no_loss_placeholder  整包被滤退无 loss 占位项，不中断训练
 TestGlm53SequenceContextSplitKeepsMmAlignment
     test_glm53_sequence_context_split_keeps_mm_alignment  SP 切分保持模态标记对齐
 """
@@ -159,19 +159,33 @@ class TestGlm53VlSftCollator:
         assert seq_ctx.pixel_values.shape == (8, 8)
         assert seq_ctx.num_img_tokens == [[8]]
 
-    def test_glm53_collator_all_corrupt_pack_raises(self):
-        # 整包样本都坏 = 系统性数据/代码问题（每条都坏），必须报错暴露而不是静默训练——
-        # 类比配置错误不走丢弃通道的反向保护。
+    def test_glm53_collator_all_corrupt_pack_no_loss_placeholder(self, monkeypatch: pytest.MonkeyPatch):
+        # 单样本 pack 是正常情况（长样本独占一个 pack、长度分组尾部等），整包被滤只说明这个
+        # pack 恰好没有好样本，推不出系统性故障；此时 raise 会让单条脏样本中断训练（E02 回归）。
+        # 退回无 loss 占位项：pack 照常产出、序列长度不变、loss 贡献为 0，与 runtime 通道
+        # _discard_damaged_sample 的占位语义一致。
+        logger_mock = Mock()
+        monkeypatch.setattr("xtuner.v1.datasets.collator.logger", logger_mock)
         bad = _glm53_item(text_len=6, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=0)
         bad["input_ids"][1] = self.IMAGE_TOKEN_ID
-        with pytest.raises(RuntimeError, match="every sample"):
-            glm53_vl_sft_collator(
-                [[bad]],
-                pack_max_length=16,
-                padding_token_idx=0,
-                image_token_id=self.IMAGE_TOKEN_ID,
-                merge_unit=self.MERGE_UNIT,
-            )
+        result = glm53_vl_sft_collator(
+            [[bad]],
+            pack_max_length=16,
+            padding_token_idx=0,
+            image_token_id=self.IMAGE_TOKEN_ID,
+            merge_unit=self.MERGE_UNIT,
+        )
+        assert logger_mock.warning.called
+        seq_ctx = result[0]["seq_ctx"]
+        # 补 padding 到 pack_max_length，长度不变，DP 各 rank 的 collective 序列保持同步。
+        assert seq_ctx.input_ids is not None
+        assert seq_ctx.input_ids.shape[-1] == 16
+        # 无 loss 占位：labels 全 IGNORE、不带任何媒体特征。
+        assert (result[0]["shifted_labels"] == IGNORE_INDEX).all()
+        assert seq_ctx.pixel_values is None
+        assert seq_ctx.image_grid_thw is None
+        assert seq_ctx.num_img_tokens == [[0]]
+        assert (seq_ctx.mm_token_type_ids == 0).all()
 
     def test_glm53_collator_is_reachable_by_name_from_dataloader_config(self):
         # 训练侧只能按名字选 collator；`glm53_vl_sft_collator` 比其它 VL collator 多两个必填
