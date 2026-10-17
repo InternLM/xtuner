@@ -435,10 +435,24 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
     # ---- pure text ----
 
+    def _check_no_literal_visual_tokens(self, input_ids: list[int]) -> None:
+        # 纯文本样本不该含视觉占位 token：文本里的字面 <|image|>（如 tool 消息中的代码片段）
+        # 会被 create_mm_token_type_ids 标成视觉类型，混进含真实媒体的 pack 后 splice 计数错位、
+        # collator 断言崩溃（线上 256 卡 Step 8 事故的根因）。在 splice 掩码能区分字面/真实
+        # 占位符的正确修复落地前，这类样本按脏数据丢弃：cache 由 _calc_cache_item 转成警告 +
+        # num_tokens=0，runtime 抛出后由上游数据集换无 loss 占位样本——两种状态都不中断训练。
+        n_literal = input_ids.count(self.processor.image_token_id)
+        if n_literal > 0:
+            raise RuntimeError(
+                f"GLM-5.3-Flash pure-text sample contains {n_literal} literal visual placeholder "
+                f"token(s) (e.g. '<|image|>' in text), data_name: {self.data_name}."
+            )
+
     def calc_num_tokens_pure_text_get_item(self, data_item) -> CacheItem:
         text, loss_mask = self._render_base(data_item)
         input_ids, labels = _tokenize_with_loss_mask(self.tokenizer, text, loss_mask)
         input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
+        self._check_no_literal_visual_tokens(input_ids)
         return {"num_tokens": len(input_ids), "num_img_tokens": [0]}
 
     def pure_text_get_item(self, data_item: dict) -> Glm53VLDataItem:
@@ -446,6 +460,7 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         input_ids, labels, mm_token_type_ids = self._finalize(text, loss_mask)
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
         mm_token_type_ids = mm_token_type_ids[: len(input_ids)]
+        self._check_no_literal_visual_tokens(input_ids)
         return Glm53VLDataItem(
             input_ids=input_ids,
             labels=labels,

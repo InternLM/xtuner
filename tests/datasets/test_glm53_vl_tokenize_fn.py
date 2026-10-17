@@ -25,7 +25,12 @@ TestGlm53MediaRoleContract
 TestGlm53DirtyDataDoesNotHalt
     test_bad_image_wh_is_discarded                  image_wh 形状非法：cache 丢弃、runtime 抛错
     test_missing_video_metadata_is_discarded        视频缺元数据：cache 警告丢弃、不挂起 worker
+    test_partial_video_metadata_is_discarded        视频只缺 origin_fps 单键：KeyError 走丢弃通道
+    test_zero_origin_fps_is_discarded               origin_fps=0：ZeroDivisionError 不逃逸杀 worker
+    test_image_geometry_type_error_is_discarded     image_wh 字符串数字：几何预测 TypeError 走丢弃通道
+    test_non_mapping_media_value_is_discarded       image 值是字符串：collector TypeError 走丢弃通道
     test_config_error_still_raises_in_cache         配置错误（enable_thinking=False）不被丢弃通道吞掉
+    test_literal_image_token_in_pure_text_is_discarded  纯文本含字面 <|image|>：cache 丢弃、runtime 抛错
 TestGlm53CacheInvalidation
     test_glm53_cache_invalidates_on_processor_or_pack_change  processor/pack 变化使缓存失效
     test_glm53_hash_covers_every_init_parameter  逐参数 hash 失效 + __init__ 参数分类完备性
@@ -522,13 +527,14 @@ class TestGlm53DirtyDataDoesNotHalt:
     def test_bad_image_wh_is_discarded(
         self, tokenize_fn: Glm53VLTokenizeFunction, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # image_wh 形状非法（长度不是 2）：collector 抛 RuntimeError，cache 走既有丢弃通道。
+        # image_wh 形状非法（长度不是 2）：collector 抛 RuntimeError，cache 走统一丢弃通道。
         logger_mock = Mock()
         monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn.logger", logger_mock)
         item = _image_item("unused.jpg")
         item["messages"][0]["content"][0]["image"]["image_wh"] = [448]
         tokenize_fn.state = "cache"
         assert tokenize_fn(item)["num_tokens"] == 0
+        assert logger_mock.warning.called
         tokenize_fn.state = "runtime"
         with pytest.raises(RuntimeError, match="image_wh"):
             tokenize_fn(item)
@@ -550,6 +556,78 @@ class TestGlm53DirtyDataDoesNotHalt:
         with pytest.raises((RuntimeError, AssertionError), match="origin_video_length"):
             tokenize_fn(item)
 
+    def test_partial_video_metadata_is_discarded(
+        self, tokenize_fn: Glm53VLTokenizeFunction, video_fixture: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 只缺 origin_fps 一个键：collector 的数量校验放行（extra 与视频数一致），
+        # _video_frame_source 取键时才抛 KeyError——覆盖 video cache 分支 except 的 KeyError arm。
+        logger_mock = Mock()
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn.logger", logger_mock)
+        item = _video_item(video_fixture)
+        del item["messages"][0]["content"][0]["video"]["origin_fps"]
+        tokenize_fn.state = "cache"
+        assert tokenize_fn(item)["num_tokens"] == 0
+        assert logger_mock.warning.called
+        assert "origin_fps" in logger_mock.warning.call_args[0][0]
+        tokenize_fn.state = "runtime"
+        with pytest.raises(KeyError, match="origin_fps"):
+            tokenize_fn(item)
+
+    def test_zero_origin_fps_is_discarded(
+        self, tokenize_fn: Glm53VLTokenizeFunction, video_fixture: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # origin_fps=0：时长计算 num_frames / fps 抛 ZeroDivisionError，必须在加载任何帧之前
+        # 被捕获丢弃——此前它不在捕获集，会逃逸杀死 cache worker 并挂住主进程。
+        logger_mock = Mock()
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn.logger", logger_mock)
+        item = _video_item(video_fixture, fps=0)
+        tokenize_fn.state = "cache"
+        assert tokenize_fn(item)["num_tokens"] == 0
+        assert logger_mock.warning.called
+        tokenize_fn.state = "runtime"
+        with pytest.raises(ZeroDivisionError):
+            tokenize_fn(item)
+
+    def test_image_geometry_type_error_is_discarded(
+        self, tokenize_fn: Glm53VLTokenizeFunction, image_fixture: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # image_wh 为字符串数字：collector 的 len==2 校验放行，几何预测（smart_resize 算术）才抛
+        # TypeError——覆盖图片 cache 分支 except 的触达。runtime 用真实图片（wh 不参与 runtime
+        # 图片路径），正常返回，证明 cache 预测丢弃不影响真实样本。
+        logger_mock = Mock()
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn.logger", logger_mock)
+        item = _image_item(image_fixture)
+        item["messages"][0]["content"][0]["image"]["image_wh"] = ["448", "448"]
+        tokenize_fn.state = "cache"
+        assert tokenize_fn(item)["num_tokens"] == 0
+        assert logger_mock.warning.called
+        tokenize_fn.state = "runtime"
+        runtime_ret = tokenize_fn(item)
+        assert runtime_ret["num_tokens"] == len(runtime_ret["input_ids"])
+
+    def test_non_mapping_media_value_is_discarded(
+        self, tokenize_fn: Glm53VLTokenizeFunction, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # "image" 值是字符串而非 dict：collector 内 c[key]["url"] 抛 TypeError——加宽后的
+        # collector 捕获网按脏数据丢弃，此前该异常逃逸会杀死 cache worker。
+        logger_mock = Mock()
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn.logger", logger_mock)
+        item = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "image", "image": "a.jpg"}, {"type": "text", "text": "x"}],
+                },
+                {"role": "assistant", "content": "y"},
+            ]
+        }
+        tokenize_fn.state = "cache"
+        assert tokenize_fn(item)["num_tokens"] == 0
+        assert logger_mock.warning.called
+        tokenize_fn.state = "runtime"
+        with pytest.raises(RuntimeError, match="TypeError"):
+            tokenize_fn(item)
+
     def test_config_error_still_raises_in_cache(self, tokenize_fn: Glm53VLTokenizeFunction) -> None:
         # 配置错误不是脏数据：enable_thinking=False 的 AssertionError 必须继续暴露（每条样本
         # 都会触发，若被丢弃通道吞掉会静默掏空整个数据集）。
@@ -557,6 +635,29 @@ class TestGlm53DirtyDataDoesNotHalt:
         tokenize_fn.state = "cache"
         with pytest.raises(AssertionError, match="enable_thinking"):
             tokenize_fn({"messages": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}]})
+
+    def test_literal_image_token_in_pure_text_is_discarded(
+        self, tokenize_fn: Glm53VLTokenizeFunction, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 纯文本样本含字面 <|image|>（线上 256 卡 Step 8 崩溃的根因样本形态：tool 消息里的
+        # 代码字符串）。HF 接受这种输入，但当前 splice 掩码无法区分字面/真实占位符——在正确
+        # 掩码修复落地前按脏数据丢弃：cache 警告 + num_tokens=0，runtime 抛错由上游换占位样本，
+        # 两种状态都不能让它流进混合 pack 把 collator/splice 打崩。
+        logger_mock = Mock()
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn.logger", logger_mock)
+        item = {
+            "messages": [
+                {"role": "user", "content": "How would you rate the quality of this image?\n<|image|>"},
+                {"role": "assistant", "content": "There is no image attached."},
+            ]
+        }
+        tokenize_fn.state = "cache"
+        assert tokenize_fn(item)["num_tokens"] == 0
+        assert logger_mock.warning.called
+        assert "literal visual placeholder" in logger_mock.warning.call_args[0][0]
+        tokenize_fn.state = "runtime"
+        with pytest.raises(RuntimeError, match="literal visual placeholder"):
+            tokenize_fn(item)
 
 
 class TestGlm53CacheInvalidation:
