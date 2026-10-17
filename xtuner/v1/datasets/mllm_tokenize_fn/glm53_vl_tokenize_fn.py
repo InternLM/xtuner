@@ -21,7 +21,9 @@ preprocessing path makes internally. Verified bitwise-equal to the real processo
 """
 
 import copy
+import json
 import os
+from collections.abc import Mapping
 from typing import Any, Literal
 
 import numpy as np
@@ -215,6 +217,7 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
     # ---- shared render/expand/tokenize, called by both cache and runtime paths ----
 
     def _render_base(self, data_item: dict) -> tuple[str, list[bool]]:
+        self._check_no_literal_visual_marker(data_item)
         messages = list(data_item["messages"])
         if self.system_message is not None and (not messages or messages[0].get("role") != "system"):
             messages = [{"role": "system", "content": self.system_message}, *messages]
@@ -225,6 +228,49 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             enable_thinking=self.enable_thinking,
             reasoning_effort=self.reasoning_effort,
         )
+
+    def _check_no_literal_visual_marker(self, data_item: dict) -> None:
+        # 字面 <|image|>/<|video|> 不只坑纯文本：_expand_marker 按首次出现位置展开，若文本（如
+        # tool 输出里的代码片段）中的字面标记位于真实媒体标记之前，patch 会展开到字面字符串的
+        # 位置；真实标记再被 max_length 截掉时，占位符数量恰好等于 patch 数，cache/runtime/
+        # collator 三层计数校验全部放行，而媒体绑定已经错位。所以在渲染/展开之前扫描所有会被
+        # renderer 输出的文本来源，把这类样本按脏数据交给统一丢弃通道；媒体结构项
+        # （{"type": "image"} 等）不参与扫描——它们展开后就是合法的真实标记。
+        texts: list[str] = []
+        for message in data_item["messages"]:
+            content = message.get("content", "")
+            parts = content if isinstance(content, list) else [content]
+            texts.extend(part for part in parts if isinstance(part, str))
+            texts.extend(
+                part.get("text", "") for part in parts if isinstance(part, Mapping) and part.get("type") == "text"
+            )
+            if message.get("role") == "assistant":
+                reasoning_content = message.get("reasoning_content")
+                if isinstance(reasoning_content, str):
+                    texts.append(reasoning_content)
+                for tool_call in message.get("tool_calls") or []:
+                    tool_call = tool_call.get("function", tool_call)
+                    texts.append(str(tool_call.get("name", "")))
+                    texts.extend(
+                        value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+                        for value in (tool_call.get("arguments") or {}).values()
+                    )
+            elif message.get("role") == "tool":
+                for part in parts:
+                    if isinstance(part, Mapping) and "output" in part:
+                        output = part["output"]
+                        texts.append(output if isinstance(output, str) else str(output))
+        for tool in data_item.get("tools") or []:
+            texts.append(json.dumps(tool.get("function", tool), ensure_ascii=False))
+
+        for text in texts:
+            for marker in (_IMAGE_MARKER, _VIDEO_MARKER):
+                if marker in text:
+                    raise RuntimeError(
+                        f"GLM-5.3-Flash sample contains literal visual placeholder marker {marker!r} in "
+                        f"message text before media expansion, data_name: {self.data_name}, "
+                        f"data_id: {data_item.get('id', '')}. Discard this data."
+                    )
 
     def _finalize(self, text: str, loss_mask: list[bool]) -> tuple[list[int], list[int], list[int]]:
         input_ids, labels = _tokenize_with_loss_mask(self.tokenizer, text, loss_mask)
@@ -436,8 +482,9 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
     # ---- pure text ----
 
     def _check_no_literal_visual_tokens(self, input_ids: list[int]) -> None:
-        # 纯文本样本不该含视觉占位 token：文本里的字面 <|image|>（如 tool 消息中的代码片段）
-        # 会被 create_mm_token_type_ids 标成视觉类型，混进含真实媒体的 pack 后 splice 计数错位、
+        # tokenize 层的最后兜底：渲染入口的 _check_no_literal_visual_marker 已在源头（含多模态
+        # 样本）拦截字面 <|image|>/<|video|>，这里兜住其余路径漏进的字面占位 token——它会被
+        # create_mm_token_type_ids 标成视觉类型，混进含真实媒体的 pack 后 splice 计数错位、
         # collator 断言崩溃（线上 256 卡 Step 8 事故的根因）。在 splice 掩码能区分字面/真实
         # 占位符的正确修复落地前，这类样本按脏数据丢弃：cache 由 _calc_cache_item 转成警告 +
         # num_tokens=0，runtime 抛出后由上游数据集换无 loss 占位样本——两种状态都不中断训练。
