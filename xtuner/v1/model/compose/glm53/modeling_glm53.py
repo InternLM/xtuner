@@ -148,7 +148,17 @@ class Glm53ForConditionalGeneration(BaseComposeModel):
             from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import materialize_image_plan
 
             pixel_values, image_grid_thw = materialize_image_plan(seq_ctx.media_plan)
-            seq_ctx = seq_ctx.copy(pixel_values=pixel_values, image_grid_thw=image_grid_thw)
+            # Mirror the eager device split exactly: SequenceContext.to leaves pixel_values
+            # on CPU (the tower's patch embed does its own H2D) but moves image_grid_thw to
+            # the accelerator, where the tower derives cu_seqlens (grid_thw.device).
+            grid_device = (
+                seq_ctx.image_grid_thw.device
+                if seq_ctx.image_grid_thw is not None
+                else inputs_embeds.device
+            )
+            seq_ctx = seq_ctx.copy(
+                pixel_values=pixel_values, image_grid_thw=image_grid_thw.to(grid_device)
+            )
 
         has_image = seq_ctx.pixel_values is not None
         has_video = seq_ctx.pixel_values_videos is not None
