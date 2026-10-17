@@ -51,6 +51,28 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.trace import span
 from xtuner.v1.utils import get_logger
 
 
+def _expand_env_refs(value: Any) -> Any:
+    """Recursively resolve ``${VAR}`` string leaves from ``os.environ``.
+
+    Only a whole-string ``${VAR}`` is treated as a reference; any other string
+    is returned as-is. A missing env var raises ``KeyError`` so a misconfigured
+    run aborts loudly instead of POSTing an unresolved placeholder.
+    """
+    if isinstance(value, str):
+        match = re.match(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$", value)
+        if match is None:
+            return value
+        name = match.group(1)
+        if name not in os.environ:
+            raise KeyError(f"sandbox create field references undefined env var ${{{name}}}")
+        return os.environ[name]
+    if isinstance(value, dict):
+        return {k: _expand_env_refs(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_env_refs(v) for v in value]
+    return value
+
+
 # ─────────────────────────────────────────────────────────────────
 # Hook base
 # ─────────────────────────────────────────────────────────────────
@@ -1003,6 +1025,10 @@ class SandboxPool:
         create_kwargs: dict[str, Any] = {}
         if spec.cluster_name:
             create_kwargs["cluster_name"] = spec.cluster_name
+        if spec.env:
+            create_kwargs["env"] = spec.env
+        if spec.extra_params:
+            create_kwargs["extra_params"] = _expand_env_refs(spec.extra_params)
         if spec.key:
             create_kwargs["key"] = spec.key
         if spec.env_vars:
