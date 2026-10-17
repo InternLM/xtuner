@@ -29,6 +29,7 @@ from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 from .chunk_cumsum import chunk_cumsum
+from .fla_compat import fla_state_layout_kwargs
 
 
 LIBRARY_NAME = "xtuner_kda"
@@ -94,8 +95,7 @@ def chunk_kda_fwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=True,
-        transpose_state_layout=transpose_state_layout,
+        **fla_state_layout_kwargs(chunk_gated_delta_rule_fwd_h, transpose_state_layout),
     )
     o = chunk_gla_fwd_o_gk(
         q=q_l2,
@@ -107,8 +107,7 @@ def chunk_kda_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         chunk_size=_CHUNK_SIZE,
-        use_exp2=True,
-        transpose_state_layout=transpose_state_layout,
+        **fla_state_layout_kwargs(chunk_gla_fwd_o_gk, transpose_state_layout),
     )
     # Backward recomputes w/u/qg/kg/v_new/h from this exact prefix; only these
     # five tensors have to cross the op boundary.
@@ -183,7 +182,7 @@ def chunk_kda_bwd(
         chunk_size=_CHUNK_SIZE,
         safe_gate=safe_gate,
         lower_bound=lower_bound,
-        transpose_state_layout=transpose_state_layout,
+        **fla_state_layout_kwargs(_fla_chunk_kda_bwd, transpose_state_layout),
     )[:5]
     return dq, dk, dv, db, dg
 

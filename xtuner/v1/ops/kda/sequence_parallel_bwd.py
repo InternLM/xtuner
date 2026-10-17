@@ -22,7 +22,9 @@ from fla.ops.kda.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.op import exp, exp2
-from fla.utils import USE_CUDA_GRAPH, autotune_cache_kwargs, check_shared_mem
+from fla.utils import autotune_cache_kwargs, check_shared_mem
+
+from .fla_compat import USE_CUDA_GRAPH, fla_state_layout_kwargs
 
 
 @triton.heuristics(
@@ -481,8 +483,7 @@ def chunk_kda_bwd(
             output_final_state=False,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
-            use_exp2=True,
-            transpose_state_layout=transpose_state_layout,
+            **fla_state_layout_kwargs(chunk_gated_delta_rule_fwd_h, transpose_state_layout),
         )
     else:
         w, u, qg, kg, v_new, h = kwargs["w"], kwargs["u"], kwargs["qg"], kwargs["kg"], kwargs["v_new"], kwargs["h"]
@@ -536,8 +537,7 @@ def chunk_kda_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=True,
-        transpose_state_layout=transpose_state_layout,
+        **fla_state_layout_kwargs(chunk_gated_delta_rule_bwd_dhu, transpose_state_layout),
     )
 
     dq, dk, dv, db, dg, dAkk = chunk_kda_bwd_wy_dqkg_fused(
@@ -556,7 +556,7 @@ def chunk_kda_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        transpose_state_layout=transpose_state_layout,
+        **fla_state_layout_kwargs(chunk_kda_bwd_wy_dqkg_fused, transpose_state_layout),
     )
 
     dq, dk, db, dg = chunk_kda_bwd_intra(
