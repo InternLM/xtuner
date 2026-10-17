@@ -867,7 +867,7 @@ class Trainer:
 
         train_begin = time.time()
         time_before_get_data = time.time()
-        for data_batch in self._data_iter():
+        for data_batch in self._prefetched_data_iter():
             time_before_train_step = time.time()
 
             ProberList.set_step(self._cur_step + 1)
@@ -1508,6 +1508,18 @@ class Trainer:
                 data = next(data_iter)
 
             yield data
+
+    def _prefetched_data_iter(self):
+        # V2c candidate: with XTUNER_LAZY_MEDIA_PREFETCH=1, fetch one batch ahead on a
+        # background thread and kick off lazy media materialization there, overlapping
+        # decode with the previous step's compute. Disabled (default) yields the plain
+        # serial iterator, byte-identical to the upstream loop.
+        from xtuner.v1.train.lazy_media_prefetch import lazy_media_prefetch_enabled, lookahead_iter
+
+        if lazy_media_prefetch_enabled():
+            yield from lookahead_iter(self._data_iter())
+        else:
+            yield from self._data_iter()
 
     def _get_checkpoint_path(self, epoch: int, step: int, is_snapshot: bool = False) -> Path:
         prefix = "snapshot-" if is_snapshot else "ckpt-"
