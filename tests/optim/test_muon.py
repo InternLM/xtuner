@@ -8,10 +8,14 @@
                           model must match a single-process reference for every
                           parameter, covering all four communication strategies
                           (all_to_all, agrs, local, subgroup_allgather).
+4. TestMuonCheckpoint  — A DCP round trip through TrainEngine restores the optimizer
+                          states, so the next step matches the run that was never saved.
 """
 
 import copy
 import math
+import tempfile
+from pathlib import Path
 from typing import Callable, Literal, overload
 
 import parametrize
@@ -791,3 +795,80 @@ class TestMuonFSDP(DeterministicDDPTestCase):
                 atol=1e-2,
                 rtol=1e-2,
             )
+
+
+# ─── Test: DCP resume ────────────────────────────────────────────────────────
+
+
+class TestMuonCheckpoint(DeterministicDDPTestCase):
+    @property
+    def world_size(self) -> int:
+        return 4
+
+    def test_dcp_round_trip_restores_states(self):
+        """Loading a TrainEngine DCP checkpoint into a fresh optimizer (the resume case: no step yet) must restore
+        every optimizer state, so the next step is bitwise identical to the run that was never saved."""
+        self.create_pg("cuda")
+        model, optim = self._build(seed=42)
+        for step in range(2):
+            self._train_step(model, optim, self._inputs(seed=step))
+
+        ckpt_dir = [tempfile.mkdtemp() if dist.get_rank() == 0 else None]
+        dist.broadcast_object_list(ckpt_dir, src=0)
+        weights_dir = Path(ckpt_dir[0]) / "dcp"  # type: ignore[arg-type]
+        self._engine(model, optim).save_dcp(weights_dir)
+
+        loaded_model, loaded_optim = self._build(seed=0)
+        self._engine(loaded_model, loaded_optim).load_dcp(weights_dir)
+
+        self._assert_params_equal(model, loaded_model)
+        self._assert_states_equal(optim, loaded_optim)
+
+        input_ids = self._inputs(seed=2)
+        self._train_step(model, optim, input_ids)
+        self._train_step(loaded_model, loaded_optim, input_ids)
+        self._assert_params_equal(model, loaded_model)
+
+    def _build(self, seed: int, **optim_kwargs) -> tuple[BaseModel, Muon]:
+        torch.manual_seed(seed)
+        model = ToyMoEModelConfig(compile_cfg=False).build().to("cuda")
+        model.fully_shard(FSDPConfig(param_dtype=torch.float32, reduce_dtype=torch.float32, torch_compile=False))
+        return model, MuonConfig(lr=0.01, weight_decay=0.01, **optim_kwargs).build(model)
+
+    def _inputs(self, seed: int) -> torch.Tensor:
+        # Each rank gets its own sample, as in real FSDP training.
+        torch.manual_seed(seed * self.world_size + dist.get_rank())
+        return torch.randint(0, ToyMoEModelConfig().vocab_size, (1, 8), device="cuda")
+
+    @staticmethod
+    def _train_step(model: BaseModel, optim: Muon, input_ids: torch.Tensor) -> None:
+        model(input_ids).backward()
+        optim.step()
+        optim.zero_grad()
+
+    @staticmethod
+    def _engine(model: BaseModel, optim: Muon) -> TrainEngine:
+        engine = object.__new__(TrainEngine)
+        engine.model = model
+        engine.model_cfg = model.config
+        engine.optimizer = optim
+        engine.has_freeze_params = False
+        return engine
+
+    @staticmethod
+    def _assert_params_equal(model: BaseModel, other: BaseModel) -> None:
+        for (name, p), (_, q) in zip(model.named_parameters(), other.named_parameters()):
+            assert torch.equal(p.to_local(), q.to_local()), f"parameter {name} differs"
+
+    @staticmethod
+    def _assert_states_equal(optim: Muon, other: Muon) -> None:
+        params = [p for g in optim.param_groups for p in g["params"]]
+        other_params = [p for g in other.param_groups for p in g["params"]]
+        for p, q in zip(params, other_params):
+            state, other_state = optim.state[p], other.state[q]
+            assert state.keys() == other_state.keys() and {"momentum"} <= state.keys()
+            for key, value in state.items():
+                if isinstance(value, torch.Tensor):
+                    assert torch.equal(value.to_local().cpu(), other_state[key].to_local().cpu()), key
+                else:
+                    assert value == other_state[key], key
