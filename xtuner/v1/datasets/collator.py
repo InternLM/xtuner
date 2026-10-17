@@ -321,8 +321,40 @@ def glm53_vl_sft_collator(
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
+        # 占位符计数与媒体特征不符的样本（纯文本含字面 <|image|>、cache/runtime 计数漂移等）
+        # 会在模型 splice 时计数错位崩溃；打包前丢弃并告警，不让单条异常样本中断训练——
+        # 线上 256 卡 Step 8 挂掉的直接原因就是此处原来的逐样本 assert。pack 末尾用 padding
+        # 补齐，丢样本不改变序列长度，DP 各 rank 的 collective 序列保持同步。
+        kept_instance: list[Glm53VLDataItem] = []
+        for data in instance:
+            placeholder_count = data["input_ids"].count(image_token_id)
+            expected_count = sum(data.get("num_img_tokens", [])) // merge_unit
+            if placeholder_count != expected_count:
+                logger.warning(
+                    f"GLM-5.3-Flash visual placeholder count {placeholder_count} != expected {expected_count}; "
+                    f"discard sample (num_tokens={data.get('num_tokens')}) from this pack instead of "
+                    "halting training."
+                )
+                continue
+            kept_instance.append(data)
+        if not kept_instance:
+            # 单样本 pack 是正常情况（长样本独占一个 pack、长度分组尾部等），整包被滤只说明
+            # 这个 pack 恰好没有好样本，推不出系统性故障；此时 raise 会让单条脏样本中断训练
+            # （E02 回归）。退回无 loss 占位项，照常走 build_text_ctx_labels：pack_to_max_length
+            # 补 padding 保持序列长度，labels 全 IGNORE 对 loss 贡献为 0，与 runtime 通道
+            # _discard_damaged_sample 的占位语义一致。系统性数据/代码问题由数据集级统计与
+            # 配置校验暴露，不在此处报错。
+            no_loss_placeholder: Glm53VLDataItem = {
+                "input_ids": [padding_token_idx] * 2,
+                "labels": [IGNORE_INDEX] * 2,
+                "num_tokens": 2,
+                "num_imgs": [0],
+                "num_img_tokens": [0],
+                "mm_token_type_ids": torch.zeros((1, 2), dtype=torch.long),
+            }
+            kept_instance = [no_loss_placeholder]
         seq_ctx, shifted_labels, instance = build_text_ctx_labels(  # type: ignore
-            instance,
+            kept_instance,
             pack_max_length,
             padding_token_idx,
             pack_to_max_length,
@@ -362,10 +394,11 @@ def glm53_vl_sft_collator(
             f"mm_token_type_ids length {mm_token_type_ids.shape[-1]} != input_ids length {seq_ctx.input_ids.shape[-1]}"
         )
 
-        # Re-assert the placeholder<->patch-count invariant per sample after truncation: this is
-        # the only layer that can desync media from text after tokenize-time construction
-        # (pack-level truncation), so re-checking its own invariant here catches a corrupted
-        # sample loudly instead of silently training on half a visual span (design doc §8.4).
+        # Re-assert the placeholder<->patch-count invariant per sample after truncation: the
+        # pre-filter above has already dropped samples that were corrupt on arrival, so a
+        # failure here means build_text_ctx_labels's own pack-level truncation desynced media
+        # from text — a packing bug, not dirty data, and it must stay loud instead of silently
+        # training on half a visual span (design doc §8.4).
         for data in instance:
             placeholder_count = data["input_ids"].count(image_token_id)
             expected_count = sum(data.get("num_img_tokens", [])) // merge_unit
