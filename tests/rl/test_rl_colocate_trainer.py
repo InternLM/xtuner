@@ -88,6 +88,7 @@ def _ray_get_none_ref():
 def _build_fake_agent_loop():
     rollout_ctl = _build_fake_rollout_controller()
     agent_loop = MagicMock()
+    agent_loop.close = AsyncMock()
     agent_loop.rollout_ctl = rollout_ctl
 
     async def generate_group(rollout_states, **kwargs):
@@ -113,7 +114,7 @@ class TestRLColocateTrainer(unittest.TestCase):
 
     def _make_trainer(self, agent_loop_manager, *, total_train_steps: int = 1, sync_weights_interval: int = 1):
         trainer = RLColocateTrainer.__new__(RLColocateTrainer)
-        trainer._rollout_config = SimpleNamespace(weight_transport_type='ipc')
+        trainer._rollout_config = SimpleNamespace(weight_transport_type="ipc")
         trainer.logger = MagicMock()
         trainer._total_train_steps = total_train_steps
         trainer._cur_step = 0
@@ -133,7 +134,10 @@ class TestRLColocateTrainer(unittest.TestCase):
         )
         Path(trainer.exp_dir).mkdir(parents=True, exist_ok=True)
         trainer.agent_loop_manager = agent_loop_manager
+        if isinstance(agent_loop_manager, (SimpleNamespace, MagicMock)):
+            agent_loop_manager.close = AsyncMock()
         trainer.eval_agent_loop_manager = MagicMock()
+        trainer.eval_agent_loop_manager.close = AsyncMock()
         trainer.evaluator = MagicMock(eval_batch_size=1)
         trainer.tokenizer = MagicMock()
         trainer._exp_tracker = MagicMock()
@@ -155,9 +159,7 @@ class TestRLColocateTrainer(unittest.TestCase):
         )
 
         trainer.rollout_controller = SimpleNamespace(
-            shutdown_inactive_workers=SimpleNamespace(
-                remote=MagicMock(side_effect=_ray_get_none_ref)
-            ),
+            shutdown_inactive_workers=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),
             offload=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),
             restart_inactive_workers=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),
             onload_weights=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),

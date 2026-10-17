@@ -1,6 +1,6 @@
 """Runner — top-level orchestrator for one task rollout.
 
-Owns sandbox lifecycle, threads one :class:`AgentRolloutItem` through the
+Uses a caller-owned environment, threads one :class:`AgentRolloutItem` through the
 stages (infer → validate), and fills the result fields in place. All real work
 is hook-driven (:class:`sandbox.SandboxStage` pre/entry/post) and the configured
 validation judger.
@@ -14,13 +14,13 @@ from __future__ import annotations
 
 import time
 import traceback
-from copy import deepcopy
 from typing import Any
 
 from lagent.utils import create_object
 
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.environment import Environment
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.judger import Judger
-from xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox import SandboxPool, SandboxStage
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox import SandboxStage
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     AgentRolloutItem,
     RolloutError,
@@ -37,19 +37,13 @@ class Runner:
     def __init__(
         self,
         *,
-        pool: SandboxPool | dict[str, Any],
         infer: SandboxStage | dict[str, Any],
         validate: Judger | dict[str, Any],
     ):
-        # ``pool`` is stored as a *template*: pass a dict for normal use (a
-        # fresh SandboxPool is built per ``run`` call), or pass an already-built
-        # SandboxPool for one-shot reuse (testing).  Sharing one SandboxPool
-        # instance across concurrent ``run`` calls is unsafe.
-        self._pool = pool
         self.infer = create_object(infer)
         self.validate = create_object(validate)
 
-    async def run(self, item: AgentRolloutItem) -> AgentRolloutItem:
+    async def run(self, item: AgentRolloutItem, environment: Environment) -> AgentRolloutItem:
         """Run one rollout sample and return the same item with result fields
         filled.
 
@@ -59,23 +53,13 @@ class Runner:
         fails.
         """
         self._validate_input(item)
-        if isinstance(self._pool, SandboxPool):
-            if item.pipeline_overrides:
-                raise RuntimeError("pipeline_overrides require dict-form pool config; got pre-built SandboxPool")
-            pool = self._pool
-        else:
-            pool_cfg = deepcopy(self._pool)
-            override = (item.pipeline_overrides or {}).get("pool")
-            if override:
-                _deep_merge(pool_cfg, override)
-            pool = create_object(pool_cfg)
-        infer_sandbox = _stage_sandbox_name(self.infer, pool)
-        infer_spec = pool.spec(infer_sandbox)
+        infer_sandbox = _stage_sandbox_name(self.infer, environment)
+        infer_info = environment.info(infer_sandbox)
 
         item.status = RolloutStatus.RUNNING
         item.infer.sandbox_name = infer_sandbox
-        item.infer.sandbox_image = infer_spec.image
-        item.infer.workspace = infer_spec.workspace_path
+        item.infer.sandbox_image = infer_info.image
+        item.infer.workspace = infer_info.workspace
 
         tid = item.id
         uid_obs = str(item.uid) if item.uid is not None else ""
@@ -87,16 +71,16 @@ class Runner:
                 # ─── acquire infer sandbox ───────────────────────────────
                 t0 = time.monotonic()
                 with span(uid_obs, "acquire", task_id=tid) as acquire_span:
-                    infer_client = await pool.get(infer_sandbox, record=item.infer)
-                    item.infer.sandbox_env_id = pool.env_id(infer_sandbox)
-                    sandbox_url = pool.url(infer_sandbox)
+                    infer_client = await environment.get(infer_sandbox, record=item.infer)
+                    item.infer.sandbox_env_id = environment.info(infer_sandbox).environment_id
+                    sandbox_url = environment.info(infer_sandbox).url
                     if sandbox_url is not None:
                         item.infer.sandbox_url = sandbox_url
                     acquire_span.annotate(
                         sandbox_name=infer_sandbox,
                         sandbox_env_id=item.infer.sandbox_env_id,
                         sandbox_url=sandbox_url,
-                        sandbox_image=infer_spec.image,
+                        sandbox_image=infer_info.image,
                     )
                 t_acquire = time.monotonic() - t0
 
@@ -119,7 +103,7 @@ class Runner:
                         validate_name,
                         StageRecord(judger_name=validate_name),
                     )
-                    score = float(await self.validate.run(item, pool, validate_record))
+                    score = float(await self.validate.run(item, environment, validate_record))
                 t_validate = time.monotonic() - t2
                 item.reward = score
 
@@ -140,7 +124,6 @@ class Runner:
             return self._fail(item, promoted)
         finally:
             self._log_final(tid, item, t_acquire, t_infer, t_validate)
-            await pool.release_all()
 
     def _log_final(
         self,
@@ -188,6 +171,7 @@ class Runner:
 
     def _fail(self, item: AgentRolloutItem, error: RolloutError | None) -> AgentRolloutItem:
         item.status = RolloutStatus.FAILED
+        item.reward = None
         if item.error is None:
             item.error = error
         if error is not None:
@@ -195,11 +179,11 @@ class Runner:
         return item
 
 
-def _stage_sandbox_name(stage: SandboxStage, pool: SandboxPool) -> str:
+def _stage_sandbox_name(stage: SandboxStage, environment: Environment) -> str:
     name = stage.sandbox
     if not isinstance(name, str):
         raise TypeError(f"SandboxStage.sandbox must be a sandbox name, got {type(name).__name__}")
-    pool.validate_name(name)
+    environment.info(name)
     return name
 
 
@@ -217,17 +201,3 @@ def _format_error(error: RolloutError | None) -> str:
     stage = f"{error.stage}/" if error.stage else ""
     typ = f" ({error.type})" if error.type else ""
     return f"{stage}{error.category}{typ}: {error.message}"
-
-
-def _deep_merge(dst: dict, src: dict) -> dict:
-    """In-place deep-merge ``src`` into ``dst``. Returns ``dst``.
-
-    Dict values are merged recursively; non-dict values (including lists) are
-    replaced. Used to apply ``item.pipeline_overrides`` onto the pool config.
-    """
-    for k, v in src.items():
-        if isinstance(v, dict) and isinstance(dst.get(k), dict):
-            _deep_merge(dst[k], v)
-        else:
-            dst[k] = v
-    return dst
