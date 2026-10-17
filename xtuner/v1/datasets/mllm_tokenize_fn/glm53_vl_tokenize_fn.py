@@ -68,11 +68,21 @@ _PROCESSOR_CACHE: dict[str, Any] = {}
 
 LAZY_MEDIA_ENV = "XTUNER_LAZY_MEDIA"
 LAZY_MEDIA_THREADS_ENV = "XTUNER_LAZY_MEDIA_THREADS"
+LAZY_MEDIA_SHARED_ENV = "XTUNER_LAZY_MEDIA_SHARED"
 
 
 def lazy_media_enabled() -> bool:
     """Return whether lazy image materialization is enabled for this process."""
     return os.environ.get(LAZY_MEDIA_ENV, "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def lazy_media_shared_decode() -> bool:
+    """Return whether V2b SP shared decode (rank0 decodes + broadcast) is enabled.
+
+    Off by default so V2a (per-rank threaded materialization) stays the exact behavior
+    of an unflagged lazy run; V2b rounds set XTUNER_LAZY_MEDIA_SHARED=1 explicitly.
+    """
+    return os.environ.get(LAZY_MEDIA_SHARED_ENV, "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 def lazy_media_threads() -> int:
