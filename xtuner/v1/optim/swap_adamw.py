@@ -53,6 +53,13 @@ class SwapAdamW(torch.optim.AdamW):
         self._param_to_group_map: dict[torch.Tensor, dict] = {}
         self._param_to_cpu_states_map: dict[torch.Tensor, dict[str, torch.Tensor | None]] = {}
         self._init_swap_states()
+        self.register_load_state_dict_post_hook(self._restore_swap_states)
+
+    def _restore_swap_states(self, optimizer: torch.optim.Optimizer) -> None:
+        # AdamW.load_state_dict replaces both state and param_groups, and casts
+        # moments to the parameter device. Rebuild our aliases and CPU placement
+        # after plain optimizer loads as well as distributed checkpoint loads.
+        self._init_swap_states()
 
     @staticmethod
     def _to_local_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -61,6 +68,8 @@ class SwapAdamW(torch.optim.AdamW):
         return tensor
 
     def _init_swap_states(self) -> None:
+        self._param_to_group_map.clear()
+        self._param_to_cpu_states_map.clear()
         for group in self.param_groups:
             for param in group["params"]:
                 self._param_to_group_map[param] = group
@@ -86,14 +95,24 @@ class SwapAdamW(torch.optim.AdamW):
                         cpu_state_dtensor[key] = None
                         cpu_state[key] = None
                     else:
-                        cpu_tensor = torch.zeros_like(local_param, memory_format=torch.preserve_format)
-                        cpu_tensor = cpu_tensor.to(device="cpu", non_blocking=True)
+                        restored = cpu_state_dtensor.get(key)
+                        if restored is None:
+                            cpu_tensor = torch.zeros_like(
+                                local_param, device="cpu", memory_format=torch.preserve_format
+                            )
+                        else:
+                            cpu_tensor = self._to_local_tensor(restored).to(device="cpu")
                         cpu_tensor = cpu_tensor.pin_memory()
                         cpu_state_dtensor[key] = cpu_tensor
                         cpu_state[key] = cpu_tensor
 
                 # Keep per-parameter step semantics consistent with torch.optim.AdamW.
-                cpu_state_dtensor["step"] = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+                step = cpu_state_dtensor.get("step")
+                cpu_state_dtensor["step"] = (
+                    torch.tensor(0.0, dtype=torch.float32, device="cpu")
+                    if step is None
+                    else self._to_local_tensor(step).to(device="cpu", dtype=torch.float32)
+                )
 
                 self._param_to_cpu_states_map[param] = cpu_state
 
