@@ -18,6 +18,10 @@ in the official ``chat_template.jinja``:
    does not remove the reasoning-effort header or close the generation-time ``<think>`` prefix.
    Because the flag has no effect, ``False`` is rejected with an ``AssertionError`` instead of
    being silently ignored.
+4. ``<|endoftext|>`` is appended only after the FINAL assistant message (the training stop
+   suffix). The official template never emits EOS mid-conversation, so assistant→system and
+   assistant→assistant boundaries get no extra token; only ``<|user|>``/``<|observation|>``
+   act as supervised stop targets.
 """
 
 from collections.abc import Mapping
@@ -133,7 +137,8 @@ def render_glm53_chat(
                 append(_render_tool_calls(message["tool_calls"]), loss)
             previous_assistant_loss = loss
             next_role = messages[index + 1].get("role") if index + 1 < len(messages) else None
-            if next_role not in _NEXT_ROLE_STOP_TOKENS:
+            if next_role is None:
+                # 训练用 EOS 只追加在对话末尾；官方模板从不在对话中间输出 EOS。
                 append(_END_OF_TEXT, loss)
         elif role == "tool":
             if index == 0 or messages[index - 1].get("role") != "tool":
