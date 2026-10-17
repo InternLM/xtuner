@@ -30,6 +30,7 @@ TestGlm53CacheInvalidation
 import copy
 import inspect
 import os
+import weakref
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -582,3 +583,69 @@ _ALT_VALUES = {
     "enable_thinking": {"enable_thinking": False},
     "reasoning_effort": {"reasoning_effort": "low"},
 }
+
+
+@pytest.mark.parametrize("use_oss", [False, True])
+def test_images_processed_incrementally_match_batched(tokenize_fn, tmp_path, monkeypatch, use_oss):
+    from xtuner.v1.datasets.mllm_tokenize_fn import glm53_vl_tokenize_fn as module
+
+    # Repeated shapes exercise grouping; the rotated long image checks EXIF and order.
+    paths = []
+    content = []
+    rng = np.random.default_rng(42)
+    for i, (width, height) in enumerate([(112, 84), (84, 560), (112, 84)]):
+        path = tmp_path / f"image_{i}.png"
+        image = Image.fromarray(rng.integers(0, 256, (height, width, 3), dtype=np.uint8))
+        exif = Image.Exif()
+        if i == 1:
+            exif[274] = 6
+        image.save(path, exif=exif)
+        image.close()
+        paths.append(path)
+        url = f"s3://bucket/{path.name}" if use_oss else str(path)
+        content.append({"type": "image", "image": {"url": url, "image_wh": [width, height]}})
+    content.append({"type": "text", "text": "Describe these images in order."})
+    item = {"messages": [{"role": "user", "content": content}, {"role": "assistant", "content": "Three images."}]}
+
+    originals = [module.apply_exif_orientation(module.load_image(str(path))) for path in paths]
+    expected = tokenize_fn.image_processor(images=originals, return_tensors="pt")
+    for image in originals:
+        image.close()
+    del originals, image
+
+    image_refs = []
+    original_exif = module.apply_exif_orientation
+
+    def track_image(image):
+        image = original_exif(image)
+        image_refs.append(weakref.ref(image))
+        return image
+
+    def check_previous_released():
+        assert all(ref() is None for ref in image_refs), "Previous full-resolution image is still referenced"
+
+    monkeypatch.setattr(module, "apply_exif_orientation", track_image)
+    if use_oss:
+        payloads = {f"s3://bucket/{path.name}": path.read_bytes() for path in paths}
+
+        def get_image_bytes(url):
+            check_previous_released()
+            return payloads[url]
+
+        tokenize_fn.oss_loader = Mock(client=Mock(get=Mock(side_effect=get_image_bytes)))
+    else:
+        original_load = module.load_image
+
+        def load_image(path):
+            check_previous_released()
+            return original_load(path)
+
+        monkeypatch.setattr(module, "load_image", load_image)
+
+    tokenize_fn.state = "runtime"
+    actual = tokenize_fn(item)
+    assert len(image_refs) == 3
+    check_previous_released()
+    assert actual["num_imgs"] == [3]
+    for key in ("pixel_values", "image_grid_thw"):
+        assert torch.equal(actual[key], expected[key]), key
