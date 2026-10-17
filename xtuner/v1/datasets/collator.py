@@ -373,6 +373,31 @@ def glm53_vl_sft_collator(
         video_grid_thw = [i["video_grid_thw"] for i in instance if "video_grid_thw" in i]
         video_grid_thw = torch.cat(video_grid_thw, dim=0) if video_grid_thw else None
 
+        # Lazy-media candidate: merge the pack's per-sample media plans into one plan whose
+        # image order matches the pack order kept by the tensors above (the placeholder
+        # invariant asserted below is what ties plan entries to surviving placeholders).
+        media_plan: dict | None
+        item_plans = [i["media_plan"] for i in instance if "media_plan" in i]
+        if item_plans:
+            if pixel_values is not None:
+                raise ValueError("media_plan and pixel_values are mutually exclusive per pack")
+            processor_keys = {plan["processor_path"] for plan in item_plans}
+            if len(processor_keys) != 1 or any(
+                (plan.get("min_pixels"), plan.get("max_pixels"))
+                != (item_plans[0].get("min_pixels"), item_plans[0].get("max_pixels"))
+                for plan in item_plans
+            ):
+                raise ValueError("media plans in one pack must share processor settings")
+            media_plan = {
+                "images": [entry for plan in item_plans for entry in plan["images"]],
+                "sample_sizes": [size for plan in item_plans for size in plan["sample_sizes"]],
+                "processor_path": item_plans[0]["processor_path"],
+                "min_pixels": item_plans[0].get("min_pixels"),
+                "max_pixels": item_plans[0].get("max_pixels"),
+            }
+        else:
+            media_plan = None
+
         # mm_token_type_ids must track input_ids through the exact same [:, :-1] drop + pad
         # (design doc §8.3). Slice each item to its own (possibly pack-truncated) input_ids
         # length first, so the rare single-oversized-item edge case in `build_text_ctx_labels`
@@ -406,6 +431,7 @@ def glm53_vl_sft_collator(
         seq_ctx.video_grid_thw = video_grid_thw
         seq_ctx.mm_token_type_ids = mm_token_type_ids
         seq_ctx.num_img_tokens = num_img_tokens
+        seq_ctx.media_plan = media_plan  # type: ignore[assignment]
 
         ret.append(
             {

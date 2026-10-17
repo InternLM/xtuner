@@ -39,6 +39,7 @@ class Glm53VLDataItem(BaseMLLMDataItem, total=False):
     pixel_values_videos: torch.Tensor
     video_grid_thw: torch.Tensor
     mm_token_type_ids: torch.Tensor  # 0=text, 1=image, 2=video
+    media_plan: dict  # lazy-media candidate: descriptors materialized at micro-batch time
 
 
 class LongTextDataItem(DataItem):
