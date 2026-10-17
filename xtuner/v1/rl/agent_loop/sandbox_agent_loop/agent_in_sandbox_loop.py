@@ -4,6 +4,7 @@ import asyncio
 import copy
 import importlib
 import json
+import math
 import traceback
 import uuid
 from typing import Any, Literal
@@ -175,10 +176,36 @@ def _extract_reward_payload(item: AgentRolloutItem) -> dict[str, Any] | None:
         if isinstance(reward, dict):
             payload = dict(reward)
             if item.reward is not None:
-                payload.setdefault("score", item.reward)
+                payload["score"] = item.reward
             return payload
     if item.reward is not None:
         return {"score": item.reward}
+    return None
+
+
+def _task_result_error(item: AgentRolloutItem) -> str | None:
+    """Only a completed, finite verifier score is a task outcome.
+
+    A task-budget timeout is scoreable only after the harness confirms the agent stopped. Transport timeouts and
+    adapter errors remain unscored.
+    """
+    if item.error is not None:
+        return f"{item.error.stage}/{item.error.category}: {item.error.message}"
+    if item.status != RolloutStatus.COMPLETED:
+        return f"Agent attempt ended with status {item.status.value}"
+    response = _response_message(item.artifacts, required=True)
+    extra = response.get("extra_info") or {}
+    if response.get("error") or (isinstance(extra, dict) and extra.get("error")):
+        return "Agent adapter failed; verifier output is not a valid task result"
+    reason = response.get("finish_reason")
+    if reason == "timeout":
+        info = _finish_info(response) or {}
+        if info.get("termination_reason") != "task_budget_exhausted" or info.get("agent_stopped") is not True:
+            return "TimeoutError: task-budget exhaustion and agent termination were not confirmed"
+    elif reason in {"error", "cancelled", "abort"}:
+        return f"Agent attempt ended with {reason}"
+    if item.reward is None or not math.isfinite(item.reward):
+        return "Verifier did not produce a finite task score"
     return None
 
 
@@ -265,10 +292,15 @@ class AgentInSandboxLoop(AgentLoop):
             result = await self._run_item(rollout_item)
             return await self._build_rollout_states(rollout_state, result)
         except Exception as exc:
-            rollout_state.status = Status.COMPLETED if self.mode == "eval" else Status.FAILED
+            rollout_state.status = Status.FAILED
+            rollout_state.reward = None
             rollout_state.finish_reason = "error"
+            if "rollout_item" in locals():
+                rollout_state.extra_fields["agent_artifacts"] = _to_json_safe(rollout_item.artifacts)
+                rollout_state.extra_fields["agent_judgers"] = {
+                    name: record.model_dump(mode="json") for name, record in rollout_item.judgers.items()
+                }
             if self.mode == "eval":
-                rollout_state.reward = {"score": 0.0}
                 rollout_state.response = ""
                 rollout_state.extra_fields["agent_status"] = "exception"
             rollout_state.error_msg = f"{type(exc).__name__}: {exc}"
@@ -287,11 +319,12 @@ class AgentInSandboxLoop(AgentLoop):
             return [rollout_state]
 
         response_message = _response_message(item.artifacts, required=item.status == RolloutStatus.COMPLETED)
-        rollout_state.status = Status.COMPLETED if item.status == RolloutStatus.COMPLETED else Status.FAILED
+        error = _task_result_error(item)
+        rollout_state.status = Status.COMPLETED if error is None else Status.FAILED
         rollout_state.finish_reason = str(
             response_message.get("finish_reason") or ("stop" if item.status == RolloutStatus.COMPLETED else "error")
         )
-        rollout_state.reward = _extract_reward_payload(item)
+        rollout_state.reward = _extract_reward_payload(item) if error is None else None
         rollout_state.extra_fields["origin_data_source"] = item.data_source
         rollout_state.extra_fields["agent_status"] = item.status.value
         selected_agent = _selected_agent(item)
@@ -304,9 +337,8 @@ class AgentInSandboxLoop(AgentLoop):
         finish_info = _finish_info(response_message)
         if finish_info:
             rollout_state.extra_fields["agent_finish_info"] = finish_info
-        if item.error is not None:
-            rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"
-        if item.status != RolloutStatus.COMPLETED:
+        rollout_state.error_msg = error
+        if rollout_state.status == Status.FAILED:
             rollout_state.extra_fields["agent_artifacts"] = _to_json_safe(item.artifacts)
             return [rollout_state]
 
@@ -360,11 +392,12 @@ class AgentInSandboxLoop(AgentLoop):
         return rollout_states
 
     def _fill_eval_rollout_state(self, rollout_state: RolloutState, item: AgentRolloutItem) -> None:
-        is_success = item.status == RolloutStatus.COMPLETED
+        error = _task_result_error(item)
+        is_success = error is None
         response_message = _response_message(item.artifacts, required=is_success)
-        rollout_state.status = Status.COMPLETED
+        rollout_state.status = Status.COMPLETED if is_success else Status.FAILED
         rollout_state.finish_reason = str(response_message.get("finish_reason") or ("stop" if is_success else "error"))
-        rollout_state.reward = {"score": item.reward if is_success and item.reward is not None else 0.0}
+        rollout_state.reward = _extract_reward_payload(item) if is_success else None
         rollout_state.input_ids = None
         rollout_state.labels = None
         rollout_state.response_ids = None
@@ -382,8 +415,7 @@ class AgentInSandboxLoop(AgentLoop):
         rollout_state.extra_fields["agent_judgers"] = {
             name: record.model_dump(mode="json") for name, record in item.judgers.items()
         }
-        if item.error is not None:
-            rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"
+        rollout_state.error_msg = error
 
         rollout_state.response = _response_text(response_message)
         finish_info = _finish_info(response_message)
