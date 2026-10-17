@@ -7,6 +7,8 @@ TestGlm53VlSftCollator
     test_glm53_collator_keeps_media_with_instance    截断丢样本时媒体同步丢弃
     test_glm53_collator_image_video_batch            图像/视频混批各自聚合
     test_glm53_collator_pure_text_sample_has_no_media 纯文本样本不带媒体字段
+    test_glm53_collator_drops_placeholder_mismatch_sample  占位符计数不符的样本打包前丢弃、不崩溃
+    test_glm53_collator_all_corrupt_pack_raises      整包都坏属系统性问题，仍报错暴露
 TestGlm53VlCollatorCastsMediaToBf16
     test_image_media_is_bf16_after_collate            图像媒体 collate 后为 bf16、grid 仍 int64
     test_video_media_is_bf16_after_collate            视频媒体同型
@@ -16,6 +18,7 @@ TestGlm53SequenceContextSplitKeepsMmAlignment
 """
 
 import os
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -160,6 +163,42 @@ class TestGlm53VlSftCollator:
         assert seq_ctx.pixel_values is None
         assert seq_ctx.image_grid_thw is None
         assert (seq_ctx.mm_token_type_ids == 0).all()
+
+    def test_glm53_collator_drops_placeholder_mismatch_sample(self, monkeypatch: pytest.MonkeyPatch):
+        # 纯文本样本带字面 image_token_id（input_ids 含占位 token 但 num_img_tokens=0，线上
+        # 256 卡 Step 8 崩溃的根因样本形态）：打包前丢弃并告警，pack 里其余样本正常训练，
+        # collator 不再 assert 崩溃。
+        logger_mock = Mock()
+        monkeypatch.setattr("xtuner.v1.datasets.collator.logger", logger_mock)
+        bad = _glm53_item(text_len=6, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=0)
+        bad["input_ids"][1] = self.IMAGE_TOKEN_ID  # 字面 <|image|>，无对应媒体特征
+        good = _glm53_item(text_len=8, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=2)
+        result = glm53_vl_sft_collator(
+            [[bad, good]],
+            pack_max_length=32,
+            padding_token_idx=0,
+            image_token_id=self.IMAGE_TOKEN_ID,
+            merge_unit=self.MERGE_UNIT,
+        )
+        seq_ctx = result[0]["seq_ctx"]
+        assert logger_mock.warning.called
+        # 只剩 good 样本：2 placeholders * merge_unit(4) = 8 raw patches。
+        assert seq_ctx.pixel_values.shape == (8, 8)
+        assert seq_ctx.num_img_tokens == [[8]]
+
+    def test_glm53_collator_all_corrupt_pack_raises(self):
+        # 整包样本都坏 = 系统性数据/代码问题（每条都坏），必须报错暴露而不是静默训练——
+        # 类比配置错误不走丢弃通道的反向保护。
+        bad = _glm53_item(text_len=6, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=0)
+        bad["input_ids"][1] = self.IMAGE_TOKEN_ID
+        with pytest.raises(RuntimeError, match="every sample"):
+            glm53_vl_sft_collator(
+                [[bad]],
+                pack_max_length=16,
+                padding_token_idx=0,
+                image_token_id=self.IMAGE_TOKEN_ID,
+                merge_unit=self.MERGE_UNIT,
+            )
 
     def test_glm53_collator_is_reachable_by_name_from_dataloader_config(self):
         # 训练侧只能按名字选 collator；`glm53_vl_sft_collator` 比其它 VL collator 多两个必填

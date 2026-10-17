@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Literal, TypeVar
 
 import torch
@@ -19,6 +19,11 @@ from ..utils import CachableTokenizeFunction, tokenizer_xxhash, with_proxy_atten
 logger = get_logger()
 
 IMAGE_TOKEN_ALIAS = "XTUNER-ALIAS-ALIAS-XTUNER-2025"
+
+# 单条脏数据在采集/几何预测阶段可能抛出的异常类型：一律按损坏样本走 _discard_damaged_sample
+# 通道（cache 警告丢弃、runtime 由上游换无 loss 占位样本）。AssertionError 刻意不在其中——
+# 配置/代码错误（如 enable_thinking=False）每条样本都会触发，必须逃逸暴露而非被静默吞掉。
+_DIRTY_DATA_ERRORS = (RuntimeError, KeyError, ValueError, IndexError, TypeError, ZeroDivisionError)
 
 
 def collect_image_video_paths_and_extra(messages: list[dict], allow_all_roles: bool = False):
@@ -226,6 +231,12 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
             return CacheItem(num_tokens=0, num_img_tokens=[0])
         raise NotImplementedError(reason)
 
+    def _calc_cache_item(self, calc_fn: Callable[[dict], CacheItem], item: dict) -> CacheItem:
+        try:
+            return calc_fn(item)
+        except _DIRTY_DATA_ERRORS as e:
+            return self._discard_damaged_sample(f"{type(e).__name__}: {e} of {self.data_name}")
+
     @with_proxy_attention_flops
     def __call__(self, item: dict, media_root: str = "", **kwargs) -> T | CacheItem:  # type: ignore[override]
         try:
@@ -238,13 +249,10 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         except NotImplementedError as e:
             # 模型家族显式不支持的数据边界按脏样本处理。
             return self._discard_damaged_sample(str(e))
-        except RuntimeError as e:
+        except _DIRTY_DATA_ERRORS as e:
             if self.state == "cache":
-                print(f"!!!! RuntimeError: {e} of {self.data_name} when tokenize cache item. skip {item}!")
-                ret = CacheItem(num_tokens=0, num_img_tokens=[0])
-                return ret
-            else:
-                raise RuntimeError(f"!!!! RuntimeError: {e} of {self.data_name}")
+                return self._discard_damaged_sample(f"{type(e).__name__}: {e} of {self.data_name}")
+            raise RuntimeError(f"!!!! {type(e).__name__}: {e} of {self.data_name}") from e
         if len(self._image_path) > 0 and len(self._video_path) > 0:
             return self._discard_damaged_sample(
                 "Mixed image and video samples in one record are not supported by "
@@ -253,12 +261,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
             )
         if len(self._image_path) > 0:
             if self.state == "cache":
-                try:
-                    ret = self.calc_num_tokens_multi_modal_get_item(item)
-                except (RuntimeError, KeyError, ValueError, IndexError) as e:
-                    # 媒体几何/元数据脏数据：警告并丢弃。AssertionError 不捕获——配置或代码错误
-                    # （如 enable_thinking=False）必须继续暴露，不能静默掏空数据集。
-                    ret = self._discard_damaged_sample(f"{type(e).__name__}: {e} of {self.data_name}")
+                ret = self._calc_cache_item(self.calc_num_tokens_multi_modal_get_item, item)
             else:
                 ret = self.multi_modal_get_item(item, media_root)
                 if self._trim_memory_counter % self._trim_memory_interval == 0:
@@ -266,10 +269,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
                 self._trim_memory_counter += 1
         elif len(self._video_path) > 0:
             if self.state == "cache":
-                try:
-                    ret = self.calc_num_tokens_video_get_item(item)
-                except (RuntimeError, KeyError, ValueError, IndexError) as e:
-                    ret = self._discard_damaged_sample(f"{type(e).__name__}: {e} of {self.data_name}")
+                ret = self._calc_cache_item(self.calc_num_tokens_video_get_item, item)
             else:
                 ret = self.video_get_item(item, media_root)
                 if self._trim_memory_counter % self._trim_memory_interval == 0:
@@ -277,7 +277,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
                 self._trim_memory_counter += 1
         else:
             if self.state == "cache":
-                ret = self.calc_num_tokens_pure_text_get_item(item)
+                ret = self._calc_cache_item(self.calc_num_tokens_pure_text_get_item, item)
             else:
                 ret = self.pure_text_get_item(item)
 
