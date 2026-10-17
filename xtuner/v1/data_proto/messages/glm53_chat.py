@@ -18,6 +18,13 @@ in the official ``chat_template.jinja``:
    does not remove the reasoning-effort header or close the generation-time ``<think>`` prefix.
    Because the flag has no effect, ``False`` is rejected with an ``AssertionError`` instead of
    being silently ignored.
+4. A contiguous block of tool messages is rendered in the preceding assistant's ``tool_calls``
+   order when the official template's can_sort rule holds (every result id is present, unique
+   within the block, and matches a unique tool_call id); otherwise the message order is kept.
+5. ``<|endoftext|>`` is appended only after the FINAL assistant message (the training stop
+   suffix). The official template never emits EOS mid-conversation, so assistant→system and
+   assistant→assistant boundaries get no extra token; only ``<|user|>``/``<|observation|>``
+   act as supervised stop targets.
 """
 
 from collections.abc import Mapping
@@ -68,6 +75,67 @@ def _visible_text(content: Any) -> str:
                 text += _MEDIA_PLACEHOLDER[item_type]
         return text
     return str(content)
+
+
+def _id_of(obj: Mapping[str, Any]) -> Any:
+    return obj.get("tool_call_id") or obj.get("id")
+
+
+def _is_list_of_outputs(message: Mapping[str, Any]) -> bool:
+    content = message.get("content")
+    return (
+        isinstance(content, list) and len(content) > 0 and isinstance(content[0], Mapping) and "output" in content[0]
+    )
+
+
+def _render_tool_block(messages: List[Dict[str, Any]], start: int, tools: Optional[List[Dict[str, Any]]]) -> str:
+    """Render the contiguous tool-message block starting at ``start``.
+
+    Results are emitted in the preceding assistant's ``tool_calls`` order when the official
+    template's can_sort rule holds: the block follows an assistant with tool_calls, every
+    result id is present, unique within the block, and matches a tool_call id, and the
+    tool_call ids themselves are present and unique. Any violation keeps the message order.
+    """
+    end = start
+    while end + 1 < len(messages) and messages[end + 1].get("role") == "tool":
+        end += 1
+    block = messages[start : end + 1]
+
+    tool_calls = None
+    if start > 0 and messages[start - 1].get("role") == "assistant":
+        tool_calls = messages[start - 1].get("tool_calls") or None
+
+    can_sort = bool(tool_calls)
+    if can_sort:
+        result_ids: list[Any] = []
+        for message in block:
+            if _is_list_of_outputs(message):
+                result_ids.extend(_id_of(entry) for entry in message["content"])
+            else:
+                result_ids.append(_id_of(message))
+        call_ids = [_id_of(tool_call) for tool_call in tool_calls or []]
+        if (
+            any(not result_id for result_id in result_ids)
+            or len(set(result_ids)) != len(result_ids)
+            or any(not call_id for call_id in call_ids)
+            or len(set(call_ids)) != len(call_ids)
+            or any(result_id not in call_ids for result_id in result_ids)
+        ):
+            can_sort = False
+
+    if not can_sort:
+        return "".join(_render_tool_result(message.get("content", ""), tools) for message in block)
+
+    text = ""
+    for call_id in call_ids:
+        for message in block:
+            if _is_list_of_outputs(message):
+                for entry in message["content"]:
+                    if _id_of(entry) == call_id:
+                        text += f"<tool_response>{entry['output']}</tool_response>"
+            elif _id_of(message) == call_id:
+                text += _render_tool_result(message.get("content", ""), tools)
+    return text
 
 
 def render_glm53_chat(
@@ -133,7 +201,8 @@ def render_glm53_chat(
                 append(_render_tool_calls(message["tool_calls"]), loss)
             previous_assistant_loss = loss
             next_role = messages[index + 1].get("role") if index + 1 < len(messages) else None
-            if next_role not in _NEXT_ROLE_STOP_TOKENS:
+            if next_role is None:
+                # 训练用 EOS 只追加在对话末尾；官方模板从不在对话中间输出 EOS。
                 append(_END_OF_TEXT, loss)
         elif role == "tool":
             if index == 0 or messages[index - 1].get("role") != "tool":
@@ -141,7 +210,8 @@ def render_glm53_chat(
                     index > 0 and messages[index - 1].get("role") == "assistant" and previous_assistant_loss
                 )
                 append(_NEXT_ROLE_STOP_TOKENS[role], boundary_loss)
-            append(_render_tool_result(message.get("content", ""), tools), False)
+                append(_render_tool_block(messages, index, tools), False)
+            # 块内后续 tool 消息已由块起点统一渲染（含按 tool_calls 顺序的重排）。
 
     if add_generation_prompt:
         append("<|assistant|>", False)
@@ -216,6 +286,13 @@ def glm53_tokenize_fn_slowspeed(
         )
 
         prefix_ids = tokenizer.encode(prefix_text, add_special_tokens=False)
+        if index > 0 and messages[index - 1].get("role") == "assistant":
+            # 前缀渲染会给其末尾的 assistant 追加训练 EOS，而完整渲染在连续 assistant 之间
+            # 没有 EOS；去掉它才能保持 token 级前缀对齐。
+            generation_ids = tokenizer.encode("<|assistant|><think>", add_special_tokens=False)
+            eos_id = tokenizer.convert_tokens_to_ids(_END_OF_TEXT)
+            assert prefix_ids[-len(generation_ids) - 1] == eos_id
+            del prefix_ids[-len(generation_ids) - 1]
         message_ids = tokenizer.encode(message_text, add_special_tokens=False)
         content_ids = message_ids[len(prefix_ids) :]
         if not content_ids:
@@ -224,6 +301,12 @@ def glm53_tokenize_fn_slowspeed(
         next_role = messages[index + 1].get("role") if index + 1 < len(messages) else None
         if next_role in _NEXT_ROLE_STOP_TOKENS:
             content_ids[-1] = tokenizer.convert_tokens_to_ids(_NEXT_ROLE_STOP_TOKENS[next_role])
+        elif next_role is not None:
+            # 截断渲染以训练 EOS 结尾，但完整渲染中 assistant→system/assistant 之间没有 EOS
+            # （边界 token 也不计入该 assistant 的 loss），监督区间去掉末尾 EOS。
+            content_ids = content_ids[:-1]
+            if not content_ids:
+                continue
 
         for start in range(curr_ptr, len(total_ids) - len(content_ids) + 1):
             if total_ids[start : start + len(content_ids)] == content_ids:
