@@ -15,7 +15,9 @@ from pathlib import Path
 from shutil import rmtree
 from typing import (
     Annotated,
+    Any,
     Callable,
+    Iterator,
     Literal,
     Protocol,
     Sequence,
@@ -1514,12 +1516,38 @@ class Trainer:
         # background thread and kick off lazy media materialization there, overlapping
         # decode with the previous step's compute. Disabled (default) yields the plain
         # serial iterator, byte-identical to the upstream loop.
+        #
+        # The batch count is held LOCALLY here: _data_iter's `while self._cur_step <
+        # total_step` gate races when iterated from the lookahead thread (the main thread
+        # advances _cur_step concurrently; the first smoke run over-yielded 2 batches and
+        # trained 5 steps of a 3-step config — evidence in runs/A8-v2c-smoke3).
         from xtuner.v1.train.lazy_media_prefetch import lazy_media_prefetch_enabled, lookahead_iter
 
         if lazy_media_prefetch_enabled():
-            yield from lookahead_iter(self._data_iter())
+            remaining = self.total_step - self._cur_step
+
+            def bounded_raw() -> Iterator[Any]:
+                raw = self._raw_data_iter()
+                for _ in range(remaining):
+                    yield next(raw)
+
+            yield from lookahead_iter(bounded_raw())
         else:
             yield from self._data_iter()
+
+    def _raw_data_iter(self) -> Iterator[Any]:
+        # Unbounded per-batch iterator with epoch restart; the CALLER bounds the count
+        # (kept separate from _data_iter so the disabled path stays byte-identical).
+        data_iter = iter(self._dataloader)
+        while True:
+            try:
+                data = next(data_iter)
+            except StopIteration:
+                self._cur_epoch += 1
+                self._dataloader.set_epoch(self._cur_epoch)
+                data_iter = iter(self._dataloader)
+                continue
+            yield data
 
     def _get_checkpoint_path(self, epoch: int, step: int, is_snapshot: bool = False) -> Path:
         prefix = "snapshot-" if is_snapshot else "ckpt-"
