@@ -22,6 +22,8 @@ preprocessing path makes internally. Verified bitwise-equal to the real processo
 
 import copy
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Literal
 
 import numpy as np
@@ -65,11 +67,24 @@ _PROCESSOR_CACHE: dict[str, Any] = {}
 # image_processor calls as the eager path and asserting predicted == processed grids.
 
 LAZY_MEDIA_ENV = "XTUNER_LAZY_MEDIA"
+LAZY_MEDIA_THREADS_ENV = "XTUNER_LAZY_MEDIA_THREADS"
 
 
 def lazy_media_enabled() -> bool:
     """Return whether lazy image materialization is enabled for this process."""
     return os.environ.get(LAZY_MEDIA_ENV, "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def lazy_media_threads() -> int:
+    """Return the per-materialization decode thread budget (0 keeps v1 serial behavior).
+
+    Values are clamped to [0, 64]; parse failures fall back to the default of 8.
+    """
+    try:
+        value = int(os.environ.get(LAZY_MEDIA_THREADS_ENV, "8").strip())
+    except ValueError:
+        value = 8
+    return max(0, min(value, 64))
 
 
 def materialize_image_plan(media_plan: dict) -> tuple[torch.Tensor, torch.Tensor]:
@@ -103,17 +118,42 @@ def materialize_image_plan(media_plan: dict) -> tuple[torch.Tensor, torch.Tensor
     if max_pixels is not None:
         image_processor.max_image_tokens = max_pixels
 
-    decoded: list[Any] = [apply_exif_orientation(load_image(entry["path"])) for entry in media_plan["images"]]
-    pixel_parts: list[torch.Tensor] = []
-    grid_parts: list[torch.Tensor] = []
-    offset = 0
-    for sample_size in media_plan["sample_sizes"]:
-        processed = image_processor(images=decoded[offset : offset + sample_size], return_tensors="pt")
-        pixel_parts.append(processed["pixel_values"])
-        grid_parts.append(processed["image_grid_thw"])
-        offset += sample_size
-    pixel_values = torch.cat(pixel_parts, dim=0)
-    image_grid_thw = torch.cat(grid_parts, dim=0)
+    thread_local = threading.local()
+
+    def process_entry(entry: dict) -> tuple[torch.Tensor, torch.Tensor]:
+        # One image = one decode + one processor call. Verified bitwise-equal to the eager
+        # whole-list processor call on real window data (see lazy_ab_test.py), which is what
+        # lets the unit of parallelism be the image instead of the sample.
+        local_processor = getattr(thread_local, "image_processor", None)
+        if local_processor is None:
+            local_processor = thread_local.image_processor = copy.deepcopy(image_processor)
+        image = apply_exif_orientation(load_image(entry["path"]))
+        processed = local_processor(images=[image], return_tensors="pt")
+        return processed["pixel_values"], processed["image_grid_thw"]
+
+    threads = lazy_media_threads()
+    if threads <= 1:
+        # v1 behavior: decode all, then one processor call per source sample.
+        decoded = [apply_exif_orientation(load_image(entry["path"])) for entry in media_plan["images"]]
+        pixel_parts: list[torch.Tensor] = []
+        grid_parts: list[torch.Tensor] = []
+        offset = 0
+        for sample_size in media_plan["sample_sizes"]:
+            processed = image_processor(images=decoded[offset : offset + sample_size], return_tensors="pt")
+            pixel_parts.append(processed["pixel_values"])
+            grid_parts.append(processed["image_grid_thw"])
+            offset += sample_size
+        pixel_values = torch.cat(pixel_parts, dim=0)
+        image_grid_thw = torch.cat(grid_parts, dim=0)
+    else:
+        # V2a: per-image decode+preprocess across a bounded thread pool (PIL decode and the
+        # numpy/torch stages release the GIL for most of their runtime). pool.map preserves
+        # plan order, so the concatenated tensors match the v1/eager layout exactly.
+        with ThreadPoolExecutor(max_workers=threads) as pool:
+            results = list(pool.map(process_entry, media_plan["images"]))
+        pixel_values = torch.cat([part[0] for part in results], dim=0)
+        image_grid_thw = torch.cat([part[1] for part in results], dim=0)
+
     predicted = torch.tensor([entry["grid"] for entry in media_plan["images"]], dtype=image_grid_thw.dtype)
     if not torch.equal(image_grid_thw, predicted):
         raise RuntimeError(
