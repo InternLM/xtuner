@@ -1,13 +1,12 @@
 from abc import abstractmethod
-from typing import Literal, Optional, Tuple
+from typing import Any, Literal, Optional, Tuple
 
-import torch
 import torch.distributed as dist
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import Annotated
 
-from xtuner.v1.optim import Muon, SwapAdamW
+from xtuner.v1.optim import AdamW, Muon, Optimizer, SwapAdamW
 from xtuner.v1.utils import get_logger
 
 
@@ -23,7 +22,7 @@ class OptimConfig(BaseModel):
     ] = None
 
     @abstractmethod
-    def build(self, params):
+    def build(self, params) -> Optimizer:
         pass
 
 
@@ -34,7 +33,7 @@ class AdamWConfig(OptimConfig):
     foreach: Annotated[Optional[bool], Parameter(help="Use foreach implementation for AdamW")] = None
     swap_optimizer: Annotated[Optional[bool], Parameter(help="Swap optimizer states to host memory.")] = False
 
-    def build(self, model):
+    def build(self, model) -> Optimizer:
         params = [p for p in model.parameters() if p.requires_grad]
 
         trainable_parameters_names = model.trainable_parameters()
@@ -62,7 +61,7 @@ class AdamWConfig(OptimConfig):
                 weight_decay=self.weight_decay,
                 foreach=self.foreach,
             )
-        return torch.optim.AdamW(
+        return AdamW(
             params, lr=self.lr, betas=self.betas, eps=self.eps, weight_decay=self.weight_decay, foreach=self.foreach
         )
 
@@ -103,8 +102,11 @@ class MuonConfig(OptimConfig):
         Literal["all", "adamw_only"],
         Parameter(help="Gradient clipping policy: clip all parameters or only the AdamW parameter groups"),
     ] = "adamw_only"
+    swap_optimizer: Annotated[
+        bool, Parameter(help="Keep Muon momentum and AdamW momentum and variance in pinned host memory")
+    ] = False
 
-    def build(self, model):
+    def build(self, model) -> Optimizer:
         trainable_parameters_names = model.trainable_parameters()
         trainable_names = {name for name, _ in trainable_parameters_names}
 
@@ -186,7 +188,7 @@ class MuonConfig(OptimConfig):
 
         # Build parameter groups
         clip_muon_grad = self.clip_grad_mode == "all"
-        param_groups = []
+        param_groups: list[dict[str, Any]] = []
         if muon_params_regular:
             param_groups.append(dict(params=muon_params_regular, clip_grad=clip_muon_grad))
         # fused_w1w3: w1 and w3 are fused, so num_experts = 2 * n_routed_experts
@@ -277,6 +279,7 @@ class MuonConfig(OptimConfig):
             enable_all2all=self.enable_all2all,
             remainder_strategy=self.remainder_strategy,
             muon_split_sizes=muon_split_sizes,
+            swap_optimizer=self.swap_optimizer,
         )
 
         return optimizer
