@@ -1,0 +1,598 @@
+diff --git a/csrc/kernels/api.cuh b/csrc/kernels/api.cuh
+index 5c6c79f..21ce697 100644
+--- a/csrc/kernels/api.cuh
++++ b/csrc/kernels/api.cuh
+@@ -9,8 +9,9 @@
+ namespace ultra_ep::kernels {
+ 
+ struct GradReduceTask {
+-    float* master_local_addr;
+-    float* replica_remote_addr;
++    // Byte addresses: only the dtype-specialized reduction kernel interprets scalars.
++    uint8_t* master_local_addr;
++    uint8_t* replica_remote_addr;
+     size_t numel;
+ };
+ 
+@@ -84,7 +85,8 @@ void run_grad_reduce(GradReduceTask* tasks,
+                      int* global_tile_counter,
+                      cudaStream_t stream,
+                      int num_sms,
+-                     bool deterministic = false);
++                     bool deterministic,
++                     int grad_element_bytes);
+ 
+ // ============================================================================
+ // Weight Sync: Broadcast master weights to replicas
+@@ -148,6 +150,7 @@ struct TaskBuildConfig {
+     int64_t expert_weight_scale_stride_bytes;
+     int weight_data_element_bytes;
+     int weight_scale_element_bytes;
++    int grad_element_bytes;
+     int max_replicas_dim;
+     int weight_sync_plan_mode;
+     int weight_sync_relay_min_replicas;
+diff --git a/csrc/kernels/config.cuh b/csrc/kernels/config.cuh
+index 6be3220..db17ffd 100644
+--- a/csrc/kernels/config.cuh
++++ b/csrc/kernels/config.cuh
+@@ -7,15 +7,15 @@
+ 
+ namespace ultra_ep::kernels {
+ 
+-using GradScalar = float;
+-
+ inline constexpr int kMaxNvlDomainSize = 72;
+ inline constexpr int kMaxGradReduceTaskCount = 256;
+ inline constexpr int kMaxWeightSyncTaskCount = 256;
+ 
+ inline constexpr std::size_t kNumTMAAlignBytes = 16;
+ 
+-inline constexpr int kGradElementBytes = sizeof(GradScalar);
++// Native gradient ABI: 2-byte gradients are BF16, 4-byte gradients are FP32.
++inline constexpr int kBf16GradElementBytes = 2;
++inline constexpr int kFp32GradElementBytes = sizeof(float);
+ 
+ inline constexpr int kWeightSyncTileSizeBytes = 32 * 1024;
+ inline constexpr int kWeightSyncThreadsPerBlock = 256;
+@@ -23,7 +23,8 @@ inline constexpr int kWeightSyncPipelineStages = 2;
+ inline constexpr int kWeightSyncRelayChunkTiles = 8;
+ 
+ inline constexpr int kGradReduceTileSizeBytes = 64 * 1024;
+-inline constexpr int kGradReduceTileElements = kGradReduceTileSizeBytes / kGradElementBytes;
++template <typename GradT>
++inline constexpr int kGradReduceTileElements = kGradReduceTileSizeBytes / sizeof(GradT);
+ inline constexpr int kGradReducePipelineStages = 2;
+ inline constexpr int kGradReduceThreadsPerBlock = 256;
+ 
+diff --git a/csrc/kernels/grad_reduce.cu b/csrc/kernels/grad_reduce.cu
+index f3e4313..19fc3c6 100644
+--- a/csrc/kernels/grad_reduce.cu
++++ b/csrc/kernels/grad_reduce.cu
+@@ -1,3 +1,5 @@
++#include <cuda_bf16.h>
++
+ #include "api.cuh"
+ #include "config.cuh"
+ #include "launch.cuh"
+@@ -6,9 +8,23 @@
+ namespace ultra_ep::kernels {
+ 
+ inline constexpr int kGradReduceDeterministicSubtileSizeBytes = kGradReduceTileSizeBytes / 2;
++// Accumulation stays FP32 for both storage dtypes. Each CTA owns the output
++// tile and rounds only once when storing the completed master + replicas sum.
+ inline constexpr int kGradReduceDeterministicSubtileElements =
+-    kGradReduceDeterministicSubtileSizeBytes / kGradElementBytes;
+-inline constexpr int kGradReduceDeterministicSharedBytes = kGradReduceTileSizeBytes;
++    kGradReduceDeterministicSubtileSizeBytes / sizeof(float);
++template <typename GradT>
++inline constexpr int kGradReduceDeterministicSharedBytes =
++    kGradReduceDeterministicSubtileElements * (sizeof(float) + sizeof(GradT));
++
++template <typename GradT>
++__device__ __forceinline__ float grad_to_float(GradT value) { return value; }
++template <>
++__device__ __forceinline__ float grad_to_float(__nv_bfloat16 value) { return __bfloat162float(value); }
++
++template <typename GradT>
++__device__ __forceinline__ GradT float_to_grad(float value) { return value; }
++template <>
++__device__ __forceinline__ __nv_bfloat16 float_to_grad(float value) { return __float2bfloat16_rn(value); }
+ 
+ // ---------------------------------------------------------------------------
+ // Grad Reduce Task Build
+@@ -37,6 +53,8 @@ __global__ __launch_bounds__(32) void build_grad_reduce_tasks_kernel(const TaskB
+     const int64_t total_numel = config->expert_total_numel;
+     const int max_rep_dim = config->max_replicas_dim;
+ 
++    const int grad_element_bytes = config->grad_element_bytes;
++    const int tile_elements = kGradReduceTileSizeBytes / grad_element_bytes;
+     int num_tasks = 0;
+ 
+     for (int i = 0; i < num_local_master; ++i) {
+@@ -44,8 +62,8 @@ __global__ __launch_bounds__(32) void build_grad_reduce_tasks_kernel(const TaskB
+         int master_log = p2l[master_phy];
+         int num_replicas = lcnts[master_log];
+ 
+-        float* local_fc1 = reinterpret_cast<float*>(local_master_fc1_ptrs[i]);
+-        float* local_fc2 = reinterpret_cast<float*>(local_master_fc2_ptrs[i]);
++        uint8_t* local_fc1 = reinterpret_cast<uint8_t*>(local_master_fc1_ptrs[i]);
++        uint8_t* local_fc2 = reinterpret_cast<uint8_t*>(local_master_fc2_ptrs[i]);
+ 
+         for (int j = 1; j < num_replicas; ++j) {  // skip the master itself (index 0)
+             int replica_phy = l2p[master_log * max_rep_dim + j];
+@@ -53,9 +71,9 @@ __global__ __launch_bounds__(32) void build_grad_reduce_tasks_kernel(const TaskB
+             int replica_nvl_rank = replica_rank % num_nvl_ranks;
+             int replica_local_offset = replica_phy % num_local_physical - num_local_master;
+ 
+-            float* remote_buf = reinterpret_cast<float*>(
+-                reinterpret_cast<uint8_t*>(remote_grad_ptrs[replica_nvl_rank]) + replica_grad_slot_offset_bytes);
+-            float* remote_expert_base = remote_buf + replica_local_offset * total_numel;
++            uint8_t* remote_buf = reinterpret_cast<uint8_t*>(remote_grad_ptrs[replica_nvl_rank]) +
++                replica_grad_slot_offset_bytes;
++            uint8_t* remote_expert_base = remote_buf + replica_local_offset * total_numel * grad_element_bytes;
+ 
+             // FC1 task
+             tasks[num_tasks].master_local_addr = local_fc1;
+@@ -65,7 +83,7 @@ __global__ __launch_bounds__(32) void build_grad_reduce_tasks_kernel(const TaskB
+ 
+             // FC2 task
+             tasks[num_tasks].master_local_addr = local_fc2;
+-            tasks[num_tasks].replica_remote_addr = remote_expert_base + fc1_numel;
++            tasks[num_tasks].replica_remote_addr = remote_expert_base + fc1_numel * grad_element_bytes;
+             tasks[num_tasks].numel = static_cast<size_t>(fc2_numel);
+             num_tasks++;
+         }
+@@ -74,7 +92,7 @@ __global__ __launch_bounds__(32) void build_grad_reduce_tasks_kernel(const TaskB
+     // Compute tile offsets (prefix sum) for tile-level grad_reduce scheduling
+     tile_offsets[0] = 0;
+     for (int t = 0; t < num_tasks; ++t) {
+-        int tiles = ceil_div(static_cast<int64_t>(tasks[t].numel), static_cast<int64_t>(kGradReduceTileElements));
++        int tiles = ceil_div(static_cast<int64_t>(tasks[t].numel), static_cast<int64_t>(tile_elements));
+         tile_offsets[t + 1] = tile_offsets[t] + tiles;
+     }
+     int total_tiles = (num_tasks > 0) ? tile_offsets[num_tasks] : 0;
+@@ -115,22 +133,19 @@ void build_grad_reduce_tasks(const TaskBuildConfig* config,
+     CUDA_RUNTIME_CHECK(cudaMemsetAsync(global_task_or_tile_counter, 0, sizeof(int), stream));
+ }
+ 
+-// Vectorized memset for remote memory zeroing (supports up to GRAD_REDUCE_TILE_SIZE_BYTES)
+-__device__ __forceinline__ void memset_zero_tile(float* __restrict__ ptr, int num_elements) {
+-    // Use vectorized stores for efficiency (16 bytes = 4 floats per store)
+-    int num_float4s = num_elements / 4;
+-    float4* vec_ptr = reinterpret_cast<float4*>(ptr);
++// Each projection and tile is 16-byte aligned, checked at Manager construction.
++template <typename GradT>
++__device__ __forceinline__ void memset_zero_tile(GradT* __restrict__ ptr, int num_elements) {
++    constexpr int elements_per_vector = 16 / sizeof(GradT);
++    const int num_vectors = num_elements / elements_per_vector;
++    uint4* vec_ptr = reinterpret_cast<uint4*>(ptr);
+ #pragma unroll 4
+-    for (int i = threadIdx.x; i < num_float4s; i += blockDim.x) {
+-        // Use streaming store to bypass L2 cache (data won't be reused)
++    for (int i = threadIdx.x; i < num_vectors; i += blockDim.x) {
+         ptx::st_global_v4_u32_streaming(&vec_ptr[i], 0, 0, 0, 0);
+     }
+-
+-    // Handle remaining elements (0-3 floats)
+-    int remaining_start = num_float4s * 4;
+-    int remaining = num_elements - remaining_start;
+-    if (threadIdx.x < remaining) {
+-        ptr[remaining_start + threadIdx.x] = 0.0f;
++    const int remaining_start = num_vectors * elements_per_vector;
++    if (threadIdx.x < num_elements - remaining_start) {
++        ptr[remaining_start + threadIdx.x] = float_to_grad<GradT>(0.0f);
+     }
+ }
+ 
+@@ -153,6 +168,7 @@ struct TileInfo {
+ };
+ 
+ // Map a global tile index to task and tile within task
++template <typename GradT>
+ __device__ __forceinline__ TileInfo get_tile_info(const GradReduceTask* tasks,
+                                                   const int* task_tile_offsets,
+                                                   int num_tasks,
+@@ -172,23 +188,25 @@ __device__ __forceinline__ TileInfo get_tile_info(const GradReduceTask* tasks,
+ 
+     info.task_idx = lo;
+     info.tile_idx_in_task = global_tile_idx - task_tile_offsets[lo];
+-    info.global_offset = static_cast<size_t>(info.tile_idx_in_task) * kGradReduceTileElements;
++    info.global_offset = static_cast<size_t>(info.tile_idx_in_task) * kGradReduceTileElements<GradT>;
+ 
+     // Compute number of elements in this tile
+     size_t task_numel = tasks[info.task_idx].numel;
+     size_t remaining = task_numel - info.global_offset;
+-    info.num_elements = min(static_cast<size_t>(kGradReduceTileElements), remaining);
++    info.num_elements = min(static_cast<size_t>(kGradReduceTileElements<GradT>), remaining);
+ 
+     return info;
+ }
+ 
+ // task_metadata: device pointer to [total_tasks, total_tiles]
++template <typename GradT>
+ __global__ __launch_bounds__(kGradReduceThreadsPerBlock) void grad_reduce_kernel(
+     const GradReduceTask* grad_reduce_tasks,
+     const int* task_tile_offsets,
+     const int* task_metadata,
+     int* global_tile_counter) {
+-    extern __shared__ float smem_pool[];
++    extern __shared__ __align__(16) uint8_t smem_bytes[];
++    GradT* smem_pool = reinterpret_cast<GradT*>(smem_bytes);
+ 
+     ptx::mbarrier* mbarrier_ptr = ptx::create_mbarrier();
+     __shared__ ptx::arrival_phase phase;
+@@ -227,18 +245,20 @@ __global__ __launch_bounds__(kGradReduceThreadsPerBlock) void grad_reduce_kernel
+             break;
+ 
+         // Get tile information via binary search
+-        TileInfo tile = get_tile_info(grad_reduce_tasks, task_tile_offsets, total_tasks, my_tile_idx);
++        TileInfo tile = get_tile_info<GradT>(grad_reduce_tasks, task_tile_offsets, total_tasks, my_tile_idx);
+         GradReduceTask task = grad_reduce_tasks[tile.task_idx];
++        auto* master = reinterpret_cast<GradT*>(task.master_local_addr);
++        auto* replica = reinterpret_cast<GradT*>(task.replica_remote_addr);
+ 
+         // Calculate TMA transfer size (must be 16-byte aligned)
+-        size_t bytes = tile.num_elements * sizeof(float);
++        size_t bytes = tile.num_elements * sizeof(GradT);
+         bytes = (bytes + 15) & ~15;
+ 
+         // Issue TMA load for this tile (thread 0 only)
+         if (threadIdx.x == 0) {
+             ptx::mbarrier_arrive_and_set_tx(mbarrier_ptr, bytes);
+             ptx::tma_load_1d(smem_pool,
+-                             task.replica_remote_addr + tile.global_offset,
++                             replica + tile.global_offset,
+                              mbarrier_ptr,
+                              bytes,
+                              ptx::TMACacheHint::kEvictFirst);
+@@ -253,12 +273,12 @@ __global__ __launch_bounds__(kGradReduceThreadsPerBlock) void grad_reduce_kernel
+         // Perform reduction: add loaded values to master buffer
+         // Using atomicAdd to handle potential concurrent updates from multiple replicas
+         for (int i = threadIdx.x; i < tile.num_elements; i += blockDim.x) {
+-            atomicAdd(&task.master_local_addr[tile.global_offset + i], smem_pool[i]);
++            atomicAdd(&master[tile.global_offset + i], smem_pool[i]);
+         }
+         __syncthreads();
+ 
+         // Zero out the replica buffer region we just consumed
+-        memset_zero_tile(task.replica_remote_addr + tile.global_offset, tile.num_elements);
++        memset_zero_tile(replica + tile.global_offset, tile.num_elements);
+ 
+         // Memory fence to ensure remote stores are visible to other GPUs
+         __threadfence_system();
+@@ -288,16 +308,16 @@ __device__ __forceinline__ bool is_first_reduce_group_task(const GradReduceTask*
+ //   * replicas are accumulated in task-list order
+ //   * each output element is written by exactly one CTA, so no atomic add is needed
+ //
+-// SMEM stays at kGradReduceTileSizeBytes: half is the accumulator, half is the
+-// TMA load buffer.
++// FP32 accumulator plus a dtype-sized TMA load buffer (64 KiB / 48 KiB).
++template <typename GradT>
+ __global__ __launch_bounds__(kGradReduceThreadsPerBlock) void grad_reduce_deterministic_kernel(
+     const GradReduceTask* grad_reduce_tasks,
+     const int* task_tile_offsets,
+     const int* task_metadata,
+     int* global_tile_counter) {
+-    extern __shared__ float smem_pool[];
+-    float* acc_smem = smem_pool;
+-    float* load_smem = smem_pool + kGradReduceDeterministicSubtileElements;
++    extern __shared__ __align__(16) uint8_t smem_bytes[];
++    float* acc_smem = reinterpret_cast<float*>(smem_bytes);
++    GradT* load_smem = reinterpret_cast<GradT*>(acc_smem + kGradReduceDeterministicSubtileElements);
+ 
+     ptx::mbarrier* mbarrier_ptr = ptx::create_mbarrier();
+     __shared__ ptx::arrival_phase phase;
+@@ -331,12 +351,13 @@ __global__ __launch_bounds__(kGradReduceThreadsPerBlock) void grad_reduce_determ
+             break;
+         }
+ 
+-        TileInfo tile = get_tile_info(grad_reduce_tasks, task_tile_offsets, total_tasks, my_tile_idx);
++        TileInfo tile = get_tile_info<GradT>(grad_reduce_tasks, task_tile_offsets, total_tasks, my_tile_idx);
+         if (!is_first_reduce_group_task(grad_reduce_tasks, tile.task_idx)) {
+             continue;
+         }
+ 
+         const GradReduceTask first_task = grad_reduce_tasks[tile.task_idx];
++        auto* master = reinterpret_cast<GradT*>(first_task.master_local_addr);
+         for (int subtile_start = 0; subtile_start < tile.num_elements;
+              subtile_start += kGradReduceDeterministicSubtileElements) {
+             const int remaining = tile.num_elements - subtile_start;
+@@ -346,7 +367,7 @@ __global__ __launch_bounds__(kGradReduceThreadsPerBlock) void grad_reduce_determ
+             const size_t subtile_global_offset = tile.global_offset + static_cast<size_t>(subtile_start);
+ 
+             for (int i = threadIdx.x; i < subtile_elements; i += blockDim.x) {
+-                acc_smem[i] = first_task.master_local_addr[subtile_global_offset + i];
++                acc_smem[i] = grad_to_float(master[subtile_global_offset + i]);
+             }
+             __syncthreads();
+ 
+@@ -356,13 +377,14 @@ __global__ __launch_bounds__(kGradReduceThreadsPerBlock) void grad_reduce_determ
+                     break;
+                 }
+ 
+-                size_t bytes = static_cast<size_t>(subtile_elements) * sizeof(float);
++                auto* replica = reinterpret_cast<GradT*>(task.replica_remote_addr);
++                size_t bytes = static_cast<size_t>(subtile_elements) * sizeof(GradT);
+                 bytes = (bytes + 15) & ~15;
+ 
+                 if (threadIdx.x == 0) {
+                     ptx::mbarrier_arrive_and_set_tx(mbarrier_ptr, bytes);
+                     ptx::tma_load_1d(load_smem,
+-                                     task.replica_remote_addr + subtile_global_offset,
++                                     replica + subtile_global_offset,
+                                      mbarrier_ptr,
+                                      bytes,
+                                      ptx::TMACacheHint::kEvictFirst);
+@@ -374,16 +396,16 @@ __global__ __launch_bounds__(kGradReduceThreadsPerBlock) void grad_reduce_determ
+                 __syncthreads();
+ 
+                 for (int i = threadIdx.x; i < subtile_elements; i += blockDim.x) {
+-                    acc_smem[i] += load_smem[i];
++                    acc_smem[i] += grad_to_float(load_smem[i]);
+                 }
+                 __syncthreads();
+ 
+-                memset_zero_tile(task.replica_remote_addr + subtile_global_offset, subtile_elements);
++                memset_zero_tile(replica + subtile_global_offset, subtile_elements);
+                 __syncthreads();
+             }
+ 
+             for (int i = threadIdx.x; i < subtile_elements; i += blockDim.x) {
+-                first_task.master_local_addr[subtile_global_offset + i] = acc_smem[i];
++                master[subtile_global_offset + i] = float_to_grad<GradT>(acc_smem[i]);
+             }
+             __syncthreads();
+         }
+@@ -397,7 +419,8 @@ __global__ __launch_bounds__(kGradReduceThreadsPerBlock) void grad_reduce_determ
+     }
+ }
+ 
+-void run_grad_reduce(GradReduceTask* tasks,
++template <typename GradT>
++void run_grad_reduce_typed(GradReduceTask* tasks,
+                      int* task_tile_offsets,
+                      int* task_metadata,
+                      int* global_tile_counter,
+@@ -406,15 +429,33 @@ void run_grad_reduce(GradReduceTask* tasks,
+                      bool deterministic) {
+     if (deterministic) {
+         const auto config = make_launch_config(
+-            dim3(num_sms), dim3(kGradReduceThreadsPerBlock), stream, kGradReduceDeterministicSharedBytes);
++            dim3(num_sms), dim3(kGradReduceThreadsPerBlock), stream, kGradReduceDeterministicSharedBytes<GradT>);
+         launch_kernel(
+-            grad_reduce_deterministic_kernel, config, tasks, task_tile_offsets, task_metadata, global_tile_counter);
++            grad_reduce_deterministic_kernel<GradT>, config, tasks, task_tile_offsets, task_metadata, global_tile_counter);
+         return;
+     }
+ 
+     const auto config =
+         make_launch_config(dim3(num_sms), dim3(kGradReduceThreadsPerBlock), stream, kGradReduceTileSizeBytes);
+-    launch_kernel(grad_reduce_kernel, config, tasks, task_tile_offsets, task_metadata, global_tile_counter);
++    launch_kernel(grad_reduce_kernel<GradT>, config, tasks, task_tile_offsets, task_metadata, global_tile_counter);
++}
++
++void run_grad_reduce(GradReduceTask* tasks,
++                     int* task_tile_offsets,
++                     int* task_metadata,
++                     int* global_tile_counter,
++                     cudaStream_t stream,
++                     int num_sms,
++                     bool deterministic,
++                     int grad_element_bytes) {
++    if (grad_element_bytes == kBf16GradElementBytes) {
++        run_grad_reduce_typed<__nv_bfloat16>(tasks, task_tile_offsets, task_metadata,
++                                            global_tile_counter, stream, num_sms, deterministic);
++    } else {
++        EP_HOST_ASSERT(grad_element_bytes == kFp32GradElementBytes);
++        run_grad_reduce_typed<float>(tasks, task_tile_offsets, task_metadata,
++                                    global_tile_counter, stream, num_sms, deterministic);
++    }
+ }
+ 
+ }  // namespace ultra_ep::kernels
+diff --git a/csrc/ultra_ep.cpp b/csrc/ultra_ep.cpp
+index 00c6406..604b9f8 100644
+--- a/csrc/ultra_ep.cpp
++++ b/csrc/ultra_ep.cpp
+@@ -267,8 +267,9 @@ Manager::Manager(const int& num_layers,
+     max_microbatches_ = num_layers / real_num_alloc_layers_;
+     EP_HOST_ASSERT(weight_data_element_bytes > 0);
+     EP_HOST_ASSERT(weight_scale_element_bytes > 0);
+-    EP_HOST_ASSERT(grad_element_bytes == static_cast<int>(sizeof(float)) &&
+-                   "UltraEP currently supports only fp32 gradients");
++    EP_HOST_ASSERT((grad_element_bytes == kernels::kFp32GradElementBytes ||
++                    grad_element_bytes == kernels::kBf16GradElementBytes) &&
++                   "UltraEP supports only fp32 or bf16 gradients");
+     EP_HOST_ASSERT(expert_fc1_numel >= 0 && expert_fc2_numel >= 0);
+     EP_HOST_ASSERT(expert_fc1_weight_scale_numel >= 0 && expert_fc2_weight_scale_numel >= 0);
+     const int64_t expert_fc1_weight_bytes = checked_num_bytes(expert_fc1_numel, weight_data_element_bytes);
+@@ -277,6 +278,13 @@ Manager::Manager(const int& num_layers,
+                    "fc1 weight shard bytes must be 16-byte aligned for TMA weight_sync");
+     EP_HOST_ASSERT(expert_fc2_weight_bytes % kernels::kNumTMAAlignBytes == 0 &&
+                    "fc2 weight shard bytes must be 16-byte aligned for TMA weight_sync");
++    if (is_train) {
++        // TMA reads and vectorized remote clearing must never cross a shard boundary.
++        EP_HOST_ASSERT(checked_num_bytes(expert_fc1_numel, grad_element_bytes) % kernels::kNumTMAAlignBytes == 0 &&
++                       "fc1 gradient shard bytes must be 16-byte aligned for TMA grad_reduce");
++        EP_HOST_ASSERT(checked_num_bytes(expert_fc2_numel, grad_element_bytes) % kernels::kNumTMAAlignBytes == 0 &&
++                       "fc2 gradient shard bytes must be 16-byte aligned for TMA grad_reduce");
++    }
+     expert_fc1_weight_scale_bytes = checked_num_bytes(expert_fc1_weight_scale_numel, weight_scale_element_bytes);
+     expert_fc2_weight_scale_bytes = checked_num_bytes(expert_fc2_weight_scale_numel, weight_scale_element_bytes);
+     expert_weight_scale_fc2_offset_bytes = align_up_bytes(expert_fc1_weight_scale_bytes, kernels::kNumTMAAlignBytes);
+@@ -391,7 +399,9 @@ Manager::Manager(const int& num_layers,
+             checked_num_bytes(expert_total_numel, grad_element_bytes);
+         local_replica_grad_buffer = nvshmem::alloc(local_replica_grad_bytes, kernels::kNumTMAAlignBytes);
+         EP_HOST_ASSERT(local_replica_grad_buffer != nullptr && "Failed to allocate NVSHMEM grad buffer");
+-        auto grad_opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::Device(torch::kCUDA, device_id));
++        const auto grad_dtype = grad_element_bytes == kernels::kBf16GradElementBytes
++            ? torch::kBFloat16 : torch::kFloat32;
++        auto grad_opts = torch::TensorOptions().dtype(grad_dtype).device(torch::Device(torch::kCUDA, device_id));
+         local_replica_grad_buffer_tensor = torch::from_blob(local_replica_grad_buffer,
+                                                             {max_microbatches_, num_local_redundant_experts,
+                                                              expert_total_numel},
+@@ -405,7 +415,8 @@ Manager::Manager(const int& num_layers,
+                                                                  expert_total_numel, 1},
+                                                                 grad_opts);
+         local_replica_fc2_grad_buffer_tensor =
+-            torch::from_blob(reinterpret_cast<float*>(local_replica_grad_buffer) + expert_fc1_numel,
++            torch::from_blob(reinterpret_cast<uint8_t*>(local_replica_grad_buffer) +
++                                 checked_num_bytes(expert_fc1_numel, grad_element_bytes),
+                              {max_microbatches_, num_local_redundant_experts, expert_fc2_numel},
+                              {num_local_redundant_experts * expert_total_numel, expert_total_numel, 1},
+                              grad_opts);
+@@ -484,6 +495,7 @@ Manager::Manager(const int& num_layers,
+                            weight_sync_relay_min_replicas_,
+                            weight_sync_relay_max_relays_,
+                            weight_sync_relay_min_fanout_gain_);
++    config_cpu.grad_element_bytes = grad_element_bytes;
+     CUDA_RUNTIME_CHECK(cudaMalloc((void**)&_task_build_config, sizeof(kernels::TaskBuildConfig)));
+     CUDA_RUNTIME_CHECK(
+         cudaMemcpy(_task_build_config, &config_cpu, sizeof(kernels::TaskBuildConfig), cudaMemcpyHostToDevice));
+@@ -1103,7 +1115,8 @@ std::optional<EventHandle> Manager::grad_reduce(const int& layer_id,
+                              _global_task_or_tile_counter,
+                              comm_stream,
+                              grad_reduce_num_sms_,
+-                             grad_reduce_deterministic_);
++                             grad_reduce_deterministic_,
++                             grad_element_bytes);
+ 
+     // Wait streams
+     if (async) {
+diff --git a/csrc/ultra_ep.hpp b/csrc/ultra_ep.hpp
+index 00b2445..926e126 100644
+--- a/csrc/ultra_ep.hpp
++++ b/csrc/ultra_ep.hpp
+@@ -112,7 +112,7 @@ class Manager {
+     int64_t expert_weight_scale_stride_bytes = 0;
+     int weight_data_element_bytes;
+     int weight_scale_element_bytes;
+-    int grad_element_bytes;
++    int grad_element_bytes;  // 2 = BF16, 4 = FP32 (independent of weight dtype)
+     int num_global_physical_experts;
+     int num_global_logical_experts;
+     bool is_train;
+diff --git a/tests/test_e2e.py b/tests/test_e2e.py
+index 94b3427..be1b9b1 100644
+--- a/tests/test_e2e.py
++++ b/tests/test_e2e.py
+@@ -193,12 +193,12 @@ def expected_master_grads(manager, args, layer_id, fc1_grads, fc2_grads):
+         for replica_slot in range(1, count):
+             phys = int(row[replica_slot].item())
+             expected_fc1[local_idx] = expected_fc1[local_idx] + deterministic_tensor(
+-                phys, args.expert_fc1_numel, torch.float32
++                phys, args.expert_fc1_numel, args.grad_dtype
+             )
+             expected_fc2[local_idx] = expected_fc2[local_idx] + deterministic_tensor(
+                 phys + manager.num_global_physical_experts,
+                 args.expert_fc2_numel,
+-                torch.float32,
++                args.grad_dtype,
+             )
+     return expected_fc1, expected_fc2
+ 
+@@ -328,10 +328,10 @@ def run_weight_sync(manager, args, layer_id, plan_mode: str):
+     )
+     replica = manager.local_replica_weight_buffer
+     assert bitwise_equal(
+-        manager.local_replica_fc1_weight_buffer, replica[:, : args.expert_fc1_numel]
++        manager.local_replica_fc1_weight_buffer, replica[..., : args.expert_fc1_numel]
+     )
+     assert bitwise_equal(
+-        manager.local_replica_fc2_weight_buffer, replica[:, args.expert_fc1_numel :]
++        manager.local_replica_fc2_weight_buffer, replica[..., args.expert_fc1_numel :]
+     )
+     replica_fc1_scales = manager.local_replica_fc1_weight_scale_buffer
+     replica_fc2_scales = manager.local_replica_fc2_weight_scale_buffer
+@@ -417,7 +417,7 @@ def run_grad_reduce(manager, args, layer_id, deterministic: bool):
+         deterministic_tensor(
+             dist.get_rank() * manager.num_local_physical_experts + local_idx,
+             args.expert_fc1_numel,
+-            torch.float32,
++            args.grad_dtype,
+         )
+         for local_idx in range(args.num_local_master)
+     ]
+@@ -427,7 +427,7 @@ def run_grad_reduce(manager, args, layer_id, deterministic: bool):
+             + local_idx
+             + manager.num_global_physical_experts,
+             args.expert_fc2_numel,
+-            torch.float32,
++            args.grad_dtype,
+         )
+         for local_idx in range(args.num_local_master)
+     ]
+@@ -442,10 +442,10 @@ def run_grad_reduce(manager, args, layer_id, deterministic: bool):
+     )
+     replica = manager.local_replica_grad_buffer
+     assert bitwise_equal(
+-        manager.local_replica_fc1_grad_buffer, replica[:, : args.expert_fc1_numel]
++        manager.local_replica_fc1_grad_buffer, replica[..., : args.expert_fc1_numel]
+     )
+     assert bitwise_equal(
+-        manager.local_replica_fc2_grad_buffer, replica[:, args.expert_fc1_numel :]
++        manager.local_replica_fc2_grad_buffer, replica[..., args.expert_fc1_numel :]
+     )
+     replica_ref = torch.empty_like(replica)
+     replica_base = (
+@@ -453,13 +453,13 @@ def run_grad_reduce(manager, args, layer_id, deterministic: bool):
+     )
+     for local_replica_idx in range(args.num_redundant_experts_per_rank):
+         phys = replica_base + local_replica_idx
+-        replica_ref[local_replica_idx, : args.expert_fc1_numel] = deterministic_tensor(
+-            phys, args.expert_fc1_numel, torch.float32
++        replica_ref[0, local_replica_idx, : args.expert_fc1_numel] = deterministic_tensor(
++            phys, args.expert_fc1_numel, args.grad_dtype
+         )
+-        replica_ref[local_replica_idx, args.expert_fc1_numel :] = deterministic_tensor(
++        replica_ref[0, local_replica_idx, args.expert_fc1_numel :] = deterministic_tensor(
+             phys + manager.num_global_physical_experts,
+             args.expert_fc2_numel,
+-            torch.float32,
++            args.grad_dtype,
+         )
+     fc1_base = [g.clone() for g in fc1_grads]
+     fc2_base = [g.clone() for g in fc2_grads]
+@@ -699,6 +699,7 @@ def main():
+     )
+     parser.add_argument("--expert-fc1-numel", type=int, default=3072 * 4096)
+     parser.add_argument("--expert-fc2-numel", type=int, default=1536 * 4096)
++    parser.add_argument("--grad-bytes", type=int, default=4, help="Gradient storage element bytes (2=BF16, 4=FP32).")
+     parser.add_argument(
+         "--weight-data-bytes",
+         type=int,
+@@ -734,7 +735,7 @@ def main():
+         raise ValueError("expert weight scale numel must be non-negative")
+     args.weight_data_dtype = dtype_for_element_bytes(args.weight_data_bytes)
+     args.weight_scale_dtype = dtype_for_element_bytes(args.weight_scale_bytes)
+-    args.grad_dtype = torch.float32
++    args.grad_dtype = dtype_for_element_bytes(args.grad_bytes)
+     args.expert_weight_scale_total_numel = (
+         args.expert_fc1_weight_scale_numel + args.expert_fc2_weight_scale_numel
+     )
+diff --git a/ultra_ep/manager.py b/ultra_ep/manager.py
+index b25a439..5065b0a 100644
+--- a/ultra_ep/manager.py
++++ b/ultra_ep/manager.py
+@@ -34,6 +34,10 @@ class Manager:
+         expert_fc2_weight_scale_numel: int = 0,
+         grad_dtype: torch.dtype = torch.float32,
+     ):
++        # Reject unsupported gradients before initializing the process-wide runtime.
++        self.grad_dtype = check_dtype("grad_dtype", grad_dtype)
++        if self.grad_dtype not in (torch.float32, torch.bfloat16):
++            raise ValueError("UltraEP supports only fp32 or bf16 gradients")
+         self._load_profile_config = load_profile_config()
+         if self._load_profile_config.enabled and legacy_placement:
+             raise AssertionError(
+@@ -62,9 +66,6 @@ class Manager:
+         )
+         self.weight_data_dtype = check_dtype("weight_data_dtype", weight_data_dtype)
+         self.weight_scale_dtype = check_dtype("weight_scale_dtype", weight_scale_dtype)
+-        self.grad_dtype = check_dtype("grad_dtype", grad_dtype)
+-        if self.grad_dtype is not torch.float32:
+-            raise ValueError("UltraEP currently supports only fp32 gradients")
+         self.weight_data_element_bytes = dtype_element_size(self.weight_data_dtype)
+         self.weight_scale_element_bytes = dtype_element_size(self.weight_scale_dtype)
+         self.grad_element_bytes = dtype_element_size(self.grad_dtype)
