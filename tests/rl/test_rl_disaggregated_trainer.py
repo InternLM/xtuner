@@ -488,9 +488,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
                     "teacher_a": {"compute": 1.0, "onload": 2.0, "offload": 3.0},
                     "teacher_b": {"compute": 3.0, "onload": 4.0, "offload": 5.0},
                 },
-                "train_metrics": [
-                    {"actor_distillation_kl": 0.5, "sampled_opd_loss": 0.25, "policy_loss": 1.0}
-                ],
+                "train_metrics": [{"actor_distillation_kl": 0.5, "sampled_opd_loss": 0.25, "policy_loss": 1.0}],
                 "sft_train_metrics": {},
             },
             {
@@ -536,14 +534,30 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer.rollout_controller.onload_weights.remote.assert_not_called()
         trainer.rollout_controller.onload_kvcache.remote.assert_not_called()
 
-    def test_resume_from_checkpoint_updates_weights_then_resets_manager(self):
+    def test_resume_from_checkpoint_makes_empty_init_workers_ready(self):
         trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
         trainer.logger = MagicMock()
         trainer._load_checkpoint_cfg = SimpleNamespace(checkpoint_path=Path(self.temp_dir.name))
         trainer.train_controller = SimpleNamespace(resume=MagicMock(return_value="resume"))
+        sleeping = {"weights", "kv_cache"}
+        weights_received = False
+
+        def receive_weights():
+            nonlocal weights_received
+            self.assertIn("kv_cache", sleeping, "Warmup must not run on uninitialized weights")
+            weights_received = True
+            sleeping.discard("weights")
+            events.append("update_weights")
+
+        def wake_kvcache():
+            self.assertTrue(weights_received)
+            sleeping.remove("kv_cache")
+            events.append("ready")
+
         trainer.rollout_controller = SimpleNamespace(
             pause_generation=SimpleNamespace(remote=MagicMock(return_value="pause_generation")),
             continue_generation=SimpleNamespace(remote=MagicMock(return_value="continue_generation")),
+            onload_kvcache=SimpleNamespace(remote=MagicMock(side_effect=wake_kvcache)),
         )
         events: list[str] = []
 
@@ -552,13 +566,14 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             return 3
 
         async def manager_continue_produce(model_step: int):
+            self.assertFalse(sleeping, "Producer must not resume while inference is sleeping")
             events.append(f"continue_produce:{model_step}")
 
         trainer.agent_loop_manager = SimpleNamespace(
             resume=AsyncMock(side_effect=manager_resume),
             continue_produce=AsyncMock(side_effect=manager_continue_produce),
         )
-        trainer.weight_update = MagicMock(side_effect=lambda: events.append("update_weights"))
+        trainer.weight_update = MagicMock(side_effect=receive_weights)
 
         train_state_path = Path(self.temp_dir.name) / trainer._SAVE_TRAIN_STATE_PATH
         train_state_path.write_text('{"cur_step": 3}')
@@ -570,7 +585,28 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer.agent_loop_manager.resume.assert_awaited_once_with(Path(self.temp_dir.name))
         trainer.agent_loop_manager.continue_produce.assert_awaited_once_with(model_step=3)
         self.assertTrue(events[0].startswith("manager_resume:"))
-        self.assertEqual(events[1:], ["update_weights", "continue_produce:3"])
+        self.assertEqual(events[1:], ["update_weights", "ready", "continue_produce:3"])
+
+    def test_resume_failure_does_not_resume_production(self):
+        for failure in ("weight_update", "onload_kvcache"):
+            with self.subTest(failure=failure):
+                trainer = self._make_trainer(_FakeManager([]))
+                trainer._cur_step = 3
+                trainer._resume_train_controller_and_state = MagicMock(return_value=Path(self.temp_dir.name))
+                trainer._resume_agent_loop_manager = AsyncMock(return_value=3)
+                trainer.agent_loop_manager.continue_produce = AsyncMock()
+                operation = (
+                    trainer.train_controller.weight_update
+                    if failure == "weight_update"
+                    else getattr(trainer.rollout_controller, failure).remote
+                )
+                operation.side_effect = RuntimeError(failure)
+                with (
+                    patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
+                    self.assertRaisesRegex(RuntimeError, failure),
+                ):
+                    trainer._resume_from_checkpoint(self.temp_dir.name)
+                trainer.agent_loop_manager.continue_produce.assert_not_awaited()
 
     def test_validate_sync_schedule_accepts_multiples(self):
         # 验证保存、HF 导出、评测周期都可以对齐 sync_weights_interval。
