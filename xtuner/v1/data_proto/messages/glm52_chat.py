@@ -241,7 +241,8 @@ def render_glm52_chat(
 
 @lru_cache(maxsize=8)
 def _content_tokenizer(tokenizer):
-    """Private encode-only backend; do not change the tokenizer used for decode or VL."""
+    """Private encode-only backend; do not change the tokenizer used for decode
+    or VL."""
     if not hasattr(tokenizer, "backend_tokenizer"):
         raise ValueError("GLM special-token literals require a fast tokenizer with a tokenizers backend.")
     backend = copy.deepcopy(tokenizer.backend_tokenizer)
@@ -316,7 +317,7 @@ def glm52_tokenize_fn_fastspeed(
     clear_thinking: bool = False,
     **kwargs,
 ) -> tuple[list[int], list[int]]:
-    literal_spans = []
+    literal_spans: list[tuple[int, int]] = []
     text, loss_mask = render_glm52_chat(
         messages,
         tools=tools,
@@ -348,7 +349,7 @@ def glm52_tokenize_fn_slowspeed(
     4. 从上次命中位置开始在 total_ids 里顺序查找 suffix，找到后复制到 labels。
     """
     # SFT 渲染保持官方轮间格式，并在没有后继角色边界时补标准 EOS。
-    full_spans = []
+    full_spans: list[tuple[int, int]] = []
     full_text, _ = render_glm52_chat(
         messages,
         tools=tools,
@@ -368,7 +369,7 @@ def glm52_tokenize_fn_slowspeed(
             continue
 
         # 历史前缀以 generation prompt 结束；prefix 之后的 token 才是当前 assistant 生成区间。
-        prefix_spans = []
+        prefix_spans: list[tuple[int, int]] = []
         prefix_text, _ = render_glm52_chat(
             messages[:index],
             tools=tools if index == 0 else None,
@@ -381,7 +382,7 @@ def glm52_tokenize_fn_slowspeed(
 
         # 当前截断渲染可能和 full render 不同，例如历史 thinking 会被模板清掉；是否能在 full
         # render 中匹配上 suffix，正是 golden 语义的一部分。
-        message_spans = []
+        message_spans: list[tuple[int, int]] = []
         message_text, _ = render_glm52_chat(
             [m.copy() for m in messages[: index + 1]],
             tools=tools if index == 0 else None,

@@ -165,7 +165,7 @@ def glm53_tokenize_fn_fastspeed(
     clear_thinking: bool = False,
     **kwargs,
 ) -> tuple[list[int], list[int]]:
-    literal_spans = []
+    literal_spans: list[tuple[int, int]] = []
     text, loss_mask = render_glm53_chat(
         messages,
         tools=tools,
@@ -189,7 +189,7 @@ def glm53_tokenize_fn_slowspeed(
     **kwargs,
 ) -> tuple[list[int], list[int]]:
     """慢速 golden 参考实现，见 ``glm52_tokenize_fn_slowspeed`` 的 docstring；算法相同。"""
-    full_spans = []
+    full_spans: list[tuple[int, int]] = []
     full_text, _ = render_glm53_chat(
         messages,
         tools=tools,
@@ -207,7 +207,7 @@ def glm53_tokenize_fn_slowspeed(
         if message.get("role") != "assistant" or not message.get("loss", True):
             continue
 
-        prefix_spans = []
+        prefix_spans: list[tuple[int, int]] = []
         prefix_text, _ = render_glm53_chat(
             messages[:index],
             tools=tools if index == 0 else None,
@@ -217,7 +217,7 @@ def glm53_tokenize_fn_slowspeed(
             clear_thinking=clear_thinking,
             _literal_spans=prefix_spans,
         )
-        message_spans = []
+        message_spans: list[tuple[int, int]] = []
         message_text, _ = render_glm53_chat(
             [m.copy() for m in messages[: index + 1]],
             tools=tools if index == 0 else None,
