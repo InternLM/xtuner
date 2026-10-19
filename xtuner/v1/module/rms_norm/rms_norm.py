@@ -10,11 +10,17 @@ from xtuner.v1.ops import rms_norm, zero_centered_rms_norm
 
 class RMSNorm(nn.Module):
     weight: torch.Tensor
+    zero_centered: bool
 
     def __init__(self, hidden_size: int, eps: float = 1e-6, type: Literal["default", "zero_centered"] = "default"):
         """RMSNorm is equivalent to T5LayerNorm."""
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
+
+        self.zero_centered = type == "zero_centered"
+        # Zero-centered RMSNorm (e.g. HF Qwen3NextRMSNorm) computes x * (1 + weight), so the
+        # raw weight must start at 0 to make the effective scale start at 1.
+        init_value = 0.0 if self.zero_centered else 1.0
+        self.weight = nn.Parameter(torch.full((hidden_size,), init_value))
         self.variance_epsilon = eps
         self._type = type
 
@@ -41,7 +47,8 @@ class RMSNorm(nn.Module):
         return self.rms_norm_fn(hidden_states, weight, epsilon=self.variance_epsilon)  # type: ignore[operator]
 
     def init_weights(self):
-        self.weight.data.fill_(1.0)
+        init_value = 0.0 if self.zero_centered else 1.0
+        self.weight.data.fill_(init_value)
 
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, type={self._type}, eps={self.variance_epsilon}"
