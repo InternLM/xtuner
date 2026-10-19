@@ -18,12 +18,14 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
+from safetensors.torch import save_file
 from torch.distributed.tensor import DTensor
 
 from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.config import AdamWConfig, FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.engine.train_engine import TrainEngine
+from xtuner.v1.model.base import BaseModel, XTunerBaseModelConfig
 from xtuner.v1.model.compose.qwen3_5.qwen3_5_config import Qwen3_5_VLMoE35BA3Config
 from xtuner.v1.model.moe.qwen3_5_text import Qwen3_5_VLTextMoE35BA3BConfig
 from xtuner.v1.module.head import ValueHead
@@ -37,6 +39,22 @@ CLIPRANGE_VALUE = 0.2
 QWEN3_5_MOE_PATH = os.environ.get("QWEN3_5_MOE_PATH")
 
 
+class _MappedCriticConfig(XTunerBaseModelConfig):
+    hidden_size: int = 4
+    head_type: str = "value_head"
+    hf_key_mapping: dict[str, str] | None = {r"^value_head\.weight$": "critic.weight"}
+
+
+class _MappedCriticModel(BaseModel):
+    def __init__(self, config: _MappedCriticConfig):
+        super().__init__(config)
+        self.lm_head = torch.nn.Linear(config.hidden_size, 1, bias=False)
+        self._init_load_spec()
+
+    def to_hf_key_list(self, key: str) -> list[str]:
+        return [key]
+
+
 def _critic_model_cfg() -> Qwen3_5_VLMoE35BA3Config:
     model_cfg = Qwen3_5_VLMoE35BA3Config(
         freeze_vision=True,
@@ -46,6 +64,30 @@ def _critic_model_cfg() -> Qwen3_5_VLMoE35BA3Config:
     )
     model_cfg.text_config.head_type = "value_head"
     return model_cfg
+
+
+class TestCriticCustomHFKeyMapping(unittest.TestCase):
+    def test_loaded_mapped_critic_head_is_not_reinitialized(self):
+        """A value head loaded through hf_key_mapping must retain checkpoint values."""
+        model = _MappedCriticModel(_MappedCriticConfig())
+        expected = torch.tensor([[1.0, 2.0, 3.0, 4.0]], dtype=torch.float32)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_file({"critic.weight": expected}, str(Path(tmpdir) / "model.safetensors"))
+            (Path(tmpdir) / "model.safetensors.index.json").write_text(
+                json.dumps(
+                    {
+                        "metadata": {"head_type": "value_head"},
+                        "weight_map": {"critic.weight": "model.safetensors"},
+                    }
+                )
+            )
+            loaded_keys, unloaded_keys, missing_keys = model.from_hf(tmpdir, strict=False)
+
+        self.assertIn("lm_head.weight", loaded_keys)
+        self.assertNotIn("lm_head.weight", unloaded_keys)
+        self.assertNotIn("critic.weight", missing_keys)
+        torch.testing.assert_close(model.lm_head.weight, expected)
 
 
 def _mse_value_loss(
@@ -149,6 +191,27 @@ class TestCriticSFT(DeterministicDDPTestCase):
             model.language_model._to_hf_key_list("lm_head.weight"),
             ["value_head.weight"],
         )
+        try:
+            dist.destroy_process_group(pg)
+        except (AssertionError, ValueError):
+            pass
+
+    def test_critic_accepts_xtuner_actor_checkpoint_head_metadata(self):
+        """An XTuner actor checkpoint may initialize a critic with a new value head."""
+        pg = self.create_pg(str(DEVICE))
+        with torch.device("meta"):
+            model = _critic_model_cfg().build()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            index_path = Path(tmpdir) / "model.safetensors.index.json"
+            index_path.write_text(json.dumps({"metadata": {"head_type": "lm_head"}}))
+            model.language_model._validate_head_checkpoint(Path(tmpdir))
+
+            # A critic checkpoint cannot initialize an actor because it has no vocabulary head.
+            model.language_model.config.head_type = "lm_head"
+            with self.assertRaisesRegex(RuntimeError, "does not match config head_type"):
+                model.language_model._validate_head_checkpoint(Path(tmpdir))
+
         try:
             dist.destroy_process_group(pg)
         except (AssertionError, ValueError):

@@ -6,7 +6,7 @@ import pydoc
 import re
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from functools import reduce
+from functools import partial, reduce
 from importlib import import_module
 from itertools import chain
 from math import prod
@@ -618,12 +618,15 @@ class BaseModel(nn.Module):
         self._validate_head_checkpoint(Path(hf_path))
         hf_loader = HFCheckpointLoader(hf_path)
         loaded_keys, unloaded_keys, missing_keys = self._load_params(hf_loader, strict=strict)
-        if self._maybe_init_unloaded_critic_head(hf_loader):
+        # XTuner runtime critic 模型内部仍然叫：lm_head.weight
+        if "lm_head.weight" not in loaded_keys and self._maybe_init_unloaded_critic_head():
             # 如果随机初始化 ValueHead，对 loaded_keys、unloaded_keys、missing_keys 进行更新
             # missing_keys 是 HF 名，loaded_keys / unloaded_keys 是运行时名
             loaded_keys.add("lm_head.weight")
             unloaded_keys.discard("lm_head.weight")
-            missing_keys -= set(self._to_hf_key_list("lm_head.weight"))
+            head_load_spec = self.load_spec_mapping.get("lm_head.weight")
+            if head_load_spec is not None:
+                missing_keys -= set(head_load_spec.global_hf_keys)
         return loaded_keys, unloaded_keys, missing_keys
 
     def scale_and_reduce_grad(self):
@@ -683,6 +686,11 @@ class BaseModel(nn.Module):
         """Validate that the model's head type matches the checkpoint head
         type.
 
+        A checkpoint exported by an actor (head_type="lm_head") may initialize a
+        critic model (head_type="value_head"). Its value head is absent and
+        is initialized later by ``_maybe_init_unloaded_critic_head``. The reverse direction
+        is invalid because a critic checkpoint has no vocabulary head.
+
         Official HF checkpoints without this metadata are skipped. Vision and projector modules have no head_type and
         are skipped.
         """
@@ -696,33 +704,40 @@ class BaseModel(nn.Module):
             return
         cfg_head_type = self.config.head_type
         ckpt_head_type = meta.get("head_type", "lm_head")
+        if cfg_head_type == "value_head" and ckpt_head_type == "lm_head":
+            log_rank0.info(
+                "Initializing a value_head critic from an lm_head actor checkpoint; "
+                "the missing value head will be randomly initialized."
+            )
+            return
         if ckpt_head_type != cfg_head_type:
             raise RuntimeError(
                 f"Checkpoint head_type={ckpt_head_type!r} does not match config head_type={cfg_head_type!r}."
             )
 
     @torch.no_grad()
-    def _maybe_init_unloaded_critic_head(self, checkpoint_loader: HFCheckpointLoader) -> bool:
-        """Use the HF index to decide whether to randomly init ValueHead.
+    def _maybe_init_unloaded_critic_head(self) -> bool:
+        """Randomly initialize an unloaded ValueHead.
 
-        Randomly initialize when head_type is value_head and the HF index does
-        not contain the remapped value-head weight (value_head.weight, or
-        language_model.value_head.weight on InternVL).
+        Call this only after ``_load_params`` reports that the runtime ``lm_head.weight``
+        was not loaded. This avoids re-checking HF keys here: ``hf_key_mapping`` may load
+        the head from a non-default checkpoint key. The weight is drawn from ``Normal(0,
+        1 / (hidden_size + 1))``.
 
         Returns:
             True if ValueHead was randomly initialized, False otherwise.
         """
         lm_head = getattr(self, "lm_head", None)
-        if getattr(self.config, "head_type", "lm_head") != "value_head" or not isinstance(lm_head, nn.Module):
+        if getattr(self.config, "head_type", "lm_head") != "value_head" or not isinstance(lm_head, nn.Linear):
             return False
-        if any(checkpoint_loader.is_key_exist(key) for key in self._to_hf_key_list("lm_head.weight")):
-            return False
-        from xtuner.v1.utils import default_init_weights
+        from xtuner.v1.utils import init_params
 
-        default_init_weights(lm_head)
+        value_head_std = 1.0 / (self.config.hidden_size + 1)
+        init_params(lm_head.weight, partial(nn.init.normal_, mean=0.0, std=value_head_std))
         log_rank0.info(
-            "Value head (runtime module lm_head) is randomly initialized because the checkpoint "
-            "has no value_head weights; the rest of the model is loaded from the checkpoint."
+            "Value head (runtime module lm_head) is initialized with "
+            f"Normal(mean=0, std={value_head_std:.6g}) because the checkpoint has no value_head weights; "
+            "the rest of the model is loaded from the checkpoint."
         )
         return True
 
