@@ -165,7 +165,7 @@ def _critic_engine(model_cfg: Qwen3_5_VLMoE35BA3Config) -> TrainEngine:
         fsdp_cfg=FSDPConfig(
             cpu_offload=False,
             torch_compile=False,
-            fp32_head=True,
+            fp32_value_head=True,
             recompute_ratio=0.0,
             ep_size=ep_size,
         ),

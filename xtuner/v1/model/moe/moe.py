@@ -1404,7 +1404,11 @@ class MoE(BaseModel):
         self.mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
-        if self.fsdp_config.fp32_head:
+        if self.config.head_type == "value_head":
+            head_fp32 = self.fsdp_config.fp32_value_head
+        else:
+            head_fp32 = self.fsdp_config.fp32_lm_head
+        if head_fp32:
             head_mp_policy = MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32)
         else:
             head_mp_policy = self.mp_policy
