@@ -1,4 +1,4 @@
-"""Learning-rate schedule and critic pass helpers shared by PPO workers."""
+"""Learning-rate and repeated-update scheduling helpers."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ def build_lr_scheduler(
     lr_cfg: LRConfig,
     total_steps: int,
 ) -> torch.optim.lr_scheduler.LRScheduler:
-    """Build the PPO scheduler.
+    """Build a LambdaLR scheduler for a training engine.
 
     ``warmup_ratio < 1`` is a fraction of ``total_steps``. A value of 1 or
     greater is an absolute warmup update count.
@@ -68,7 +68,7 @@ def partition_indices(indices: list[int], max_updates: int) -> list[list[int]]:
 
 
 def pass_order(num_batches: int, rollout_idx: int, pass_index: int, seed: int) -> list[int]:
-    """Keep the first critic pass in pack order and shuffle later passes."""
+    """Keep the first pass in pack order and shuffle later passes."""
     if num_batches <= 0:
         return []
     if pass_index == 0:

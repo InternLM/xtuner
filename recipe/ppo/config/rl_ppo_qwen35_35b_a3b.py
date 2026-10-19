@@ -110,7 +110,13 @@ judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
 
 actor_lr_cfg = LRConfig(lr_type="constant", warmup_ratio=actor_lr_warmup_updates, lr_min=actor_lr)
 critic_lr_cfg = LRConfig(lr_type="constant", warmup_ratio=critic_lr_warmup_updates, lr_min=critic_lr)
-fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=train_ep_size, fp32_head=True)
+fsdp_cfg = FSDPConfig(
+    torch_compile=False,
+    cpu_offload=False,
+    ep_size=train_ep_size,
+    fp32_lm_head=True,
+    fp32_value_head=True,
+)
 
 model_cfg = Qwen3_5_VLMoE35BA3Config(freeze_vision=True, freeze_projector=True)
 model_cfg.text_config.ep_size = train_ep_size
@@ -166,8 +172,6 @@ critic_cfg = CriticWorkerConfig(
     ),
     loss_cfg=CriticLossConfig(cliprange_value=0.6, ignore_idx=-100),
     lr_cfg=critic_lr_cfg,
-    fsdp_cfg=deepcopy(fsdp_cfg),
-    sp_size=sp_size,
     optimizer_steps=train_optimizer_steps,
     num_passes=critic_num_passes,
     optimizer_steps_per_pass=critic_optimizer_steps,

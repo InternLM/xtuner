@@ -5,7 +5,6 @@ import ray
 import torch
 from pydantic import BaseModel, ConfigDict
 
-from xtuner.v1.config.fsdp import FSDPConfig
 from xtuner.v1.config.optim import LRConfig, OptimConfig
 from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.data_proto.sequence_context import SequenceContext
@@ -34,6 +33,9 @@ class CriticWorkerConfig(BaseModel):
 
     A critic is hosted by the actor Ray worker instead of being spawned as a second Ray actor. It shares the actor
     process' distributed process group, but owns its own value-head model and optimizer.
+
+    FSDP and sequence-parallel topology is owned by the host ``WorkerConfig`` and is
+    intentionally not duplicated here.
     """
 
     model_config = ConfigDict(title="Critic worker config", extra="forbid", arbitrary_types_allowed=True)
@@ -41,14 +43,11 @@ class CriticWorkerConfig(BaseModel):
     optim_cfg: OptimConfig
     loss_cfg: CriticLossConfig = CriticLossConfig()
     lr_cfg: LRConfig
-    fsdp_cfg: FSDPConfig
     load_from: str | Path
     optimizer_steps: int = 1
     num_passes: int = 1
     optimizer_steps_per_pass: int | None = None
     scheduler_steps: int = 1_000_000
-    sp_size: int = 1
-    seed: int | None = None
 
 
 class CriticWorker:
@@ -60,10 +59,13 @@ class CriticWorker:
     sequence-parallel mesh, pack plan, and process lifetime.
     """
 
-    def __init__(self, worker_cfg: CriticWorkerConfig, host: "TrainingWorker | None" = None) -> None:
+    def __init__(self, worker_cfg: CriticWorkerConfig, host: "TrainingWorker") -> None:
+        if host is None:
+            raise ValueError("CriticWorker must be attached to a TrainingWorker")
+
         self.config = worker_cfg
         self.host = host
-        self.sp_mesh = host.sp_mesh if host is not None else None
+        self.sp_mesh = host.sp_mesh
         if worker_cfg.num_passes <= 0:
             raise ValueError("num_passes must be positive.")
         if worker_cfg.optimizer_steps_per_pass is not None and worker_cfg.optimizer_steps_per_pass <= 0:
@@ -72,11 +74,12 @@ class CriticWorker:
         head_cfg = model_cfg.text_config if isinstance(model_cfg, BaseComposeConfig) else model_cfg
         if getattr(head_cfg, "head_type", "lm_head") != "value_head":
             raise ValueError("CriticWorker requires model_cfg.head_type='value_head'")
-        if not worker_cfg.fsdp_cfg.torch_compile:
+        fsdp_cfg = host.config.fsdp_cfg
+        if not fsdp_cfg.torch_compile:
             worker_cfg.model_cfg.compile_cfg = False
         self._engine = TrainEngine(
             optim_cfg=worker_cfg.optim_cfg,
-            fsdp_cfg=worker_cfg.fsdp_cfg,
+            fsdp_cfg=fsdp_cfg,
             model_cfg=worker_cfg.model_cfg,
         )
         self._engine.from_hf(worker_cfg.load_from)

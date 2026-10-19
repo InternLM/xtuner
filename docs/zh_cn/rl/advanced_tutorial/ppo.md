@@ -79,16 +79,14 @@ class CriticWorkerConfig(BaseModel):
     optim_cfg: OptimConfig
     loss_cfg: CriticLossConfig = CriticLossConfig()
     lr_cfg: LRConfig
-    fsdp_cfg: FSDPConfig
     load_from: str | Path
     optimizer_steps: int = 1
     num_passes: int = 1
     optimizer_steps_per_pass: int | None = None
     scheduler_steps: int = 1_000_000
-    sp_size: int = 1
-    seed: int | None = None
 ```
 
+- Critic 挂在 actor 的 `TrainingWorker` 上，复用 host 的 `WorkerConfig.fsdp_cfg` 与 `sp_size`，因此在 `CriticWorkerConfig` 中不再重复配置 FSDP 和序列并行拓扑。
 - `optimizer_steps_per_pass` 为 `None` 时，critic 沿用 actor 的 pack 计划，并检查步数不超过 `optimizer_steps`。
 - 设置了 `optimizer_steps_per_pass` 时，每个 pass 把本地 pack 摊平。第一轮保持原顺序，之后的 pass 打乱，再切成 `optimizer_steps_per_pass` 次优化器更新。`num_passes` 是重复次数。
 - 一次更新里可训练 token 数为 0 时跳过。梯度范数通过 `optimizer_step_succeeds` 时才 `scheduler.step()`。
