@@ -6,7 +6,7 @@ TestGlm53Rendering
     test_all_generation_eos_are_supervised_at_assistant_boundaries  停止 token 计入 loss
     test_media_placeholder_matches_jinja        媒体占位符与 jinja 一致
 TestGlm53OfficialTemplateContract
-    test_render_matches_official_jinja          飞书失败报告样例逐字符对齐官方 jinja
+    test_render_matches_official_jinja          逐字符对齐官方 jinja
     test_mid_conversation_boundaries_use_their_actual_occurrence  对话中间无 EOS、边界 token loss 正确
 """
 
@@ -22,7 +22,6 @@ from xtuner.v1.data_proto.messages.glm53_chat import glm53_tokenize_fn_slowspeed
 GLM_5_3_FLASH_PATH = os.environ["GLM_5_3_FLASH_PATH"]
 GLM53_TEMPLATE_DEFAULTS = {"enable_thinking": True, "reasoning_effort": "max", "clear_thinking": False}
 
-# 飞书《glm5.3 flash训推chat template一致性》失败报告（2026-10-15）的渲染层样例。
 _CONTRACT_CASES = {
     # content 列表混排纯字符串与 text 字典（jinja 均按文本渲染）。
     "text_content_parts": {

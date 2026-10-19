@@ -17,7 +17,6 @@ from xtuner.v1.data_proto.messages.glm52_chat import render_glm52_chat
 GLM5_2_TINY_MOE_PATH = os.environ["GLM5_2_TINY_MOE_PATH"]
 GLM52_TEMPLATE_DEFAULTS = {"enable_thinking": True, "reasoning_effort": "max", "clear_thinking": False}
 
-# 与 GLM-5.3-Flash 契约测试（#2198）相同的渲染层样例。
 _CONTRACT_CASES = {
     # content 列表混排纯字符串与 text 字典（jinja 均按文本渲染）。
     "text_content_parts": {
