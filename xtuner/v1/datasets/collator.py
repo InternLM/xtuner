@@ -318,7 +318,27 @@ def glm53_vl_sft_collator(
     merge_unit: int,
     pack_to_max_length: bool = True,
     pad_chunk_size: int = 256,
+    media_dtype: torch.dtype = torch.bfloat16,
 ) -> list[ColateItem]:
+    """Collate GLM-5.3 packs into text contexts and concatenated media.
+
+    Args:
+        instances (list[list[Glm53VLDataItem]]): Tokenized items, one inner list per pack.
+        pack_max_length (int): Maximum packed token length.
+        padding_token_idx (int): Padding token id for ``input_ids``.
+        image_token_id (int): Image placeholder token id, re-checked against the patch
+            count after pack-level truncation.
+        merge_unit (int): Vision tower spatial-merge unit (``spatial_merge_size ** 2``).
+        pack_to_max_length (bool): Pad every pack up to ``pack_max_length``.
+        pad_chunk_size (int): Padding granularity when ``pack_to_max_length`` is off.
+        media_dtype (torch.dtype): Transport dtype applied element-wise to image/video
+            patches before the pack-level concat (worker side, pre-IPC). Keep it equal to
+            the vision tower's parameter dtype (bf16 by default); a lower-precision value
+            under an fp32 tower rounds the patches at pack time.
+
+    Returns:
+        list[ColateItem]: One ``{"seq_ctx", "shifted_labels"}`` dict per pack.
+    """
     ret: list[ColateItem] = []
     for instance in instances:
         seq_ctx, shifted_labels, instance = build_text_ctx_labels(  # type: ignore
@@ -331,8 +351,12 @@ def glm53_vl_sft_collator(
 
         num_img_tokens: list[list[int]] = [data.get("num_img_tokens", [0]) for data in instance]
 
+        # Cast image/video patches to the transport dtype (default bf16) on the worker side,
+        # before cat and the cross-process IPC: the vision tower's patch_embed casts patches to
+        # its parameter dtype anyway, so fp32 media would only double the bytes crossing shm,
+        # main-process residency, and H2D. No-op when the dtypes already match.
         pixel_values: list | torch.Tensor | None
-        pixel_values = [i["pixel_values"] for i in instance if "pixel_values" in i]
+        pixel_values = [i["pixel_values"].to(media_dtype) for i in instance if "pixel_values" in i]
         pixel_values = torch.cat(pixel_values, dim=0) if pixel_values else None
 
         image_grid_thw: list | torch.Tensor | None
@@ -340,7 +364,9 @@ def glm53_vl_sft_collator(
         image_grid_thw = torch.cat(image_grid_thw, dim=0) if image_grid_thw else None
 
         pixel_values_videos: list | torch.Tensor | None
-        pixel_values_videos = [i["pixel_values_videos"] for i in instance if "pixel_values_videos" in i]
+        pixel_values_videos = [
+            i["pixel_values_videos"].to(media_dtype) for i in instance if "pixel_values_videos" in i
+        ]
         pixel_values_videos = torch.cat(pixel_values_videos, dim=0) if pixel_values_videos else None
 
         video_grid_thw: list | torch.Tensor | None
