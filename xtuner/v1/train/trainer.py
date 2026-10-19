@@ -869,73 +869,76 @@ class Trainer:
 
         train_begin = time.time()
         time_before_get_data = time.time()
-        for data_batch in self._prefetched_data_iter():
-            time_before_train_step = time.time()
+        from contextlib import closing
 
-            ProberList.set_step(self._cur_step + 1)
-            DEVICE_MODULE.reset_peak_memory_stats()
+        with closing(self._prefetched_data_iter()) as data_iterator:
+            for data_batch in data_iterator:
+                time_before_train_step = time.time()
 
-            with self._maybe_profiling():
-                engine_input = self._prepare_model_input(data_batch)
-                train_step_info = self._engine.train_step(engine_input)
-                hooks = self.hooks_config.get_hooks(HookStage.AFTER_TRAIN_STEP)
-                for hook in hooks:
-                    hook(
-                        train_step_info=train_step_info,
-                        step=self.cur_step,
-                        epoch=self._cur_epoch,
-                        total_step=self.total_step,
-                        total_epoch=self.total_epoch,
-                    )
+                ProberList.set_step(self._cur_step + 1)
+                DEVICE_MODULE.reset_peak_memory_stats()
 
-                grad_norm = self._engine.clip_grad_norm(do_clip=self._do_clip, dtype=self._grad_norm_dtype)
-                if self._offload_optimizer_first_step:
-                    self._engine.put_optimizer_to_device(DEVICE)
-                    self._offload_optimizer_first_step = False
-                self._engine.step_optimizer(grad_norm)
+                with self._maybe_profiling():
+                    engine_input = self._prepare_model_input(data_batch)
+                    train_step_info = self._engine.train_step(engine_input)
+                    hooks = self.hooks_config.get_hooks(HookStage.AFTER_TRAIN_STEP)
+                    for hook in hooks:
+                        hook(
+                            train_step_info=train_step_info,
+                            step=self.cur_step,
+                            epoch=self._cur_epoch,
+                            total_step=self.total_step,
+                            total_epoch=self.total_epoch,
+                        )
 
-            time_after_train_step = time.time()
-            ProberList.after_step()
+                    grad_norm = self._engine.clip_grad_norm(do_clip=self._do_clip, dtype=self._grad_norm_dtype)
+                    if self._offload_optimizer_first_step:
+                        self._engine.put_optimizer_to_device(DEVICE)
+                        self._offload_optimizer_first_step = False
+                    self._engine.step_optimizer(grad_norm)
 
-            data_time = time_before_train_step - time_before_get_data
-            step_time = time_after_train_step - time_before_train_step
+                time_after_train_step = time.time()
+                ProberList.after_step()
 
-            internal_metrics = self._maybe_pop_model_internal_metrics(engine_input)
+                data_time = time_before_train_step - time_before_get_data
+                step_time = time_after_train_step - time_before_train_step
 
-            self._cur_step += 1
-            step_tokens = train_step_info["step_consumed_tokens"]
-            self._local_total_consumed_tokens += step_tokens
-            self._train_time = time_after_train_step - train_begin
+                internal_metrics = self._maybe_pop_model_internal_metrics(engine_input)
 
-            # Compute training metrics
-            training_metrics = self._compute_performance_metrics(
-                local_step_consumed_tokens=step_tokens,
-                local_step_seqlen_tokens=train_step_info["step_seqlen_tokens"],
-                local_step_consumed_img_tokens=train_step_info.get("step_consumed_img_tokens"),
-                step_time=step_time,
-            )
+                self._cur_step += 1
+                step_tokens = train_step_info["step_consumed_tokens"]
+                self._local_total_consumed_tokens += step_tokens
+                self._train_time = time_after_train_step - train_begin
 
-            # TODO: This log should be move before lr_scheduler.step, but for CI BC, keep it temporarily
-            self._log_step(
-                train_step_info=train_step_info,
-                training_metrics=training_metrics,
-                grad_norm=grad_norm.item(),
-                data_time=data_time,
-                step_time=step_time,
-                internal_metrics=internal_metrics,
-            )
+                # Compute training metrics
+                training_metrics = self._compute_performance_metrics(
+                    local_step_consumed_tokens=step_tokens,
+                    local_step_seqlen_tokens=train_step_info["step_seqlen_tokens"],
+                    local_step_consumed_img_tokens=train_step_info.get("step_consumed_img_tokens"),
+                    step_time=step_time,
+                )
 
-            self._lr_scheduler.step()
-            self._maybe_check_health()
-            self._maybe_save_hf()
-            ckpt_saved = self._maybe_save(is_snapshot=False)
-            if not ckpt_saved:
-                _ = self._maybe_save(is_snapshot=True)
+                # TODO: This log should be move before lr_scheduler.step, but for CI BC, keep it temporarily
+                self._log_step(
+                    train_step_info=train_step_info,
+                    training_metrics=training_metrics,
+                    grad_norm=grad_norm.item(),
+                    data_time=data_time,
+                    step_time=step_time,
+                    internal_metrics=internal_metrics,
+                )
 
-            time_before_get_data = time.time()
+                self._lr_scheduler.step()
+                self._maybe_check_health()
+                self._maybe_save_hf()
+                ckpt_saved = self._maybe_save(is_snapshot=False)
+                if not ckpt_saved:
+                    _ = self._maybe_save(is_snapshot=True)
 
-            if self.cur_step % 50 == 0:
-                gc.collect()
+                time_before_get_data = time.time()
+
+                if self.cur_step % 50 == 0:
+                    gc.collect()
 
         if self._async_hf_export:
             self._wait_for_pending_async_hf()
@@ -1531,7 +1534,10 @@ class Trainer:
                 for _ in range(remaining):
                     yield next(raw)
 
-            yield from lookahead_iter(bounded_raw())
+            from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import lazy_media_shared_decode
+            decode_here = not lazy_media_shared_decode() or self.sp_mesh.get_local_rank() == 0
+            logger.info(f"Rank: {self.rank} async media decoder={decode_here}, SP rank={self.sp_mesh.get_local_rank()}")
+            yield from lookahead_iter(bounded_raw(), decode_here=decode_here, count=remaining)
         else:
             yield from self._data_iter()
 

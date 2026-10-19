@@ -351,6 +351,19 @@ def glm53_vl_sft_collator(
 
         num_img_tokens: list[list[int]] = [data.get("num_img_tokens", [0]) for data in instance]
 
+        # Carry the collator transport dtype to deferred materialization too.
+        for item in instance:
+            if item.get("media_plan") is not None:
+                item["media_plan"] = dict(item["media_plan"], media_dtype=media_dtype)
+        # Eager fallbacks and lazy images must preserve the original pack order.
+        if any(i.get("media_plan") is not None for i in instance) and any("pixel_values" in i for i in instance):
+            from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import materialize_image_plan
+
+            for item in instance:
+                plan = item.pop("media_plan", None)
+                if plan is not None:
+                    item["pixel_values"], item["image_grid_thw"] = materialize_image_plan(plan)
+
         # Cast image/video patches to the transport dtype (default bf16) on the worker side,
         # before cat and the cross-process IPC: the vision tower's patch_embed casts patches to
         # its parameter dtype anyway, so fp32 media would only double the bytes crossing shm,
@@ -392,6 +405,8 @@ def glm53_vl_sft_collator(
                 "images": [entry for plan in item_plans for entry in plan["images"]],
                 "sample_sizes": [size for plan in item_plans for size in plan["sample_sizes"]],
                 "processor_path": item_plans[0]["processor_path"],
+                "media_dtype": media_dtype,
+                "oss_loader_cfg": item_plans[0].get("oss_loader_cfg"),
                 "min_pixels": item_plans[0].get("min_pixels"),
                 "max_pixels": item_plans[0].get("max_pixels"),
             }

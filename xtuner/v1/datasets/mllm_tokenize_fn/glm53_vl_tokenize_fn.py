@@ -116,7 +116,9 @@ def materialize_image_plan(media_plan: dict) -> tuple[torch.Tensor, torch.Tensor
     Returns:
         tuple[torch.Tensor, torch.Tensor]: ``(pixel_values, image_grid_thw)`` on CPU,
         equal to what the eager tokenize path + collator would have produced.
+        ``media_dtype`` is supplied by the collator; legacy raw plans default to FP32.
     """
+    media_dtype = media_plan.get("media_dtype", torch.float32)
     processor_path = media_plan["processor_path"]
     if processor_path not in _PROCESSOR_CACHE:
         _PROCESSOR_CACHE[processor_path] = AutoProcessor.from_pretrained(processor_path, trust_remote_code=True)
@@ -130,6 +132,19 @@ def materialize_image_plan(media_plan: dict) -> tuple[torch.Tensor, torch.Tensor
 
     thread_local = threading.local()
 
+    def load_entry(entry: dict):
+        path = entry["path"]
+        if "s3://" in path:
+            cfg = media_plan.get("oss_loader_cfg")
+            if cfg is None or cfg["backend"] != "petrel":
+                raise RuntimeError("Lazy OSS image requires petrel oss_loader_cfg")
+            client = getattr(thread_local, "oss_client", None)
+            if client is None:
+                from petrel_client.client import Client
+                client = thread_local.oss_client = Client(**cfg["backend_kwargs"])
+            return apply_exif_orientation(pil_loader(client.get(path)))
+        return apply_exif_orientation(load_image(path))
+
     def process_entry(entry: dict) -> tuple[torch.Tensor, torch.Tensor]:
         # One image = one decode + one processor call. Verified bitwise-equal to the eager
         # whole-list processor call on real window data (see lazy_ab_test.py), which is what
@@ -137,20 +152,20 @@ def materialize_image_plan(media_plan: dict) -> tuple[torch.Tensor, torch.Tensor
         local_processor = getattr(thread_local, "image_processor", None)
         if local_processor is None:
             local_processor = thread_local.image_processor = copy.deepcopy(image_processor)
-        image = apply_exif_orientation(load_image(entry["path"]))
+        image = load_entry(entry)
         processed = local_processor(images=[image], return_tensors="pt")
-        return processed["pixel_values"], processed["image_grid_thw"]
+        return processed["pixel_values"].to(media_dtype), processed["image_grid_thw"]
 
     threads = lazy_media_threads()
     if threads <= 1:
         # v1 behavior: decode all, then one processor call per source sample.
-        decoded = [apply_exif_orientation(load_image(entry["path"])) for entry in media_plan["images"]]
+        decoded = [load_entry(entry) for entry in media_plan["images"]]
         pixel_parts: list[torch.Tensor] = []
         grid_parts: list[torch.Tensor] = []
         offset = 0
         for sample_size in media_plan["sample_sizes"]:
             processed = image_processor(images=decoded[offset : offset + sample_size], return_tensors="pt")
-            pixel_parts.append(processed["pixel_values"])
+            pixel_parts.append(processed["pixel_values"].to(media_dtype))
             grid_parts.append(processed["image_grid_thw"])
             offset += sample_size
         pixel_values = torch.cat(pixel_parts, dim=0)
@@ -275,6 +290,7 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         self.video_processor = self.processor.video_processor
         # Kept for the lazy-media plan so the deferred consumer rebuilds this exact processor.
         self.processor_path = processor_path
+        self._lazy_oss_cfg = oss_loader_cfg.model_dump() if oss_loader_cfg is not None else None
 
         if min_pixels is not None:
             self.image_processor.min_image_tokens = min_pixels
@@ -382,8 +398,16 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
     def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> Glm53VLDataItem:
         if lazy_media_enabled():
-            return self._lazy_multi_modal_get_item(data_item, media_root)
+            try:
+                for width, height in self._image_wh_list:
+                    self._predict_image_grid(width, height)
+            except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+                return self._eager_multi_modal_get_item(data_item, media_root)
+            if len(self._image_wh_list) == len(self._image_path):
+                return self._lazy_multi_modal_get_item(data_item, media_root)
+        return self._eager_multi_modal_get_item(data_item, media_root)
 
+    def _eager_multi_modal_get_item(self, data_item: dict, media_root: str = "") -> Glm53VLDataItem:
         # Process images individually, preserving upstream eager behavior.
         pixel_values_list = []
         image_grid_list = []
@@ -474,6 +498,7 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 for image_file, grid in zip(self._image_path, grids)
             ],
             "sample_sizes": [len(self._image_path)],
+            "oss_loader_cfg": self._lazy_oss_cfg,
             "processor_path": self.processor_path,
             "min_pixels": self.image_processor.min_image_tokens,
             "max_pixels": self.image_processor.max_image_tokens,

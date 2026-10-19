@@ -1,65 +1,18 @@
-"""V2c: one-step-ahead lazy media materialization (bounded lookahead prefetch).
+"""Per-SP-leader prefetch, bounded to current plus one future batch.
 
-The trainer's data loop is serial: the batch for step N+1 is fetched only after step N
-finishes, so the lazy media decode would otherwise sit at the head of every forward.
-This module moves two things onto a single background thread:
-
-1. fetching the next batch from the dataloader (one slot ahead, bounded);
-2. kicking off materialize_image_plan for every media plan in that batch.
-
-The result is attached as a ``concurrent.futures.Future`` ON THE PLAN DICT (plans travel
-by reference through SequenceContext split/copy, so the future reaches the consumption
-point regardless of context re-wrapping). Consumption stays on the main thread in
-Glm53ForConditionalGeneration._prepare_llm_inputs — in particular all NCCL collectives
-(V2b broadcast) remain on the main thread, because concurrent collectives on the same
-process group from two threads are not safe.
-
-Gating:
-- XTUNER_LAZY_MEDIA_PREFETCH=0 (default) keeps the V2a/V2b behavior exactly.
-- With XTUNER_LAZY_MEDIA_SHARED=1 (V2b), only global rank 0 kicks off decoding; other
-  ranks receive the exact bits via the consumption-time broadcast. Note: this rank-0
-  shortcut assumes DP1 (the SP group covers the world, as in the frozen GPU3 contract);
-  under DP>1 every data replica needs its own decoding rank, so the shared+prefetch
-  combination falls back to all-rank decode there (see _should_decode_here).
-
-Failure semantics: a decode error propagates through future.result() at consumption and
-fails the run with the original exception — no fake samples, no silent skips.
+The supplied decoder identity is computed on the training thread from its SP mesh.
+No distributed collective runs in this executor. A running media read cannot be
+cancelled: close waits for it; launcher termination handles a hung external read.
 """
-
 import os
-import queue
-import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Iterator
 
-import torch.distributed as dist
-
-from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import (
-    lazy_media_shared_decode,
-    materialize_image_plan,
-)
-
-PREFETCH_ENV = "XTUNER_LAZY_MEDIA_PREFETCH"
-
-# One worker serializes plan materializations; each materialization itself uses the V2a
-# bounded thread pool, so the total decode thread count stays at that pool's size.
-_MATERIALIZER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lazy-media-mat")
-_LOOKAHEAD_SLOT = 1
+from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import materialize_image_plan
 
 
 def lazy_media_prefetch_enabled() -> bool:
-    """Return whether one-step-ahead media prefetching is enabled for this process."""
-    return os.environ.get(PREFETCH_ENV, "0").strip().lower() in ("1", "true", "yes", "on")
-
-
-def _should_decode_here() -> bool:
-    # V2b mode: a single decoding rank per SP group. With DP1 the SP group is the whole
-    # world, so global rank 0 is the right decoder. Otherwise decode locally everywhere
-    # (the consumption-time broadcast of V2b is then skipped for want of a shared decoder
-    # in every group; the local V2a path consumes the future instead).
-    if lazy_media_shared_decode() and dist.is_available() and dist.is_initialized():
-        return dist.get_rank() == 0
-    return True
+    return os.environ.get("XTUNER_LAZY_MEDIA_PREFETCH", "0").lower() in ("1", "true", "yes", "on")
 
 
 def _iter_media_plans(batch: Any):
@@ -72,43 +25,92 @@ def _iter_media_plans(batch: Any):
             yield from _iter_media_plans(item)
 
 
-def kickoff_lazy_media(batch: Any) -> None:
-    """Start materializing every media plan in ``batch`` (no-op without plans)."""
-    if not lazy_media_prefetch_enabled():
+def kickoff_lazy_media(batch: Any, *, decode_here: bool) -> None:
+    if not decode_here:
         return
-    decode_here = _should_decode_here()
+    # Called inside the single producer thread; completed futures preserve the
+    # consumption API and defer decode errors to the main-thread group handshake.
     for plan in _iter_media_plans(batch):
-        if "_future" in plan or not decode_here:
-            continue
-        plan["_future"] = _MATERIALIZER.submit(materialize_image_plan, plan)
+        future = Future()
+        plan["_future"] = future
+        try:
+            future.set_result(materialize_image_plan(plan))
+        except Exception as exc:
+            future.set_exception(exc)
 
 
 def take_media_future(plan: dict) -> Future | None:
-    """Detach and return the plan's materialization future, if any."""
     return plan.pop("_future", None)
 
 
-_DONE = object()
+def lookahead_iter(base: Iterator[Any], *, decode_here: bool, count: int) -> Iterator[Any]:
+    if count <= 0:
+        return
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lazy-media-lookahead")
+    pending = None
+
+    def fetch():
+        batch = next(base)
+        kickoff_lazy_media(batch, decode_here=decode_here)
+        return batch
+
+    try:
+        pending = pool.submit(fetch)
+        for index in range(count):
+            batch = pending.result()
+            pending = pool.submit(fetch) if index + 1 < count else None
+            yield batch
+            del batch
+    finally:
+        if pending is not None:
+            pending.cancel()
+        pool.shutdown(wait=True, cancel_futures=True)
+        close = getattr(base, "close", None)
+        if close is not None:
+            close()
 
 
-def lookahead_iter(base: Iterator[Any]) -> Iterator[Any]:
-    """Iterate ``base`` one batch ahead on a background thread, kicking off decodes."""
-    slot: queue.Queue = queue.Queue(maxsize=_LOOKAHEAD_SLOT)
+def shared_materialize(plan, group, device, patch_dim):
+    """Main-thread SP protocol; CPU Gloo and CUDA NCCL use the same code."""
+    import torch
+    import torch.distributed as dist
 
-    def worker() -> None:
+    media_dtype = plan.get("media_dtype", torch.float32)
+    images = plan["images"]
+    rows = sum(entry["grid"][0] * entry["grid"][1] * entry["grid"][2] for entry in images)
+    src = dist.get_process_group_ranks(group)[0]
+    error = None
+    # Allocate after checking the leader result, so decode failures don't force
+    # receivers to allocate full media tensors just to learn about the error.
+    status = torch.zeros(1, dtype=torch.int32, device=device)
+    local_pixel = local_grid = None
+    if dist.get_rank(group) == 0:
         try:
-            for fetched in base:
-                kickoff_lazy_media(fetched)
-                slot.put(fetched)
-            slot.put(_DONE)
-        except BaseException as exc:  # surfaced to the main loop below
-            slot.put(exc)
-
-    threading.Thread(target=worker, daemon=True, name="lazy-media-lookahead").start()
-    while True:
-        item = slot.get()
-        if item is _DONE:
-            return
-        if isinstance(item, BaseException):
-            raise item
-        yield item
+            future = take_media_future(plan)
+            local_pixel, local_grid = future.result() if future is not None else materialize_image_plan(plan)
+            if local_pixel.dtype != media_dtype or local_grid.dtype != torch.int64:
+                raise RuntimeError("Unexpected lazy media dtype")
+            if tuple(local_pixel.shape) != (rows, patch_dim) or tuple(local_grid.shape) != (len(images), 3):
+                raise RuntimeError("Lazy media shape differs from the SP plan")
+        except Exception as exc:
+            error = exc
+            status.fill_(1)
+    dist.broadcast(status, src=src, group=group)
+    if status.item():
+        raise RuntimeError(f"SP media decoder rank {src} failed") from error
+    # Allocation/copy errors are synchronized before any rank enters pixel broadcast.
+    try:
+        pixels = torch.empty((rows, patch_dim), dtype=media_dtype, device=device)
+        grid = torch.empty((len(images), 3), dtype=torch.int64, device=device)
+        if dist.get_rank(group) == 0:
+            pixels.copy_(local_pixel)
+            grid.copy_(local_grid)
+    except Exception as exc:
+        error = exc
+        status.fill_(1)
+    dist.all_reduce(status, op=dist.ReduceOp.MAX, group=group)
+    if status.item():
+        raise RuntimeError("SP media allocation/copy failed") from error
+    dist.broadcast(pixels, src=src, group=group)
+    dist.broadcast(grid, src=src, group=group)
+    return pixels, grid

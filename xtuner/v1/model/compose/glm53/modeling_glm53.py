@@ -172,22 +172,10 @@ class Glm53ForConditionalGeneration(BaseComposeModel):
                     * patch_embed.temporal_patch_size
                     * patch_embed.patch_size**2
                 )
-                plan_images = seq_ctx.media_plan["images"]
-                rows = sum(grid[0] * grid[1] * grid[2] for grid in (entry["grid"] for entry in plan_images))
-                pixel_values = torch.empty((rows, patch_dim), dtype=torch.float32, device=inputs_embeds.device)
-                image_grid_thw = torch.empty((len(plan_images), 3), dtype=torch.int64, device=inputs_embeds.device)
-                src = dist.get_process_group_ranks(sp_group)[0]
-                if dist.get_rank(sp_group) == 0:
-                    local_pixel, local_grid = _materialize_or_join(seq_ctx.media_plan)
-                    if local_pixel.dtype != torch.float32 or local_grid.dtype != torch.int64:
-                        raise RuntimeError(
-                            "V2b allocation assumptions broken: materialized dtypes "
-                            f"{local_pixel.dtype}/{local_grid.dtype} != float32/int64"
-                        )
-                    pixel_values.copy_(local_pixel)
-                    image_grid_thw.copy_(local_grid)
-                dist.broadcast(pixel_values, src=src, group=sp_group)
-                dist.broadcast(image_grid_thw, src=src, group=sp_group)
+                from xtuner.v1.train.lazy_media_prefetch import shared_materialize
+                pixel_values, image_grid_thw = shared_materialize(
+                    seq_ctx.media_plan, sp_group, inputs_embeds.device, patch_dim
+                )
             else:
                 pixel_values, image_grid_thw = _materialize_or_join(seq_ctx.media_plan)
                 # Mirror the eager device split exactly: SequenceContext.to leaves
