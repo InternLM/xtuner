@@ -937,6 +937,11 @@ class BaseRLTrainer:
 
         Evaluation never enters this path. Staleness is already handled by take_train_batch, and debug replay preserves
         its saved label masks.
+
+        ``ProduceBatchResult`` production counters and raw rewards describe the producer window (including groups that
+        may not be in this retrieved training batch); ``task_batch_sizes`` records requested buffer counts. Keep those
+        metrics unchanged when this method filters invalid training groups. The dropped groups are reported separately
+        through the returned counts and ``response/invalid_train_groups`` / ``response/invalid_train_samples``.
         """
         valid_groups = []
         rejected_groups = []

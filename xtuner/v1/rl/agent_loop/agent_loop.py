@@ -333,35 +333,42 @@ class AgentLoop(ABC):
         """Build full, unshifted training fields and write lightweight
         metadata.
 
-        Already assembled sequences are preserved. Construction errors propagate; the producer checks public results
-        and the trainer checks training fields.
+        Already assembled sequences are preserved. A construction error marks that sample failed so the producer can
+        discard its group without aborting the produce window.
         """
         for state in group:
             if state.status != Status.COMPLETED:
                 continue
-            if state.input_ids is None:
-                prompt_ids = state.extra_fields.get("train_prompt_ids", state.prompt_ids)
-                assert prompt_ids is not None and len(prompt_ids) > 0, (
-                    f"Prompt ids cannot be None or empty in data: {state}"
-                )
-                if state.response_ids is not None:
-                    response_ids = (
-                        state.response_ids.flatten().tolist()
-                        if isinstance(state.response_ids, torch.Tensor)
-                        else list(state.response_ids)
+            try:
+                if state.input_ids is None:
+                    prompt_ids = state.extra_fields.get("train_prompt_ids", state.prompt_ids)
+                    assert prompt_ids is not None and len(prompt_ids) > 0, (
+                        f"Prompt ids cannot be None or empty in data: {state}"
                     )
-                else:
-                    assert state.response is not None, "response item cannot be None"
-                    response_ids = self.tokenizer(state.response, return_tensors="pt")["input_ids"].flatten().tolist()
-                state.response_ids = response_ids
-                if state.logprobs is not None:
-                    assert len(state.logprobs) == len(response_ids), (
-                        f"{len(state.logprobs)} vs {len(response_ids)}, data: {state}"
-                    )
-                    state.logprobs = [0.0] * len(prompt_ids) + list(state.logprobs)
-                state.input_ids = list(prompt_ids) + response_ids
-                state.labels = [-100] * len(prompt_ids) + response_ids
-            self._write_train_meta(state)
+                    if state.response_ids is not None:
+                        response_ids = (
+                            state.response_ids.flatten().tolist()
+                            if isinstance(state.response_ids, torch.Tensor)
+                            else list(state.response_ids)
+                        )
+                    else:
+                        assert state.response is not None, "response item cannot be None"
+                        response_ids = (
+                            self.tokenizer(state.response, return_tensors="pt")["input_ids"].flatten().tolist()
+                        )
+                    state.response_ids = response_ids
+                    if state.logprobs is not None:
+                        assert len(state.logprobs) == len(response_ids), (
+                            f"{len(state.logprobs)} vs {len(response_ids)}, data: {state}"
+                        )
+                        state.logprobs = [0.0] * len(prompt_ids) + list(state.logprobs)
+                    state.input_ids = list(prompt_ids) + response_ids
+                    state.labels = [-100] * len(prompt_ids) + response_ids
+                self._write_train_meta(state)
+            except Exception as exc:
+                self.logger.error(f"Canonicalize failed for rollout_id={state.rollout_id}: {exc}")
+                state.status = Status.FAILED
+                state.error_msg = f"canonicalize_train_fields failed: {exc}"
         return group
 
     @overload
