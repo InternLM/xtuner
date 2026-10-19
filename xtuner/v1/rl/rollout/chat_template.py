@@ -6,7 +6,7 @@ from typing import Any
 _RAW_ARGUMENTS_KEY = "__xtuner_raw_arguments__"
 
 
-def canonicalize_messages_for_chat_template(messages: list[dict]) -> list[dict]:
+def canonicalize_messages_for_chat_template(messages: list[dict], *, tokenizer=None) -> list[dict]:
     """Render a copied, trace-store-only view of agent messages.
 
     Some LLM tool-call messages are not directly accepted by Qwen-style
@@ -21,6 +21,43 @@ def canonicalize_messages_for_chat_template(messages: list[dict]) -> list[dict]:
     """
 
     messages = copy.deepcopy(messages)
+    if tokenizer is not None and any(message.get("role") == "system" for message in messages[1:]):
+        sentinel = "__xtuner_inline_system_probe__"
+        try:
+            probe = tokenizer.apply_chat_template(
+                [
+                    {"role": "system", "content": "system"},
+                    {"role": "user", "content": "user"},
+                    {"role": "system", "content": sentinel},
+                    {"role": "user", "content": "user"},
+                ],
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            supports_inline = isinstance(probe, str) and sentinel in probe
+        except Exception:
+            supports_inline = False
+        if not supports_inline:
+            # Match LMDeploy's Anthropic fallback for templates which require
+            # a single leading system message. Keep the original transcript
+            # untouched; request rendering and trace lookup share this view.
+            systems = [message for message in messages if message.get("role") == "system"]
+            contents = [message.get("content", "") for message in systems]
+            if all(isinstance(content, str) for content in contents):
+                content = "".join(contents)
+            else:
+                content = []
+                for part in contents:
+                    if isinstance(part, str):
+                        content.append({"type": "text", "text": part})
+                    elif isinstance(part, list):
+                        content.extend(part)
+                    else:
+                        raise ValueError("system content must be text or content blocks")
+            messages = [
+                {**systems[0], "content": content},
+                *(message for message in messages if message.get("role") != "system"),
+            ]
     for message in messages:
         tool_calls = message.get("tool_calls")
         if not isinstance(tool_calls, list):
