@@ -64,6 +64,24 @@ DEVICE_MODULE = get_torch_device_module()
 threading_lock = threading.Lock()
 
 
+def _validate_optimizer_checkpoint_shapes(optimizer_state_dict, metadata) -> None:
+    # DCP can read overlapping regions when the saved global shape is smaller.
+    # That is unsafe for optimizer moments: older SwapAdamW checkpoints lost
+    # all but one local shard and cannot be recovered as full training state.
+    for name, state in optimizer_state_dict["state"].items():
+        for key, value in state.items():
+            if not isinstance(value, torch.Tensor):
+                continue
+            fqn = f"optimizer.state.{name}.{key}"
+            saved = metadata.state_dict_metadata.get(fqn)
+            if saved is not None and hasattr(saved, "size") and saved.size != value.shape:
+                raise ValueError(
+                    f"Incomplete or incompatible optimizer checkpoint: {fqn} has global shape "
+                    f"{tuple(saved.size)}, expected {tuple(value.shape)}. "
+                    "Do not resume optimizer state from a checkpoint that lost distributed shards."
+                )
+
+
 class CPUThreadTaskCoordinator:
     def __init__(self, futures, callback):
         self.futures = futures
@@ -541,6 +559,10 @@ class TrainEngine:
 
         load_optimizer = load_states or load_args
         state_dict = self._get_dcp_state_dict(cpu_offload=True, save_optimizer=load_optimizer)
+        if load_states:
+            _validate_optimizer_checkpoint_shapes(
+                state_dict["optimizer"], dcp.FileSystemReader(weights_dir).read_metadata()
+            )
 
         if self.has_freeze_params:
             set_options = StateDictOptions(cpu_offload=True, strict=False)

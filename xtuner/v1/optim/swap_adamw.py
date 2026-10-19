@@ -1,6 +1,7 @@
 from collections.abc import Iterable
 
 import torch
+from torch.distributed.tensor import DTensor
 from torch.optim.adam import adam as torch_adam
 
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
@@ -96,14 +97,29 @@ class SwapAdamW(torch.optim.AdamW):
                         cpu_state[key] = None
                     else:
                         restored = cpu_state_dtensor.get(key)
-                        if restored is None:
+                        if isinstance(param, DTensor):
+                            if restored is not None and (
+                                not isinstance(restored, DTensor) or restored.shape != param.shape
+                            ):
+                                raise ValueError("Sharded SwapAdamW requires moments with complete DTensor metadata")
+                            # DCP treats plain local tensors as replicated and saves
+                            # only one rank. Keep global shape/placements in state;
+                            # the swap map below aliases its pinned local storage.
+                            state_tensor = torch.empty_like(param, device="cpu", pin_memory=True)
+                            cpu_tensor = state_tensor.to_local()
+                            if restored is None:
+                                cpu_tensor.zero_()
+                            else:
+                                cpu_tensor.copy_(restored.to_local())
+                            cpu_state_dtensor[key] = state_tensor
+                        elif restored is None:
                             cpu_tensor = torch.zeros_like(
                                 local_param, device="cpu", memory_format=torch.preserve_format
-                            )
+                            ).pin_memory()
+                            cpu_state_dtensor[key] = cpu_tensor
                         else:
-                            cpu_tensor = self._to_local_tensor(restored).to(device="cpu")
-                        cpu_tensor = cpu_tensor.pin_memory()
-                        cpu_state_dtensor[key] = cpu_tensor
+                            cpu_tensor = self._to_local_tensor(restored).to(device="cpu").pin_memory()
+                            cpu_state_dtensor[key] = cpu_tensor
                         cpu_state[key] = cpu_tensor
 
                 # Keep per-parameter step semantics consistent with torch.optim.AdamW.
