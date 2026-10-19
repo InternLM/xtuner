@@ -351,6 +351,19 @@ def glm53_vl_sft_collator(
 
         num_img_tokens: list[list[int]] = [data.get("num_img_tokens", [0]) for data in instance]
 
+        # Carry the collator transport dtype to deferred materialization too.
+        for item in instance:
+            if item.get("media_plan") is not None:
+                item["media_plan"] = dict(item["media_plan"], media_dtype=media_dtype)
+        # Eager fallbacks and lazy images must preserve the original pack order.
+        if any(i.get("media_plan") is not None for i in instance) and any("pixel_values" in i for i in instance):
+            from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import materialize_image_plan
+
+            for item in instance:
+                plan = item.pop("media_plan", None)
+                if plan is not None:
+                    item["pixel_values"], item["image_grid_thw"] = materialize_image_plan(plan)
+
         # Cast image/video patches to the transport dtype (default bf16) on the worker side,
         # before cat and the cross-process IPC: the vision tower's patch_embed casts patches to
         # its parameter dtype anyway, so fp32 media would only double the bytes crossing shm,
@@ -372,6 +385,33 @@ def glm53_vl_sft_collator(
         video_grid_thw: list | torch.Tensor | None
         video_grid_thw = [i["video_grid_thw"] for i in instance if "video_grid_thw" in i]
         video_grid_thw = torch.cat(video_grid_thw, dim=0) if video_grid_thw else None
+
+        # Lazy-media candidate: merge the pack's per-sample media plans into one plan whose
+        # image order matches the pack order kept by the tensors above (the placeholder
+        # invariant asserted below is what ties plan entries to surviving placeholders).
+        media_plan: dict | None
+        item_plans = [i["media_plan"] for i in instance if "media_plan" in i]
+        if item_plans:
+            if pixel_values is not None:
+                raise ValueError("media_plan and pixel_values are mutually exclusive per pack")
+            processor_keys = {plan["processor_path"] for plan in item_plans}
+            if len(processor_keys) != 1 or any(
+                (plan.get("min_pixels"), plan.get("max_pixels"))
+                != (item_plans[0].get("min_pixels"), item_plans[0].get("max_pixels"))
+                for plan in item_plans
+            ):
+                raise ValueError("media plans in one pack must share processor settings")
+            media_plan = {
+                "images": [entry for plan in item_plans for entry in plan["images"]],
+                "sample_sizes": [size for plan in item_plans for size in plan["sample_sizes"]],
+                "processor_path": item_plans[0]["processor_path"],
+                "media_dtype": media_dtype,
+                "oss_loader_cfg": item_plans[0].get("oss_loader_cfg"),
+                "min_pixels": item_plans[0].get("min_pixels"),
+                "max_pixels": item_plans[0].get("max_pixels"),
+            }
+        else:
+            media_plan = None
 
         # mm_token_type_ids must track input_ids through the exact same [:, :-1] drop + pad
         # (design doc §8.3). Slice each item to its own (possibly pack-truncated) input_ids
@@ -406,6 +446,7 @@ def glm53_vl_sft_collator(
         seq_ctx.video_grid_thw = video_grid_thw
         seq_ctx.mm_token_type_ids = mm_token_type_ids
         seq_ctx.num_img_tokens = num_img_tokens
+        seq_ctx.media_plan = media_plan  # type: ignore[assignment]
 
         ret.append(
             {

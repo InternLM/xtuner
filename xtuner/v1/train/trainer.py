@@ -15,7 +15,9 @@ from pathlib import Path
 from shutil import rmtree
 from typing import (
     Annotated,
+    Any,
     Callable,
+    Iterator,
     Literal,
     Protocol,
     Sequence,
@@ -867,7 +869,7 @@ class Trainer:
 
         train_begin = time.time()
         time_before_get_data = time.time()
-        for data_batch in self._data_iter():
+        for data_batch in self._prefetched_data_iter():
             time_before_train_step = time.time()
 
             ProberList.set_step(self._cur_step + 1)
@@ -1507,6 +1509,47 @@ class Trainer:
                 data_iter = iter(self._dataloader)
                 data = next(data_iter)
 
+            yield data
+
+    def _prefetched_data_iter(self):
+        # V2c candidate: with XTUNER_LAZY_MEDIA_PREFETCH=1, fetch one batch ahead on a
+        # background thread and kick off lazy media materialization there, overlapping
+        # decode with the previous step's compute. Disabled (default) yields the plain
+        # serial iterator, byte-identical to the upstream loop.
+        #
+        # The batch count is held LOCALLY here: _data_iter's `while self._cur_step <
+        # total_step` gate races when iterated from the lookahead thread (the main thread
+        # advances _cur_step concurrently; the first smoke run over-yielded 2 batches and
+        # trained 5 steps of a 3-step config — evidence in runs/A8-v2c-smoke3).
+        from xtuner.v1.train.lazy_media_prefetch import lazy_media_prefetch_enabled, lookahead_iter
+
+        if lazy_media_prefetch_enabled():
+            remaining = self.total_step - self._cur_step
+
+            def bounded_raw() -> Iterator[Any]:
+                raw = self._raw_data_iter()
+                for _ in range(remaining):
+                    yield next(raw)
+
+            from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import lazy_media_shared_decode
+            decode_here = not lazy_media_shared_decode() or self.sp_mesh.get_local_rank() == 0
+            logger.info(f"Rank: {self.rank} async media decoder={decode_here}, SP rank={self.sp_mesh.get_local_rank()}")
+            yield from lookahead_iter(bounded_raw(), decode_here=decode_here, count=remaining)
+        else:
+            yield from self._data_iter()
+
+    def _raw_data_iter(self) -> Iterator[Any]:
+        # Unbounded per-batch iterator with epoch restart; the CALLER bounds the count
+        # (kept separate from _data_iter so the disabled path stays byte-identical).
+        data_iter = iter(self._dataloader)
+        while True:
+            try:
+                data = next(data_iter)
+            except StopIteration:
+                self._cur_epoch += 1
+                self._dataloader.set_epoch(self._cur_epoch)
+                data_iter = iter(self._dataloader)
+                continue
             yield data
 
     def _get_checkpoint_path(self, epoch: int, step: int, is_snapshot: bool = False) -> Path:

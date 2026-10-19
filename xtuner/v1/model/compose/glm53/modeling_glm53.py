@@ -28,6 +28,17 @@ from .vision_utils import flatten_video_grid_thw
 GLM53_COMPILE_CFG: dict[str, TorchCompileOption] = {}
 
 
+def _materialize_or_join(media_plan: dict) -> tuple[torch.Tensor, torch.Tensor]:
+    """Materialize now, or join the V2c prefetch future already attached to the plan."""
+    from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import materialize_image_plan
+    from xtuner.v1.train.lazy_media_prefetch import take_media_future
+
+    future = take_media_future(media_plan)
+    if future is not None:
+        return future.result()
+    return materialize_image_plan(media_plan)
+
+
 class Glm53ForConditionalGeneration(BaseComposeModel):
     config: Glm53BaseConfig
 
@@ -137,6 +148,47 @@ class Glm53ForConditionalGeneration(BaseComposeModel):
         input_ids = seq_ctx.input_ids
         assert input_ids is not None
         inputs_embeds = self.language_model.embed_tokens(input_ids)  # type: ignore[attr-defined]
+
+        # Lazy-media candidate: materialize this micro-batch's images right here at
+        # consumption time instead of in the dataloader workers. The plan is produced by
+        # the tokenize side only under XTUNER_LAZY_MEDIA=1 and is decoded by the SAME
+        # load_image/EXIF/image_processor calls (per-sample grouping preserved) with the
+        # processed grids asserted equal to the tokenize-time prediction.
+        if seq_ctx.pixel_values is None and seq_ctx.media_plan is not None:
+            from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import lazy_media_shared_decode
+
+            sp_group = sp_mesh.get_group() if sp_mesh is not None else None
+            if sp_group is not None and dist.get_world_size(sp_group) > 1 and lazy_media_shared_decode():
+                # V2b: every SP rank holds the SAME media plan (packs are replicated under
+                # SP), so shapes are locally computable and only the SP-group's first rank
+                # decodes; the exact bits are then broadcast. Non-decoding ranks receive
+                # bitwise-identical tensors to what local materialization would produce,
+                # with 1/N of the decode CPU and 1/N of the PCIe H2D traffic. Both
+                # collectives run once per image pack on every rank; text-only packs skip
+                # uniformly on all ranks, so the collective sequence stays identical.
+                patch_embed = self.vision_tower.patch_embed
+                patch_dim = (
+                    patch_embed.in_channels
+                    * patch_embed.temporal_patch_size
+                    * patch_embed.patch_size**2
+                )
+                from xtuner.v1.train.lazy_media_prefetch import shared_materialize
+                pixel_values, image_grid_thw = shared_materialize(
+                    seq_ctx.media_plan, sp_group, inputs_embeds.device, patch_dim
+                )
+            else:
+                pixel_values, image_grid_thw = _materialize_or_join(seq_ctx.media_plan)
+                # Mirror the eager device split exactly: SequenceContext.to leaves
+                # pixel_values on CPU (the tower's patch embed does its own H2D) but moves
+                # image_grid_thw to the accelerator (the tower derives cu_seqlens on
+                # grid_thw.device).
+                grid_device = (
+                    seq_ctx.image_grid_thw.device
+                    if seq_ctx.image_grid_thw is not None
+                    else inputs_embeds.device
+                )
+                image_grid_thw = image_grid_thw.to(grid_device)
+            seq_ctx = seq_ctx.copy(pixel_values=pixel_values, image_grid_thw=image_grid_thw)
 
         has_image = seq_ctx.pixel_values is not None
         has_video = seq_ctx.pixel_values_videos is not None
