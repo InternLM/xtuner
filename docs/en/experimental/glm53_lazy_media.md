@@ -24,7 +24,7 @@ Sample-level input/pixel equality was recorded by the experiment. Final versus e
 
 Rebased onto main at 40b3b18 (#2207). The historical table above predates this integration and must not be interpreted as a measurement of the current code.
 
-- Async decoding now runs on every SP-group leader (or every rank when shared decode is disabled). Lookahead is bounded to the current batch plus one future batch. Closing the training iterator joins the producer; an active external media read may still delay shutdown.
+- Async decoding now runs on every SP-group leader (or every rank when shared decode is disabled). Lookahead is bounded to the current batch plus one future batch. The training loop retains its original direct iterator structure. Explicit cleanup on early consumer exit is not guaranteed by an outer context manager and remains a validation item; an active external media read may delay shutdown.
 - Decode and allocation errors are propagated through the main-thread SP protocol. Process death and collective failures still rely on distributed timeouts; rank-plan agreement remains an assumption.
 - The GLM collator's media_dtype travels with lazy plans. Processor outputs are cast before materialization concatenation, and SP buffers use the same dtype. Legacy raw plans without the field retain FP32. Videos retain the upstream eager collator path.
 - OSS configuration and mixed eager-fallback/lazy image ordering are preserved.
