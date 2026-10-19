@@ -159,11 +159,16 @@ class BaseProduceContext:
         return result
 
     async def put_generated_group(self, group: list[RolloutState]) -> bool:
-        validate_rollout_group(group, task_name=self.task_name)
-        produced_tokens = sum(len(item.response_ids or []) - len(item.response_model_steps or []) for item in group)
+        produced_tokens = sum(
+            max(0, len(item.response_ids or []) - len(item.response_model_steps or [])) for item in group
+        )
         initial_status = get_group_status(group)
 
-        if initial_status in (Status.COMPLETED, Status.FILTERED):
+        allowed_statuses = {Status.COMPLETED, Status.FAILED, Status.FILTERED, Status.ABORTED, Status.EXPIRED}
+        if all(item.status in allowed_statuses for item in group) and initial_status in (
+            Status.COMPLETED,
+            Status.FILTERED,
+        ):
             rewards_sum = 0.0
             rewards_count = 0
             for item in group:
@@ -173,6 +178,15 @@ class BaseProduceContext:
                 rewards_sum += float(item.reward["score"])
                 rewards_count += 1
             self.progress.add_raw_rewards(self.task_name, rewards_sum, rewards_count)
+
+        try:
+            validate_rollout_group(group, task_name=self.task_name)
+        except ValueError as exc:
+            logger.warning(f"Discard invalid generated group for task={self.task_name!r}: {exc}")
+            self.progress.add_produced(self.task_name, samples=len(group), tokens=produced_tokens)
+            self.progress.add_discarded(self.task_name, Status.FAILED, samples=len(group))
+            await release_and_discard_rollout_groups([group])
+            return False
 
         if initial_status in (Status.FAILED, Status.FILTERED):
             # 失败样本和业务过滤样本都不进入 replay buffer。
