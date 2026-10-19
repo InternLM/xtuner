@@ -20,15 +20,15 @@ Final observed peak reduction: 71.4%; TGS increase: 5.5%. Each added row is cond
 
 Sample-level input/pixel equality was recorded by the experiment. Final versus eager maximum absolute/relative LLM loss differences from printed step logs: 0.00532436 / 4.83884e-4. Maximum MTP absolute difference: 1.274e-5; grad-norm relative difference: 6.58505e-3. First two LLM losses match at log precision; this is not proof of bitwise training or identical parameter updates. Full-layer BF16 failed during model loading before data processing.
 
-## Outstanding review and validation
+## Current integration and validation
 
-This is a draft experimental snapshot, not ready for production merge.
+Rebased onto main at 40b3b18 (#2207). The historical table above predates this integration and must not be interpreted as a measurement of the current code.
 
-- Lookahead lacks cancellation/join on early consumer exit. Queue capacity one does not imply exactly one future batch: materialization starts before `put`, and the producer may hold another batch while blocked.
-- Async shared decode selects global rank zero. Other SP-group leaders fall back to synchronous materialization at consumption; the current source comment describing an all-rank fallback is inaccurate. DP>1 is unvalidated.
-- Epoch transitions/checkpoint resume and worker error teardown need tests.
-- SP broadcasts assume equal plan shapes/order across ranks, without cross-rank fingerprint checks; fault propagation needs validation.
-- Multiple processor configurations, mixed media, general microbatch counts, and parameter-update equivalence are not fully validated.
-- The original async smoke overran the step limit (5/3); b890abc bounds iteration locally. Corrected smoke completed 3/3 and final completed 20/20.
+- Async decoding now runs on every SP-group leader (or every rank when shared decode is disabled). Lookahead is bounded to the current batch plus one future batch. Closing the training iterator joins the producer; an active external media read may still delay shutdown.
+- Decode and allocation errors are propagated through the main-thread SP protocol. Process death and collective failures still rely on distributed timeouts; rank-plan agreement remains an assumption.
+- The GLM collator's media_dtype travels with lazy plans. Processor outputs are cast before materialization concatenation, and SP buffers use the same dtype. Legacy raw plans without the field retain FP32. Videos retain the upstream eager collator path.
+- OSS configuration and mixed eager-fallback/lazy image ordering are preserved.
 
-The separate per-image eager optimization has independent measurements; it has not been combined with this full ladder in training. Do not add its memory reduction to these numbers.
+Current CPU validation: 17 tests passed, including real-processor BF16/FP32 transport parity, OSS, mixed eager fallback, upstream image/video collator tests, and bounded prefetch/cleanup. A four-process CPU Gloo test passed for two SP groups using BF16 transport and injected leader decode errors.
+
+The new six-run GPU/NCCL precision and performance comparison is pending. No new speedup, long-run convergence, full-model parameter-update equality, or 256-GPU validation is claimed for this rebased version. Checkpoint resume, epoch transitions, process failure, and general microbatch workloads need further validation. Keep this PR experimental.
