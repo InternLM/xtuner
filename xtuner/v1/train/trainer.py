@@ -78,6 +78,11 @@ from xtuner.v1.utils.internal_metrics import (
     InternalMetricsRecorder,
     flatten_internal_metrics_for_logs,
 )
+from xtuner.v1.utils.numa_affinity import (
+    allowed_cpus_by_node,
+    allowed_memory_nodes,
+    format_id_list,
+)
 
 from .toy_tokenizer import UTF8ByteTokenizer
 
@@ -1537,39 +1542,83 @@ class Trainer:
         set_random_seed(seed)
 
     def _try_bind_numa(self):
+        if os.environ.get("XTUNER_DISABLE_NUMA") == "1":
+            log_rank0.info("XTUNER_DISABLE_NUMA=1: skip numa binding")
+            return
         if str(DEVICE) != "cuda":
             log_rank0.info("Current device is not cuda, skip numa binding.")
             return
 
+        local_rank = numa_id = None
+        cpu_bound = False
+        requested_cpu_affinity = None
         try:
-            import numa
-            from numa import memory, schedule
-
-            numa_node_num = numa.info.get_max_node() + 1
+            cpus_by_node = allowed_cpus_by_node(set(os.sched_getaffinity(0)))
+            nodes = sorted(cpus_by_node)
+            numa_node_num = len(nodes)
             total_GPU_per_node = DEVICE_MODULE.device_count()
-
-            # return while total_GPU_per_node is larger than numa_node_num or is not divisible by numa_node_num
-            if total_GPU_per_node <= numa_node_num:
-                return
-            if total_GPU_per_node % numa_node_num != 0:
-                return
-            # return while the number of processes is smaller than one node GPUs num
             if self.world_size < total_GPU_per_node:
                 return
 
+            mems_allowed = allowed_memory_nodes()
+            if not nodes:
+                logger.info(f"Rank: {self.rank} skip numa binding: no NUMA nodes found.")
+                return
             local_rank = self.rank % total_GPU_per_node
-            # compute numa id for each locak rank
-            per_numa = total_GPU_per_node // numa_node_num
-            numa_id = local_rank // per_numa
+            cpu_counts = {node: len(cpus_by_node[node]) for node in nodes}
+            binding_nodes = nodes
+            if total_GPU_per_node < numa_node_num:
+                binding_nodes = [node for node in nodes if cpu_counts[node] > 0][:total_GPU_per_node]
+            if (
+                not binding_nodes
+                or any(cpu_counts[node] == 0 for node in binding_nodes)
+                or sum(cpu_counts[node] for node in binding_nodes) < total_GPU_per_node
+            ):
+                logger.info(
+                    f"Rank: {self.rank} skip numa binding: cannot assign ranks to selected NUMA nodes "
+                    f"without exceeding available CPUs; local GPUs={total_GPU_per_node}, CPUs by node={cpu_counts}."
+                )
+                return
 
-            # bind numa node
-            schedule.run_on_nodes(numa_id)
+            rank_counts = dict.fromkeys(nodes, 0)
+            for _ in range(total_GPU_per_node):
+                available_nodes = [node for node in binding_nodes if rank_counts[node] < cpu_counts[node]]
+                node = min(available_nodes, key=rank_counts.get)
+                rank_counts[node] += 1
+
+            rank_to_node = [node for node in nodes for _ in range(rank_counts[node])]
+            numa_id = rank_to_node[local_rank]
+            requested_cpu_affinity = format_id_list(cpus_by_node[numa_id])
+            if local_rank == 0:
+                plan = {
+                    node: {
+                        "local_ranks": [rank for rank, target in enumerate(rank_to_node) if target == node],
+                        "allowed_cpu_list": format_id_list(cpus_by_node[node]),
+                    }
+                    for node in nodes
+                }
+                logger.info(f"Rank: {self.rank} NUMA CPU rank plan: {plan}")
+
+            os.sched_setaffinity(0, cpus_by_node[numa_id])
+            cpu_bound = True
+            from numa import memory
+
             memory.set_membind_nodes(numa_id)
-        except Exception:
-            logger.info(f"Rank: {self.rank} failed to bind process to numa node.")
+        except Exception as exc:
+            logger.info(
+                f"Rank: {self.rank} failed to bind process to numa node. "
+                f"local_rank={local_rank}, target_node={numa_id}, "
+                f"cpu_bound={cpu_bound}, "
+                f"requested_cpu_affinity={requested_cpu_affinity}, "
+                f"error={type(exc).__name__}: {exc}"
+            )
             return  # try_bind_numa should not raise exception
         else:
-            logger.info(f"Rank: {self.rank} success bind process to numa node: {numa_id}")
+            logger.info(
+                f"Rank: {self.rank} success bind process to numa node: {numa_id}; "
+                f"requested_cpu_affinity={requested_cpu_affinity}, "
+                f"memory_policy=bind:{numa_id}, Mems_allowed_list={format_id_list(mems_allowed)}."
+            )
 
     def _init_dist(self, backend: str | None = None):
         if backend is None:
