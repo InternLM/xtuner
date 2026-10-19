@@ -18,6 +18,8 @@ TestGlm53VisionForwardParity
 TestGlm53VisionProductionAttention
     test_flash_attention_matches_eager             flash kernel 与 eager 基准一致
     test_cpu_pixel_values_are_moved_to_device      CPU 上的 pixel_values 由塔自己搬设备
+TestGlm53Bf16CastParity
+    test_cpu_cast_matches_gpu_cast_bitwise         CPU/GPU fp32->bf16 同为 RNE，逐位一致
 TestGlm53VisionSequenceParallel
     test_sp_tower_and_projector_match_non_sp       2 卡 Vision SP 与非 SP 逐位一致
 """
@@ -337,6 +339,21 @@ class TestGlm53VisionProductionAttention:
         # grid_thw 走 SequenceContext.to()，生产里已在 device 上；只有 pixel_values 留在 CPU。
         out = xt_vision(cpu_pixel_values, torch.tensor([[1, 4, 4]], device="cuda"))
         assert out.device.type == "cuda"
+
+
+class TestGlm53Bf16CastParity:
+    """collator 把媒体提前在 CPU 上 cast 成 bf16 后，patch_embed 实收值必须与旧路径
+    （fp32 进塔、GPU 上 cast）逐位一致——两侧同为 RNE 舍入，包括恰好卡在 tie 上的值。"""
+
+    @pytest.mark.gpu
+    def test_cpu_cast_matches_gpu_cast_bitwise(self):
+        if not torch.cuda.is_available():
+            pytest.skip("needs a GPU")
+        # 1.0 + 2**-9 的 bf16 舍入位恰是 tie（round bit 置 1、其后全 0），走 RNE 进位到偶；
+        # 再配普通值与负数 tie，覆盖三种舍入方向。
+        ties = torch.tensor([1.0 + 2**-9, 2.0 + 2**-8, -1.0 - 2**-9, 1.0, 0.5, -3.75, 1e-8], dtype=torch.float32)
+        t = torch.cat([ties, torch.randn(1024, dtype=torch.float32)])
+        assert torch.equal(t.to(torch.bfloat16).cuda(), t.cuda().to(torch.bfloat16))
 
 
 class TestGlm53VisionSequenceParallel(DistributedTestBase):

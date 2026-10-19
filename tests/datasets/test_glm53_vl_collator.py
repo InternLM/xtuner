@@ -7,6 +7,10 @@ TestGlm53VlSftCollator
     test_glm53_collator_keeps_media_with_instance    截断丢样本时媒体同步丢弃
     test_glm53_collator_image_video_batch            图像/视频混批各自聚合
     test_glm53_collator_pure_text_sample_has_no_media 纯文本样本不带媒体字段
+TestGlm53VlCollatorCastsMediaToBf16
+    test_image_media_is_bf16_after_collate            图像媒体 collate 后为 bf16、grid 仍 int64
+    test_video_media_is_bf16_after_collate            视频媒体同型
+    test_multi_item_pack_cast_preserves_order_and_values  拼包逐段数值一致
 TestGlm53SequenceContextSplitKeepsMmAlignment
     test_glm53_sequence_context_split_keeps_mm_alignment  SP 切分保持模态标记对齐
 """
@@ -80,6 +84,29 @@ def _glm53_item(text_len: int, image_token_id: int, num_placeholders: int, merge
     return item
 
 
+def _glm53_video_item(text_len: int, image_token_id: int, num_frames: int, merge_unit: int = 4):
+    # 每帧一个 [1, 2, 2] patch 网格：merge_unit 个 raw patch -> 1 个 placeholder/帧；
+    # num_img_tokens 按 ViT 序列（帧）计数，与 tokenize fn 的真实输出同构。
+    num_placeholders = num_frames
+    input_ids = [100] * text_len
+    for i in range(num_placeholders):
+        input_ids[i] = image_token_id
+    labels = list(input_ids)
+    labels[0] = IGNORE_INDEX
+    mm_token_type_ids = torch.zeros(1, text_len, dtype=torch.long)
+    mm_token_type_ids[0, :num_placeholders] = 2
+    return {
+        "input_ids": input_ids,
+        "labels": labels,
+        "num_tokens": text_len,
+        "num_imgs": [0],
+        "num_img_tokens": [merge_unit] * num_frames,
+        "mm_token_type_ids": mm_token_type_ids,
+        "pixel_values_videos": torch.randn(num_frames * merge_unit, 8),
+        "video_grid_thw": torch.tensor([[num_frames, 2, 2]]),
+    }
+
+
 class TestGlm53VlSftCollator:
     IMAGE_TOKEN_ID = 999
     MERGE_UNIT = 4
@@ -146,6 +173,100 @@ class TestGlm53VlSftCollator:
         # 只补 dataloader 自己会传的那几个参数，额外参数必须已经绑好。
         result = collator([[item]], pack_max_length=32, padding_token_idx=0)
         assert result[0]["seq_ctx"].pixel_values.shape == (16, 8)
+
+
+class TestGlm53VlCollatorCastsMediaToBf16:
+    """媒体在 collator（worker 侧、cat 之前）提前转 bf16：fp32 不再穿越 shm IPC、
+    主进程驻留与 H2D；patch_embed 本就 cast bf16，数值应与 fp32 参考逐位一致（同为 RNE）。"""
+
+    IMAGE_TOKEN_ID = 999
+    MERGE_UNIT = 4
+
+    def test_image_media_is_bf16_after_collate(self):
+        # fp32（HF processor 输出 dtype）进 collate，出的 pixel_values 必须已是 bf16 且数值
+        # 只做 fp32->bf16 舍入；grid/mm_token_type_ids 等整型字段不受 cast 波及。
+        item = _glm53_item(text_len=10, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=4)
+        ref = item["pixel_values"].clone()
+        result = glm53_vl_sft_collator(
+            [[item]],
+            pack_max_length=32,
+            padding_token_idx=0,
+            image_token_id=self.IMAGE_TOKEN_ID,
+            merge_unit=self.MERGE_UNIT,
+        )
+        seq_ctx = result[0]["seq_ctx"]
+        assert seq_ctx.pixel_values is not None
+        assert seq_ctx.pixel_values.dtype == torch.bfloat16
+        assert torch.equal(seq_ctx.pixel_values, ref.to(torch.bfloat16))
+        assert seq_ctx.image_grid_thw.dtype == torch.long
+        assert seq_ctx.mm_token_type_ids.dtype == torch.long
+        # 文本侧逐位不变：input_ids = 拼包后 [:, :-1] 再 pad 0；shifted_labels = [:, 1:] 再 pad -100。
+        assert seq_ctx.input_ids.dtype == torch.long
+        expected_input_ids = torch.zeros(1, 32, dtype=torch.long)
+        expected_input_ids[0, :9] = torch.tensor(item["input_ids"][:-1])
+        assert torch.equal(seq_ctx.input_ids, expected_input_ids)
+        expected_labels = torch.full((1, 32), IGNORE_INDEX, dtype=torch.long)
+        expected_labels[0, :9] = torch.tensor(item["labels"][1:])
+        assert torch.equal(result[0]["shifted_labels"], expected_labels)
+
+    def test_video_media_is_bf16_after_collate(self):
+        # 视频模态同型：pixel_values_videos 转 bf16，video_grid_thw 保持 int64。
+        item = _glm53_video_item(text_len=10, image_token_id=self.IMAGE_TOKEN_ID, num_frames=3)
+        ref = item["pixel_values_videos"].clone()
+        result = glm53_vl_sft_collator(
+            [[item]],
+            pack_max_length=32,
+            padding_token_idx=0,
+            image_token_id=self.IMAGE_TOKEN_ID,
+            merge_unit=self.MERGE_UNIT,
+        )
+        seq_ctx = result[0]["seq_ctx"]
+        assert seq_ctx.pixel_values is None
+        assert seq_ctx.pixel_values_videos is not None
+        assert seq_ctx.pixel_values_videos.dtype == torch.bfloat16
+        assert torch.equal(seq_ctx.pixel_values_videos, ref.to(torch.bfloat16))
+        assert seq_ctx.video_grid_thw.dtype == torch.long
+        assert seq_ctx.mm_token_type_ids.dtype == torch.long
+
+    def test_multi_item_pack_cast_preserves_order_and_values(self):
+        # 图像样本与视频样本拼进同一个 pack：两路媒体各自逐段 torch.equal，顺序保持。
+        image_item = _glm53_item(text_len=8, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=2)
+        video_item = _glm53_video_item(text_len=6, image_token_id=self.IMAGE_TOKEN_ID, num_frames=3)
+        image_ref = image_item["pixel_values"].clone()
+        video_ref = video_item["pixel_values_videos"].clone()
+        result = glm53_vl_sft_collator(
+            [[image_item, video_item]],
+            pack_max_length=32,
+            padding_token_idx=0,
+            image_token_id=self.IMAGE_TOKEN_ID,
+            merge_unit=self.MERGE_UNIT,
+        )
+        seq_ctx = result[0]["seq_ctx"]
+        assert seq_ctx.pixel_values is not None
+        assert seq_ctx.pixel_values_videos is not None
+        assert seq_ctx.pixel_values.dtype == torch.bfloat16
+        assert seq_ctx.pixel_values_videos.dtype == torch.bfloat16
+        assert torch.equal(seq_ctx.pixel_values, image_ref.to(torch.bfloat16))
+        assert torch.equal(seq_ctx.pixel_values_videos, video_ref.to(torch.bfloat16))
+        assert seq_ctx.num_img_tokens == [[8], [4, 4, 4]]
+
+    def test_media_dtype_is_configurable(self):
+        # media_dtype 只是运输精度、默认 bf16：fp32 vision tower 等场景可经 collator_kwargs
+        # 覆盖为 torch.float32，此时 collator 不做任何舍入（数值与 fp32 参考逐位一致）。
+        item = _glm53_item(text_len=10, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=4)
+        ref = item["pixel_values"].clone()
+        result = glm53_vl_sft_collator(
+            [[item]],
+            pack_max_length=32,
+            padding_token_idx=0,
+            image_token_id=self.IMAGE_TOKEN_ID,
+            merge_unit=self.MERGE_UNIT,
+            media_dtype=torch.float32,
+        )
+        seq_ctx = result[0]["seq_ctx"]
+        assert seq_ctx.pixel_values is not None
+        assert seq_ctx.pixel_values.dtype == torch.float32
+        assert torch.equal(seq_ctx.pixel_values, ref)
 
 
 @pytest.fixture
