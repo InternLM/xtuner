@@ -175,8 +175,9 @@ class TestAgentLoopCanonicalizeTrainFields(unittest.TestCase):
     def test_existing_full_sequence_fields_are_validated(self):
         loop = self._make_loop()
         state = self._state(input_ids=[30, 31, 40], labels=[40], logprobs=None)
-        with self.assertRaisesRegex(ValueError, "labels length mismatch"):
-            loop.canonicalize_train_fields([state])
+        loop.canonicalize_train_fields([state])
+        self.assertEqual(state.status, Status.FAILED)
+        self.assertIn("labels length mismatch", state.error_msg)
         loop.tokenizer.assert_not_called()
 
     def test_non_completed_state_is_skipped(self):
@@ -233,29 +234,31 @@ class TestAgentLoopCanonicalizeTrainFields(unittest.TestCase):
         self.assertEqual(state.extra_fields["train_prompt_length"], 1)
         self.assertEqual(state.extra_fields["supervised_tokens"], 2)
 
-    def test_missing_prompt_ids_propagates_construction_error(self):
+    def test_missing_prompt_ids_marks_sample_failed(self):
         loop = self._make_loop()
         state = self._state()
         state.prompt_ids = None
-        with self.assertRaisesRegex(AssertionError, "Prompt ids cannot be None or empty"):
-            loop.canonicalize_train_fields([state])
-        self.assertEqual(state.status, Status.COMPLETED)
+        loop.canonicalize_train_fields([state])
+        self.assertEqual(state.status, Status.FAILED)
+        self.assertIn("canonicalize_train_fields failed", state.error_msg)
 
-    def test_empty_response_stops_group(self):
+    def test_empty_response_marks_sample_failed(self):
         for response_ids in ([20, 21], []):
             with self.subTest(response_ids=response_ids):
                 loop = self._make_loop()
                 state = self._state(response="", response_ids=response_ids)
-                with self.assertRaisesRegex(ValueError, "response must be non-empty"):
-                    loop.canonicalize_train_fields([state])
+                loop.canonicalize_train_fields([state])
+                self.assertEqual(state.status, Status.FAILED)
+                self.assertIn("response must be non-empty", state.error_msg)
 
-    def test_construction_error_stops_the_group(self):
+    def test_construction_error_is_isolated_within_group(self):
         loop = self._make_loop()
         bad, good = self._state(uid=1), self._state(uid=2)
         bad.prompt_ids = None
-        with self.assertRaises(AssertionError):
-            loop.canonicalize_train_fields([bad, good])
-        self.assertIsNone(good.input_ids)
+        loop.canonicalize_train_fields([bad, good])
+        self.assertEqual(bad.status, Status.FAILED)
+        self.assertEqual(good.status, Status.COMPLETED)
+        self.assertEqual(good.input_ids, [10, 11, 12, 20, 21, 22])
 
 
 class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
@@ -308,23 +311,25 @@ class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
                 self.assertIsNone(state.error_msg)
                 loop.logger.error.assert_not_called()
 
-    def test_labels_length_mismatch_rejected(self):
+    def test_labels_length_mismatch_marks_sample_failed(self):
         for loop_cls in self.AGENTIC_LOOP_CLASSES:
             with self.subTest(loop_cls=loop_cls.__name__):
                 loop = self._make_loop(loop_cls)
                 state = self._agentic_state(input_ids=[30, 31, 40, 41, 42], labels=[-100, -100, 40, 41])
-                with self.assertRaisesRegex(ValueError, "labels length mismatch"):
-                    loop.canonicalize_train_fields([state])
+                loop.canonicalize_train_fields([state])
+                self.assertEqual(state.status, Status.FAILED)
+                self.assertIn("labels length mismatch", state.error_msg)
 
-    def test_missing_labels_rejected(self):
+    def test_missing_labels_marks_sample_failed(self):
         for loop_cls in self.AGENTIC_LOOP_CLASSES:
             with self.subTest(loop_cls=loop_cls.__name__):
                 loop = self._make_loop(loop_cls)
                 state = self._agentic_state(input_ids=[30, 31, 40, 41, 42], labels=None)
-                with self.assertRaisesRegex(ValueError, "Training input_ids and labels must be full and aligned"):
-                    loop.canonicalize_train_fields([state])
+                loop.canonicalize_train_fields([state])
+                self.assertEqual(state.status, Status.FAILED)
+                self.assertIn("Training input_ids and labels must be full and aligned", state.error_msg)
 
-    def test_logprobs_length_mismatch_rejected(self):
+    def test_logprobs_length_mismatch_marks_sample_failed(self):
         for loop_cls in self.AGENTIC_LOOP_CLASSES:
             with self.subTest(loop_cls=loop_cls.__name__):
                 loop = self._make_loop(loop_cls)
@@ -333,8 +338,9 @@ class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
                     labels=[-100, -100, 40, 41, 42],
                     logprobs=[0.0, -0.1, -0.2],
                 )
-                with self.assertRaisesRegex(ValueError, "logprobs length mismatch"):
-                    loop.canonicalize_train_fields([state])
+                loop.canonicalize_train_fields([state])
+                self.assertEqual(state.status, Status.FAILED)
+                self.assertIn("logprobs length mismatch", state.error_msg)
 
     def test_writes_train_meta_for_valid_states(self):
         for loop_cls in self.AGENTIC_LOOP_CLASSES:
