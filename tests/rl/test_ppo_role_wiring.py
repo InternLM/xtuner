@@ -1,6 +1,8 @@
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -13,6 +15,8 @@ from xtuner.v1.rl.advantage.gae import action_gae, terminal_rewards
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.rl.trainer.critic_worker import CriticWorker, CriticWorkerConfig
 from xtuner.v1.rl.trainer.schedule import build_lr_scheduler, partition_indices, pass_order
+from xtuner.v1.rl.trainer.worker import TrainingWorker
+from xtuner.v1.train.trainer import LoadCheckpointConfig
 
 
 def _state(**overrides) -> RolloutState:
@@ -180,7 +184,7 @@ class TestPPORoleWiring(unittest.TestCase):
         self.assertIs(worker.sp_mesh, host.sp_mesh)
         self.assertIs(train_engine.call_args.kwargs["fsdp_cfg"], fsdp_cfg)
         self.assertIs(build_scheduler.call_args.args[0], train_engine.return_value)
-        self.assertIs(train_engine.return_value.from_hf.call_args.args[0], "/tmp/critic")
+        train_engine.return_value.from_hf.assert_called_once_with("/tmp/critic", strict=False)
         self.assertFalse(critic_cfg.model_cfg.compile_cfg)
 
     def test_critic_requires_host_worker(self):
@@ -193,6 +197,71 @@ class TestPPORoleWiring(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "must be attached"):
             CriticWorker(critic_cfg, host=None)
+
+    def test_save_hf_includes_attached_critic(self):
+        worker = TrainingWorker.__new__(TrainingWorker)
+        worker._engine = MagicMock()
+        critic_worker = MagicMock()
+        teacher_worker = MagicMock()
+        worker._attached = {"critic": critic_worker, "teacher": teacher_worker}
+        worker._sft_dataloader = None
+        worker.logger = MagicMock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = Path(tmpdir) / "ckpt-step-1"
+            checkpoint_path.mkdir()
+            actor_path = checkpoint_path / "actor"
+            actor_path.mkdir()
+            (actor_path / ".metadata").write_text("")
+            (checkpoint_path / "critic").mkdir()
+            (checkpoint_path / "teacher").mkdir()
+            TrainingWorker.save(worker, checkpoint_path, no_save_optimizer=True)
+            self.assertEqual(
+                worker._engine.save_dcp.call_args.kwargs["weights_dir"],
+                checkpoint_path / "actor",
+            )
+            critic_worker.save.assert_called_once_with(checkpoint_path / "critic", no_save_optimizer=True)
+            teacher_worker.save.assert_not_called()
+
+            TrainingWorker.resume(
+                worker,
+                LoadCheckpointConfig(checkpoint_path=checkpoint_path, load_optimizer_states=False),
+            )
+            critic_worker.resume.assert_called_once()
+            teacher_worker.resume.assert_not_called()
+
+            TrainingWorker.save_hf(worker, checkpoint_path / "hf", save_dtype=torch.float16)
+
+        self.assertEqual(
+            worker._engine.save_hf.call_args.args,
+            (checkpoint_path / "hf" / "actor", torch.float16),
+        )
+        critic_worker.save_hf.assert_called_once_with(checkpoint_path / "hf" / "critic", torch.float16)
+        teacher_worker.save_hf.assert_not_called()
+
+        critic = CriticWorker.__new__(CriticWorker)
+        critic._engine = MagicMock()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            critic_path = Path(tmpdir) / "critic"
+            critic_path.mkdir()
+            critic.save(critic_path, no_save_optimizer=True)
+            critic_path.joinpath(".metadata").write_text("")
+            critic.resume(critic_path)
+
+        critic._engine.save_dcp.assert_called_once_with(
+            weights_dir=critic_path,
+            save_optimizer=False,
+        )
+        critic._engine.load_dcp.assert_called_once_with(
+            weights_dir=critic_path,
+            load_states=True,
+            load_args=True,
+        )
+        critic.save_hf(Path("/tmp/critic-hf"), save_dtype=torch.float16)
+        critic._engine.save_hf.assert_called_once_with(
+            hf_dir=Path("/tmp/critic-hf"),
+            save_dtype=torch.float16,
+        )
 
     def test_actor_only_switch_rejects_unknown_role(self):
         controller = TrainingController(workers=[])

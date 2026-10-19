@@ -862,7 +862,7 @@ class BaseRLTrainer:
 
         # save tokenizer
         if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
-            self.tokenizer.save_pretrained(str(save_hf_path))
+            self.tokenizer.save_pretrained(str(save_hf_path / "actor"))
 
     async def _run_initial_evaluate(self) -> None:
         eval_batch: list[list[RolloutState]] = []

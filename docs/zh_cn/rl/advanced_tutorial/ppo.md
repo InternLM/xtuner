@@ -91,6 +91,25 @@ class CriticWorkerConfig(BaseModel):
 - 设置了 `optimizer_steps_per_pass` 时，每个 pass 把本地 pack 摊平。第一轮保持原顺序，之后的 pass 打乱，再切成 `optimizer_steps_per_pass` 次优化器更新。`num_passes` 是重复次数。
 - 一次更新里可训练 token 数为 0 时跳过。梯度范数通过 `optimizer_step_succeeds` 时才 `scheduler.step()`。
 
+## Checkpoint 布局
+
+DCP 与 HF 导出都使用 role-first 布局：
+
+```text
+checkpoints/
+└── ckpt-step-10/
+    ├── actor/
+    ├── critic/
+    └── train_state.json
+
+hf/
+└── hf-step-N/
+    ├── actor/
+    └── critic/
+```
+
+critic value head 的 HF 权重名是 `value_head.weight`。
+
 ## CriticLossConfig
 
 [`CriticLossConfig`](xtuner.v1.rl.loss.CriticLossConfig) 不继承 policy loss。它回归的是 value head，不是词表。

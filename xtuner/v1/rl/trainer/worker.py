@@ -394,7 +394,8 @@ class TrainSample:
 
 
 class TrainingWorker(SingleAcceleratorWorker):
-    _SAVE_WEIGHTS_DIR = "weights"
+    _ACTOR_CHECKPOINT_DIR = "actor"
+    _CRITIC_ROLE = "critic"
     _SAVE_SFT_DATALOADER_DIR = "sft_dataloader"
     _SAVE_SFT_TRAIN_STATE_PATH = "sft_train_state.json"
 
@@ -1652,7 +1653,12 @@ class TrainingWorker(SingleAcceleratorWorker):
 
     @ray_method
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
-        self._engine.save_hf(hf_dir, save_dtype)
+        actor_hf_dir = Path(hf_dir) / self._ACTOR_CHECKPOINT_DIR
+        self._engine.save_hf(actor_hf_dir, save_dtype)
+
+        critic_worker = self._attached.get(self._CRITIC_ROLE)
+        if critic_worker is not None:
+            critic_worker.save_hf(Path(hf_dir) / self._CRITIC_ROLE, save_dtype)
 
     @ray_method
     def get_data_replicate_size(self) -> int:
@@ -1742,7 +1748,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         """Save the DCP checkpoint of the training worker."""
         if not isinstance(checkpoint_path, Path):
             checkpoint_path = Path(checkpoint_path)
-        weights_path = checkpoint_path / self._SAVE_WEIGHTS_DIR
+        weights_path = checkpoint_path / self._ACTOR_CHECKPOINT_DIR
 
         # Save model and optimizer
         self._engine.save_dcp(
@@ -1750,10 +1756,9 @@ class TrainingWorker(SingleAcceleratorWorker):
             save_optimizer=not no_save_optimizer,
         )
 
-        for name, worker in self._attached.items():
-            save_fn = getattr(worker, "save", None)
-            if save_fn is not None:
-                save_fn(checkpoint_path / name, no_save_optimizer=no_save_optimizer)
+        critic_worker = self._attached.get(self._CRITIC_ROLE)
+        if critic_worker is not None:
+            critic_worker.save(checkpoint_path / self._CRITIC_ROLE, no_save_optimizer=no_save_optimizer)
 
         # Save sft dataloader
         if self._sft_dataloader is not None:
@@ -1791,9 +1796,9 @@ class TrainingWorker(SingleAcceleratorWorker):
         if not resume_from.exists():
             raise FileNotFoundError(f"Checkpoint path {resume_from} does not exist.")
 
-        weights_path = resume_from / self._SAVE_WEIGHTS_DIR
-        if not weights_path.exists():
-            raise FileNotFoundError(f"Checkpoint at {resume_from} has no '{self._SAVE_WEIGHTS_DIR}/' directory.")
+        weights_path = resume_from / self._ACTOR_CHECKPOINT_DIR
+        if not (weights_path / ".metadata").is_file():
+            raise FileNotFoundError(f"Checkpoint at {resume_from} has no actor DCP metadata.")
 
         self._engine.load_dcp(
             weights_dir=weights_path,
@@ -1801,15 +1806,14 @@ class TrainingWorker(SingleAcceleratorWorker):
             load_args=load_checkpoint_cfg.load_optimizer_args,
         )
 
-        for name, worker in self._attached.items():
-            resume_fn = getattr(worker, "resume", None)
-            role_path = resume_from / name
-            if resume_fn is not None and role_path.exists():
-                resume_fn(
-                    role_path,
-                    load_optimizer_states=load_checkpoint_cfg.load_optimizer_states,
-                    load_optimizer_args=load_checkpoint_cfg.load_optimizer_args,
-                )
+        critic_worker = self._attached.get(self._CRITIC_ROLE)
+        critic_path = resume_from / self._CRITIC_ROLE
+        if critic_worker is not None and critic_path.exists():
+            critic_worker.resume(
+                critic_path,
+                load_optimizer_states=load_checkpoint_cfg.load_optimizer_states,
+                load_optimizer_args=load_checkpoint_cfg.load_optimizer_args,
+            )
 
         # Resume sft dataloader
         if self._sft_dataloader is not None:

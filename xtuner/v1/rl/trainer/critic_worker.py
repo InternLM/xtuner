@@ -25,7 +25,6 @@ if TYPE_CHECKING:
 DEVICE_MODULE = get_torch_device_module()
 
 DEVICE = get_device()
-_SAVE_WEIGHTS_DIR = "weights"
 
 
 class CriticWorkerConfig(BaseModel):
@@ -82,7 +81,9 @@ class CriticWorker:
             fsdp_cfg=fsdp_cfg,
             model_cfg=worker_cfg.model_cfg,
         )
-        self._engine.from_hf(worker_cfg.load_from)
+        # Actor checkpoints do not contain value_head.weight. Load the backbone with
+        # strict=False; the missing critic head is initialized after checkpoint loading.
+        self._engine.from_hf(worker_cfg.load_from, strict=False)
         self._optimizer_steps = worker_cfg.optimizer_steps
         self._num_passes = worker_cfg.num_passes
         self._optimizer_steps_per_pass = worker_cfg.optimizer_steps_per_pass
@@ -381,9 +382,13 @@ class CriticWorker:
         """Save the critic engine under its role-specific checkpoint path."""
         checkpoint_path = Path(checkpoint_path)
         self._engine.save_dcp(
-            weights_dir=checkpoint_path / _SAVE_WEIGHTS_DIR,
+            weights_dir=checkpoint_path,
             save_optimizer=not no_save_optimizer,
         )
+
+    def save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16) -> None:
+        """Save the critic engine in Hugging Face format."""
+        self._engine.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
 
     def resume(
         self,
@@ -394,11 +399,10 @@ class CriticWorker:
     ) -> None:
         """Restore the critic engine from its role-specific checkpoint."""
         checkpoint_path = Path(checkpoint_path)
-        weights_path = checkpoint_path / _SAVE_WEIGHTS_DIR
-        if not weights_path.exists():
-            raise FileNotFoundError(f"Critic checkpoint at {checkpoint_path} has no '{_SAVE_WEIGHTS_DIR}/' directory.")
+        if not (checkpoint_path / ".metadata").is_file():
+            raise FileNotFoundError(f"Critic checkpoint at {checkpoint_path} has no DCP metadata.")
         self._engine.load_dcp(
-            weights_dir=weights_path,
+            weights_dir=checkpoint_path,
             load_states=load_optimizer_states,
             load_args=load_optimizer_args,
         )
