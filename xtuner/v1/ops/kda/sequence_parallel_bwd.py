@@ -414,7 +414,11 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             FORWARD=False,
             INTRACARD_MODE=False,
             NUM_SEQ_ENTRIES=0,
-            TRANSPOSE_STATE=transpose_state_layout,
+            **fla_state_layout_kwargs(
+                merge_fwd_bwd_kernel,
+                transpose_state_layout,
+                hv=do.shape[-2],
+            ),
         )
 
     # initial_state is None in the CP mode
