@@ -350,11 +350,11 @@ class TrainEngine:
             name = name.replace("_orig_mod.", "")
         return name
 
-    def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
+    def save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16):
         """Save the hf model to the given directory.
 
         Args:
-            hf_dir (str): The directory to save the model.
+            hf_dir (Path | str): The directory to save the model.
             save_dtype (torch.dtype): The dtype to save the model parameters, bfloat16 or float8.
         """
         self.model.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
