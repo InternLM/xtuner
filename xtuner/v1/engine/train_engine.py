@@ -221,12 +221,8 @@ class TrainEngine:
         data_batch_info = self.model.pre_micro_batch_forward(data_batches)
         total_loss = torch.tensor(0.0, device=DEVICE)
 
-        # Saved-tensor offload is scoped to one complete optimizer step. All
-        # microbatch backwards are done inside this scope, so no saved
-        # activation is needed afterwards; the scope exit is also the only
-        # point where it is safe to wait for the offload copy streams before
-        # dropping their references. `finally` guarantees the release even
-        # when backward raises (OOM retry, NaN abort, ...).
+        # Release each microbatch's saved-tensor state after backward. Keep the
+        # final cleanup for exceptions and any state created by post-processing.
         try:
             for i in range(0, len(data_batches), intra_layer_micro_batch):
                 ProberList.set_micro_batch_iter(micro_batch_iter)
@@ -250,7 +246,14 @@ class TrainEngine:
 
                 loss = self._get_total_loss(output)
                 loss.backward()
-                total_loss += loss.detach()
+                # Logging must not retain checkpoint contexts from completed backwards.
+                # Detaching here leaves accumulated parameter gradients untouched.
+                loss = loss.detach()
+                for field in type(output).model_fields:
+                    if "loss" in field and isinstance(getattr(output, field), torch.Tensor):
+                        setattr(output, field, getattr(output, field).detach())
+                OffloadManager().clear_step()
+                total_loss += loss
                 # call dump_forward_records after backward to record the recomputed activations
                 ProberList.after_micro_iter_forward()
 
