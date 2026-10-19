@@ -1,4 +1,5 @@
 import copy
+import json
 
 import pytest
 from tokenizers import Tokenizer
@@ -57,3 +58,32 @@ def test_projection_preserves_system_content_blocks_and_tool_arguments():
     assert projected[0]["content"] == [{"type": "text", "text": "first"}, {"type": "text", "text": "late"}]
     assert projected[-1]["tool_calls"][0]["function"]["arguments"] == {"command": "pwd"}
     assert messages == original
+
+
+@pytest.mark.parametrize("encoded", [False, True])
+def test_sdk_argument_reordering_preserves_the_rendered_trace_key(encoded):
+    tok = tokenizer(True)
+    tok.chat_template = """{% for m in messages %}{% for call in m.tool_calls %}
+{% for key, value in call.function.arguments.items() %}{{ key }}={{ value | tojson }};
+{% endfor %}{% endfor %}{% endfor %}"""
+    first = {"description": "write result", "command": "printf neutral", "nested": [{"z": 1, "a": 2}]}
+    reordered = {"command": "printf neutral", "nested": [{"a": 2, "z": 1}], "description": "write result"}
+
+    def render(arguments):
+        messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"function": {"name": "Bash", "arguments": json.dumps(arguments) if encoded else arguments}}
+                ],
+            }
+        ]
+        original = copy.deepcopy(messages)
+        result = tok.apply_chat_template(
+            canonicalize_messages_for_chat_template(messages, tokenizer=tok), tokenize=False
+        )
+        assert messages == original
+        return result
+
+    assert render(first) == render(reordered)
+    assert list(first) == ["description", "command", "nested"]
