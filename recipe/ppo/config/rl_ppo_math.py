@@ -278,8 +278,6 @@ critic_cfg = CriticWorkerConfig(
     ),
     loss_cfg=CriticLossConfig(cliprange_value=0.6, ignore_idx=-100),
     lr_cfg=critic_lr_cfg,
-    fsdp_cfg=deepcopy(fsdp_cfg),
-    sp_size=sp_size,
     optimizer_steps=train_optimizer_steps,
     num_passes=critic_num_passes,
     optimizer_steps_per_pass=critic_optimizer_steps,

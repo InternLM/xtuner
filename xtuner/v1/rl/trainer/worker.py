@@ -225,6 +225,9 @@ class WorkerConfig(BaseModel):
             CPU and move each layer's slice to device during forward. Defaults to False.
         offload_old_logprobs (bool): Keep actor old log probabilities on CPU between
             metric computation and the optimizer step. Defaults to False.
+        critic_cfg (CriticWorkerConfig | None): Attached critic configuration.
+            The critic reuses this worker's FSDP and sequence-parallel topology;
+            do not configure those fields on the critic itself.
 
     **Examples:**
 

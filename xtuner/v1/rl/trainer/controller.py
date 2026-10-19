@@ -243,6 +243,7 @@ class TrainingController:
                 self._compute_group_advantages(group["rewards"], group["representatives"], group["cluster_indices"])
             )
         return advantages
+
     def _build_trainer_log_info(
         self,
         prepared: _PreparedBatch,
@@ -490,6 +491,7 @@ class TrainingController:
             }
             for dp_rank, dp_plan in pack_plan["dp_plans"].items()
         }
+
     def _compute_ppo_targets(
         self,
         rollout_items: list[RolloutState],

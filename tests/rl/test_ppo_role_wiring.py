@@ -1,12 +1,17 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
+from xtuner.v1.config import AdamWConfig, FSDPConfig
 from xtuner.v1.config.optim import LRConfig
 from xtuner.v1.data_proto.rl_data import RolloutState
+from xtuner.v1.model.dense.qwen3 import Qwen3Dense0P6BConfig
 from xtuner.v1.rl.advantage import GAEAdvantageConfig, GAEEstimator
 from xtuner.v1.rl.advantage.gae import action_gae, terminal_rewards
 from xtuner.v1.rl.trainer.controller import TrainingController
+from xtuner.v1.rl.trainer.critic_worker import CriticWorker, CriticWorkerConfig
 from xtuner.v1.rl.trainer.schedule import build_lr_scheduler, partition_indices, pass_order
 
 
@@ -150,6 +155,44 @@ class TestPPORoleWiring(unittest.TestCase):
         self.assertEqual([worker.role for worker in workers], ["critic", "critic"])
         controller.switch_role_modules("actor")
         self.assertEqual(workers[1].role, "actor")
+
+    def test_critic_reuses_host_fsdp_and_sp_topology(self):
+        self.assertNotIn("fsdp_cfg", CriticWorkerConfig.model_fields)
+        self.assertNotIn("sp_size", CriticWorkerConfig.model_fields)
+
+        model_cfg = Qwen3Dense0P6BConfig(head_type="value_head")
+        critic_cfg = CriticWorkerConfig(
+            model_cfg=model_cfg,
+            optim_cfg=AdamWConfig(lr=1e-6, foreach=False),
+            lr_cfg=LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6),
+            load_from="/tmp/critic",
+        )
+        fsdp_cfg = FSDPConfig(torch_compile=False)
+        host = SimpleNamespace(config=SimpleNamespace(fsdp_cfg=fsdp_cfg), sp_mesh=object())
+
+        with (
+            patch("xtuner.v1.rl.trainer.critic_worker.TrainEngine") as train_engine,
+            patch("xtuner.v1.rl.trainer.critic_worker.build_lr_scheduler") as build_scheduler,
+        ):
+            worker = CriticWorker(critic_cfg, host=host)
+
+        self.assertIs(worker.host, host)
+        self.assertIs(worker.sp_mesh, host.sp_mesh)
+        self.assertIs(train_engine.call_args.kwargs["fsdp_cfg"], fsdp_cfg)
+        self.assertIs(build_scheduler.call_args.args[0], train_engine.return_value)
+        self.assertIs(train_engine.return_value.from_hf.call_args.args[0], "/tmp/critic")
+        self.assertFalse(critic_cfg.model_cfg.compile_cfg)
+
+    def test_critic_requires_host_worker(self):
+        model_cfg = Qwen3Dense0P6BConfig(head_type="value_head")
+        critic_cfg = CriticWorkerConfig(
+            model_cfg=model_cfg,
+            optim_cfg=AdamWConfig(lr=1e-6, foreach=False),
+            lr_cfg=LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6),
+            load_from="/tmp/critic",
+        )
+        with self.assertRaisesRegex(ValueError, "must be attached"):
+            CriticWorker(critic_cfg, host=None)
 
     def test_actor_only_switch_rejects_unknown_role(self):
         controller = TrainingController(workers=[])
