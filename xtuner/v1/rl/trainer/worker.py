@@ -78,6 +78,7 @@ from xtuner.v1.utils.fsdp import release_deferred_fsdp_all_gathers
 from xtuner.v1.utils.nccl_process_group import resume_nccl_process_groups, suspend_nccl_process_groups
 
 from ..rollout_is import merge_rollout_is_metrics
+from .critic_worker import CriticWorker, CriticWorkerConfig
 from .pack import DPRankPackIndices, TokenTensorBatch
 from .schedule import build_lr_scheduler, optimizer_step_succeeds
 
@@ -284,7 +285,7 @@ class WorkerConfig(BaseModel):
 
     # The critic is hosted in this actor process. A configured critic selects
     # the critic training flow; GAE is selected by the advantage estimator.
-    critic_cfg: Any | None = None
+    critic_cfg: CriticWorkerConfig | None = None
 
     def build(
         self,
@@ -315,8 +316,6 @@ class WorkerConfig(BaseModel):
             distillation=distillation,
         )
         if self.critic_cfg is not None:
-            from xtuner.v1.rl.trainer.critic_worker import CriticWorker
-
             controller.attach_role("critic", CriticWorker, self.critic_cfg)
         return controller
 
