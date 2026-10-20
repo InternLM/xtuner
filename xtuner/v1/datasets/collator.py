@@ -1,16 +1,14 @@
-import hashlib
-import json
 from typing import Sequence
 
 import torch
 from typing_extensions import TypedDict
 
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.datasets.lazy_media import pack_image_plans
 from xtuner.v1.utils import IGNORE_INDEX, get_logger
 from xtuner.v1.utils.pad import pad_to_max_length
 
 from .data_item import DataItem, Glm53VLDataItem, InternS1DataItem, QwenVL3DataItem
-from .media.config import MediaPipelineConfig
 
 
 logger = get_logger()
@@ -31,68 +29,6 @@ def split_to_chunks(n: int, chunk_size: int) -> list[int]:
 
 def fake_collator(instances: list[DataItem], **kwargs):
     return instances
-
-
-def _prepare_retained_media(instance, seq_ctx, shifted_labels, media_pipeline):
-    if media_pipeline is None or not media_pipeline.enabled:
-        return instance
-    from .media.provider import create_provider
-    from .media.providers import resolve_mixed_media_items
-
-    instance = resolve_mixed_media_items(list(instance), media_pipeline)
-    plans = [item["media_plan"] for item in instance if item.get("media_plan") is not None]
-    if plans:
-        provider = create_provider(plans[0].provider, plans[0].processor_config_json)
-        seq_ctx.media_plan = provider.merge_plans(plans)
-    return instance
-
-
-def _finalize_media_packs(items, media_pipeline):
-    if media_pipeline is None or not media_pipeline.enabled:
-        return items
-    for item in items:
-        context = item["seq_ctx"]
-        fingerprint = hashlib.sha256()
-        fields = {
-            name: getattr(context, name)
-            for name in (
-                "input_ids",
-                "cu_seq_lens_q",
-                "cu_seq_lens_k",
-                "max_length_q",
-                "max_length_k",
-                "num_padding",
-                "mask",
-                "position_ids",
-                "image_grid_thw",
-                "video_grid_thw",
-                "mm_token_type_ids",
-                "num_img_tokens",
-            )
-        }
-        fields["shifted_labels"] = item["shifted_labels"]
-        for name, value in fields.items():
-            if isinstance(value, torch.Tensor):
-                if value.device.type != "cpu":
-                    raise ValueError("media pack identity must be finalized on CPU before SP slicing")
-                header = {"name": name, "kind": "tensor", "dtype": str(value.dtype), "shape": list(value.shape)}
-                content = value.detach().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()
-            else:
-                header = {"name": name, "kind": "json", "present": value is not None}
-                content = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-            encoded = json.dumps(header, sort_keys=True, separators=(",", ":")).encode()
-            fingerprint.update(len(encoded).to_bytes(8, "big"))
-            fingerprint.update(encoded)
-            fingerprint.update(len(content).to_bytes(8, "big"))
-            fingerprint.update(content)
-        for name in ("pixel_values", "pixel_values_videos"):
-            value = getattr(context, name)
-            signature = {"name": name, "present": value is not None}
-            if value is not None:
-                signature.update(dtype=str(value.dtype), shape=list(value.shape))
-            fingerprint.update(json.dumps(signature, sort_keys=True, separators=(",", ":")).encode())
-        context.media_pack_id = fingerprint.hexdigest()
-    return items
 
 
 def build_text_ctx_labels(
@@ -176,19 +112,17 @@ def sft_llm_collator(
     padding_token_idx: int,
     pack_to_max_length: bool = True,
     pad_chunk_size: int = 256,
-    media_pipeline: MediaPipelineConfig | None = None,
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
         # If the token number of the packed sample is larger than the packed_max_length
-        seq_ctx, shifted_labels, instance = build_text_ctx_labels(
+        seq_ctx, shifted_labels, _ = build_text_ctx_labels(
             instance,
             pack_max_length,
             padding_token_idx,
             pack_to_max_length,
             pad_chunk_size,
         )
-        _prepare_retained_media(instance, seq_ctx, shifted_labels, media_pipeline)
         ret.append(
             {
                 "seq_ctx": seq_ctx,
@@ -196,7 +130,7 @@ def sft_llm_collator(
             }
         )
 
-    return _finalize_media_packs(ret, media_pipeline)
+    return ret
 
 
 def intern_s1_vl_sft_collator(
@@ -295,7 +229,6 @@ def qwen3_vl_sft_collator(
     padding_token_idx: int,
     pack_to_max_length: bool = True,
     pad_chunk_size: int = 256,
-    media_pipeline: MediaPipelineConfig | None = None,
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
@@ -307,7 +240,6 @@ def qwen3_vl_sft_collator(
             pack_to_max_length,
             pad_chunk_size,
         )
-        instance = _prepare_retained_media(instance, seq_ctx, shifted_labels, media_pipeline)
 
         all_position_ids_none = all(
             "position_ids" not in _instance or _instance["position_ids"] is None for _instance in instance
@@ -343,6 +275,7 @@ def qwen3_vl_sft_collator(
         for data in instance:
             num_img_tokens.append(data.get("num_img_tokens", [0]))
 
+        media_plan = pack_image_plans(instance)
         pixel_values: list | torch.Tensor | None
         pixel_values = [i["pixel_values"] for i in instance if "pixel_values" in i]
         if pixel_values:
@@ -360,6 +293,7 @@ def qwen3_vl_sft_collator(
         if position_ids is not None:
             seq_ctx.position_ids = position_ids  # type: ignore
 
+        seq_ctx.media_plan = media_plan
         seq_ctx.pixel_values = pixel_values  # type: ignore
         seq_ctx.image_grid_thw = image_grid_thw
         seq_ctx.num_img_tokens = num_img_tokens
@@ -376,7 +310,7 @@ def qwen3_vl_sft_collator(
             }
         )
 
-    return _finalize_media_packs(ret, media_pipeline)
+    return ret
 
 
 def glm53_vl_sft_collator(
@@ -388,7 +322,6 @@ def glm53_vl_sft_collator(
     pack_to_max_length: bool = True,
     pad_chunk_size: int = 256,
     media_dtype: torch.dtype = torch.bfloat16,
-    media_pipeline: MediaPipelineConfig | None = None,
 ) -> list[ColateItem]:
     """Collate GLM-5.3 packs into text contexts and concatenated media.
 
@@ -450,9 +383,10 @@ def glm53_vl_sft_collator(
             pack_to_max_length,
             pad_chunk_size,
         )
-        instance = _prepare_retained_media(instance, seq_ctx, shifted_labels, media_pipeline)
 
         num_img_tokens: list[list[int]] = [data.get("num_img_tokens", [0]) for data in instance]
+
+        media_plan = pack_image_plans(instance, media_dtype=media_dtype)
 
         # Cast image/video patches to the transport dtype (default bf16) on the worker side,
         # before cat and the cross-process IPC: the vision tower's patch_embed casts patches to
@@ -510,6 +444,7 @@ def glm53_vl_sft_collator(
         seq_ctx.video_grid_thw = video_grid_thw
         seq_ctx.mm_token_type_ids = mm_token_type_ids
         seq_ctx.num_img_tokens = num_img_tokens
+        seq_ctx.media_plan = media_plan  # type: ignore[assignment]
 
         ret.append(
             {
@@ -518,4 +453,4 @@ def glm53_vl_sft_collator(
             }
         )
 
-    return _finalize_media_packs(ret, media_pipeline)
+    return ret

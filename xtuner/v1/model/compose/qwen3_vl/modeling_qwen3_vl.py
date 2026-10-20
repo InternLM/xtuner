@@ -147,6 +147,9 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
             self,
             seq_ctx: SequenceContext,
     ) -> tuple[torch.FloatTensor, list[torch.Tensor] | None, torch.Tensor | None]:
+        from xtuner.v1.datasets.lazy_media import resolve_lazy_media
+
+        seq_ctx = resolve_lazy_media(seq_ctx)
         input_ids = seq_ctx.input_ids
         pixel_values = seq_ctx.pixel_values
         image_grid_thw = seq_ctx.image_grid_thw

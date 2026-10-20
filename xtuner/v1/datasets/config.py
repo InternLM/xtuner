@@ -1,5 +1,4 @@
 import copy
-import inspect
 import os
 import pydoc
 from functools import partial
@@ -10,7 +9,7 @@ import torch
 from cyclopts import Parameter
 from mmengine.dist import get_rank
 from mmengine.fileio import list_dir_or_file
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, TypeAdapter, model_validator
 from torch.distributed.device_mesh import DeviceMesh
 from torch.utils.data import ConcatDataset, RandomSampler, SequentialSampler
 from torch.utils.data import DataLoader as TorchDataLoader
@@ -29,7 +28,6 @@ from .collator import (
 )
 from .dataloader import BaseDataloader, Dataloader
 from .jsonl import JsonlDataset
-from .media.config import MediaPipelineConfig
 from .packing import ExpandSoftPackDataset, HardPackDataset, MLLMPretrainHybridPackDataset, _LegacySoftPackDataset
 from .preset_pack import PresetPackDataset
 from .preset_sampler import PresetSampler
@@ -278,7 +276,6 @@ class BaseDataloaderConfig(BaseModel):
 
 
 class DataloaderConfig(BaseDataloaderConfig):
-    media_pipeline: MediaPipelineConfig = Field(default_factory=MediaPipelineConfig, exclude=True)
     model_config = ConfigDict(title="Dataloader config for xtuner", extra="forbid", arbitrary_types_allowed=True)
 
     dataset_config_list: DatasetConfigList | None = None
@@ -376,10 +373,6 @@ class DataloaderConfig(BaseDataloaderConfig):
         collator = builtin.get(self.collator) or pydoc.locate(self.collator)
         if collator is None:
             raise ImportError(f"Cannot locate collator: {self.collator}")
-        if self.media_pipeline.enabled:
-            if "media_pipeline" not in inspect.signature(collator).parameters:
-                raise ValueError("selected collator does not support the enabled media pipeline")
-            return partial(collator, media_pipeline=self.media_pipeline, **self.collator_kwargs)
         return partial(collator, **self.collator_kwargs) if self.collator_kwargs else collator
 
     @model_validator(mode="before")
@@ -415,19 +408,6 @@ class DataloaderConfig(BaseDataloaderConfig):
                 if self.pack_level == "preset"
                 else self.dataset_config_list
             )
-            if self.media_pipeline.enabled:
-                updated_configs = []
-                for config in effective_config_list:
-                    tokenize_config = config["tokenize_fn"]
-                    if not getattr(tokenize_config, "supports_media_pipeline", False):
-                        raise ValueError("selected tokenizer does not support the enabled media pipeline")
-                    updated_configs.append(
-                        {
-                            **config,
-                            "tokenize_fn": tokenize_config.model_copy(update={"media_pipeline": self.media_pipeline}),
-                        }
-                    )
-                effective_config_list = updated_configs
             datasets = build_datasets(effective_config_list, tokenizer, tokenizer_hash=self.tokenizer_hash)
 
         assert isinstance(datasets, list), "datasets must be a list of datasets."

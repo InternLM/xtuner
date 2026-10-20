@@ -24,7 +24,7 @@ import copy
 import json
 import os
 from collections.abc import Mapping
-from typing import Any, ClassVar, Literal
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -39,8 +39,7 @@ from xtuner.v1.data_proto.messages.glm53_chat import _tokenize_with_loss_mask, r
 from xtuner.v1.utils import get_logger
 
 from ..data_item import CacheItem, Glm53VLDataItem
-from ..media.config import MediaPipelineConfig
-from ..media.providers.shared import check_video_policy, initialize_image_provider, prepare_image_inputs
+from ..lazy_media import lazy_media_enabled, make_image_plan
 from ..utils import apply_exif_orientation
 from .base_mllm_tokenize_fn import (
     BaseMLLMTokenizeFnConfig,
@@ -151,13 +150,13 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         oss_time_log_thr: int = 10,
         trim_memory_interval: int = 1,
         oss_loader_cfg: OSSLoaderConfig | None = None,
-        media_pipeline: MediaPipelineConfig | None = None,
     ):
         if processor_path not in _PROCESSOR_CACHE:
             _PROCESSOR_CACHE[processor_path] = AutoProcessor.from_pretrained(processor_path, trust_remote_code=True)
         self.processor = copy.deepcopy(_PROCESSOR_CACHE[processor_path])
         self.image_processor = self.processor.image_processor
         self.video_processor = self.processor.video_processor
+        self._lazy_oss_cfg = oss_loader_cfg.model_dump() if oss_loader_cfg is not None else None
 
         if min_pixels is not None:
             self.image_processor.min_image_tokens = min_pixels
@@ -175,7 +174,6 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         self.merge_unit = self.image_processor.merge_size**2
 
         self.oss_loader = None
-        self._media_oss_loader_config = None if oss_loader_cfg is None else oss_loader_cfg.model_dump(mode="json")
         self.debug = debug
         self.oss_time_log_thr = oss_time_log_thr
         if oss_loader_cfg is not None:
@@ -216,9 +214,7 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             llm_pack_weight=llm_pack_weight,
             visual_pack_weight=visual_pack_weight,
             trim_memory_interval=trim_memory_interval,
-            media_pipeline=media_pipeline,
         )
-        initialize_image_provider(self, "glm_image")
 
     # ---- shared render/expand/tokenize, called by both cache and runtime paths ----
 
@@ -311,35 +307,38 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         return self._cache_item(input_ids, num_img_tokens, data_item)
 
     def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> Glm53VLDataItem:
-        # Process each image before loading the next one so full-resolution PIL images
-        # do not accumulate alongside the processed tensors. Preserve the media order
-        # when concatenating the per-image processor outputs.
-        planned_inputs = prepare_image_inputs(self, data_item, media_root, "glm_image")
-        media_plan = None
-        if planned_inputs is None:
-            pixel_values_list = []
-            image_grid_list = []
-            for image_file in self._image_path:
-                image_path_ = get_image_path(image_file, media_root)
-                if self.oss_loader is not None and "s3://" in image_path_:
-                    img_str = self.oss_loader.client.get(image_path_)
-                    image = pil_loader(img_str)
-                else:
-                    assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
-                    image = load_image(image_path_)
-                image = apply_exif_orientation(image)
-                processed_i = self.image_processor(images=[image], return_tensors="pt")
-                pixel_values_list.append(processed_i["pixel_values"])
-                image_grid_list.append(processed_i["image_grid_thw"])
-                del image, processed_i
+        if lazy_media_enabled():
+            try:
+                for width, height in self._image_wh_list:
+                    self._predict_image_grid(width, height)
+            except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+                return self._eager_multi_modal_get_item(data_item, media_root)
+            if len(self._image_wh_list) == len(self._image_path):
+                return self._lazy_multi_modal_get_item(data_item, media_root)
+        return self._eager_multi_modal_get_item(data_item, media_root)
 
-            pixel_values = torch.cat(pixel_values_list, dim=0)
-            image_grid_thw = torch.cat(image_grid_list, dim=0)
-            num_images = len(pixel_values_list)
-            del pixel_values_list, image_grid_list
-        else:
-            pixel_values, image_grid_thw, media_plan = planned_inputs
-            num_images = len(self._image_path)
+    def _eager_multi_modal_get_item(self, data_item: dict, media_root: str = "") -> Glm53VLDataItem:
+        # Process images individually, preserving upstream eager behavior.
+        pixel_values_list = []
+        image_grid_list = []
+        for image_file in self._image_path:
+            image_path_ = get_image_path(image_file, media_root)
+            if self.oss_loader is not None and "s3://" in image_path_:
+                img_str = self.oss_loader.client.get(image_path_)
+                image = pil_loader(img_str)
+            else:
+                assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
+                image = load_image(image_path_)
+            image = apply_exif_orientation(image)
+            processed_i = self.image_processor(images=[image], return_tensors="pt")
+            pixel_values_list.append(processed_i["pixel_values"])
+            image_grid_list.append(processed_i["image_grid_thw"])
+            del image, processed_i
+
+        pixel_values = torch.cat(pixel_values_list, dim=0)
+        image_grid_thw = torch.cat(image_grid_list, dim=0)
+        num_images = len(pixel_values_list)
+        del pixel_values_list, image_grid_list
 
         text, loss_mask = self._render_base(data_item)
         image_inputs = {"image_grid_thw": image_grid_thw}
@@ -360,7 +359,7 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             f"data_id: {data_item.get('id', '')}. Discard this data."
         )
 
-        result = Glm53VLDataItem(
+        return Glm53VLDataItem(
             input_ids=input_ids,
             labels=labels,
             num_tokens=len(input_ids),
@@ -370,10 +369,55 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             image_grid_thw=image_grid_thw,
             mm_token_type_ids=torch.tensor(mm_token_type_ids, dtype=torch.long).unsqueeze(0),
         )
-        if media_plan is not None:
-            result.pop("pixel_values")
-            result["media_plan"] = media_plan
-        return result
+
+    def _lazy_multi_modal_get_item(self, data_item: dict, media_root: str) -> Glm53VLDataItem:
+        # Same text/placeholder/truncation semantics as the eager path; the ONLY deltas are
+        # that image_grid_thw comes from geometry-only prediction (identical values asserted
+        # at materialization time) and that pixel_values are replaced by a serializable
+        # media plan decoded later at micro-batch consumption.
+        if len(self._image_wh_list) != len(self._image_path):
+            # Deferred decode needs per-image geometry from the annotation; without it the
+            # eager path is the only valid one. Surface as an unsupported boundary exactly
+            # like other per-model-family limits (upstream turns it into a discard).
+            raise NotImplementedError(
+                f"{type(self).__name__} lazy media requires image_wh for every image; "
+                f"got {len(self._image_wh_list)} sizes for {len(self._image_path)} images."
+            )
+        grids = [self._predict_image_grid(w, h) for w, h in self._image_wh_list]
+        image_grid_thw = torch.tensor(grids)
+
+        text, loss_mask = self._render_base(data_item)
+        image_inputs = {"image_grid_thw": image_grid_thw}
+        expansions = [self.processor.replace_image_token(image_inputs, i) for i in range(len(grids))]
+        text, loss_mask = _expand_marker(text, loss_mask, _IMAGE_MARKER, expansions)
+        input_ids, labels, mm_token_type_ids = self._finalize(text, loss_mask)
+
+        num_img_tokens = (image_grid_thw[:, 1] * image_grid_thw[:, 2]).tolist()
+        input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
+        mm_token_type_ids = mm_token_type_ids[: len(input_ids)]
+        placeholder_count = input_ids.count(self.processor.image_token_id)
+        assert placeholder_count == sum(num_img_tokens) // self.merge_unit, (
+            f"GLM-5.3-Flash image placeholder count {placeholder_count} != expected "
+            f"{sum(num_img_tokens) // self.merge_unit}, data_name: {self.data_name}, "
+            f"data_id: {data_item.get('id', '')}. Discard this data."
+        )
+
+        media_plan = make_image_plan(
+            self.image_processor,
+            [get_image_path(path, media_root) for path in self._image_path],
+            grids,
+            oss_loader_cfg=self._lazy_oss_cfg,
+        )
+        return Glm53VLDataItem(
+            input_ids=input_ids,
+            labels=labels,
+            num_tokens=len(input_ids),
+            num_imgs=[len(self._image_path)],
+            num_img_tokens=num_img_tokens,
+            image_grid_thw=image_grid_thw,
+            mm_token_type_ids=torch.tensor(mm_token_type_ids, dtype=torch.long).unsqueeze(0),
+            media_plan=media_plan,
+        )
 
     def _cache_item(self, input_ids: list[int], num_img_tokens: list[int], data_item: dict) -> CacheItem:
         # Truncating text is harmless, but truncating *through* a visual span leaves fewer
@@ -444,7 +488,6 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         return self._cache_item(input_ids, num_img_tokens, data_item)
 
     def video_get_item(self, data_item: dict, media_root: str = "") -> Glm53VLDataItem:
-        check_video_policy(self)
         assert len(self._video_extra_info_list) == len(self._video_path), (
             "GLM-5.3-Flash video runtime requires origin_video_length/origin_fps metadata for "
             f"every video, data_name: {self.data_name}."
@@ -554,7 +597,6 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
 
 class Glm53VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
-    supports_media_pipeline: ClassVar[bool] = True
     model_config = ConfigDict(title="GLM-5.3-Flash VL dataset config for xtuner", extra="forbid")
     # GLM-5.3-Flash renders through `render_glm53_chat`, not a `CHAT_TEMPLATE_MAP` entry, so
     # `build()` never reads this field and `BaseMLLMTokenizeFunction` is constructed with None.
@@ -599,5 +641,4 @@ class Glm53VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             debug=self.debug,
             oss_time_log_thr=self.oss_time_log_thr,
             trim_memory_interval=self.trim_memory_interval,
-            media_pipeline=kwargs.get("media_pipeline", self.media_pipeline),
         )
