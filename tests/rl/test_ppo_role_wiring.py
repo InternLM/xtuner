@@ -14,6 +14,7 @@ from xtuner.v1.rl.advantage import GAEAdvantageConfig, GAEEstimator
 from xtuner.v1.rl.advantage.gae import action_gae, terminal_rewards
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.rl.trainer.critic_worker import CriticWorker, CriticWorkerConfig
+from xtuner.v1.rl.trainer.pack import TokenTensorBatch
 from xtuner.v1.rl.trainer.schedule import build_lr_scheduler, partition_indices, pass_order
 from xtuner.v1.rl.trainer.worker import TrainingWorker, TrainSample
 from xtuner.v1.train.trainer import LoadCheckpointConfig
@@ -368,3 +369,83 @@ class TestPPORoleWiring(unittest.TestCase):
         controller = TrainingController(workers=[], advantage_estimator=GAEEstimator())
         with self.assertRaises(RuntimeError):
             controller.fit([[]], pack_max_length=8, rollout_idx=0)
+
+
+class TestSessionGAEAdvantageDispatch(unittest.TestCase):
+    """Session GAE must scatter per-rank critic values back to global sample order
+    before running the estimator, reading only replica-0 batches."""
+
+    @staticmethod
+    def _controller() -> TrainingController:
+        controller = TrainingController.__new__(TrainingController)
+        controller.advantage_estimator = GAEEstimator(reward_scope="session", normalize_actor_advantage=False)
+        controller._gae_reward_scope = "session"
+        return controller
+
+    def test_session_gae_scatters_values_by_pack_plan(self):
+        # Four samples across two DP ranks with scrambled global indices; replica
+        # positions 1 and 3 hold decoy values that must never be read.
+        rollout_items = [
+            _state(uid=0, rollout_id=10, labels=[-100, 5, 6], reward={"score": 1.0}),
+            _state(uid=1, rollout_id=11, labels=[7, 8], reward={"score": 0.0}),
+            _state(uid=2, rollout_id=12, labels=[9, 10, 11], reward={"score": 0.5}),
+            _state(uid=3, rollout_id=13, labels=[12, 13, 14, 15], reward={"score": -1.0}),
+        ]
+        dense_values = [[0.1, 0.2], [0.3], [0.4, 0.5], [0.6, 0.7, 0.8]]
+        pack_plan = {
+            "dp_plans": {
+                0: {"global_indices": [2, 0], "plan": [[[0, 1]]]},
+                1: {"global_indices": [3, 1], "plan": [[[0, 1]]]},
+            },
+            "plan_log": {},
+        }
+        decoy = TokenTensorBatch.cat_samples([torch.tensor([9.9, 9.9])])
+        value_batches = [
+            TokenTensorBatch.cat_samples(
+                [
+                    torch.tensor(dense_values[2], dtype=torch.float32),
+                    torch.tensor(dense_values[0], dtype=torch.float32),
+                ]
+            ),
+            decoy,
+            TokenTensorBatch.cat_samples(
+                [
+                    torch.tensor(dense_values[3], dtype=torch.float32),
+                    torch.tensor(dense_values[1], dtype=torch.float32),
+                ]
+            ),
+            decoy,
+        ]
+
+        sample_means, token_advantages, token_returns, advantage_stats = self._controller()._estimate_advantages(
+            {"reward_groups": []}, rollout_items, pack_plan, value_batches, data_replicate_size=2
+        )
+
+        # Token rows keep each sample's shifted-label length.
+        self.assertEqual([len(row) for row in token_advantages], [2, 1, 2, 3])
+        self.assertEqual([len(row) for row in token_returns], [2, 1, 2, 3])
+        # The scattered mapping matches running the estimator directly on dense values.
+        expected_advantages, expected_returns = self._controller().advantage_estimator.compute_gae(
+            rollout_items, dense_values
+        )
+        self.assertEqual(token_advantages, expected_advantages)
+        self.assertEqual(token_returns, expected_returns)
+        # Sample means average the supervised positions (sample 0 has one masked row).
+        for state, mean, row in zip(rollout_items, sample_means, token_advantages):
+            mask = [label != -100 for label in state.labels[1:]]
+            supervised = [value for value, keep in zip(row, mask) if keep]
+            self.assertAlmostEqual(mean, sum(supervised) / len(supervised))
+        # Session-GAE stats are derived downstream, not here.
+        self.assertIsNone(advantage_stats)
+
+    def test_session_gae_rejects_value_count_mismatch(self):
+        rollout_items = [_state(uid=0, rollout_id=10, labels=[-100, 5, 6], reward={"score": 1.0})]
+        pack_plan = {"dp_plans": {0: {"global_indices": [0], "plan": [[[0]]]}}, "plan_log": {}}
+        # Rank 0 reports two local value rows for one packed sample.
+        value_batches = [
+            TokenTensorBatch.cat_samples([torch.tensor([0.1, 0.2]), torch.tensor([0.3, 0.4])]),
+        ]
+        with self.assertRaisesRegex(ValueError, "do not match the packed samples"):
+            self._controller()._estimate_advantages(
+                {"reward_groups": []}, rollout_items, pack_plan, value_batches, data_replicate_size=1
+            )
