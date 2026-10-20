@@ -317,7 +317,7 @@ class WorkerConfig(BaseModel):
         if self.critic_cfg is not None:
             from xtuner.v1.rl.trainer.critic_worker import CriticWorker
 
-            controller.attach("critic", CriticWorker, self.critic_cfg)
+            controller.attach_role("critic", CriticWorker, self.critic_cfg)
         return controller
 
 

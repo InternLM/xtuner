@@ -138,26 +138,33 @@ class TestPPORoleWiring(unittest.TestCase):
         self.assertAlmostEqual(optimizer.param_groups[0]["lr"], 1e-6)
 
     def test_attach_and_switch_route_to_host_workers(self):
+        # Test doubles mimic Ray actor handles: methods are exposed as `.remote` callables,
+        # and ray.get is patched so no Ray runtime is needed.
         class Worker:
             def __init__(self):
                 self.attached = {}
                 self.role = "actor"
+                self.attach = SimpleNamespace(remote=self._attach)
+                self.switch_role_modules = SimpleNamespace(remote=self._switch_role_modules)
 
-            def attach(self, name, worker_cls, worker_cfg):
+            def _attach(self, name, worker_cls, worker_cfg):
                 self.attached[name] = (worker_cls, worker_cfg)
 
-            def switch_role_modules(self, role):
+            def _switch_role_modules(self, role):
                 self.role = role
 
         workers = [Worker(), Worker()]
         controller = TrainingController(workers=workers)
-        controller.attach("critic", object, {"head": "value"})
+        with patch("xtuner.v1.rl.trainer.controller.ray.get"):
+            controller.attach_role("critic", object, {"head": "value"})
 
         self.assertEqual(controller._roles, {"critic"})
         self.assertEqual(workers[0].attached["critic"][1], {"head": "value"})
-        controller.switch_role_modules("critic")
+        with patch("xtuner.v1.rl.trainer.controller.ray.get"):
+            controller.switch_role("critic")
         self.assertEqual([worker.role for worker in workers], ["critic", "critic"])
-        controller.switch_role_modules("actor")
+        with patch("xtuner.v1.rl.trainer.controller.ray.get"):
+            controller.switch_role("actor")
         self.assertEqual(workers[1].role, "actor")
 
     def test_critic_reuses_host_fsdp_and_sp_topology(self):
@@ -355,7 +362,7 @@ class TestPPORoleWiring(unittest.TestCase):
     def test_actor_only_switch_rejects_unknown_role(self):
         controller = TrainingController(workers=[])
         with self.assertRaises(KeyError):
-            controller.switch_role_modules("critic")
+            controller.switch_role("critic")
 
     def test_gae_without_critic_is_rejected(self):
         controller = TrainingController(workers=[], advantage_estimator=GAEEstimator())
