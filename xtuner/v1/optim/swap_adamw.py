@@ -1,4 +1,5 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 import torch
 from torch.distributed.tensor import DTensor
@@ -54,12 +55,37 @@ class SwapAdamW(torch.optim.AdamW):
         self._param_to_group_map: dict[torch.Tensor, dict] = {}
         self._param_to_cpu_states_map: dict[torch.Tensor, dict[str, torch.Tensor | None]] = {}
         self._init_swap_states()
-        self.register_load_state_dict_post_hook(self._restore_swap_states)
 
-    def _restore_swap_states(self, optimizer: torch.optim.Optimizer) -> None:
-        # AdamW.load_state_dict replaces both state and param_groups, and casts
-        # moments to the parameter device. Rebuild our aliases and CPU placement
-        # after plain optimizer loads as well as distributed checkpoint loads.
+    def load_state_dict(self, state_dict: Mapping[str, Any]) -> None:
+        """Load optimizer state without staging moments on the accelerator.
+
+        AdamW.load_state_dict deep-copies and casts every saved moment to the
+        parameter device before any post hook runs, so a resume would briefly
+        hold the full optimizer state (2-3x parameter size) in accelerator
+        memory. SwapAdamW exists because those moments do not fit there. The
+        moments are extracted first so only the scalar ``step`` tensors go
+        through the base cast, and the swap states are then rebuilt from
+        host-side tensors without a device round-trip. Distributed checkpoint
+        loads funnel through this method as well.
+        """
+        saved_state = {
+            param_id: dict(per_param_state) for param_id, per_param_state in (state_dict.get("state") or {}).items()
+        }
+        moments: dict[int, dict[str, torch.Tensor]] = {
+            param_id: {key: state.pop(key) for key in tuple(state) if key in self._state_keys}
+            for param_id, state in saved_state.items()
+        }
+        super().load_state_dict({**state_dict, "state": saved_state})
+        if any(moments.values()):
+            saved_id_to_param = {
+                param_id: param
+                for saved_group, group in zip(state_dict["param_groups"], self.param_groups)
+                for param_id, param in zip(saved_group["params"], group["params"])
+            }
+            for param_id, per_param_state in moments.items():
+                param = saved_id_to_param.get(param_id)
+                if param is not None:
+                    self.state.setdefault(param, {}).update(per_param_state)
         self._init_swap_states()
 
     @staticmethod
@@ -86,7 +112,7 @@ class SwapAdamW(torch.optim.AdamW):
 
         for group in self.param_groups:
             for param in group["params"]:
-                cpu_state_dtensor = self.state[param]
+                cpu_state_dtensor = self.state.setdefault(param, {})
                 cpu_state: dict[str, torch.Tensor | None] = {}
                 amsgrad = bool(self._param_to_group_map[param]["amsgrad"])
                 local_param = self._to_local_tensor(param)

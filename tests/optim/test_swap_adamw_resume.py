@@ -81,6 +81,44 @@ def test_resume_matches_continuous_update(tmp_path, monkeypatch, device, amsgrad
             torch.testing.assert_close(resumed.state[p][key], optimizer.state[model.weight][key])
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_load_state_dict_never_stages_moments_on_device(monkeypatch, device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    monkeypatch.setattr(module, "DEVICE", device)
+    if device == "cpu":
+        monkeypatch.setattr(
+            module, "DEVICE_MODULE", SimpleNamespace(current_device=lambda: 0, synchronize=lambda: None)
+        )
+        monkeypatch.setattr(torch.Tensor, "pin_memory", lambda self: self)
+    else:
+        monkeypatch.setattr(module, "DEVICE_MODULE", torch.cuda)
+    torch.manual_seed(7)
+    model = torch.nn.Linear(5, 3, bias=False, device=device)
+    optimizer = module.SwapAdamW(model.parameters(), lr=0.1, fused=False)
+    model.weight.grad = torch.ones_like(model.weight)
+    optimizer.step()
+
+    staged = []
+    original = torch.optim.Optimizer._process_value_according_to_param_policy
+
+    def spy(param, value, param_id, param_groups, key=None):
+        if isinstance(value, torch.Tensor) and value.numel() > 1:
+            staged.append((param_id, key))
+        return original(param, value, param_id, param_groups, key=key)
+
+    monkeypatch.setattr(torch.optim.Optimizer, "_process_value_according_to_param_policy", staticmethod(spy))
+    restored = copy.deepcopy(model)
+    resumed = module.SwapAdamW(restored.parameters(), lr=0.1, fused=False)
+    resumed.load_state_dict(copy.deepcopy(optimizer.state_dict()))
+
+    assert staged == []
+    p = restored.weight
+    for key in ("exp_avg", "exp_avg_sq"):
+        torch.testing.assert_close(resumed.state[p][key], optimizer.state[model.weight][key])
+    assert resumed._param_to_cpu_states_map[p]["exp_avg"] is resumed.state[p]["exp_avg"]
+
+
 def _sharded_resume_worker(rank, checkpoint_dir, rendezvous, amsgrad, asynchronous, device):
     if device == "cuda":
         torch.cuda.set_device(rank)
