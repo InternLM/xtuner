@@ -183,7 +183,7 @@ class TestPPORoleWiring(unittest.TestCase):
         self.assertIs(worker.host, host)
         self.assertIs(worker.sp_mesh, host.sp_mesh)
         self.assertIs(train_engine.call_args.kwargs["fsdp_cfg"], fsdp_cfg)
-        self.assertIs(build_scheduler.call_args.args[0], train_engine.return_value)
+        self.assertIs(build_scheduler.call_args.args[0], train_engine.return_value.optimizer)
         train_engine.return_value.from_hf.assert_called_once_with("/tmp/critic", strict=False)
         self.assertFalse(critic_cfg.model_cfg.compile_cfg)
 
