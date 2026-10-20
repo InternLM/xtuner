@@ -208,6 +208,7 @@ class TestCriticSFT(DeterministicDDPTestCase):
             model.language_model._validate_head_checkpoint(Path(tmpdir))
 
             # A critic checkpoint cannot initialize an actor because it has no vocabulary head.
+            index_path.write_text(json.dumps({"metadata": {"head_type": "value_head"}}))
             model.language_model.config.head_type = "lm_head"
             with self.assertRaisesRegex(RuntimeError, "does not match config head_type"):
                 model.language_model._validate_head_checkpoint(Path(tmpdir))

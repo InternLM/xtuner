@@ -619,7 +619,7 @@ class BaseModel(nn.Module):
         hf_loader = HFCheckpointLoader(hf_path)
         loaded_keys, unloaded_keys, missing_keys = self._load_params(hf_loader, strict=strict)
         # XTuner runtime critic 模型内部仍然叫：lm_head.weight
-        if "lm_head.weight" not in loaded_keys and self._maybe_init_unloaded_critic_head():
+        if self._maybe_init_unloaded_critic_head(hf_loader):
             # 如果随机初始化 ValueHead，对 loaded_keys、unloaded_keys、missing_keys 进行更新
             # missing_keys 是 HF 名，loaded_keys / unloaded_keys 是运行时名
             loaded_keys.add("lm_head.weight")
@@ -716,20 +716,49 @@ class BaseModel(nn.Module):
             )
 
     @torch.no_grad()
-    def _maybe_init_unloaded_critic_head(self) -> bool:
-        """Randomly initialize an unloaded ValueHead.
+    def _maybe_init_unloaded_critic_head(self, hf_loader: HFCheckpointLoader) -> bool:
+        """Randomly initialize a critic ValueHead missing from the checkpoint.
 
-        Call this only after ``_load_params`` reports that the runtime ``lm_head.weight``
-        was not loaded. This avoids re-checking HF keys here: ``hf_key_mapping`` may load
-        the head from a non-default checkpoint key. The weight is drawn from ``Normal(0,
+        The decision is based on the global checkpoint key map, not on the
+        rank-local ``loaded_keys`` returned by ``_load_params``.  For a small
+        value head, FSDP can leave all non-zero local shards on one rank while
+        other ranks own empty shards and report the runtime parameter as
+        loaded.  A rank-local decision would therefore make only one rank enter
+        the DTensor collective used by random initialization.
+
+        ``hf_key_mapping`` is respected because the load spec stores the mapped
+        checkpoint keys. The initialized weight is drawn from ``Normal(0,
         1 / (hidden_size + 1))``.
 
         Returns:
             True if ValueHead was randomly initialized, False otherwise.
         """
-        lm_head = getattr(self, "lm_head", None)
-        if getattr(self.config, "head_type", "lm_head") != "value_head" or not isinstance(lm_head, nn.Linear):
+
+        # 非critic模型直接返回 False
+        if getattr(self.config, "head_type", "lm_head") != "value_head":
             return False
+
+        # critic 必须有可初始化的线性 head。
+        lm_head = getattr(self, "lm_head", None)
+        if not isinstance(lm_head, nn.Linear):
+            raise TypeError(
+                "Cannot initialize critic value head: config has head_type='value_head' "
+                "but model.lm_head is not nn.Linear."
+            )
+
+        # runtime 参数名 lm_head.weight 对应的 HF checkpoint key。
+        # global_hf_keys 中已经应用过 hf_key_mapping，因此这里不需要再查一次 mapping。
+        # 映射后的 HF key 都存在，说明 checkpoint 提供了完整 value head。
+        # 此时不需要随机初始化；任意 key 缺失则走随机初始化。
+        head_load_spec = self.load_spec_mapping.get("lm_head.weight")
+        if head_load_spec is None:
+            raise ValueError(
+                "Critic model has head_type='value_head' but no load spec for "
+                "'lm_head.weight'. Check model initialization and _init_load_spec()."
+            )
+        if all(hf_loader.is_key_exist(key) for key in head_load_spec.global_hf_keys):
+            return False
+
         from xtuner.v1.utils import init_params
 
         value_head_std = 1.0 / (self.config.hidden_size + 1)
