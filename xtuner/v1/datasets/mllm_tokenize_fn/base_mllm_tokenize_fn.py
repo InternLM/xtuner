@@ -20,6 +20,9 @@ logger = get_logger()
 
 IMAGE_TOKEN_ALIAS = "XTUNER-ALIAS-ALIAS-XTUNER-2025"
 
+# TODO: 错误契约的目标形态：导致训练失败的 error 只应是一个显式自定义的 DataFatalError，
+# 除此之外的任何 error 都视为可丢弃的脏数据，不允许中断训练。当前先以 RuntimeError 约定
+# 脏数据边界（见下），后续引入 DataFatalError 后可据此收敛异常类型。
 # 单条脏数据在采集/几何预测阶段可能抛出的异常类型：一律按损坏样本走 _discard_damaged_sample
 # 通道（cache 警告丢弃、runtime 由上游换无 loss 占位样本）。AssertionError 刻意不在其中——
 # 配置/代码错误（如 enable_thinking=False）每条样本都会触发，必须逃逸暴露而非被静默吞掉。
