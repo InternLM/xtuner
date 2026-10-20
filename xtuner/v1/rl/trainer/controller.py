@@ -23,15 +23,6 @@ if TYPE_CHECKING:
 TRAIN_RAY_GET_TIMEOUT = os.getenv("XTUNER_TRAIN_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
 
 
-class _DPRankDispatch(TypedDict):
-    """Per-DP-rank payload of one training batch, before the Ray upload in
-    ``fit``."""
-
-    plan: DPRankPackIndices
-    advantages: list[float | list[float]]
-    rollout_items: list[RolloutState]
-
-
 class _DPRankPlan(TypedDict):
     """Global sample mapping and local pack indices for one DP rank."""
 
@@ -237,16 +228,6 @@ class TrainingController:
                 sums[target] = sums.get(target, 0.0) + float(value)
                 counts[target] = counts.get(target, 0) + 1
         return {key: sums[key] / counts[key] for key in sums}
-
-    def _prepare_advantages(self, prepared: _PreparedBatch, pack_plan: _PackPlan) -> list[float]:
-        """Prepare targets after packing indices are fixed, without changing
-        sample order or placing targets inside the plan."""
-        advantages: list[float] = []
-        for group in prepared["reward_groups"]:
-            advantages.extend(
-                self._compute_group_advantages(group["rewards"], group["representatives"], group["cluster_indices"])
-            )
-        return advantages
 
     def _build_trainer_log_info(
         self,
@@ -486,115 +467,113 @@ class TrainingController:
         }
         return {"dp_plans": dp_plans, "plan_log": plan_log}
 
-    def _build_dispatches(
+    def _estimate_advantages(
         self,
-        rollout_items: list[RolloutState],
-        advantages: Sequence[float | list[float]],
-        pack_plan: _PackPlan,
-    ) -> dict[int, _DPRankDispatch]:
-        """Attach states and training targets to an already fixed sample
-        mapping."""
-        if len(rollout_items) != len(advantages):
-            raise ValueError(f"rollout_items and advantages lengths differ: {len(rollout_items)} vs {len(advantages)}")
-        for state, advantage in zip(rollout_items, advantages):
-            if isinstance(advantage, list) and len(advantage) != state.num_tokens:
-                raise ValueError(
-                    f"Token advantage length mismatch for rollout_id={state.rollout_id}: "
-                    f"{len(advantage)} vs num_tokens={state.num_tokens}"
-                )
-        return {
-            dp_rank: {
-                "plan": dp_plan["plan"],
-                "rollout_items": [rollout_items[index] for index in dp_plan["global_indices"]],
-                "advantages": [advantages[index] for index in dp_plan["global_indices"]],
-            }
-            for dp_rank, dp_plan in pack_plan["dp_plans"].items()
-        }
-
-    def _compute_ppo_targets(
-        self,
-        rollout_items: list[RolloutState],
-        pack_plan: _PackPlan,
-        value_batches: list[TokenTensorBatch],
-        data_replicate_size: int,
-    ) -> tuple[list[list[float]], list[list[float]]]:
-        """Build split actor advantages and critic returns from critic
-        values."""
-        from xtuner.v1.rl.advantage.gae import GAEEstimator
-
-        estimator = self.advantage_estimator
-        if not isinstance(estimator, GAEEstimator):
-            raise RuntimeError("Critic training requires a GAE advantage estimator")
-        dense_values: list[list[float] | None] = [None] * len(rollout_items)
-        for dp_rank, dispatch in pack_plan["dp_plans"].items():
-            local_values = [row.tolist() for row in value_batches[dp_rank * data_replicate_size].split_samples()]
-            sample_indices = dispatch["global_indices"]
-            if len(local_values) != len(sample_indices):
-                raise ValueError(
-                    f"Critic values for dp_rank={dp_rank} do not match the packed samples: "
-                    f"{len(local_values)} vs {len(sample_indices)}"
-                )
-            for local_index, global_index in enumerate(sample_indices):
-                dense_values[global_index] = local_values[local_index]
-        if any(sample_values is None for sample_values in dense_values):
-            raise RuntimeError("Critic values do not cover every training sample")
-        return estimator.compute_gae(
-            rollout_items,
-            cast(list[list[float]], dense_values),
-        )
-
-    def _compute_advantages(
-        self,
-        rollout_groups: list[list[RolloutState]],
+        prepared: _PreparedBatch,
         rollout_items: list[RolloutState],
         pack_plan: _PackPlan,
         value_batches: list[TokenTensorBatch] | None,
         data_replicate_size: int,
-    ) -> tuple[list[float], list[list[float]] | None, list[list[float]] | None]:
-        """Return scalar advantages, token advantages, and critic returns.
+    ) -> tuple[list[float], list[list[float]] | None, list[list[float]] | None, dict[str, float] | None]:
+        """Estimate advantages with the configured mode and return the stats.
 
         Args:
-            rollout_groups (list[list[RolloutState]]): Training groups. Non-GAE estimates one
-                scalar per member from each group's clustered rewards.
-            rollout_items (list[RolloutState]): Flat states in the same order as
-                ``rollout_groups``. GAE reads ``labels`` from these states.
+            prepared (_PreparedBatch): Output of ``_prepare_rollout_items`` holding the
+                pre-clustered reward groups consumed by the non-GAE path.
+            rollout_items (list[RolloutState]): Flat states in training order.
             pack_plan (_PackPlan): Maps each DP rank's packed samples back to global indices.
-            value_batches (list[TokenTensorBatch] | None): Critic values, one batch per worker.
-                ``None`` when the estimator is not GAE.
-            data_replicate_size (int): Workers that share one DP rank. Only replica 0's values
-                are read, at worker index ``dp_rank * data_replicate_size``.
+            value_batches (list[TokenTensorBatch] | None): Critic values gathered by
+                ``collect_values``. ``None`` when values stay worker-local (segment GAE)
+                or no critic is configured.
+            data_replicate_size (int): Workers that share one DP rank.
 
         Returns:
             sample_advantages (list[float]): One float per rollout item, for ``advantages/*``
-                logs. Non-GAE is the group estimate. GAE is the mean of that sample's
-                supervised-token advantages.
+                logs. Empty for segment GAE, whose per-sample advantages live worker-side.
             token_advantages (list[list[float]] | None): One row per sample and one value
-                per shifted token, passed to actor ``fit``. ``None`` for non-GAE.
-            token_returns (list[list[float]] | None): Critic returns with the same layout as
-                ``token_advantages``, passed to critic ``fit``. ``None`` for non-GAE.
+                per shifted token, passed to actor ``fit``. ``None`` unless session GAE.
+            token_returns (list[list[float]] | None): Critic returns with the same layout,
+                passed to critic ``fit``. ``None`` unless session GAE.
+            advantage_stats (dict[str, float] | None): ``mean``/``min``/``max`` of the
+                supervised-token advantages. ``None`` for the non-GAE and session-GAE paths,
+                whose stats are derived downstream from the returned advantages.
         """
         if self._gae_reward_scope is None:
+            # Group-based scalar advantages (GRPO-style, no critic): one advantage per
+            # sample, scattered from each session cluster's estimate.
             sample_advantages: list[float] = []
-            for group in rollout_groups:
-                cluster_rewards, representatives, cluster_indices = self._cluster_group_rewards(group)
+            for group in prepared["reward_groups"]:
                 sample_advantages.extend(
-                    self._compute_group_advantages(cluster_rewards, representatives, cluster_indices)
+                    self._compute_group_advantages(
+                        group["rewards"], group["representatives"], group["cluster_indices"]
+                    )
                 )
-            return sample_advantages, None, None
-        if value_batches is None:
-            raise RuntimeError("GAE requires critic values")
-        token_advantages, token_returns = self._compute_ppo_targets(
-            rollout_items, pack_plan, value_batches, data_replicate_size
-        )
-        sample_means: list[float] = []
-        for state, row in zip(rollout_items, token_advantages):
-            labels = state.labels or []
-            mask = [label != -100 for label in labels[1:]]
-            if len(mask) != len(row):
-                raise ValueError(f"shifted label length {len(mask)} does not match advantage length {len(row)}")
-            supervised = [advantage for advantage, keep in zip(row, mask) if keep]
-            sample_means.append(sum(supervised) / len(supervised) if supervised else 0.0)
-        return sample_means, token_advantages, token_returns
+            return sample_advantages, None, None, None
+        elif self._gae_reward_scope == "segment":
+            # Segment GAE stays worker-local: values were cached by ``collect_values`` and
+            # each worker computes per-segment targets in place. Only replica-0 workers
+            # contribute to the global normalization statistics returned here.
+            from xtuner.v1.rl.advantage.gae import GAEEstimator
+
+            estimator = self.advantage_estimator
+            assert isinstance(estimator, GAEEstimator)
+            gae_handles = [
+                worker.call_attached.remote(  # type: ignore[attr-defined]
+                    "critic",
+                    "compute_segment_gae",
+                    gae_gamma=estimator.gae_gamma,
+                    gae_lambda=estimator.gae_lambda,
+                    normalize_actor_advantage=estimator.normalize_actor_advantage,
+                    contribute_to_global_stats=worker_idx % data_replicate_size == 0,
+                )
+                for worker_idx, worker in enumerate(self.workers)
+            ]
+            gae_results = [result for result in ray.get(gae_handles, timeout=TRAIN_RAY_GET_TIMEOUT) if result]
+            advantage_count = sum(result["count"] for result in gae_results)
+            advantage_stats = {
+                "mean": sum(result["sum"] for result in gae_results) / advantage_count if advantage_count else 0.0,
+                "min": min((result["min"] for result in gae_results), default=0.0),
+                "max": max((result["max"] for result in gae_results), default=0.0),
+            }
+            return [], None, None, advantage_stats
+        elif self._gae_reward_scope == "session":
+            # Session GAE groups tokens across samples of one session, so critic values must
+            # be gathered on the controller. Scatter each rank's local values back to global
+            # sample order before running the estimator.
+            assert value_batches is not None
+            from xtuner.v1.rl.advantage.gae import GAEEstimator
+
+            estimator = self.advantage_estimator
+            assert isinstance(estimator, GAEEstimator)
+            dense_values: list[list[float] | None] = [None] * len(rollout_items)
+            for dp_rank, dispatch in pack_plan["dp_plans"].items():
+                local_values = [row.tolist() for row in value_batches[dp_rank * data_replicate_size].split_samples()]
+                sample_indices = dispatch["global_indices"]
+                if len(local_values) != len(sample_indices):
+                    raise ValueError(
+                        f"Critic values for dp_rank={dp_rank} do not match the packed samples: "
+                        f"{len(local_values)} vs {len(sample_indices)}"
+                    )
+                for local_index, global_index in enumerate(sample_indices):
+                    dense_values[global_index] = local_values[local_index]
+            if any(sample_values is None for sample_values in dense_values):
+                raise RuntimeError("Critic values do not cover every training sample")
+            token_advantages, token_returns = estimator.compute_gae(
+                rollout_items,
+                cast(list[list[float]], dense_values),
+            )
+            # Sample-level log values: the mean of each sample's supervised-token advantages.
+            sample_means: list[float] = []
+            for state, row in zip(rollout_items, token_advantages):
+                labels = state.labels or []
+                mask = [label != -100 for label in labels[1:]]
+                if len(mask) != len(row):
+                    raise ValueError(f"shifted label length {len(mask)} does not match advantage length {len(row)}")
+                supervised = [advantage for advantage, keep in zip(row, mask) if keep]
+                sample_means.append(sum(supervised) / len(supervised) if supervised else 0.0)
+            return sample_means, token_advantages, token_returns, None
+        else:
+            raise ValueError(f"Unknown GAE reward scope: {self._gae_reward_scope}")
 
     def fit(
         self,
@@ -665,42 +644,15 @@ class TrainingController:
                     for worker in self.workers
                 ]
                 value_batches = ray.get(value_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
-            if self._gae_reward_scope is not None:
-                if segment_gae:
-                    from xtuner.v1.rl.advantage.gae import GAEEstimator
-
-                    estimator = self.advantage_estimator
-                    assert isinstance(estimator, GAEEstimator)
-                    gae_handles = [
-                        worker.call_attached.remote(  # type: ignore[attr-defined]
-                            "critic",
-                            "compute_segment_gae",
-                            gae_gamma=estimator.gae_gamma,
-                            gae_lambda=estimator.gae_lambda,
-                            normalize_actor_advantage=estimator.normalize_actor_advantage,
-                            contribute_to_global_stats=worker_idx % data_replicate_size == 0,
-                        )
-                        for worker_idx, worker in enumerate(self.workers)
-                    ]
-                    gae_results = [result for result in ray.get(gae_handles, timeout=TRAIN_RAY_GET_TIMEOUT) if result]
-                    advantage_count = sum(result["count"] for result in gae_results)
-                    advantage_stats = {
-                        "mean": (
-                            sum(result["sum"] for result in gae_results) / advantage_count if advantage_count else 0.0
-                        ),
-                        "min": min((result["min"] for result in gae_results), default=0.0),
-                        "max": max((result["max"] for result in gae_results), default=0.0),
-                    }
-                else:
-                    sample_advantages, token_advantages, token_returns = self._compute_advantages(
-                        rollout_groups,
-                        rollout_items,
-                        pack_plan,
-                        cast(list[TokenTensorBatch], value_batches),
-                        data_replicate_size,
-                    )
-            else:
-                sample_advantages = self._prepare_advantages(prepared, pack_plan)
+            # 2.5. Estimate advantages with the configured mode: group scalars without a
+            # critic, worker-local segment GAE, or controller-side session GAE.
+            sample_advantages, token_advantages, token_returns, advantage_stats = self._estimate_advantages(
+                prepared,
+                rollout_items,
+                pack_plan,
+                cast(list[TokenTensorBatch], value_batches) if value_batches is not None else None,
+                data_replicate_size,
+            )
             # 3. Optional. Critic fit. Each worker trains the value head on its samples' token returns.
             if has_critic:
                 critic_handles = []
