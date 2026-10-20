@@ -250,7 +250,13 @@ class TrainEngine:
 
                 loss = self._get_total_loss(output)
                 loss.backward()
-                total_loss += loss.detach()
+                # Logging must not retain checkpoint contexts from completed backwards.
+                # Detaching here leaves accumulated parameter gradients untouched.
+                loss = loss.detach()
+                for field in type(output).model_fields:
+                    if "loss" in field and isinstance(getattr(output, field), torch.Tensor):
+                        setattr(output, field, getattr(output, field).detach())
+                total_loss += loss
                 # call dump_forward_records after backward to record the recomputed activations
                 ProberList.after_micro_iter_forward()
 
