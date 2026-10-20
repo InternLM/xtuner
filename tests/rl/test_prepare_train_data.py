@@ -410,12 +410,13 @@ class TestPrepareRolloutItems(unittest.TestCase):
         controller.task_adv_weight = task_adv_weight
         controller.distillation = DistillationTrainerAdapter(None)
         controller.logger = MagicMock()
+        controller._gae_reward_scope = None
         return controller
 
     def _prepare(self, controller, data_groups):
         prepared = controller._prepare_rollout_items(data_groups, rollout_idx=0)
         plan = {"dp_plans": {}, "plan_log": {}}
-        advantages = controller._prepare_advantages(prepared, plan)
+        advantages, _, _, _ = controller._estimate_advantages(prepared, prepared["rollout_items"], plan, None, 1)
         return (
             prepared["rollout_items"],
             advantages,
@@ -491,7 +492,10 @@ class TestPrepareRolloutItems(unittest.TestCase):
         prepared = controller._prepare_rollout_items([[self._state()]], rollout_idx=0)
         self.assertEqual(controller.advantage_estimator.calls, [])
         self.assertNotIn("advantages", prepared)
-        self.assertEqual(controller._prepare_advantages(prepared, {"dp_plans": {}, "plan_log": {}}), [1.0])
+        self.assertEqual(
+            controller._estimate_advantages(prepared, prepared["rollout_items"], {"dp_plans": {}, "plan_log": {}}, None, 1)[0],
+            [1.0],
+        )
         self.assertEqual(len(controller.advantage_estimator.calls), 1)
 
     def test_returns_items_with_per_sample_advantages(self):
