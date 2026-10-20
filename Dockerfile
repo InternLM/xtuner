@@ -138,7 +138,7 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 
 WORKDIR ${CODESPACE}/DeepSelect
 
-RUN DEEP_SELECT_BUILD_TARGET_PLATFORM=CUDA pip wheel -w ${DEEPSELECT_DIR} -v --no-deps --no-build-isolation .
+RUN TORCH_CUDA_ARCH_LIST=9.0 DEEP_SELECT_BUILD_TARGET_PLATFORM=CUDA pip wheel -w ${DEEPSELECT_DIR} -v --no-deps --no-build-isolation .
 
 # compile flash_mla
 FROM setup_env AS flash_mla
@@ -155,7 +155,7 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 
 WORKDIR ${CODESPACE}/FlashMLA
 
-RUN FLASH_MLA_DISABLE_SM100=1 pip wheel -w ${FLASHMLA_DIR} -v --no-deps --no-build-isolation .
+RUN TORCH_CUDA_ARCH_LIST=9.0 FLASH_MLA_DISABLE_SM100=1 pip wheel -w ${FLASHMLA_DIR} -v --no-deps --no-build-isolation .
 
 # compile nvshmem and deepep
 FROM setup_env AS deep_ep
