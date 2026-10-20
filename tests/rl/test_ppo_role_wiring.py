@@ -226,7 +226,7 @@ class TestPPORoleWiring(unittest.TestCase):
             reward_score=1.0,
             values=values,
         )
-        host = SimpleNamespace(_get_cached_batch=lambda: ([sample], [], {}))
+        host = SimpleNamespace(get_cached_batch=lambda: ([sample], [], {}))
         critic = CriticWorker.__new__(CriticWorker)
         critic.host = host
 
@@ -252,7 +252,7 @@ class TestPPORoleWiring(unittest.TestCase):
             reward_score=1.0,
             values=torch.tensor([[[0.2, 0.1]]]).reshape(1, 2),
         )
-        host = SimpleNamespace(_get_cached_batch=lambda: ([sample], [], {}))
+        host = SimpleNamespace(get_cached_batch=lambda: ([sample], [], {}))
         critic = CriticWorker.__new__(CriticWorker)
         critic.host = host
 
@@ -275,7 +275,7 @@ class TestPPORoleWiring(unittest.TestCase):
             teacher_targets={},
             values=torch.tensor([[[0.2, 0.1]]]).reshape(1, 2),
         )
-        host = SimpleNamespace(_get_cached_batch=lambda: ([sample], [], {}))
+        host = SimpleNamespace(get_cached_batch=lambda: ([sample], [], {}))
         critic = CriticWorker.__new__(CriticWorker)
         critic.host = host
 
