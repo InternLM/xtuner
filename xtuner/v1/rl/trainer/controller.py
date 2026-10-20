@@ -119,37 +119,28 @@ class TrainingController:
         self._roles: set[str] = set()
         self._gae_reward_scope = self._get_gae_reward_scope(advantage_estimator)
 
-    @staticmethod
-    def _invoke(worker: Any, method: str, *args, **kwargs):
-        call = getattr(worker, method)
-        remote = getattr(call, "remote", None)
-        return remote(*args, **kwargs) if remote is not None else call(*args, **kwargs)
-
-    @staticmethod
-    def _resolve(handles: list[Any]) -> list[Any]:
-        if handles and isinstance(handles[0], ray.ObjectRef):
-            return ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
-        return handles
-
-    def attach(self, name: str, worker_cls: type, worker_cfg: Any) -> None:
+    def attach_role(self, name: str, worker_cls: type, worker_cfg: Any) -> None:
         """Attach one in-process role to every actor and remember its name.
 
         The critic reuses the actor Ray handles. Weight sync stays on the actor engine.
         """
         if not name or name == "actor" or name in self._roles:
             raise ValueError(f"duplicate or invalid worker group: {name}")
-        handles = [self._invoke(worker, "attach", name, worker_cls, worker_cfg) for worker in self.workers]
-        self._resolve(handles)
+        handles = [
+            worker.attach.remote(name, worker_cls, worker_cfg)  # type: ignore[attr-defined]
+            for worker in self.workers
+        ]
+        ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         self._roles.add(name)
 
-    def switch_role_modules(self, role: str) -> None:
+    def switch_role(self, role: str) -> None:
         """Switch the active role inside every actor process."""
         if role not in {"actor", "none"} and role not in self._roles:
             if not self._roles:
                 raise KeyError(f"role is not available in actor-only stage: {role}")
             raise KeyError(f"role is not registered: {role}")
-        handles = [self._invoke(worker, "switch_role_modules", role) for worker in self.workers]
-        self._resolve(handles)
+        handles = [worker.switch_role_modules.remote(role) for worker in self.workers]  # type: ignore[attr-defined]
+        ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
 
     @staticmethod
     def _get_gae_reward_scope(
@@ -634,7 +625,7 @@ class TrainingController:
             # 2. Optional. Critic value forward. Segment GAE keeps values worker-local;
             # session GAE returns them to the controller for cross-sequence grouping.
             if has_critic:
-                self.switch_role_modules("critic")
+                self.switch_role("critic")
                 value_handles = [
                     worker.call_attached.remote(  # type: ignore[attr-defined]
                         "critic",
@@ -679,7 +670,7 @@ class TrainingController:
                         )
                 critic_log_infos = ray.get(critic_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
             # 4. Actor fit. Each worker trains the policy on its samples' advantages.
-            self.switch_role_modules("actor")
+            self.switch_role("actor")
 
             for worker_idx, worker in enumerate(self.workers):
                 dp_rank = worker_idx // data_replicate_size
@@ -697,7 +688,7 @@ class TrainingController:
             log_infos = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         finally:
             if has_critic:
-                self.switch_role_modules("actor")
+                self.switch_role("actor")
             free_pixel_value_refs: list[ray.ObjectRef] = []
             for state in rollout_items:
                 pixel_values = state.mm_info.get("pixel_values") if state.mm_info is not None else None
