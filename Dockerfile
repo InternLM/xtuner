@@ -138,7 +138,17 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 
 WORKDIR ${CODESPACE}/DeepSelect
 
-RUN TORCH_CUDA_ARCH_LIST=9.0 DEEP_SELECT_BUILD_TARGET_PLATFORM=CUDA pip wheel -w ${DEEPSELECT_DIR} -v --no-deps --no-build-isolation .
+# DeepSelect 0f03b68 hard-codes Blackwell (SM100a/SM103a) and asserts NVCC>=12.9,
+# but the base image (NGC 25.03) ships NVCC 12.8 which cannot build SM100a.
+# Patch setup.py to target Hopper SM90a only: neutralize the version guard and
+# swap the gencode flags to compute_90a/sm_90a. deep_select then runs on Hopper;
+# on Blackwell the caller is expected to fall back to torch.topk.
+# DEEP_SELECT_DISABLE_REG_SPILL_CHECK avoids the register-spill gate falsely
+# failing when building for an architecture other than the default Blackwell.
+RUN sed -i 's@if major < 12 or (major == 12 and minor <= 8):@if False:@' setup.py && \
+    sed -i 's@compute_100a,code=sm_100a@compute_90a,code=sm_90a@' setup.py && \
+    sed -i '/compute_103a,code=sm_103a/d' setup.py && \
+    DEEP_SELECT_BUILD_TARGET_PLATFORM=CUDA DEEP_SELECT_DISABLE_REG_SPILL_CHECK=1 pip wheel -w ${DEEPSELECT_DIR} -v --no-deps --no-build-isolation .
 
 # compile flash_mla
 FROM setup_env AS flash_mla
