@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
+from collections.abc import Mapping
 from typing import Any, Literal, TypeVar
 
 import torch
@@ -20,18 +21,22 @@ logger = get_logger()
 IMAGE_TOKEN_ALIAS = "XTUNER-ALIAS-ALIAS-XTUNER-2025"
 
 
-def collect_image_video_paths_and_extra(messages: list[dict]):
+def collect_image_video_paths_and_extra(messages: list[dict], allow_all_roles: bool = False):
     image_paths = []
     image_wh_list = []
     video_wh_list = []
     video_extra_info_list = []
     video_paths = []
     for msg in messages:
-        if msg["role"] == "user" or msg["role"] == "pretrain":
+        if allow_all_roles or msg["role"] == "user" or msg["role"] == "pretrain":
             content = msg["content"]
             if isinstance(content, list):
                 for c in content:
-                    if c["type"] in ("image_url", "image"):
+                    if not isinstance(c, Mapping):
+                        # 纯字符串是文本块（chat template 按原文渲染），不是媒体引用。
+                        continue
+                    ctype = c.get("type")
+                    if ctype in ("image_url", "image"):
                         key = "image_url" if "image_url" in c else "image"
                         image_paths.append(c[key]["url"])
                         if "image_wh" in c[key]:
@@ -43,7 +48,7 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
                                 image_wh = image_wh[0]
                             image_wh_list.append(image_wh)
                             assert len(image_wh) == 2, f"image_wh should be [width, height], but got {image_wh}"
-                    if c["type"] in ("video_url", "video"):
+                    if ctype in ("video_url", "video"):
                         key = "video_url" if "video_url" in c else "video"
                         video_paths.append(c[key]["url"])
                         video_wh = c[key].get("image_wh")
@@ -136,6 +141,8 @@ T = TypeVar("T", bound=BaseMLLMDataItem)
 
 
 class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
+    allow_all_roles = False
+
     def __init__(
         self,
         tokenizer,
@@ -201,13 +208,31 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
                 labels = labels[: self.max_length]
         return input_ids, labels
 
+    def _discard_damaged_sample(self, reason: str) -> CacheItem:
+        """单条脏数据/未支持媒体边界的统一出口。
+
+        cache 阶段：log warning 并按损坏样本丢弃（num_tokens=0，打包前被 ``_filter_sampled_indices``
+        过滤）；runtime 阶段：抛出，由上游数据集（如 VLMJsonlDataset）换成无 loss 的占位样本。
+        两种状态都不因单条脏数据中断训练——cache 构建跑在 worker 子进程里，任何逃逸的异常都会
+        杀死 worker 并让主进程永远阻塞在结果队列上。
+        """
+        if self.state == "cache":
+            logger.warning(f"{reason} Discard this data.")
+            return CacheItem(num_tokens=0, num_img_tokens=[0])
+        raise NotImplementedError(reason)
+
     @with_proxy_attention_flops
     def __call__(self, item: dict, media_root: str = "", **kwargs) -> T | CacheItem:  # type: ignore[override]
         try:
-            self._image_path, self._video_path, extra_info = collect_image_video_paths_and_extra(item["messages"])
+            self._image_path, self._video_path, extra_info = collect_image_video_paths_and_extra(
+                item["messages"], allow_all_roles=self.allow_all_roles
+            )
             self._image_wh_list = extra_info["image_wh"]
             self._video_wh_list = extra_info["video_wh"]
             self._video_extra_info_list = extra_info["video_extra_info"]
+        except NotImplementedError as e:
+            # 模型家族显式不支持的数据边界按脏样本处理。
+            return self._discard_damaged_sample(str(e))
         except RuntimeError as e:
             if self.state == "cache":
                 print(f"!!!! RuntimeError: {e} of {self.data_name} when tokenize cache item. skip {item}!")
@@ -215,6 +240,11 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
                 return ret
             else:
                 raise RuntimeError(f"!!!! RuntimeError: {e} of {self.data_name}")
+        if len(self._image_path) > 0 and len(self._video_path) > 0:
+            raise NotImplementedError(
+                "Mixed image and video samples in one record are not supported by "
+                f"{type(self).__name__}; please split them into separate records."
+            )
         if len(self._image_path) > 0:
             if self.state == "cache":
                 ret = self.calc_num_tokens_multi_modal_get_item(item)

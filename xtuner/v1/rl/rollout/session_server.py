@@ -250,7 +250,7 @@ class SessionServer:
     - ``POST /v1/chat/completions`` — passthrough
     - ``POST /v1/messages`` (Anthropic) — passthrough; hooks render the
       request via the lmdeploy adapter to drive prefix-cache lookup, swap
-      ``messages``/``system``/``tools``/``tool_choice`` out for raw
+      ``messages``/``system`` out for raw
       ``input_ids`` on the wire (lmdeploy requires this when ``input_ids`` is
       set), then re-assemble the OpenAI-shaped trace from the anthropic
       response.
@@ -381,13 +381,11 @@ class SessionServer:
         worker_req["include_stop_str_in_output"] = True
 
         if fmt == FMT_ANTHROPIC:
-            # lmdeploy's /v1/messages requires messages to be empty AND
-            # system / tools / tool_choice to be unset whenever input_ids is
-            # supplied (raw input_ids bypass message rendering).
+            # Raw tokens replace message rendering. Retain the tool schema
+            # and choice: LMDeploy still needs them to parse/validate output
+            # tool calls, even though their prompt is already in input_ids.
             worker_req["messages"] = []
             worker_req.pop("system", None)
-            worker_req.pop("tools", None)
-            worker_req.pop("tool_choice", None)
         else:
             worker_req["messages"] = []
 

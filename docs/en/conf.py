@@ -109,6 +109,7 @@ autodoc_mock_imports = [
     "scikit-image",
     "scipy",
     "torchvision",
+    "einops",  # KDA imports this while autodoc loads XTuner with docs-only dependencies.
     "fla",
     "xxhash",
     "timm",

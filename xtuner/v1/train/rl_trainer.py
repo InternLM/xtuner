@@ -2105,6 +2105,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         assert self._cur_step == saved_model_step
 
         self.weight_update()
+        # Empty-init workers need KV cache allocation and warmup before inference.
+        ray.get(self.rollout_controller.onload_kvcache.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
         asyncio_run(self.agent_loop_manager.continue_produce(model_step=saved_model_step))
 
     def fit(self):

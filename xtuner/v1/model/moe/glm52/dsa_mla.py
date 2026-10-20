@@ -13,6 +13,7 @@ from xtuner.v1.model.utils import reuse_during_recompute
 from xtuner.v1.module.attention.attn_outputs import AttnOutputs
 from xtuner.v1.module.attention.mla import MLAConfig, MultiLatentAttention, mla_apply_rotary_pos_emb
 from xtuner.v1.module.linear import build_linear
+from xtuner.v1.module.rms_norm import LayerNorm
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm import gather_for_sequence_parallel
 from xtuner.v1.ops.sparse_mla import (
@@ -72,38 +73,6 @@ def _validate_query_chunk_size(value: int | None, backend: str, *, field_name: s
         raise ValueError(f"{field_name} must be a positive integer, got {value!r}")
     if value is not None and backend not in ("tilelang", "cudnn_dsa", "flash_mla", "tilelang_deepselect"):
         raise ValueError("query-chunk Indexer selection requires a TileLang selector")
-
-
-class LayerNorm(nn.Module):
-    weight: torch.Tensor
-    bias: torch.Tensor
-
-    def __init__(self, hidden_size: int, eps: float = 1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.bias = nn.Parameter(torch.zeros(hidden_size))
-        self.normalized_shape = (hidden_size,)
-        self.eps = eps
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if isinstance(self.weight, DTensor):
-            weight = self.weight.to_local()
-        else:
-            weight = self.weight
-
-        if isinstance(self.bias, DTensor):
-            bias = self.bias.to_local()
-        else:
-            bias = self.bias
-
-        return torch.nn.functional.layer_norm(hidden_states, self.normalized_shape, weight, bias, self.eps)
-
-    def init_weights(self):
-        self.weight.data.fill_(1.0)
-        self.bias.data.zero_()
-
-    def extra_repr(self):
-        return f"{self.normalized_shape}, eps={self.eps}"
 
 
 class DSAIndexer(nn.Module):
@@ -217,9 +186,11 @@ class DSAMLAConfig(MLAConfig):
     index_skip_topk_offset: int = 0
     indexer_rope_interleave: bool = True
     indexer_types: list[str] | None = None
-    sparse_mla_backend: SparseMLABackend = "torch"
+    # The SparseMLA forward and the indexer are independent choices with different backend
+    # vocabularies (``flash_mla_cudnn`` is SparseMLA-only), so neither defaults to the other.
+    sparse_mla_backend: SparseMLABackend = "tilelang"
     # ``deep_gemm_fp8`` selects the DeepGEMM FP8 MQA score path.
-    indexer_backend: DSAIndexerBackend | None = None
+    indexer_backend: DSAIndexerBackend = "tilelang"
     freeze_dsa_indexer: bool = True
     indexer_topk_query_chunk_size: int | None = None
 
@@ -234,7 +205,7 @@ class DSAMLAConfig(MLAConfig):
     ) -> "DSAMultiLatentAttention":
         if not self.freeze_dsa_indexer:
             raise ValueError("freeze_dsa_indexer=False is not supported until the indexer has a differentiable output")
-        indexer_backend = self.indexer_backend or self.sparse_mla_backend
+        indexer_backend = self.indexer_backend
         _validate_indexer_backend_config(
             indexer_backend,
             index_head_dim=self.index_head_dim,
@@ -283,7 +254,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         indexer_rope_interleave: bool = True,
         indexer_types: list[str] | None = None,
         sparse_mla_backend: SparseMLABackend = "torch",
-        indexer_backend: DSAIndexerBackend | None = None,
+        indexer_backend: DSAIndexerBackend = "tilelang",
         freeze_dsa_indexer: bool = True,
         indexer_topk_query_chunk_size: int | None = None,
         **kwargs,
@@ -312,7 +283,7 @@ class DSAMultiLatentAttention(MultiLatentAttention):
         self.indexer_rope_interleave = indexer_rope_interleave
         self.indexer_types = indexer_types
         self.sparse_mla_backend = sparse_mla_backend
-        self.indexer_backend = indexer_backend or sparse_mla_backend
+        self.indexer_backend = indexer_backend
         self.freeze_dsa_indexer = freeze_dsa_indexer
         _validate_query_chunk_size(
             indexer_topk_query_chunk_size,

@@ -65,10 +65,8 @@ class TestMoETorchAll2AllDispatcher(DistributedTestBase):
         self.assertTrue(torch.allclose(noep_results, all2all_results, atol=1e-6, rtol=1e-4))
 
     def test_sync_dispatch_and_combine_buffers_are_reusable_once_freed(self):
-        # A synchronous DeepEP call already orders the compute stream after the communication kernels, so its
-        # buffers must neither live in a comm-stream allocator pool nor stay pending on comm-stream events after
-        # the host frees them. At 512K/SP8 such pending multi-GiB buffers made the next large allocation miss and
-        # forced a device-wide `release_cached_blocks`.
+        # Large synchronous dispatch/combine buffers must be reusable as soon as the host frees them.
+        # Small layout metadata may use the communication stream to hand its event to dispatch.
         self.create_pg("cuda")
         num_experts = 16
         dispatcher = DeepEPDispatcher(
@@ -97,12 +95,17 @@ class TestMoETorchAll2AllDispatcher(DistributedTestBase):
 
         events = [event for trace in snapshot["device_traces"] for event in trace]
         compute_stream = torch.cuda.current_stream().cuda_stream
-        self.assertEqual({event["stream"] for event in events if event["action"] == "alloc"}, {compute_stream})
-        # Without cross-stream uses, the allocator completes a free right when the host requests it.
+        payload_bytes = hidden_states.numel() * hidden_states.element_size()
+        self.assertEqual(
+            {event["stream"] for event in events if event["action"] == "alloc" and event["size"] >= payload_bytes},
+            {compute_stream},
+        )
+        # Pending frees of payload-sized buffers caused multi-GiB cache misses at 512K/SP8.
         pending_frees = [
             (event["size"], event["addr"])
             for index, event in enumerate(events)
             if event["action"] == "free_requested"
+            and event["size"] >= payload_bytes
             and not (events[index + 1]["action"] == "free_completed" and events[index + 1]["addr"] == event["addr"])
         ]
         self.assertEqual(pending_frees, [])

@@ -199,8 +199,8 @@ def render_glm52_chat(
                 append(_render_tool_calls(message["tool_calls"]), loss)
             previous_assistant_loss = loss
             next_role = messages[index + 1].get("role") if index + 1 < len(messages) else None
-            if next_role not in _NEXT_ROLE_STOP_TOKENS:
-                # 没有 user/observation 角色边界时，用标准 EOS 结束 assistant。
+            if next_role is None:
+                # 训练用 EOS 只追加在对话末尾；官方模板从不在对话中间输出 EOS。
                 append(_END_OF_TEXT, loss)
         elif role == "tool":
             if index == 0 or messages[index - 1].get("role") != "tool":

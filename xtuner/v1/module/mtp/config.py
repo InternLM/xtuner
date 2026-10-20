@@ -36,6 +36,11 @@ class MTPConfig(BaseModel):
             expected multi-step rejection-sampling acceptance length. Default: ``"ce"``.
         tv_loss_chunk_size (int): Number of token positions processed together when
             computing the exact full-vocabulary TV overlap. Default: 128.
+        use_local_future_embeddings (bool): Gather supplied embeddings once, then
+            materialize only the local SP slice for each prediction depth. All depths
+            reuse the unshifted sequence metadata; future tokens are passed explicitly
+            via ``future_embeddings``. Token-ID-only inputs keep the rolling path.
+            Default: True. Set False to restore the full-sequence rolling path.
 
     Example:
         >>> # In model config
@@ -58,3 +63,4 @@ class MTPConfig(BaseModel):
     loss_scaling_factor: Annotated[float, Parameter(group="model")] = 0.1
     loss_type: Annotated[Literal["ce", "e2e_tv"], Parameter(group="model")] = "ce"
     tv_loss_chunk_size: Annotated[int, Parameter(group="model")] = 128
+    use_local_future_embeddings: Annotated[bool, Parameter(group="model")] = True
