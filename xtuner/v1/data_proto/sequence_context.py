@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 from torch.distributed._functional_collectives import all_gather_tensor_autograd
@@ -7,6 +7,10 @@ from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
 from .utils import gather_for_sequence_parallel, pad_to_multiple_of, split_for_sequence_parallel
+
+
+if TYPE_CHECKING:
+    from xtuner.v1.datasets.media.schema import MediaDeliveryProof, MediaPlan
 
 
 # Avoid using dataclass decorator here to get rid of extra ops called in pytorch 2.8 and above
@@ -38,6 +42,9 @@ class SequenceContext:
     device: str | torch.device  # TODO: 这个地方有点乱，到处是 device
     position_ids: torch.LongTensor | None
     seq_idx: torch.IntTensor | None
+    media_plan: "MediaPlan | None"
+    media_delivery: "MediaDeliveryProof | None"
+    media_pack_id: str | None
 
     # Qwen3VL
     image_grid_thw: torch.Tensor | None
@@ -94,6 +101,9 @@ class SequenceContext:
         raw_inputs_embeds: torch.FloatTensor | None = None,
         shard_start: int = 0,
         shard_size: int = 0,
+        media_plan: "MediaPlan | None" = None,
+        media_delivery: "MediaDeliveryProof | None" = None,
+        media_pack_id: str | None = None,
     ):
         # Only to distinguish parameters accepted by the constructor from attributes. For example, for `max_length_q`,
         # the argument can be an int, but as an attribute it can only be a tensor
@@ -131,6 +141,9 @@ class SequenceContext:
         self._shard_start = shard_start
         self._shard_size = shard_size
         self.seq_idx = None
+        self.media_plan = media_plan
+        self.media_delivery = media_delivery
+        self.media_pack_id = media_pack_id
 
         # `DeviceMesh.get_local_rank` is not compatible with `torch.compile`, we calculate `_sp_rank` in
         # `SequenceContext`
@@ -291,6 +304,9 @@ class SequenceContext:
                 raw_input_ids=cast(torch.LongTensor, pad_input_ids),
                 shard_start=start,
                 shard_size=shard_size,
+                media_plan=self.media_plan,
+                media_delivery=self.media_delivery,
+                media_pack_id=self.media_pack_id,
             )
             return sp_seq_ctx
         else:
@@ -298,6 +314,12 @@ class SequenceContext:
 
     @classmethod
     def cat(cls, sequence_context_list: list["SequenceContext"]) -> "SequenceContext":
+        if any(
+            context.media_plan is not None or context.media_delivery is not None for context in sequence_context_list
+        ):
+            raise ValueError(
+                "media plans must be assembled by the retained-pack collator before context concatenation"
+            )
         packed_input_ids: list[torch.Tensor] = []
         cu_seq_lens_q: list[torch.IntTensor] = []
         cu_seq_lens_k: list[torch.IntTensor] = []
@@ -491,6 +513,8 @@ class SequenceContext:
 
     # TODO: 暂时没有用到，可能要删掉
     def chunk(self, num_chunks: int) -> list[Self]:
+        if self.media_plan is not None or self.media_delivery is not None:
+            raise ValueError("chunking media contexts requires an explicit media-to-sequence mapping")
         n = self.seq_lens_q.numel()
         assert n // num_chunks
         n_per_chunk = n // num_chunks
@@ -566,6 +590,9 @@ class SequenceContext:
             raw_inputs_embeds=overrides.get("raw_inputs_embeds", self._raw_inputs_embeds),
             shard_start=overrides.get("shard_start", self._shard_start),
             shard_size=overrides.get("shard_size", self._shard_size),
+            media_plan=overrides.get("media_plan", self.media_plan),
+            media_delivery=overrides.get("media_delivery", self.media_delivery),
+            media_pack_id=overrides.get("media_pack_id", self.media_pack_id),
         )
 
     def to(self, device: torch.device | str):
@@ -642,7 +669,7 @@ class SequenceContext:
         Returns:
             dict: A dictionary containing all attributes of the SequenceContext.
         """
-        return {
+        result = {
             "input_ids": self.input_ids,
             "cu_seq_lens_q": self.cu_seq_lens_q,
             "cu_seq_lens_k": self.cu_seq_lens_k,
@@ -665,3 +692,10 @@ class SequenceContext:
             "rollout_routed_experts": self.rollout_routed_experts,
             "offload_rollout_routed_experts": self.offload_rollout_routed_experts,
         }
+        if self.media_plan is not None:
+            result["media_plan"] = self.media_plan
+        if self.media_delivery is not None:
+            result["media_delivery"] = self.media_delivery
+        if self.media_pack_id is not None:
+            result["media_pack_id"] = self.media_pack_id
+        return result

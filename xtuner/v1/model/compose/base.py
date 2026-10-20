@@ -80,6 +80,40 @@ class BaseComposeModel(BaseModel):
 
         self._maybe_enable_compile(self.compile_cfg)
         self._freeze_modules()
+        self.register_forward_pre_hook(self._require_resolved_media, with_kwargs=True)
+        self.language_model.register_forward_pre_hook(self._language_media_boundary, with_kwargs=True)
+
+    @staticmethod
+    def _language_media_boundary(module, args, kwargs):
+        contexts = kwargs.get("seq_ctx", args[0] if args else None)
+
+        def language_context(context):
+            if getattr(context, "media_delivery", None) is None:
+                return context
+            if context.media_plan is not None or context.input_ids is not None or context.inputs_embeds is None:
+                raise ValueError("resolved media must be encoded before entering the language model")
+            return context.copy(pixel_values=None, pixel_values_videos=None, media_delivery=None)
+
+        if isinstance(contexts, (list, tuple)):
+            updated = type(contexts)(language_context(context) for context in contexts)
+        else:
+            updated = language_context(contexts)
+        if "seq_ctx" in kwargs:
+            return args, {**kwargs, "seq_ctx": updated}
+        if args:
+            return (updated, *args[1:]), kwargs
+        return None
+
+    @staticmethod
+    def _require_resolved_media(module, args, kwargs):
+        contexts = kwargs.get("seq_ctx", args[0] if args else None)
+        contexts = contexts if isinstance(contexts, (list, tuple)) else [contexts]
+        for context in contexts:
+            if getattr(context, "media_plan", None) is not None:
+                raise ValueError("unresolved media plan: use the common TrainEngine media consumption entry")
+            proof = getattr(context, "media_delivery", None)
+            if proof is not None:
+                proof.validate_context(context)
 
     def _freeze_modules(self):
         freeze_vision = self.config.freeze_vision

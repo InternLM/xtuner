@@ -1,5 +1,11 @@
+from typing import TYPE_CHECKING
+
 import torch
 from typing_extensions import NotRequired, TypedDict
+
+
+if TYPE_CHECKING:
+    from .media.schema import MediaPlan
 
 
 class CacheItem(TypedDict):
@@ -15,6 +21,7 @@ class DataItem(CacheItem):
 
 class BaseMLLMDataItem(DataItem):
     num_imgs: list[int]
+    media_plan: NotRequired["MediaPlan"]
 
 
 class InternS1DataItem(BaseMLLMDataItem, total=False):

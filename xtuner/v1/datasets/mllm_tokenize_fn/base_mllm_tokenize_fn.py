@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
 from collections.abc import Mapping
-from typing import Any, Literal, TypeVar
+from typing import Any, ClassVar, Literal, TypeVar
 
 import torch
 import xxhash
@@ -13,6 +13,7 @@ from xtuner.v1.data_proto.templates import ChatTemplate, HybridChatTemplate
 from xtuner.v1.utils import get_logger, trim_memory
 
 from ..data_item import BaseMLLMDataItem, CacheItem
+from ..media.config import MediaPipelineConfig
 from ..utils import CachableTokenizeFunction, tokenizer_xxhash, with_proxy_attention_flops
 
 
@@ -168,8 +169,10 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         llm_pack_weight: float = 1.0,
         visual_pack_weight: float = 0.0,
         trim_memory_interval: int = 1,
+        media_pipeline: MediaPipelineConfig | None = None,
     ):
         self.max_length = max_length
+        self.media_pipeline = media_pipeline or MediaPipelineConfig()
         self._tokenizer_hash = tokenizer_hash
         self._hash = hash
         self._hash_str = hash_str
@@ -298,6 +301,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
 
 
 class BaseMLLMTokenizeFnConfig(BaseModel):
+    supports_media_pipeline: ClassVar[bool] = False
     model_config = ConfigDict(
         title="Base dataset config for xtuner",
         extra="forbid",
@@ -314,6 +318,7 @@ class BaseMLLMTokenizeFnConfig(BaseModel):
     llm_pack_weight: float = 1.0
     visual_pack_weight: float = 0.0
     trim_memory_interval: int = 1
+    media_pipeline: MediaPipelineConfig = MediaPipelineConfig()
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs

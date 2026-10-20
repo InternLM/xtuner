@@ -56,6 +56,7 @@ Welcome to XTuner V1 English Documentation
 
    pretrain_sft/advanced_tutorial/index.rst
    rl/advanced_tutorial/index.rst
+   unified_media
 
 .. toctree::
    :hidden:

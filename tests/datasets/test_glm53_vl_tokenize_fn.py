@@ -852,6 +852,7 @@ _NON_HASH_PARAMS = {
     "oss_time_log_thr",
     "trim_memory_interval",
     "oss_loader_cfg",
+    "media_pipeline",
 }
 
 # _HASH_PARAMS（除 processor_path）逐参数构造变体用的 override。取值必须避开 processor 默认值

@@ -43,6 +43,7 @@ from xtuner.v1._writer import get_writer
 from xtuner.v1.config import FSDPConfig, LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import BaseDataloaderConfig, DataloaderConfig, DatasetConfigList
+from xtuner.v1.datasets.media import MediaPipelineConfig
 from xtuner.v1.engine import TrainEngine
 from xtuner.v1.engine.train_engine import TrainStepInfo
 from xtuner.v1.loss import CELossConfig
@@ -405,6 +406,7 @@ class TrainerConfig(BaseModel):
         None  # TODO: Removed in version 1.1.0
     )
     dataloader_cfg: BaseDataloaderConfig
+    media_pipeline: MediaPipelineConfig = MediaPipelineConfig()
     optim_cfg: OptimConfig
     lr_cfg: LRConfig
     loss_cfg: CELossConfig = CELossConfig()
@@ -575,9 +577,16 @@ class Trainer:
         trainer_cfg: TrainerConfig | None = None,
         hooks_config: HooksConfig = HooksConfig(),
         internal_metrics_cfg: InternalMetricsConfig | None = None,
+        media_pipeline: MediaPipelineConfig | None = None,
     ):
         self._do_clip = do_clip
         self._grad_norm_dtype = grad_norm_dtype
+        self._media_pipeline = media_pipeline or MediaPipelineConfig()
+        if self._media_pipeline.enabled:
+            if not isinstance(dataloader_cfg, DataloaderConfig):
+                raise ValueError("enabled media pipeline requires a supported map-style DataloaderConfig")
+            dataloader_cfg = dataloader_cfg.model_copy(deep=True)
+            dataloader_cfg.media_pipeline = self._media_pipeline
         self._dataloader_config = dataloader_cfg
 
         self._total_step = total_step
@@ -851,12 +860,31 @@ class Trainer:
             hooks_config=config.hooks_config,
             trainer_cfg=config,
             internal_metrics_cfg=config.internal_metrics_cfg,
+            media_pipeline=config.media_pipeline,
         )
         self._config = config
         self._print_training_config()
         return self
 
     def fit(self):
+        if not self._media_pipeline.enabled:
+            return self._fit()
+        if not hasattr(self._dataloader, "enable_explicit_consumption"):
+            raise ValueError("media pipeline requires an explicit committed-cursor dataloader")
+        self._dataloader.enable_explicit_consumption()
+        try:
+            self._engine.configure_media(self._media_pipeline)
+            return self._fit()
+        finally:
+            self._media_lookahead = None
+            try:
+                self._engine.shutdown_media()
+            finally:
+                iterator = getattr(self._dataloader, "_iterator", None)
+                if iterator is not None:
+                    iterator._shutdown_workers()
+
+    def _fit(self):
         """Run the training loop.
 
         This method executes the main training loop, iterating through the dataset and performing training steps. It
@@ -875,6 +903,12 @@ class Trainer:
 
             with self._maybe_profiling():
                 engine_input = self._prepare_model_input(data_batch)
+                if self._media_pipeline.enabled:
+                    self._engine.set_media_schedule(
+                        epoch=self._cur_epoch,
+                        step=self._cur_step,
+                        lookahead=getattr(self, "_media_lookahead", None),
+                    )
                 train_step_info = self._engine.train_step(engine_input)
                 hooks = self.hooks_config.get_hooks(HookStage.AFTER_TRAIN_STEP)
                 for hook in hooks:
@@ -891,6 +925,8 @@ class Trainer:
                     self._engine.put_optimizer_to_device(DEVICE)
                     self._offload_optimizer_first_step = False
                 self._engine.step_optimizer(grad_norm)
+                if self._media_pipeline.enabled:
+                    self._dataloader.commit_batch(len(data_batch))
 
             time_after_train_step = time.time()
             ProberList.after_step()
@@ -1452,7 +1488,15 @@ class Trainer:
             )
 
     def _save_dataloader(self, dataloader_path: Path | str):
+        if self._media_pipeline.enabled and self._engine._media_runtime is not None:
+            self._engine._media_runtime.cancel_pending()
         dataloader_state = self._dataloader.get_state_dict()
+        if self._media_pipeline.enabled:
+            consumption = dataloader_state["media_consumption"]
+            next_epoch = self._cur_epoch + int(consumption.get("at_epoch_boundary", False))
+            consumption["next_epoch"] = next_epoch
+            if consumption.get("at_epoch_boundary"):
+                dataloader_state["sampler"]["epoch"] = next_epoch
         if self.rank == 0:
             torch.save(dataloader_state, dataloader_path)
 
@@ -1497,6 +1541,9 @@ class Trainer:
         return self._meta
 
     def _data_iter(self):
+        if self._media_pipeline.enabled and self._media_pipeline.prefetch_batches:
+            yield from self._media_data_iter()
+            return
         data_iter = iter(self._dataloader)
         while self._cur_step < self.total_step:
             try:
@@ -1508,6 +1555,39 @@ class Trainer:
                 data = next(data_iter)
 
             yield data
+
+    def _media_data_iter(self):
+        data_iter = iter(self._dataloader)
+        buffered = None
+        epoch_exhausted = False
+        epoch_had_data = False
+        while self._cur_step < self.total_step:
+            if epoch_exhausted:
+                self._cur_epoch += 1
+                self._dataloader.set_epoch(self._cur_epoch)
+                data_iter = iter(self._dataloader)
+                epoch_exhausted = False
+                epoch_had_data = False
+            if buffered is None:
+                try:
+                    current = next(data_iter)
+                except StopIteration:
+                    if not epoch_had_data:
+                        raise RuntimeError("cannot prefetch from an empty dataloader epoch")
+                    epoch_exhausted = True
+                    continue
+            else:
+                current = buffered
+            epoch_had_data = True
+            buffered = None
+            if self._cur_step + 1 < self.total_step:
+                try:
+                    buffered = next(data_iter)
+                except StopIteration:
+                    epoch_exhausted = True
+            self._media_lookahead = buffered
+            yield current
+        self._media_lookahead = None
 
     def _get_checkpoint_path(self, epoch: int, step: int, is_snapshot: bool = False) -> Path:
         prefix = "snapshot-" if is_snapshot else "ckpt-"
@@ -2144,6 +2224,11 @@ class Trainer:
             raise FileNotFoundError(f"Dataloader path {dataloader_path} does not exist.")
         dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
         self._dataloader.load_state_dict(dataloader_state)
+        if self._media_pipeline.enabled:
+            consumption = dataloader_state.get("media_consumption", {})
+            if consumption.get("version") != 1 or "next_epoch" not in consumption:
+                raise ValueError("enabled media resume requires a committed cursor with an explicit next epoch")
+            self._cur_epoch = consumption["next_epoch"]
 
     def _setup_hooks(self, hooks_config: HooksConfig) -> HooksConfig:
         for stage in HookStage:

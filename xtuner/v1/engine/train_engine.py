@@ -8,6 +8,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor, wait
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, cast
 
@@ -161,6 +162,78 @@ class TrainEngine:
         self.has_freeze_params = self.__has_freeze_params()
         self._async_checkpoint_pg: dist.ProcessGroup | None = None
         self._async_state_dict_cache: dict[str, Any] | None = None
+        self._media_runtime = None
+        self._media_epoch = 0
+        self._media_step = 0
+        self._media_lookahead = None
+
+    def configure_media(self, config):
+        if self._media_runtime is not None:
+            raise RuntimeError("media runtime already configured")
+        if config.enabled:
+            from xtuner.v1.datasets.media.runtime import MediaRuntime
+
+            self._media_runtime = MediaRuntime(config)
+            self._media_config = config
+
+    def set_media_schedule(self, *, epoch, step, lookahead=None):
+        self._media_epoch = epoch
+        self._media_step = step
+        self._media_lookahead = lookahead
+
+    def _media_key(self, context, ordinal, step=None):
+        step = self._media_step if step is None else step
+        return f"epoch={self._media_epoch}:step={step}:micro={ordinal}:pack={context.media_pack_id}"
+
+    @contextmanager
+    def _consume_media(self, contexts, ordinal):
+        if self._media_runtime is None:
+            yield contexts
+            return
+        from xtuner.v1.datasets.media.schema import MediaDeliveryProof
+
+        with ExitStack() as leases:
+            resolved = []
+            for offset, context in enumerate(contexts):
+                key = self._media_key(context, ordinal + offset)
+                media = leases.enter_context(
+                    self._media_runtime.consume(
+                        context.media_plan,
+                        key=key,
+                        sp_mesh=context.sequence_parallel_mesh,
+                        device=DEVICE,
+                    )
+                )
+                if context.media_plan is None:
+                    resolved.append(context)
+                else:
+                    if media is None:
+                        raise RuntimeError("nonempty media plan produced no delivery")
+                    media.validate(context.media_plan.output_specs)
+                    for name in media.tensors:
+                        if not hasattr(context, name):
+                            raise ValueError(f"provider output has no native context field: {name}")
+                    proof = MediaDeliveryProof(key, context.media_plan.fingerprint, context.media_plan.output_specs)
+                    resolved.append(context.copy(media_plan=None, media_delivery=proof, **media.tensors))
+            try:
+                yield resolved
+            finally:
+                resolved.clear()
+
+    def _prefetch_media_context(self, context, ordinal, *, step=None, sp_mesh=None):
+        if self._media_runtime is None or context.media_plan is None:
+            return
+        mesh = sp_mesh if sp_mesh is not None else context.sequence_parallel_mesh
+        producer = self._media_config.distribution == "local" or mesh is None or mesh.get_local_rank() == 0
+        self._media_runtime.prefetch(
+            context.media_plan, key=self._media_key(context, ordinal, step), is_producer=producer
+        )
+
+    def shutdown_media(self):
+        self._media_lookahead = None
+        if self._media_runtime is not None:
+            self._media_runtime.close()
+            self._media_runtime = None
 
     def __has_freeze_params(self) -> bool:
         has_freeze_params = False
@@ -190,7 +263,8 @@ class TrainEngine:
 
     @torch.no_grad()
     def forward_only(self, seq_ctx: SequenceContext, loss_ctx: LogProbContext):
-        output = self.model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})  # type: ignore[call-overload]
+        with self._consume_media([seq_ctx], 0) as contexts:
+            output = self.model(seq_ctx=contexts[0], loss_ctx={"lm": loss_ctx})  # type: ignore[call-overload]
         return output
 
     def grad_accumulation_steps(self, data_batches_len: int):
@@ -235,22 +309,26 @@ class TrainEngine:
                 seq_ctx_list = [i["seq_ctx"] for i in data_batch]
                 loss_ctx_list = [i["loss_ctx"] for i in data_batch]
 
-                if self.intra_layer_micro_batch == 1:
-                    output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
-                else:
-                    # For intra_layer_micro_batch > 1, we need to handle the data batches differently.
-                    # Here we assume that the model can handle a list of seq_ctx and loss_ctx.
-                    output = self.model(
-                        seq_ctx=seq_ctx_list,
-                        loss_ctx=loss_ctx_list,  # type: ignore[arg-type]
-                    )
-                output.free_nongrad_feature()
-
-                micro_batch_results.append(output)
-
-                loss = self._get_total_loss(output)
-                loss.backward()
-                total_loss += loss.detach()
+                with self._consume_media(seq_ctx_list, i) as resolved_contexts:
+                    next_ordinal = i + intra_layer_micro_batch
+                    if next_ordinal < len(data_batches):
+                        self._prefetch_media_context(data_batches[next_ordinal]["seq_ctx"], next_ordinal)
+                    elif self._media_lookahead:
+                        self._prefetch_media_context(
+                            self._media_lookahead[0]["seq_ctx"],
+                            0,
+                            step=self._media_step + 1,
+                            sp_mesh=seq_ctx_list[0].sequence_parallel_mesh,
+                        )
+                    if self.intra_layer_micro_batch == 1:
+                        output = self.model(seq_ctx=resolved_contexts[0], loss_ctx=loss_ctx_list[0])
+                    else:
+                        output = self.model(seq_ctx=resolved_contexts, loss_ctx=loss_ctx_list)
+                    output.free_nongrad_feature()
+                    micro_batch_results.append(output)
+                    loss = self._get_total_loss(output)
+                    loss.backward()
+                    total_loss += loss.detach()
                 # call dump_forward_records after backward to record the recomputed activations
                 ProberList.after_micro_iter_forward()
 

@@ -7,7 +7,7 @@ import os
 from dataclasses import asdict, is_dataclass
 from itertools import chain
 from types import SimpleNamespace
-from typing import Dict, Literal, Optional, Union
+from typing import ClassVar, Dict, Literal, Optional, Union
 
 import numpy as np
 import torch
@@ -23,6 +23,8 @@ from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP, HybridChatTemplate
 from xtuner.v1.utils import get_logger, log_rank0
 
 from ..data_item import CacheItem, QwenVL3DataItem
+from ..media.config import MediaPipelineConfig
+from ..media.providers.shared import check_video_policy, initialize_image_provider, prepare_image_inputs
 from ..utils import apply_exif_orientation, generate_random_int_from_dict
 from .base_mllm_tokenize_fn import (
     IMAGE_TOKEN_ALIAS,
@@ -307,8 +309,10 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         trim_memory_interval: int = 1,
         add_generation_prompt: bool = False,
         enable_thinking: bool | None = None,
+        media_pipeline: MediaPipelineConfig | None = None,
     ):
         self.oss_loader = None
+        self._media_oss_loader_config = None if oss_loader_cfg is None else oss_loader_cfg.model_dump(mode="json")
         self.debug = debug
         self.oss_time_log_thr = oss_time_log_thr
         self.enable_3d_rope = enable_3d_rope
@@ -419,7 +423,9 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             llm_pack_weight=llm_pack_weight,
             visual_pack_weight=visual_pack_weight,
             trim_memory_interval=trim_memory_interval,
+            media_pipeline=media_pipeline,
         )
+        initialize_image_provider(self, "qwen_image")
 
     def calc_num_tokens_pure_text_get_item(self, data_item) -> CacheItem:
         # It is expected that Qwen35ChatMessages is slightly slower than ChatMessages in the same data and same output.
@@ -567,22 +573,27 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         return {"num_tokens": len(input_ids), "num_img_tokens": (sum_media_grid_thw * self.merge_length).tolist()}
 
     def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> QwenVL3DataItem:
-        image_data_list = []
-        for image_file in self._image_path:
-            image_path_ = get_image_path(image_file, media_root)
-            if self.oss_loader is not None and "s3://" in image_path_:
-                img_str = self.oss_loader.client.get(image_path_)
-                buff = io.BytesIO(img_str)
-                image = Image.open(buff).convert("RGB")
-            else:
-                assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
-                image = load_image(image_path_)
-            image = apply_exif_orientation(image)
-            image_data_list.append(image)
+        planned_inputs = prepare_image_inputs(self, data_item, media_root, "qwen_image")
+        media_plan = None
+        if planned_inputs is None:
+            image_data_list = []
+            for image_file in self._image_path:
+                image_path_ = get_image_path(image_file, media_root)
+                if self.oss_loader is not None and "s3://" in image_path_:
+                    img_str = self.oss_loader.client.get(image_path_)
+                    buff = io.BytesIO(img_str)
+                    image = Image.open(buff).convert("RGB")
+                else:
+                    assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
+                    image = load_image(image_path_)
+                image = apply_exif_orientation(image)
+                image_data_list.append(image)
 
-        visual_processed = self.image_processor.preprocess(image_data_list, return_tensors="pt")
-        image_tensor = visual_processed["pixel_values"]
-        grid_thw = visual_processed["image_grid_thw"]  # b,3
+            visual_processed = self.image_processor.preprocess(image_data_list, return_tensors="pt")
+            image_tensor = visual_processed["pixel_values"]
+            grid_thw = visual_processed["image_grid_thw"]
+        else:
+            image_tensor, grid_thw, media_plan = planned_inputs
         grid_thw_merged = [merged_thw.prod().item() // self.merge_length for merged_thw in grid_thw]  # type: ignore
 
         is_pretrain = False
@@ -650,6 +661,9 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             num_img_tokens=grid_thw.prod(dim=1).tolist(),
             num_imgs=[len(self._image_path)],
         )
+        if media_plan is not None:
+            ret.pop("pixel_values")
+            ret["media_plan"] = media_plan
         return ret
 
     def calc_frame_info(self, data_item):
@@ -877,6 +891,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         return {"num_tokens": len(input_ids), "num_img_tokens": orig_num_image_tokens}
 
     def video_get_item(self, data_item: dict, media_root: str = "") -> QwenVL3DataItem:
+        check_video_policy(self)
         num_image_tokens_list = []
         pixel_values_list = []
         num_imgs_list = []
@@ -1051,6 +1066,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
 
 class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
+    supports_media_pipeline: ClassVar[bool] = True
     model_config = ConfigDict(title="Base dataset config for xtuner", extra="forbid")
     processor_path: str
     min_pixels: int | None = None
@@ -1107,4 +1123,5 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             trim_memory_interval=self.trim_memory_interval,
             add_generation_prompt=self.add_generation_prompt,
             enable_thinking=self.enable_thinking,
+            media_pipeline=kwargs.get("media_pipeline", self.media_pipeline),
         )
