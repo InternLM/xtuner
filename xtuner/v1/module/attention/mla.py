@@ -196,6 +196,7 @@ class MultiLatentAttention(nn.Module):
         layer_type: Literal["full_attention", "sliding_attention"] | None = None,
         sliding_window: int = -1,
         layer_idx: int = 0,
+        rms_norm_eps: float = 1e-6,
     ):
         super().__init__()
         self.name = f"layers.{layer_idx}.self_attn"
@@ -232,7 +233,11 @@ class MultiLatentAttention(nn.Module):
                 bias=self.qkv_bias,
                 float8_cfg=self.float8_cfg,
             )
-            self.q_a_layernorm = RMSNorm(self.q_lora_rank)
+            # The published GLM-5.3-Flash checkpoints carry rms_norm_eps=1e-5 for the
+            # whole text stack; HF and Automodel build both a-layernorms from the text
+            # config's eps. The RMSNorm class default (1e-6) is only a fallback for
+            # callers without a config; GLM53 must pass the config value through.
+            self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=rms_norm_eps)
             self.q_b_proj = build_linear(
                 self.q_lora_rank,
                 self.num_attention_heads * self.q_head_dim,
@@ -246,7 +251,7 @@ class MultiLatentAttention(nn.Module):
             bias=self.qkv_bias,
             float8_cfg=self.float8_cfg,
         )
-        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank)
+        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=rms_norm_eps)
         self.kv_b_proj = build_linear(
             self.kv_lora_rank,
             self.num_attention_heads * (self.q_head_dim - self.qk_rope_head_dim + self.v_head_dim),

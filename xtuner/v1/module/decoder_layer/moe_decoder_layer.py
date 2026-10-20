@@ -3,7 +3,7 @@ from typing import Callable, Literal, Protocol, TypeAlias, TypedDict, cast
 
 import torch
 import torch.nn as nn
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 from torch.autograd.function import Function
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
@@ -17,6 +17,8 @@ from xtuner.v1.module import (
     GatedDeltaNet,
     GatedDeltaNetConfig,
     GreedyRouterConfig,
+    KDAConfig,
+    KimiDeltaAttention,
     MHAConfig,
     MLAConfig,
     MultiHeadAttention,
@@ -35,7 +37,8 @@ from xtuner.v1.module.dispatcher import (
 )
 from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linear
 from xtuner.v1.module.rope import RopeScalingConfig
-from xtuner.v1.ops.act_fn import get_act_fn
+from xtuner.v1.ops.act_fn import get_act_fn, get_gated_act_fn
+from xtuner.v1.ops.fp32_linear import fp32_linear
 from xtuner.v1.utils import ForwardState
 
 from ..linear import build_linear
@@ -87,16 +90,26 @@ class MoEActFnProtocol(Protocol):
 
 class MoEActFnConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    act_type: Literal["clipped_swiglu", "swiglu"] = "swiglu"
+    act_type: Literal["clipped_swiglu", "clamped_swiglu", "swiglu"] = "swiglu"
 
     clip_alpha: float | None = None
     clip_limit: float | None = None
+
+    @model_validator(mode="after")
+    def _check_clip_limit(self) -> "MoEActFnConfig":
+        # Without it the activation reaches `clamp(max=None)`, whose RuntimeError says nothing
+        # about the misconfiguration; fail where the mistake was made.
+        if self.act_type in ("clipped_swiglu", "clamped_swiglu") and self.clip_limit is None:
+            raise ValueError(f"act_type={self.act_type!r} requires clip_limit")
+        return self
 
     def build(self) -> MoEActFnProtocol:
         act_fn = get_act_fn(self.act_type)
 
         if self.act_type == "clipped_swiglu":
             act_fn = partial(act_fn, alpha=self.clip_alpha, limit=self.clip_limit)
+        elif self.act_type == "clamped_swiglu":
+            act_fn = partial(act_fn, limit=self.clip_limit)
         return act_fn
 
 
@@ -109,6 +122,7 @@ class MoEMLP(nn.Module):
         moe_intermediate_size: int,
         hidden_act: str,
         mlp_bias: bool = False,
+        swiglu_limit: float | None = None,
         float8_cfg: Float8Config | None = None,
     ):
         super().__init__()
@@ -117,11 +131,10 @@ class MoEMLP(nn.Module):
         self.gate_proj = build_linear(self.hidden_size, self.intermediate_size, bias=mlp_bias, float8_cfg=float8_cfg)
         self.up_proj = build_linear(self.hidden_size, self.intermediate_size, bias=mlp_bias, float8_cfg=float8_cfg)
         self.down_proj = build_linear(self.intermediate_size, self.hidden_size, bias=mlp_bias, float8_cfg=float8_cfg)
-        self.act_fn = get_act_fn(hidden_act)
+        self.act_fn = get_gated_act_fn(hidden_act, swiglu_limit)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        return down_proj
+        return self.down_proj(self.act_fn(self.gate_proj(x), self.up_proj(x)))
 
 
 class MoEGate(nn.Module):
@@ -134,10 +147,14 @@ class MoEGate(nn.Module):
         router_config: GreedyRouterConfig | NoAuxRouterConfig,
         gate_bias: bool = False,
         router_compute_dtype: Literal["float32", "native"] = "float32",
+        router_projection_block_size: int = 0,
     ):
         super().__init__()
         self.n_routed_experts = n_routed_experts
         self.router_compute_dtype = router_compute_dtype
+        self.router_projection_block_size = router_projection_block_size
+        if router_projection_block_size and router_compute_dtype != "float32":
+            raise ValueError("Fixed router projections require router_compute_dtype='float32'")
 
         self.gating_dim = hidden_size
         self.weight = nn.Parameter(torch.empty((self.n_routed_experts, self.gating_dim)))
@@ -171,7 +188,7 @@ class MoEGate(nn.Module):
             logits = F.linear(hidden_states, weight, bias)
         else:
             bias = bias.float() if bias is not None else None
-            logits = F.linear(hidden_states.float(), weight.float(), bias)
+            logits = fp32_linear(hidden_states, weight, bias, block_size=self.router_projection_block_size)
         return self.router(logits, rollout_routed_experts)
 
         # Debug for aligning with hf implementation.
@@ -247,6 +264,7 @@ class MoEDecoderLayer(nn.Module):
         gate_bias: bool = False,
         moe_bias: bool = False,
         hidden_act: str,
+        swiglu_limit: float | None = None,
         rms_norm_eps: float = 1e-6,
         rms_norm_type: Literal["default", "zero_centered"] = "default",
         num_experts_per_tok: int,
@@ -254,12 +272,13 @@ class MoEDecoderLayer(nn.Module):
         n_shared_experts: int,
         with_shared_expert_gate: bool = False,
         hidden_factor: float = 1.0,
-        attention_config: MHAConfig | MLAConfig | GatedDeltaNetConfig,
+        attention_config: MHAConfig | MLAConfig | GatedDeltaNetConfig | KDAConfig,
         rope_scaling_cfg: RopeScalingConfig | None = None,
         layer_type: Literal["full_attention", "sliding_attention"] | None = None,
         generate_config: GenerateConfig | None = None,
         router_config: GreedyRouterConfig | NoAuxRouterConfig,
         router_compute_dtype: Literal["float32", "native"] = "float32",
+        router_projection_block_size: int = 0,
         moe_act_fn_cfg: MoEActFnConfig,
         float8_cfg: Float8Config | None = None,
         layer_idx: int = 0,
@@ -276,13 +295,15 @@ class MoEDecoderLayer(nn.Module):
         self.n_shared_experts = n_shared_experts
         self.hidden_factor = hidden_factor
 
-        self.self_attn: MultiHeadAttention | MultiLatentAttention | GatedDeltaNet = attention_config.build(
-            hidden_size=hidden_size,
-            layer_idx=layer_idx,
-            generate_config=generate_config,
-            rope_scaling_cfg=rope_scaling_cfg,
-            layer_type=layer_type,
-            float8_cfg=float8_cfg,
+        self.self_attn: MultiHeadAttention | MultiLatentAttention | GatedDeltaNet | KimiDeltaAttention = (
+            attention_config.build(
+                hidden_size=hidden_size,
+                layer_idx=layer_idx,
+                generate_config=generate_config,
+                rope_scaling_cfg=rope_scaling_cfg,
+                layer_type=layer_type,
+                float8_cfg=float8_cfg,
+            )
         )
         self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps, type=rms_norm_type)
         self.layer_idx = layer_idx
@@ -298,6 +319,7 @@ class MoEDecoderLayer(nn.Module):
                 moe_intermediate_size=moe_intermediate_size,
                 hidden_act=hidden_act,
                 mlp_bias=mlp_bias,
+                swiglu_limit=swiglu_limit,
                 float8_cfg=float8_cfg,
             )
             if with_shared_expert_gate:
@@ -315,6 +337,7 @@ class MoEDecoderLayer(nn.Module):
             router_config=router_config,
             gate_bias=gate_bias,
             router_compute_dtype=router_compute_dtype,
+            router_projection_block_size=router_projection_block_size,
         )
         self.experts = MoEBlock(
             hidden_size=hidden_size,

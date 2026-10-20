@@ -398,7 +398,11 @@ class MTPE2ETVLossContext(LMHeadLossContext):
         valid_mask = loss_weight != 0
 
         if not valid_mask.any():
-            loss = head_weight.sum() * 0.0 + sum(draft.sum() * 0.0 for draft in draft_hidden_states)
+            # Empty SP shards must match the FP32 loss on non-empty ranks
+            # before the collective, while retaining zero-gradient edges.
+            loss = head_weight.sum(dtype=torch.float32) * 0.0 + sum(
+                draft.sum(dtype=torch.float32) * 0.0 for draft in draft_hidden_states
+            )
         else:
             selected_weight = loss_weight[valid_mask]
             alpha_per_step: list[torch.Tensor] = []

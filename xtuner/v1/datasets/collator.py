@@ -7,7 +7,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.utils import IGNORE_INDEX, get_logger
 from xtuner.v1.utils.pad import pad_to_max_length
 
-from .data_item import DataItem, InternS1DataItem, QwenVL3DataItem
+from .data_item import DataItem, Glm53VLDataItem, InternS1DataItem, QwenVL3DataItem
 
 
 logger = get_logger()
@@ -300,6 +300,113 @@ def qwen3_vl_sft_collator(
             assert position_ids.shape[-1] == seq_ctx.input_ids.shape[-1], (
                 f"position_ids length {position_ids.shape[-1]} != input_ids length {seq_ctx.input_ids.shape[-1]}"
             )
+        ret.append(
+            {
+                "seq_ctx": seq_ctx,
+                "shifted_labels": shifted_labels,
+            }
+        )
+
+    return ret
+
+
+def glm53_vl_sft_collator(
+    instances: list[list[Glm53VLDataItem]],
+    pack_max_length: int,
+    padding_token_idx: int,
+    image_token_id: int,
+    merge_unit: int,
+    pack_to_max_length: bool = True,
+    pad_chunk_size: int = 256,
+    media_dtype: torch.dtype = torch.bfloat16,
+) -> list[ColateItem]:
+    """Collate GLM-5.3 packs into text contexts and concatenated media.
+
+    Args:
+        instances (list[list[Glm53VLDataItem]]): Tokenized items, one inner list per pack.
+        pack_max_length (int): Maximum packed token length.
+        padding_token_idx (int): Padding token id for ``input_ids``.
+        image_token_id (int): Image placeholder token id, re-checked against the patch
+            count after pack-level truncation.
+        merge_unit (int): Vision tower spatial-merge unit (``spatial_merge_size ** 2``).
+        pack_to_max_length (bool): Pad every pack up to ``pack_max_length``.
+        pad_chunk_size (int): Padding granularity when ``pack_to_max_length`` is off.
+        media_dtype (torch.dtype): Transport dtype applied element-wise to image/video
+            patches before the pack-level concat (worker side, pre-IPC). Keep it equal to
+            the vision tower's parameter dtype (bf16 by default); a lower-precision value
+            under an fp32 tower rounds the patches at pack time.
+
+    Returns:
+        list[ColateItem]: One ``{"seq_ctx", "shifted_labels"}`` dict per pack.
+    """
+    ret: list[ColateItem] = []
+    for instance in instances:
+        seq_ctx, shifted_labels, instance = build_text_ctx_labels(  # type: ignore
+            instance,
+            pack_max_length,
+            padding_token_idx,
+            pack_to_max_length,
+            pad_chunk_size,
+        )
+
+        num_img_tokens: list[list[int]] = [data.get("num_img_tokens", [0]) for data in instance]
+
+        # Cast image/video patches to the transport dtype (default bf16) on the worker side,
+        # before cat and the cross-process IPC: the vision tower's patch_embed casts patches to
+        # its parameter dtype anyway, so fp32 media would only double the bytes crossing shm,
+        # main-process residency, and H2D. No-op when the dtypes already match.
+        pixel_values: list | torch.Tensor | None
+        pixel_values = [i["pixel_values"].to(media_dtype) for i in instance if "pixel_values" in i]
+        pixel_values = torch.cat(pixel_values, dim=0) if pixel_values else None
+
+        image_grid_thw: list | torch.Tensor | None
+        image_grid_thw = [i["image_grid_thw"] for i in instance if "image_grid_thw" in i]
+        image_grid_thw = torch.cat(image_grid_thw, dim=0) if image_grid_thw else None
+
+        pixel_values_videos: list | torch.Tensor | None
+        pixel_values_videos = [
+            i["pixel_values_videos"].to(media_dtype) for i in instance if "pixel_values_videos" in i
+        ]
+        pixel_values_videos = torch.cat(pixel_values_videos, dim=0) if pixel_values_videos else None
+
+        video_grid_thw: list | torch.Tensor | None
+        video_grid_thw = [i["video_grid_thw"] for i in instance if "video_grid_thw" in i]
+        video_grid_thw = torch.cat(video_grid_thw, dim=0) if video_grid_thw else None
+
+        # mm_token_type_ids must track input_ids through the exact same [:, :-1] drop + pad
+        # (design doc §8.3). Slice each item to its own (possibly pack-truncated) input_ids
+        # length first, so the rare single-oversized-item edge case in `build_text_ctx_labels`
+        # (which truncates that item's input_ids/labels but knows nothing about this
+        # GLM53-specific field) can't leave a stale, longer mm_token_type_ids behind.
+        mm_token_type_ids = torch.cat([i["mm_token_type_ids"][:, : len(i["input_ids"])] for i in instance], dim=-1)
+        mm_token_type_ids = mm_token_type_ids[:, :-1]
+        if seq_ctx.num_padding > 0:
+            mm_token_type_ids = pad_to_max_length(mm_token_type_ids, 0, max_length=pack_max_length, dim=-1)
+
+        assert seq_ctx.input_ids is not None, "input_ids should not be None"
+        assert mm_token_type_ids.shape[-1] == seq_ctx.input_ids.shape[-1], (
+            f"mm_token_type_ids length {mm_token_type_ids.shape[-1]} != input_ids length {seq_ctx.input_ids.shape[-1]}"
+        )
+
+        # Re-assert the placeholder<->patch-count invariant per sample after truncation: this is
+        # the only layer that can desync media from text after tokenize-time construction
+        # (pack-level truncation), so re-checking its own invariant here catches a corrupted
+        # sample loudly instead of silently training on half a visual span (design doc §8.4).
+        for data in instance:
+            placeholder_count = data["input_ids"].count(image_token_id)
+            expected_count = sum(data.get("num_img_tokens", [])) // merge_unit
+            assert placeholder_count == expected_count, (
+                f"GLM-5.3-Flash visual placeholder count {placeholder_count} != expected {expected_count} "
+                "after pack truncation; pack_max_length is too small to hold this sample's visual span."
+            )
+
+        seq_ctx.pixel_values = pixel_values  # type: ignore
+        seq_ctx.image_grid_thw = image_grid_thw
+        seq_ctx.pixel_values_videos = pixel_values_videos  # type: ignore
+        seq_ctx.video_grid_thw = video_grid_thw
+        seq_ctx.mm_token_type_ids = mm_token_type_ids
+        seq_ctx.num_img_tokens = num_img_tokens
+
         ret.append(
             {
                 "seq_ctx": seq_ctx,
