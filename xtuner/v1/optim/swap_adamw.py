@@ -132,6 +132,7 @@ class SwapAdamW(torch.optim.AdamW):
                             # only one rank. Keep global shape/placements in state;
                             # the swap map below aliases its pinned local storage.
                             state_tensor = torch.empty_like(param, device="cpu", pin_memory=True)
+                            assert isinstance(state_tensor, DTensor)
                             cpu_tensor = state_tensor.to_local()
                             if restored is None:
                                 cpu_tensor.zero_()
