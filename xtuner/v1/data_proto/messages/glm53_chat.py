@@ -96,7 +96,8 @@ def _is_list_of_outputs(message: Mapping[str, Any]) -> bool:
 
 
 def _contains_media(content: Any) -> bool:
-    """Media items anywhere in ``content``: top-level parts or nested ``{output: ...}`` entries."""
+    """Media items anywhere in ``content``: top-level parts or nested
+    ``{output: ...}`` entries."""
     if isinstance(content, Mapping):
         if content.get("type") in _MEDIA_PLACEHOLDER:
             return True
