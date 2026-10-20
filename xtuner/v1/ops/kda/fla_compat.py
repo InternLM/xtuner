@@ -16,6 +16,7 @@ def fla_state_layout_kwargs(
     func: Callable,
     transpose_state_layout: bool,
     hv: int | None = None,
+    h: int | None = None,
 ) -> dict[str, bool | int]:
     """Translate XTuner's state-layout flag to the installed FLA KDA API.
 
@@ -23,11 +24,19 @@ def fla_state_layout_kwargs(
         func (Callable): FLA Python wrapper or Triton kernel whose signature is inspected.
         transpose_state_layout (bool): Whether XTuner uses the ``[N, H, V, K]`` state layout.
         hv (int, optional): Value-head count required by FLA 0.5.2 Triton kernels.
+        h (int, optional): Query-head count required by Triton kernels that still take ``H``.
 
     Returns:
         dict[str, bool | int]: Keyword arguments using the API contract of ``func``.
     """
-    parameters = inspect.signature(func).parameters
+    # ``@triton.heuristics`` / ``@triton.autotune`` wrappers are not plain
+    # callables, so ``inspect.signature`` on them raises TypeError. Unwrap the
+    # ``.fn`` chain down to the underlying Python function, which carries the
+    # constexpr parameter names used for branching below.
+    fn = func
+    while hasattr(fn, "fn"):
+        fn = fn.fn
+    parameters = inspect.signature(fn).parameters
 
     # FLA 0.5.2 Python wrappers renamed the lowercase Python API from
     # ``transpose_state_layout`` to ``state_v_first``.
@@ -39,25 +48,29 @@ def fla_state_layout_kwargs(
     # required and must not be replaced by the old ``TRANSPOSE_STATE`` name.
     if "STATE_V_FIRST" in parameters:
         if "HV" not in parameters:
-            raise TypeError(f"{func.__name__} has 'STATE_V_FIRST' but no required 'HV' parameter")
+            raise TypeError(f"{fn.__name__} has 'STATE_V_FIRST' but no required 'HV' parameter")
         if hv is None:
-            raise ValueError(f"{func.__name__} requires the value-head count 'hv'")
+            raise ValueError(f"{fn.__name__} requires the value-head count 'hv'")
         return {"HV": hv, "STATE_V_FIRST": transpose_state_layout}
 
     # FLA 0.4.2 Triton kernels use the old uppercase constexpr name
-    # ``TRANSPOSE_STATE``.
+    # ``TRANSPOSE_STATE`` and take the query-head count as ``H``.
     if "TRANSPOSE_STATE" in parameters:
+        if "H" in parameters:
+            if h is None:
+                raise ValueError(f"{fn.__name__} requires the query-head count 'h'")
+            return {"H": h, "TRANSPOSE_STATE": transpose_state_layout}
         return {"TRANSPOSE_STATE": transpose_state_layout}
 
     # FLA 0.4.2 Python wrappers use the old lowercase API name. Some internal
     # functions additionally expose ``use_exp2``; XTuner's KDA gates always use
     # exp2, so enable it when available.
     if "transpose_state_layout" in parameters:
-        kwargs = {"transpose_state_layout": transpose_state_layout}
+        kwargs: dict[str, bool | int] = {"transpose_state_layout": transpose_state_layout}
         if "use_exp2" in parameters:
             kwargs["use_exp2"] = True
         return kwargs
     raise TypeError(
-        f"{func.__name__} supports none of 'state_v_first', 'STATE_V_FIRST', 'TRANSPOSE_STATE', "
+        f"{fn.__name__} supports none of 'state_v_first', 'STATE_V_FIRST', 'TRANSPOSE_STATE', "
         "or 'transpose_state_layout'; unsupported flash-linear-attention installation?"
     )

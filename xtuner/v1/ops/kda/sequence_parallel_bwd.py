@@ -407,7 +407,6 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             init_offsets=None,
             h0_seq_ids=None,
             h0=None,
-            H=H,
             K=K,
             V=V,
             BK=BK,
@@ -417,6 +416,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             **fla_state_layout_kwargs(
                 merge_fwd_bwd_kernel,
                 transpose_state_layout,
+                h=H,
                 hv=do.shape[-2],
             ),
         )
