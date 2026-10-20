@@ -387,6 +387,9 @@ class TrainSample:
     shifted_labels: torch.Tensor
     rollout_logprobs: torch.Tensor | None
     teacher_targets: dict[str, torch.Tensor]
+    # Optional terminal score. Only worker-local GAE reads it; GRPO receives its final
+    # advantages from the controller.
+    reward_score: float | None = None
 
     values: torch.Tensor | None = None  # per-token critic values, written when the critic collects values
     returns: torch.Tensor | None = None  # GAE returns, written when the critic fits
@@ -950,24 +953,34 @@ class TrainingWorker(SingleAcceleratorWorker):
             shifted_labels=shifted_labels_t,
             rollout_logprobs=rollout_logprobs,
             teacher_targets=self._distillation.rollout_teacher_targets(state, shifted_labels=shifted_labels),
+            reward_score=float(state.reward["score"])
+            if state.reward is not None and "score" in state.reward
+            else None,
         )
 
     def _get_train_items(
         self,
         samples: list[TrainSample],
-        advantages: list[float] | TokenTensorBatch,
+        advantages: list[float] | TokenTensorBatch | None,
     ) -> list[_TrainItem]:
         """Build raw CPU sequence and loss inputs per cached sample.
 
         Writes advantages onto each sample without building a loss context.
         Samples stay separate; ``_pack_train_items`` packs them afterwards.
         """
-        if isinstance(advantages, TokenTensorBatch):
+        if advantages is None:
+            # Worker-local segment GAE.
+            if any(sample.advantages is None for sample in samples):
+                raise ValueError("Worker-local GAE advantages are missing from the cached samples")
+            advantage_rows: list[tuple[float, torch.Tensor | None]] = [(0.0, sample.advantages) for sample in samples]
+        elif isinstance(advantages, TokenTensorBatch):
+            # Controller token advantages, e.g. session GAE.
             rows = advantages.split_samples()
             if len(rows) != len(samples):
                 raise ValueError(f"token advantage rows {len(rows)} do not match samples {len(samples)}")
-            advantage_rows: list[tuple[float, torch.Tensor | None]] = [(0.0, row) for row in rows]
+            advantage_rows = [(0.0, row) for row in rows]
         else:
+            # Controller scalar advantages, e.g. GRPO.
             if len(advantages) != len(samples):
                 raise ValueError(f"advantage rows {len(advantages)} do not match samples {len(samples)}")
             advantage_rows = [(float(advantage), None) for advantage in advantages]
@@ -996,12 +1009,13 @@ class TrainingWorker(SingleAcceleratorWorker):
         return items
 
     @ray_method
-    def fit(self, advantages: list[float] | TokenTensorBatch) -> WorkerLogItem:
+    def fit(self, advantages: list[float] | TokenTensorBatch | None = None) -> WorkerLogItem:
         """Train one rollout from the batch loaded by ``load_train_batch``.
 
         Args:
-            advantages (list[float] | TokenTensorBatch): One scalar per local sample, or one
-                packed token-advantage batch. Aligned with the loaded sample list.
+            advantages (list[float] | TokenTensorBatch | None): One scalar per local
+                sample, one packed token-advantage batch, or ``None`` to consume the
+                advantages cached by worker-local GAE.
 
         Returns:
             WorkerLogItem: Training metrics of one rollout batch.
@@ -1013,7 +1027,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         try:
             train_items = self._get_train_items(samples, advantages)
             conversion_time_s = time.perf_counter() - convert_begin
-            del advantages
 
             pack_begin = time.perf_counter()
             step_batches = self._pack_train_items(train_items, pack_plan, batch_attr)

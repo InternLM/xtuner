@@ -12,6 +12,7 @@ from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.loss.utils import sp_split
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig
+from xtuner.v1.rl.advantage.gae import compute_ppo_targets
 from xtuner.v1.rl.loss import CriticLossConfig, CriticLossContext
 from xtuner.v1.utils import get_device, get_torch_device_module
 
@@ -202,7 +203,7 @@ class CriticWorker:
             raise RuntimeError("critic forward did not return value predictions")
         return values.float()
 
-    def collect_values(self) -> TokenTensorBatch:
+    def collect_values(self, return_values: bool = True) -> TokenTensorBatch | None:
         """Return packed values and keep the per-sample rows on this worker."""
         host = self._require_host()
         train_samples, pack_plan, batch_attr = host._get_cached_batch()
@@ -234,7 +235,88 @@ class CriticWorker:
         batch = TokenTensorBatch.cat_samples(collected)
         for item, row in zip(train_samples, batch.split_samples()):
             item.values = row.unsqueeze(0)
-        return batch
+        return batch if return_values else None
+
+    def compute_segment_gae(
+        self,
+        *,
+        gae_gamma: float,
+        gae_lambda: float,
+        normalize_actor_advantage: bool,
+        contribute_to_global_stats: bool,
+    ) -> dict[str, float]:
+        """Compute independent segment GAE targets in this worker.
+
+        ``contribute_to_global_stats`` is true for one worker per data replica. Replica-zero
+        moments preserve the controller's previous global-normalization statistics while all
+        replicas can consume their locally cached values for actor/critic updates.
+        """
+        host = self._require_host()
+        samples, _pack_plan, _batch_attr = host._get_cached_batch()
+        if any(sample.values is None for sample in samples):
+            raise RuntimeError("Segment GAE requires cached critic values")
+
+        moments = torch.zeros(3, dtype=torch.float64, device=DEVICE)
+        for sample in samples:
+            assert sample.values is not None
+            reward_score = sample.reward_score
+            if reward_score is None:
+                raise ValueError("Segment GAE requires a reward score for every sample")
+            values = sample.values.detach().float().reshape(-1)
+            action_mask = sample.shifted_labels.reshape(-1).ne(-100)
+            advantages, returns = compute_ppo_targets(
+                values,
+                torch.tensor([reward_score], dtype=torch.float32),
+                action_mask,
+                torch.tensor([0, values.numel()], dtype=torch.int32),
+                gae_gamma=gae_gamma,
+                gae_lambda=gae_lambda,
+            )
+            sample.advantages = advantages.reshape(1, -1)
+            sample.returns = returns.reshape(1, -1)
+            if contribute_to_global_stats:
+                valid_advantages = advantages[action_mask]
+                moments[0] += valid_advantages.double().sum()
+                moments[1] += valid_advantages.double().square().sum()
+                moments[2] += valid_advantages.numel()
+
+        if normalize_actor_advantage:
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.all_reduce(moments, op=torch.distributed.ReduceOp.SUM)
+            moments = moments.cpu()
+            count = float(moments[2].item())
+            if count > 0:
+                mean = moments[0] / moments[2]
+                variance = torch.clamp(moments[1] / moments[2] - mean.square(), min=0.0)
+                scale = (variance.sqrt() + 1e-8).float()
+                mean_value = mean.float()
+                for sample in samples:
+                    if sample.advantages is not None:
+                        mask = sample.shifted_labels.ne(-100)
+                        sample.advantages = torch.where(
+                            mask,
+                            (sample.advantages.float() - mean_value) / scale,
+                            torch.zeros_like(sample.advantages.float()),
+                        )
+
+        if not contribute_to_global_stats:
+            return {}
+
+        flat_advantages = torch.cat(
+            [
+                sample.advantages.reshape(-1)[sample.shifted_labels.reshape(-1).ne(-100)]
+                for sample in samples
+                if sample.advantages is not None
+            ]
+        )
+        if flat_advantages.numel() == 0:
+            return {"sum": 0.0, "count": 0.0, "min": 0.0, "max": 0.0}
+        return {
+            "sum": float(flat_advantages.sum().item()),
+            "count": float(flat_advantages.numel()),
+            "min": float(flat_advantages.min().item()),
+            "max": float(flat_advantages.max().item()),
+        }
 
     def _materialize(
         self,
@@ -254,7 +336,10 @@ class CriticWorker:
             train_samples = host._cached_samples
             if train_samples is None:
                 raise RuntimeError("critic materialize requires a loaded training batch")
-        if token_returns is None or not values_ready:
+
+        # Fetch rollout states only when cached samples are incomplete: missing returns must
+        # be restored from extra fields, and missing old values are needed by the clipped loss.
+        if (token_returns is None and any(item.returns is None for item in train_samples)) or not values_ready:
             if not rollout_item_refs:
                 raise RuntimeError("critic materialize requires a loaded training batch")
             rollout_items = ray.get(rollout_item_refs[0])
