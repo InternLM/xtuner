@@ -72,8 +72,10 @@ def _controller_dir(
     return mount if (mount / marker).exists() else None
 
 
-def _cgroup_dir() -> Path | None:
-    return _controller_dir(None, "memory.events") or _controller_dir("memory", "memory.usage_in_bytes")
+def _cgroup_dir(root: Path = Path("/sys/fs/cgroup"), membership: Path = Path("/proc/self/cgroup")) -> Path | None:
+    return _controller_dir(None, "memory.events", root, membership) or _controller_dir(
+        "memory", "memory.usage_in_bytes", root, membership
+    )
 
 
 def _read_numbers(path: Path) -> dict[str, int]:
@@ -168,7 +170,12 @@ def _read_node_cpulists(root: Path = Path("/sys/devices/system/node")) -> dict[s
     return {path.parent.name: path.read_text().strip() for path in sorted(root.glob("node[0-9]*/cpulist"))}
 
 
-def _read_cgroup(cgroup: Path | None) -> dict[str, Any]:
+def _read_cgroup(
+    cgroup: Path | None,
+    *,
+    root: Path = Path("/sys/fs/cgroup"),
+    membership: Path = Path("/proc/self/cgroup"),
+) -> dict[str, Any]:
     if cgroup is None:
         return {"available": False}
     version = 2 if (cgroup / "memory.events").exists() else 1 if (cgroup / "memory.usage_in_bytes").exists() else None
@@ -200,7 +207,7 @@ def _read_cgroup(cgroup: Path | None) -> dict[str, Any]:
         cpuset_names = ("cpuset.cpus", "cpuset.mems", "cpuset.cpus.effective", "cpuset.mems.effective")
     else:
         values["memory.oom_control"] = _read_numbers(cgroup / "memory.oom_control")
-        cpuset = _controller_dir("cpuset", "cpuset.cpus")
+        cpuset = _controller_dir("cpuset", "cpuset.cpus", root, membership)
         cpuset_names = ("cpuset.cpus", "cpuset.mems", "cpuset.effective_cpus", "cpuset.effective_mems")
     if cpuset is not None:
         values["cpuset_path"] = str(cpuset)
@@ -228,6 +235,9 @@ class _MemoryWatch:
         output (Path): Destination JSONL file, opened in append mode.
         include_cgroup (bool): Include cgroup and host node metrics for this rank.
         interval_s (float): Finite positive interval between periodic samples.
+        proc_self (Path): Process-local procfs directory.
+        cgroup_root (Path): Root of the cgroup mounts.
+        node_root (Path): Root of the host NUMA node directories.
     """
 
     def __init__(
@@ -236,13 +246,19 @@ class _MemoryWatch:
         *,
         include_cgroup: bool,
         interval_s: float = _SAMPLE_INTERVAL_S,
+        proc_self: Path = Path("/proc/self"),
+        cgroup_root: Path = Path("/sys/fs/cgroup"),
+        node_root: Path = Path("/sys/devices/system/node"),
     ) -> None:
         if not math.isfinite(interval_s) or interval_s <= 0:
             raise ValueError("Memory sampling interval must be a finite positive number of seconds")
         self._output = output
         self._interval_s = interval_s
         self._include_cgroup = include_cgroup
-        self._cgroup = _cgroup_dir() if include_cgroup else None
+        self._proc_self = proc_self
+        self._cgroup_root = cgroup_root
+        self._node_root = node_root
+        self._cgroup = _cgroup_dir(cgroup_root, proc_self / "cgroup") if include_cgroup else None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, name="xtuner-memory-watch", daemon=True)
@@ -276,6 +292,8 @@ class _MemoryWatch:
             _tb (object): Traceback supplied by the context manager.
         """
         self._stop_event.set()
+        # Event.wait wakes immediately on set, regardless of the configured
+        # interval. The timeout only bounds an in-flight sample.
         self._thread.join(timeout=_SAMPLE_INTERVAL_S + 1)
         try:
             self._sample("stop")
@@ -323,20 +341,20 @@ class _MemoryWatch:
             record["host"] = os.uname().nodename
             try:
                 # starttime is field 22 of /proc/self/stat, in clock ticks.
-                stat_fields = Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()
+                stat_fields = (self._proc_self / "stat").read_text().rsplit(")", 1)[1].split()
                 record["pid_starttime_ticks"] = int(stat_fields[19])
-                record["cgroup_membership"] = Path("/proc/self/cgroup").read_text().splitlines()
+                record["cgroup_membership"] = (self._proc_self / "cgroup").read_text().splitlines()
             except (OSError, ValueError, IndexError) as exc:
                 record["identity_error"] = str(exc)
             try:
-                record["host_node_cpus"] = _read_node_cpulists()
+                record["host_node_cpus"] = _read_node_cpulists(self._node_root)
             except (OSError, ValueError) as exc:
                 record["host_node_cpus_error"] = str(exc)
             if self._include_cgroup:
                 try:
                     record["cgroup_mounts"] = [
                         line
-                        for line in Path("/proc/self/mountinfo").read_text().splitlines()
+                        for line in (self._proc_self / "mountinfo").read_text().splitlines()
                         if " - cgroup " in line or " - cgroup2 " in line
                     ]
                 except OSError as exc:
@@ -344,21 +362,23 @@ class _MemoryWatch:
         try:
             # /proc/self addresses the thread-group leader, even when the
             # watcher's background thread takes this sample.
-            record["process"] = _read_status(Path("/proc/self/status"))
+            record["process"] = _read_status(self._proc_self / "status")
         except (OSError, ValueError) as exc:
             record["process_error"] = str(exc)
         if read_numa:
             try:
-                record["numa_maps"] = _read_numa_maps(Path("/proc/self/numa_maps"))
+                record["numa_maps"] = _read_numa_maps(self._proc_self / "numa_maps")
             except (OSError, ValueError) as exc:
                 record["numa_maps_error"] = str(exc)
             try:
-                record["smaps_rollup"] = _read_smaps_rollup(Path("/proc/self/smaps_rollup"))
+                record["smaps_rollup"] = _read_smaps_rollup(self._proc_self / "smaps_rollup")
             except (OSError, ValueError) as exc:
                 record["smaps_rollup_error"] = str(exc)
         if self._include_cgroup:
             try:
-                record["cgroup"] = _read_cgroup(self._cgroup)
+                record["cgroup"] = _read_cgroup(
+                    self._cgroup, root=self._cgroup_root, membership=self._proc_self / "cgroup"
+                )
                 oom_kill = _oom_kill_count(record["cgroup"])
                 if oom_kill is not None:
                     with self._lock:
@@ -368,7 +388,7 @@ class _MemoryWatch:
             except (OSError, ValueError) as exc:
                 record["cgroup_error"] = str(exc)
             try:
-                record["host_nodes"] = _read_node_meminfo()
+                record["host_nodes"] = _read_node_meminfo(self._node_root)
             except (OSError, ValueError) as exc:
                 record["host_nodes_error"] = str(exc)
         payload = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
@@ -385,6 +405,8 @@ def monitor_rank_memory(work_dir: Path | str) -> Iterator[None]:
     under the work directory. Only local rank zero collects cgroup and host
     node metrics. Set ``XTUNER_MEMORY_WATCH_ENABLED=1`` to enable monitoring
     and ``XTUNER_MEMORY_WATCH_INTERVAL`` to a positive interval in seconds.
+    An invalid interval or an initialization failure logs a warning and lets
+    training continue without a trace.
 
     Args:
         work_dir (Path | str): Training directory containing the memory traces.
@@ -396,13 +418,25 @@ def monitor_rank_memory(work_dir: Path | str) -> Iterator[None]:
     if os.environ.get("XTUNER_MEMORY_WATCH_ENABLED") != "1":
         yield
         return
-    output_dir = (Path(work_dir) / "memory").resolve()
-    rank = os.environ.get("RANK", "unknown")
-    local_rank = os.environ.get("LOCAL_RANK", "unknown")
-    watcher = _MemoryWatch(
-        output_dir / f"rank_{rank}.jsonl",
-        include_cgroup=local_rank == "0",
-        interval_s=float(os.environ.get("XTUNER_MEMORY_WATCH_INTERVAL", "1")),
-    )
-    with watcher:
+    watcher: _MemoryWatch | None = None
+    try:
+        output_dir = (Path(work_dir) / "memory").resolve()
+        rank = os.environ.get("RANK", "unknown")
+        local_rank = os.environ.get("LOCAL_RANK", "unknown")
+        candidate = _MemoryWatch(
+            output_dir / f"rank_{rank}.jsonl",
+            include_cgroup=local_rank == "0",
+            interval_s=float(os.environ.get("XTUNER_MEMORY_WATCH_INTERVAL", "1")),
+        )
+        candidate.__enter__()
+        watcher = candidate
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"[XTuner memory watch] disabled: {type(exc).__name__}: {exc}", file=sys.stderr)
+    try:
         yield
+    finally:
+        if watcher is not None:
+            try:
+                watcher.__exit__(None, None, None)
+            except (OSError, RuntimeError) as exc:
+                print(f"[XTuner memory watch] shutdown failed: {type(exc).__name__}: {exc}", file=sys.stderr)
