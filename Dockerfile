@@ -138,7 +138,7 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 
 WORKDIR ${CODESPACE}/DeepSelect
 
-RUN DEEP_SELECT_BUILD_TARGET_PLATFORM=cuda pip wheel -w ${DEEPSELECT_DIR} -v --no-deps --no-build-isolation .
+RUN DEEP_SELECT_BUILD_TARGET_PLATFORM=CUDA pip wheel -w ${DEEPSELECT_DIR} -v --no-deps --no-build-isolation .
 
 # compile flash_mla
 FROM setup_env AS flash_mla
