@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -18,11 +20,11 @@ from xtuner.v1.utils import get_device, get_torch_device_module
 
 from .pack import DPRankPackIndices, TokenTensorBatch
 from .schedule import build_lr_scheduler, optimizer_step_succeeds, partition_indices, pass_order
-from .worker import TrainBatchAttr, WorkerLogItem, WorkerTrainLogItem
 
 
 if TYPE_CHECKING:
-    from .worker import TrainingWorker
+    from .worker import TrainBatchAttr, TrainingWorker, WorkerLogItem, WorkerTrainLogItem
+
 DEVICE_MODULE = get_torch_device_module()
 
 DEVICE = get_device()
@@ -59,7 +61,7 @@ class CriticWorker:
     sequence-parallel mesh, pack plan, and process lifetime.
     """
 
-    def __init__(self, worker_cfg: CriticWorkerConfig, host: "TrainingWorker") -> None:
+    def __init__(self, worker_cfg: CriticWorkerConfig, host: TrainingWorker) -> None:
         if host is None:
             raise ValueError("CriticWorker must be attached to a TrainingWorker")
 
@@ -90,7 +92,7 @@ class CriticWorker:
         self._optimizer_steps_per_pass = worker_cfg.optimizer_steps_per_pass
         self._scheduler = build_lr_scheduler(self._engine.optimizer, worker_cfg.lr_cfg, worker_cfg.scheduler_steps)
 
-    def _require_host(self) -> "TrainingWorker":
+    def _require_host(self) -> TrainingWorker:
         if self.host is None:
             raise RuntimeError("CriticWorker must be attached to a TrainingWorker")
         return self.host
@@ -422,7 +424,7 @@ class CriticWorker:
                 self._scheduler.step()
             logs_info = cast(dict[str, float], train_step_info["logs_info"])
             worker_log_item["train_metrics"].append(
-                cast(WorkerTrainLogItem, {**logs_info, "grad_norm": grad_norm.item()})
+                cast("WorkerTrainLogItem", {**logs_info, "grad_norm": grad_norm.item()})
             )
         return worker_log_item
 

@@ -449,3 +449,16 @@ class TestSessionGAEAdvantageDispatch(unittest.TestCase):
             self._controller()._estimate_advantages(
                 {"reward_groups": []}, rollout_items, pack_plan, value_batches, data_replicate_size=1
             )
+
+    def test_session_gae_rejects_uncovered_samples(self):
+        # Sample 1 is claimed by no DP rank, so its dense value slot stays empty.
+        rollout_items = [
+            _state(uid=0, rollout_id=10, labels=[-100, 5], reward={"score": 1.0}),
+            _state(uid=1, rollout_id=11, labels=[6, 7], reward={"score": 1.0}),
+        ]
+        pack_plan = {"dp_plans": {0: {"global_indices": [0], "plan": [[[0]]]}}, "plan_log": {}}
+        value_batches = [TokenTensorBatch.cat_samples([torch.tensor([0.1, 0.2])])]
+        with self.assertRaisesRegex(RuntimeError, "do not cover every training sample"):
+            self._controller()._estimate_advantages(
+                {"reward_groups": []}, rollout_items, pack_plan, value_batches, data_replicate_size=1
+            )
