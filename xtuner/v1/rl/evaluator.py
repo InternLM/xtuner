@@ -49,8 +49,7 @@ def default_compute_metric_func(samples: list[RolloutState]) -> dict[str, float]
 def _reward_score(sample: RolloutState) -> float | None:
     """Return the verifier score, or None when the attempt is unscored.
 
-    None rewards (infrastructure failures) and non-finite scores are unscored,
-    not synthetic zeroes.
+    None rewards (infrastructure failures) and non-finite scores are unscored, not synthetic zeroes.
     """
     reward = sample.reward
     if not isinstance(reward, Mapping):
