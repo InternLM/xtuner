@@ -141,16 +141,18 @@ def test_default_metrics_all_unscored_attempts():
 def test_grouped_pass_metrics_count_unscored_attempt_as_non_pass():
     from xtuner.v1.rl.evaluator import default_compute_metric_func
 
-    # 同一 eval group 的三次 attempt：一次通过、一次失败分、一次基础设施失败。
+    # 同一 eval group 的四次 attempt：一次通过、两次失败分、一次基础设施失败。
     samples = [
         _metric_state(1, {"score": 1.0}),
         _metric_state(2, {"score": 0.0}),
         _metric_state(3, None),
+        _metric_state(4, {"score": 0.0}),
     ]
     for sample in samples:
         sample.reward_model = {"id": "case-a"}
     metrics = default_compute_metric_func(samples)
-    assert metrics["eval_inferred_k"] == 3
+    assert metrics["eval_inferred_k"] == 4
     assert metrics["pass@1"] == 1.0
-    assert metrics["avg_pass@3"] == pytest.approx(1 / 3)
-    assert metrics["eval_failed_ratio"] == pytest.approx(1 / 3)
+    assert metrics["pass@4"] == 1.0
+    assert metrics["avg_pass@4"] == pytest.approx(0.25)
+    assert metrics["eval_failed_ratio"] == pytest.approx(0.25)
