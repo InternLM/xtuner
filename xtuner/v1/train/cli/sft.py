@@ -36,7 +36,8 @@ def main(
         trainer_cfg = Config.fromfile(config)["trainer"]
 
     trainer = Trainer.from_config(trainer_cfg)
-    trainer.fit()
+    with trainer_cfg.diagnostics.record(trainer):
+        trainer.fit()
 
     if dist.is_initialized():
         dist.destroy_process_group()

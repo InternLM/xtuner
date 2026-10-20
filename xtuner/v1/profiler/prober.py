@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     # Don't import model and module here to avoid circular import.
     # Because the model and module may import ProberList to debug.
     from xtuner.v1.module.decoder_layer.moe_decoder_layer import RouterResults
+    from xtuner.v1.utils.diagnostics import TrainingDiagnostics
 else:
     RouterResults = dict
 
@@ -242,6 +243,21 @@ class BaseProber(ABC):
 
 class ProberList:
     prober_list: ClassVar[list[type[BaseProber]]] = []
+    _diagnostics: ClassVar["TrainingDiagnostics | None"] = None
+
+    @classmethod
+    def record_progress(cls, phase: str, micro: int | None = None, *, step: int | None = None) -> None:
+        """Notify the active progress recorder.
+
+        Args:
+            phase (str): Training boundary name.
+            micro (int | None): Optional microbatch index.
+            step (int | None): Optional global step before fetching data.
+        """
+        if cls._diagnostics is not None:
+            if step is not None:
+                cls._diagnostics.set_step(step)
+            cls._diagnostics.mark(phase, micro)
 
     @classmethod
     def setup(cls, dump_home: Path, profile_step: list[int] | None, prober_class_names: list[str]):

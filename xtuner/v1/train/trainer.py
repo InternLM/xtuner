@@ -72,6 +72,7 @@ from xtuner.v1.utils import (
 from xtuner.v1.utils.async_save_monitor import AsyncSaveMonitor, AsyncSaveWatchItem
 from xtuner.v1.utils.check_health import check_health
 from xtuner.v1.utils.device import get_device, get_torch_device_module
+from xtuner.v1.utils.diagnostics import DiagnosticsConfig
 from xtuner.v1.utils.internal_metrics import (
     InternalMetrics,
     InternalMetricsConfig,
@@ -445,6 +446,7 @@ class TrainerConfig(BaseModel):
     grad_norm_dtype: torch.dtype = torch.float32
     hooks_config: HooksConfig = HooksConfig()
     internal_metrics_cfg: InternalMetricsConfig | None = None
+    diagnostics: DiagnosticsConfig = DiagnosticsConfig()
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
@@ -874,7 +876,9 @@ class Trainer:
             DEVICE_MODULE.reset_peak_memory_stats()
 
             with self._maybe_profiling():
+                ProberList.record_progress("prepare_input_begin")
                 engine_input = self._prepare_model_input(data_batch)
+                ProberList.record_progress("prepare_input_end")
                 train_step_info = self._engine.train_step(engine_input)
                 hooks = self.hooks_config.get_hooks(HookStage.AFTER_TRAIN_STEP)
                 for hook in hooks:
@@ -886,11 +890,15 @@ class Trainer:
                         total_epoch=self.total_epoch,
                     )
 
+                ProberList.record_progress("grad_reduce_begin")
                 grad_norm = self._engine.clip_grad_norm(do_clip=self._do_clip, dtype=self._grad_norm_dtype)
+                ProberList.record_progress("grad_reduce_end")
                 if self._offload_optimizer_first_step:
                     self._engine.put_optimizer_to_device(DEVICE)
                     self._offload_optimizer_first_step = False
+                ProberList.record_progress("optimizer_begin")
                 self._engine.step_optimizer(grad_norm)
+                ProberList.record_progress("optimizer_end")
 
             time_after_train_step = time.time()
             ProberList.after_step()
@@ -1499,6 +1507,7 @@ class Trainer:
     def _data_iter(self):
         data_iter = iter(self._dataloader)
         while self._cur_step < self.total_step:
+            ProberList.record_progress("data_next_begin", step=self._cur_step + 1)
             try:
                 data = next(data_iter)
             except StopIteration:
@@ -1507,6 +1516,7 @@ class Trainer:
                 data_iter = iter(self._dataloader)
                 data = next(data_iter)
 
+            ProberList.record_progress("data_next_end")
             yield data
 
     def _get_checkpoint_path(self, epoch: int, step: int, is_snapshot: bool = False) -> Path:

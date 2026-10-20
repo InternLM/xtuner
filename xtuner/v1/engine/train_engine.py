@@ -203,6 +203,7 @@ class TrainEngine:
         Args:
             data_batches (List[Dict]): The input data batches for the training step.
         """
+        ProberList.record_progress("train_step_begin")
         self._maybe_precompute_float8_dynamic_scale_for_fsdp()
 
         intra_layer_micro_batch = self.intra_layer_micro_batch
@@ -218,7 +219,9 @@ class TrainEngine:
         micro_batch_iter = 0
         micro_batch_results = []
 
+        ProberList.record_progress("pre_micro_batch_begin")
         data_batch_info = self.model.pre_micro_batch_forward(data_batches)
+        ProberList.record_progress("pre_micro_batch_end")
         total_loss = torch.tensor(0.0, device=DEVICE)
 
         # Saved-tensor offload is scoped to one complete optimizer step. All
@@ -235,6 +238,7 @@ class TrainEngine:
                 seq_ctx_list = [i["seq_ctx"] for i in data_batch]
                 loss_ctx_list = [i["loss_ctx"] for i in data_batch]
 
+                ProberList.record_progress("forward_begin", micro_batch_iter)
                 if self.intra_layer_micro_batch == 1:
                     output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
                 else:
@@ -244,19 +248,26 @@ class TrainEngine:
                         seq_ctx=seq_ctx_list,
                         loss_ctx=loss_ctx_list,  # type: ignore[arg-type]
                     )
+                ProberList.record_progress("forward_end")
                 output.free_nongrad_feature()
 
                 micro_batch_results.append(output)
 
                 loss = self._get_total_loss(output)
+                ProberList.record_progress("backward_begin")
                 loss.backward()
+                ProberList.record_progress("backward_end")
                 total_loss += loss.detach()
                 # call dump_forward_records after backward to record the recomputed activations
                 ProberList.after_micro_iter_forward()
 
+            ProberList.record_progress("post_micro_batch_begin")
             batch_forward_info = self.model.post_micro_batch_forward(micro_batch_results)
+            ProberList.record_progress("post_micro_batch_end")
         finally:
+            ProberList.record_progress("offload_clear_begin")
             OffloadManager().clear_step()
+            ProberList.record_progress("offload_clear_end")
         return TrainStepInfo(total_loss=total_loss.item(), **data_batch_info, **batch_forward_info)
 
     def from_hf(self, hf_path: str | Path, strict: bool = False):
