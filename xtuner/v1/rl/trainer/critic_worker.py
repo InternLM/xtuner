@@ -109,7 +109,7 @@ class CriticWorker:
             )
         return torch.tensor(values, dtype=torch.float32).unsqueeze(0)
 
-    def _pack_one(
+    def _pack_one_batch(
         self,
         samples: list[tuple[SequenceContext, torch.Tensor, torch.Tensor, torch.Tensor | None]],
         batch_attr: TrainBatchAttr,
@@ -124,40 +124,49 @@ class CriticWorker:
             raise ValueError(f"Pack tokens {real_tokens} exceed pack_max_length {host.config.pack_max_length}")
 
         if samples:
-            shifted_labels = torch.cat([sample[1] for sample in samples], dim=1)
-            returns = torch.cat([sample[2] for sample in samples], dim=1)
-            old_values_present = [sample[3] is not None for sample in samples]
-            if any(old_values_present) and not all(old_values_present):
+            # old_values is pack-wide all-or-none.
+            if any(sample[3] is not None for sample in samples) and not all(
+                sample[3] is not None for sample in samples
+            ):
                 raise ValueError("old_values must be all-present or all-absent within a pack")
-            old_values = (
-                torch.cat([cast(torch.Tensor, sample[3]) for sample in samples], dim=1)
-                if all(old_values_present)
-                else None
+            packed = host.cat_pack_fields(
+                {
+                    "shifted_labels": [sample[1] for sample in samples],
+                    "returns": [sample[2] for sample in samples],
+                    "old_values": (
+                        [cast(torch.Tensor, sample[3]) for sample in samples]
+                        if all(sample[3] is not None for sample in samples)
+                        else None
+                    ),
+                },
+                padding_len,
             )
+            shifted_labels = cast(torch.Tensor, packed["shifted_labels"])
+            returns = cast(torch.Tensor, packed["returns"])
+            old_values = cast(torch.Tensor | None, packed["old_values"])
             seq_ctx_list = [sample[0] for sample in samples]
+            if padding_len > 0:
+                # Pack is not full: append the padding seq_ctx; padded rows carry no gradient.
+                seq_ctx_list.append(
+                    host.pack_padding_seq_ctx(
+                        padding_len,
+                        use_3d_position_ids=batch_attr["use_3d_position_ids"],
+                        has_routed_experts=batch_attr["has_routed_experts"],
+                    )
+                )
         else:
-            shifted_labels = host._pack_padding_loss_input("shifted_labels", padding_len)
-            returns = torch.zeros(1, padding_len, dtype=torch.float32)
-            # Padding slots are not on every rank. old_values must be a local tensor so
-            # loss prep does not run a model forward that the other ranks skip.
-            old_values = torch.zeros(1, padding_len, dtype=torch.float32)
-            seq_ctx_list = []
-
-        if padding_len > 0 and samples:
-            shifted_labels = torch.cat(
-                [shifted_labels, host._pack_padding_loss_input("shifted_labels", padding_len)], dim=1
-            )
-            returns = torch.cat([returns, torch.zeros(1, padding_len, dtype=torch.float32)], dim=1)
-            if old_values is not None:
-                old_values = torch.cat([old_values, torch.zeros(1, padding_len, dtype=torch.float32)], dim=1)
-        if padding_len > 0:
-            seq_ctx_list.append(
-                host._pack_padding_seq_ctx(
+            # Empty pack: the whole pack materializes as padding.
+            shifted_labels = host.pack_padding_loss_input("shifted_labels", padding_len)
+            returns = host.pack_padding_loss_input("returns", padding_len)
+            old_values = host.pack_padding_loss_input("old_values", padding_len)
+            seq_ctx_list = [
+                host.pack_padding_seq_ctx(
                     padding_len,
                     use_3d_position_ids=batch_attr["use_3d_position_ids"],
                     has_routed_experts=batch_attr["has_routed_experts"],
                 )
-            )
+            ]
+        # Cat only when the pack holds multiple contexts.
         seq_ctx = seq_ctx_list[0] if len(seq_ctx_list) == 1 else SequenceContext.cat(seq_ctx_list)
         return seq_ctx, shifted_labels, returns, old_values
 
@@ -169,7 +178,7 @@ class CriticWorker:
         old_values: torch.Tensor | None,
     ) -> tuple[SequenceContext, CriticLossContext]:
         host = self._require_host()
-        seq_ctx = host._prepare_forward_seq_ctx(seq_ctx, need_routed_experts=False)
+        seq_ctx = host.prepare_forward_seq_ctx(seq_ctx, need_routed_experts=False)
         shifted_labels = shifted_labels.to(DEVICE)
         returns = returns.to(DEVICE)
         if self.sp_mesh is not None and self.sp_mesh.size() > 1:
@@ -206,19 +215,19 @@ class CriticWorker:
     def collect_values(self, return_values: bool = True) -> TokenTensorBatch | None:
         """Return packed values and keep the per-sample rows on this worker."""
         host = self._require_host()
-        train_samples, pack_plan, batch_attr = host._get_cached_batch()
+        train_samples, pack_plan, batch_attr = host.get_cached_batch()
         samples: list[tuple[SequenceContext, torch.Tensor, torch.Tensor, None]] = []
         for item in train_samples:
             labels = item.shifted_labels
             samples.append((item.seq_ctx, labels, torch.zeros_like(labels, dtype=torch.float32), None))
         packed: list[list[tuple[list[int], SequenceContext, torch.Tensor]]] = []
         for step in pack_plan:
-            packed.append([(pack, *self._pack_one([samples[i] for i in pack], batch_attr)[:2]) for pack in step])
+            packed.append([(pack, *self._pack_one_batch([samples[i] for i in pack], batch_attr)[:2]) for pack in step])
         torch.distributed.barrier()
         values: list[torch.Tensor | None] = [None] * len(samples)
         for packed_step in packed:
             for indices, forward_ctx, _shifted_labels in packed_step:
-                forward_ctx = host._prepare_forward_seq_ctx(
+                forward_ctx = host.prepare_forward_seq_ctx(
                     forward_ctx, sequence_parallel=False, need_routed_experts=False
                 )
                 raw = self.forward_only(forward_ctx).detach().float().reshape(-1)
@@ -252,7 +261,7 @@ class CriticWorker:
         replicas can consume their locally cached values for actor/critic updates.
         """
         host = self._require_host()
-        samples, _pack_plan, _batch_attr = host._get_cached_batch()
+        samples, _pack_plan, _batch_attr = host.get_cached_batch()
         if any(sample.values is None for sample in samples):
             raise RuntimeError("Segment GAE requires cached critic values")
 
@@ -326,14 +335,14 @@ class CriticWorker:
         token_returns: TokenTensorBatch | None = None,
     ) -> list[list[tuple[SequenceContext, torch.Tensor, torch.Tensor, torch.Tensor | None]]]:
         host = self._require_host()
-        train_samples = host._cached_samples
+        train_samples = host.cached_samples
         rollout_items: list[RolloutState] | None = None
         values_ready = train_samples is not None and all(item.values is not None for item in train_samples)
         if train_samples is None:
             if not rollout_item_refs:
                 raise RuntimeError("critic materialize requires a loaded training batch")
             host.load_train_batch(rollout_item_refs, pack_plan, batch_attr)
-            train_samples = host._cached_samples
+            train_samples = host.cached_samples
             if train_samples is None:
                 raise RuntimeError("critic materialize requires a loaded training batch")
 
@@ -371,7 +380,8 @@ class CriticWorker:
                 )
             samples.append((item.seq_ctx, shifted_labels, item.returns, item.values))
         return [
-            [self._pack_one([samples[index] for index in pack], batch_attr) for pack in step] for step in pack_plan
+            [self._pack_one_batch([samples[index] for index in pack], batch_attr) for pack in step]
+            for step in pack_plan
         ]
 
     def fit(self, token_returns: TokenTensorBatch | None = None, **kwargs) -> WorkerLogItem:
@@ -382,7 +392,7 @@ class CriticWorker:
         """
         del kwargs
         host = self._require_host()
-        _samples, pack_plan, batch_attr = host._get_cached_batch()
+        _samples, pack_plan, batch_attr = host.get_cached_batch()
         step_batches = self._materialize(
             [],
             pack_plan,

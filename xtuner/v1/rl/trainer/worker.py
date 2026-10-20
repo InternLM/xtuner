@@ -887,11 +887,25 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._cached_pack_plan = None
         self._cached_batch_attr = None
 
-    def _get_cached_batch(self) -> tuple[list[TrainSample], DPRankPackIndices, TrainBatchAttr]:
+    @property
+    def cached_samples(self) -> list[TrainSample] | None:
+        """Samples cached by ``load_train_batch``, or ``None`` when no batch is
+        loaded.
+
+        Read by attached role workers (e.g. the critic) that need a non-raising view of the cache.
+        """
+        return self._cached_samples
+
+    def get_cached_batch(self) -> tuple[list[TrainSample], DPRankPackIndices, TrainBatchAttr]:
         """Return the samples, pack plan, and batch attributes cached by
         ``load_train_batch``.
 
-        Actor ``fit`` and the critic read this cache. Raises when it has not been loaded.
+        Actor ``fit`` and attached role workers (e.g. the critic) read this cache.
+        Raises when it has not been loaded.
+
+        Returns:
+            tuple[list[TrainSample], DPRankPackIndices, TrainBatchAttr]: The cached
+                samples, pack plan, and batch attributes.
         """
         samples = self._cached_samples
         pack_plan = self._cached_pack_plan
@@ -1023,7 +1037,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         # NOTE: sglang会清除logger handle, 重新创建
         self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
         convert_begin = time.perf_counter()
-        samples, pack_plan, batch_attr = self._get_cached_batch()
+        samples, pack_plan, batch_attr = self.get_cached_batch()
         try:
             train_items = self._get_train_items(samples, advantages)
             conversion_time_s = time.perf_counter() - convert_begin
@@ -1103,37 +1117,30 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         if pack_items:
             loss_inputs_list = [item["loss_inputs"] for item in pack_items]
-            loss_inputs: dict[str, torch.Tensor | None] = {
-                "shifted_labels": torch.cat(
-                    [cast(torch.Tensor, inputs["shifted_labels"]) for inputs in loss_inputs_list], dim=1
-                ),
-                "advantages": torch.cat(
-                    [cast(torch.Tensor, inputs["advantages"]) for inputs in loss_inputs_list], dim=1
-                ),
+            fields: dict[str, list[torch.Tensor] | None] = {
+                "shifted_labels": [cast(torch.Tensor, inputs["shifted_labels"]) for inputs in loss_inputs_list],
+                "advantages": [cast(torch.Tensor, inputs["advantages"]) for inputs in loss_inputs_list],
             }
             for key in template_keys:
                 values = [inputs.get(key) for inputs in loss_inputs_list]
                 present = [value is not None for value in values]
                 if not all(present):
                     raise ValueError(f"Required pack field {key} must be present on every sample: {present}")
-                loss_inputs[key] = torch.cat([cast(torch.Tensor, value) for value in values], dim=1)
-            if padding_len > 0:
-                for key, tensor in loss_inputs.items():
-                    assert tensor is not None
-                    loss_inputs[key] = torch.cat([tensor, self._pack_padding_loss_input(key, padding_len)], dim=1)
+                fields[key] = [cast(torch.Tensor, value) for value in values]
+            loss_inputs = self.cat_pack_fields(fields, padding_len)
         else:
             # Scheduling-only padding slot: the whole pack materializes as padding.
             loss_inputs = {
-                "shifted_labels": self._pack_padding_loss_input("shifted_labels", padding_len),
-                "advantages": self._pack_padding_loss_input("advantages", padding_len),
+                "shifted_labels": self.pack_padding_loss_input("shifted_labels", padding_len),
+                "advantages": self.pack_padding_loss_input("advantages", padding_len),
             }
             for key in template_keys:
-                loss_inputs[key] = self._pack_padding_loss_input(key, padding_len)
+                loss_inputs[key] = self.pack_padding_loss_input(key, padding_len)
 
         seq_ctx_list = [item["seq_ctx"] for item in pack_items]
         if padding_len > 0:
             seq_ctx_list.append(
-                self._pack_padding_seq_ctx(
+                self.pack_padding_seq_ctx(
                     padding_len,
                     use_3d_position_ids=use_3d_position_ids,
                     has_routed_experts=has_routed_experts,
@@ -1153,12 +1160,24 @@ class TrainingWorker(SingleAcceleratorWorker):
         assert loss_ctx is not None
         return seq_ctx, loss_ctx
 
-    def _pack_padding_loss_input(self, key: str, padding_len: int) -> torch.Tensor:
+    def pack_padding_loss_input(self, key: str, padding_len: int) -> torch.Tensor:
+        """Build the padding rows of one packed loss-input tensor.
+
+        Shared by the actor pack path and attached role workers (e.g. the
+        critic) so every role pads loss inputs with the same values and
+        shapes.
+
+        Args:
+            key (str): Loss-input field name, e.g. ``"shifted_labels"`` or
+                ``"teacher_logprobs"``.
+            padding_len (int): Number of padding positions to materialize.
+
+        Returns:
+            torch.Tensor: Padding rows of shape ``(1, padding_len[, top_k])``.
+        """
         if key == "shifted_labels":
             return torch.full((1, padding_len), -100, dtype=torch.long)
-        if key == "advantages":
-            return torch.zeros(1, padding_len, dtype=torch.float32)
-        if key == "rollout_logprobs":
+        if key in ("advantages", "rollout_logprobs", "returns", "old_values"):
             return torch.zeros(1, padding_len, dtype=torch.float32)
         if key == "teacher_indices":
             return torch.full((1, padding_len), -1, dtype=torch.long)
@@ -1175,7 +1194,38 @@ class TrainingWorker(SingleAcceleratorWorker):
             return torch.zeros(1, padding_len, top_k, dtype=torch.long)
         raise ValueError(f"Unknown pack loss input key: {key}")
 
-    def _prepare_forward_seq_ctx(
+    def cat_pack_fields(
+        self,
+        fields: dict[str, list[torch.Tensor] | None],
+        padding_len: int,
+    ) -> dict[str, torch.Tensor | None]:
+        """Concatenate per-sample rows of each field and tail-pad to pack
+        length.
+
+        Shared by the actor pack path and attached role workers so every role
+        assembles packed loss tensors with the same cat-and-pad skeleton.
+
+        Args:
+            fields (dict[str, list[torch.Tensor] | None]): Per-sample tensors by
+                field name. ``None`` marks a field absent for the whole pack and
+                is passed through as ``None``.
+            padding_len (int): Number of tail padding positions to append.
+
+        Returns:
+            dict[str, torch.Tensor | None]: Packed tensors keyed by field name.
+        """
+        packed: dict[str, torch.Tensor | None] = {}
+        for key, rows in fields.items():
+            if rows is None:
+                packed[key] = None
+                continue
+            tensor = rows[0] if len(rows) == 1 else torch.cat(rows, dim=1)
+            if padding_len > 0:
+                tensor = torch.cat([tensor, self.pack_padding_loss_input(key, padding_len)], dim=1)
+            packed[key] = tensor
+        return packed
+
+    def prepare_forward_seq_ctx(
         self,
         seq_ctx: SequenceContext,
         *,
@@ -1183,7 +1233,19 @@ class TrainingWorker(SingleAcceleratorWorker):
         need_routed_experts: bool = True,
     ) -> SequenceContext:
         """Resolve multimodal refs, move to device, and sequence-parallel
-        split."""
+        split.
+
+        Shared by the actor fit path and attached role workers so every role
+        applies the same device transfer and SP-split rules.
+
+        Args:
+            seq_ctx (SequenceContext): Packed context to prepare.
+            sequence_parallel (bool): Whether to apply the SP split.
+            need_routed_experts (bool): Whether to materialize routed experts.
+
+        Returns:
+            SequenceContext: The prepared context.
+        """
         pixel_values = seq_ctx.pixel_values
         if pixel_values is not None:
             if not isinstance(pixel_values, np.ndarray):
@@ -1210,12 +1272,26 @@ class TrainingWorker(SingleAcceleratorWorker):
             seq_ctx = seq_ctx.split(self.sp_mesh)
         return seq_ctx
 
-    def _pack_padding_seq_ctx(
+    def pack_padding_seq_ctx(
         self,
         padding_len: int,
         use_3d_position_ids: bool,
         has_routed_experts: bool,
     ) -> SequenceContext:
+        """Build the padding slot of one pack as a standalone sequence context.
+
+        Shared by the actor pack path and attached role workers so every role
+        materializes padding positions, position ids, and dummy routed experts
+        identically.
+
+        Args:
+            padding_len (int): Number of padding positions to materialize.
+            use_3d_position_ids (bool): Whether to emit 3-axis mrope position ids.
+            has_routed_experts (bool): Whether to emit dummy routed-expert ids.
+
+        Returns:
+            SequenceContext: Padding context of length ``padding_len``.
+        """
         # Reduce the attn calculation time by using multiple short sequence packs
         pad_tokens = tuple(torch.zeros(1, 1024, dtype=torch.long) for _ in range(padding_len // 1024))
         if padding_len % 1024 > 0:
@@ -1269,7 +1345,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         prepare_inputs_begin = time.perf_counter()
         for data in flat_data_batches:
             seq_ctx, loss_ctx = data
-            seq_ctx = self._prepare_forward_seq_ctx(seq_ctx)
+            seq_ctx = self.prepare_forward_seq_ctx(seq_ctx)
 
             # update loss_ctx
             loss_kwargs = loss_ctx.loss_kwargs
