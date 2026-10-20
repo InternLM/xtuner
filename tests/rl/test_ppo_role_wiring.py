@@ -15,7 +15,7 @@ from xtuner.v1.rl.advantage.gae import action_gae, terminal_rewards
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.rl.trainer.critic_worker import CriticWorker, CriticWorkerConfig
 from xtuner.v1.rl.trainer.schedule import build_lr_scheduler, partition_indices, pass_order
-from xtuner.v1.rl.trainer.worker import TrainingWorker
+from xtuner.v1.rl.trainer.worker import TrainingWorker, TrainSample
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 
 
@@ -197,6 +197,95 @@ class TestPPORoleWiring(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "must be attached"):
             CriticWorker(critic_cfg, host=None)
+
+    def test_segment_gae_scope_is_detected(self):
+        controller = TrainingController(
+            workers=[],
+            advantage_estimator=GAEEstimator(reward_scope="segment"),
+        )
+        self.assertEqual(controller._gae_reward_scope, "segment")
+
+        session_controller = TrainingController(
+            workers=[],
+            advantage_estimator=GAEEstimator(reward_scope="session"),
+        )
+        self.assertEqual(session_controller._gae_reward_scope, "session")
+
+    def test_non_gae_estimator_has_no_reward_scope(self):
+        controller = TrainingController(workers=[], advantage_estimator=None)
+        self.assertIsNone(controller._gae_reward_scope)
+
+    def test_compute_segment_gae_uses_cached_values(self):
+        labels = torch.tensor([[[-100, 2, 3]]]).reshape(1, 3)
+        values = torch.tensor([[[0.2, 0.1, 0.3]]]).reshape(1, 3)
+        sample = TrainSample(
+            seq_ctx=MagicMock(),
+            shifted_labels=labels,
+            rollout_logprobs=None,
+            teacher_targets={},
+            reward_score=1.0,
+            values=values,
+        )
+        host = SimpleNamespace(_get_cached_batch=lambda: ([sample], [], {}))
+        critic = CriticWorker.__new__(CriticWorker)
+        critic.host = host
+
+        stats = critic.compute_segment_gae(
+            gae_gamma=1.0,
+            gae_lambda=1.0,
+            normalize_actor_advantage=False,
+            contribute_to_global_stats=True,
+        )
+
+        self.assertEqual(sample.advantages.shape, values.shape)
+        self.assertEqual(sample.returns.shape, values.shape)
+        self.assertEqual(sample.advantages[0, 0].item(), 0.0)
+        self.assertEqual(stats["count"], 2.0)
+        self.assertEqual(sample.advantages[:, 1:].sum().item(), stats["sum"])
+
+    def test_compute_segment_gae_non_contributing_replica_returns_no_stats(self):
+        sample = TrainSample(
+            seq_ctx=MagicMock(),
+            shifted_labels=torch.tensor([[[-100, 2]]]).reshape(1, 2),
+            rollout_logprobs=None,
+            teacher_targets={},
+            reward_score=1.0,
+            values=torch.tensor([[[0.2, 0.1]]]).reshape(1, 2),
+        )
+        host = SimpleNamespace(_get_cached_batch=lambda: ([sample], [], {}))
+        critic = CriticWorker.__new__(CriticWorker)
+        critic.host = host
+
+        stats = critic.compute_segment_gae(
+            gae_gamma=1.0,
+            gae_lambda=1.0,
+            normalize_actor_advantage=False,
+            contribute_to_global_stats=False,
+        )
+
+        self.assertEqual(stats, {})
+        self.assertIsNotNone(sample.advantages)
+        self.assertIsNotNone(sample.returns)
+
+    def test_compute_segment_gae_rejects_missing_reward_score(self):
+        sample = TrainSample(
+            seq_ctx=MagicMock(),
+            shifted_labels=torch.tensor([[[-100, 2]]]).reshape(1, 2),
+            rollout_logprobs=None,
+            teacher_targets={},
+            values=torch.tensor([[[0.2, 0.1]]]).reshape(1, 2),
+        )
+        host = SimpleNamespace(_get_cached_batch=lambda: ([sample], [], {}))
+        critic = CriticWorker.__new__(CriticWorker)
+        critic.host = host
+
+        with self.assertRaisesRegex(ValueError, "requires a reward score"):
+            critic.compute_segment_gae(
+                gae_gamma=1.0,
+                gae_lambda=1.0,
+                normalize_actor_advantage=False,
+                contribute_to_global_stats=True,
+            )
 
     def test_save_hf_includes_attached_critic(self):
         worker = TrainingWorker.__new__(TrainingWorker)

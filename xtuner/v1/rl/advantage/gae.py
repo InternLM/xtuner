@@ -6,7 +6,7 @@ resets the recursion at trajectory boundaries, and observation tokens are skippe
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 
 import torch
 
@@ -159,7 +159,7 @@ class GAEEstimator(AdvantageEstimator):
         self,
         gae_gamma: float = 1.0,
         gae_lambda: float = 0.95,
-        reward_scope: str = "segment",
+        reward_scope: Literal["segment", "session"] = "segment",
         normalize_actor_advantage: bool = True,
     ) -> None:
         self.gae_gamma = gae_gamma
