@@ -689,6 +689,14 @@ class TrainingController:
         finally:
             if has_critic:
                 self.switch_role("actor")
+            # Critic-stage failures skip actor fit, so release the worker-side cache here.
+            try:
+                ray.get(
+                    [worker.release_train_batch.remote() for worker in self.workers],  # type: ignore[attr-defined]
+                    timeout=TRAIN_RAY_GET_TIMEOUT,
+                )
+            except (RuntimeError, ray.exceptions.RayError) as exc:
+                self.logger.warning(f"Failed to release cached training batch: {exc}")
             free_pixel_value_refs: list[ray.ObjectRef] = []
             for state in rollout_items:
                 pixel_values = state.mm_info.get("pixel_values") if state.mm_info is not None else None

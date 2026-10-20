@@ -877,12 +877,20 @@ class TrainingWorker(SingleAcceleratorWorker):
                 stack.enter_context(profiling_memory(memory_dir))
             yield
 
+    @ray_method
+    def release_train_batch(self) -> None:
+        """Drop the cached training batch on every worker.
+
+        Actor ``fit`` releases the cache on its own success and failure paths, but a
+        critic-stage failure skips actor ``fit`` entirely. The controller broadcasts this
+        in its ``finally`` so cached samples (and their routed-experts object refs) never
+        outlive the training step. Safe to call when nothing is cached.
+        """
+        self._release_cache_samples()
+
     def _release_cache_samples(self) -> None:
         """Drop the samples, pack plan, and batch attributes cached by
-        ``load_train_batch``.
-
-        Called at the end of actor ``fit``, including when training raises.
-        """
+        ``load_train_batch``."""
         self._cached_samples = None
         self._cached_pack_plan = None
         self._cached_batch_attr = None
