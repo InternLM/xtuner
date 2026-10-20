@@ -15,3 +15,11 @@ A valid evaluation score does not imply a trainable sample: training additionall
 requires recorded model tokens, logprobs and a valid trace. No trace is synthesized
 by tokenizing a missing response. Retries must use a new attempt and environment;
 this contract does not authorize replaying side-effectful tool calls.
+
+Evaluation delivers unscored attempts instead of dropping them: eval producers
+store failed groups with their true status and the eval batch drains them, so
+`accuracy` is computed over scored attempts only and `eval_failed_ratio` reports
+the unscored share. Unscored attempts count as non-passing in grouped `pass@k`
+metrics (an attempt with no verifier result cannot pass, but must not become a
+synthetic zero in `accuracy`). Training still discards failed groups before the
+replay buffer; the two modes differ deliberately.

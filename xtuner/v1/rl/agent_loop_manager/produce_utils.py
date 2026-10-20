@@ -115,6 +115,7 @@ class BaseProduceContext:
     stale_threshold: int | None = None
     expired_groups_retryable: bool = True
     token_stale_threshold: int | None = None
+    eval_mode: bool = False
 
     @property
     def consumer_step(self) -> int:
@@ -175,8 +176,22 @@ class BaseProduceContext:
             self.progress.add_raw_rewards(self.task_name, rewards_sum, rewards_count)
 
         if initial_status in (Status.FAILED, Status.FILTERED):
-            # 失败样本和业务过滤样本都不进入 replay buffer。
             self.progress.add_produced(self.task_name, samples=len(group), tokens=produced_tokens)
+            if self.eval_mode and initial_status == Status.FAILED:
+                # 评测失败组照常交付：存入 replay buffer（保留真实 FAILED 状态），
+                # 由 take_train_batch(drain_failed=True) 取出交给 evaluator 统计失败率，
+                # 而不是静默缩小评测分母，或在沙箱持续故障时无限重采样。
+                await self.replay_buffer.put(
+                    group,
+                    self.task_name,
+                    model_step=self.model_step,
+                    current_train_step=self.consumer_step,
+                    stale_threshold=self.stale_threshold,
+                    token_stale_threshold=self.token_stale_threshold,
+                    expired_groups_retryable=self.expired_groups_retryable,
+                )
+                return True
+            # 训练侧：失败样本和业务过滤样本都不进入 replay buffer。
             self.progress.add_discarded(self.task_name, initial_status, samples=len(group))
             await release_and_discard_rollout_groups([group])
             return False
@@ -586,8 +601,22 @@ async def take_train_batch(
     progress: ProduceProgress | DisaggProduceProgress,
     current_train_step: int,
     pause_time_s: float = 0.0,
+    drain_failed: bool = False,
 ) -> ProduceBatchResult:
     batch_by_task, consumed_counts = await replay_buffer.take_batch(task_batch_sizes)
+    if drain_failed:
+        # 评测读取：补齐 FAILED 组，让基础设施失败样本以 reward=None 交付给
+        # evaluator（见 default_compute_metric_func 的 eval_failed_ratio）。
+        remaining = {
+            task_name: batch_size - consumed_counts.get(task_name, 0)
+            for task_name, batch_size in task_batch_sizes.items()
+        }
+        remaining = {task_name: left for task_name, left in remaining.items() if left > 0}
+        if remaining:
+            failed_by_task, failed_counts = await replay_buffer.take_batch(remaining, group_status=Status.FAILED)
+            for task_name, failed_groups in failed_by_task.items():
+                batch_by_task.setdefault(task_name, []).extend(failed_groups)
+                consumed_counts[task_name] = consumed_counts.get(task_name, 0) + failed_counts[task_name]
 
     for task in task_runners:
         if task.token_stale_threshold is None:

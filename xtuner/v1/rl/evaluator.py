@@ -1,4 +1,5 @@
 import json
+import math
 from collections.abc import Mapping
 from typing import Annotated, Protocol, cast, runtime_checkable
 
@@ -15,17 +16,28 @@ class ComputeMetricProtocol(Protocol):
 
 def default_compute_metric_func(samples: list[RolloutState]) -> dict[str, float]:
     if not samples:
-        return {"accuracy": 0.0}
+        return {"accuracy": 0.0, "eval_failed_ratio": 0.0}
 
     positives = []
+    scored_count = 0
     tool_turns_list: list[int] = []
     for s in samples:
-        positives.append(1 if _reward_score(s) > 0 else 0)
+        score = _reward_score(s)
+        if score is None:
+            # 基础设施失败样本没有任务分数：不计入 accuracy 分母（避免制造 0 分），
+            # 通过 eval_failed_ratio 单独上报；在 pass@k 分组里按"未通过"计。
+            positives.append(0)
+            continue
+        scored_count += 1
+        positives.append(1 if score > 0 else 0)
         turns = s.extra_fields.get("agent_tool_turns")
         if isinstance(turns, int):
             tool_turns_list.append(turns)
 
-    metrics: dict[str, float] = {"accuracy": sum(positives) / len(positives)}
+    metrics: dict[str, float] = {
+        "accuracy": (sum(positives) / scored_count) if scored_count else 0.0,
+        "eval_failed_ratio": 1.0 - scored_count / len(samples),
+    }
     if tool_turns_list:
         metrics["tool_turns/mean"] = sum(tool_turns_list) / len(tool_turns_list)
         metrics["tool_turns/min"] = float(min(tool_turns_list))
@@ -34,10 +46,19 @@ def default_compute_metric_func(samples: list[RolloutState]) -> dict[str, float]
     return metrics
 
 
-def _reward_score(sample: RolloutState) -> float:
+def _reward_score(sample: RolloutState) -> float | None:
+    """Return the verifier score, or None when the attempt is unscored.
+
+    None rewards (infrastructure failures) and non-finite scores are unscored,
+    not synthetic zeroes.
+    """
     reward = sample.reward
-    assert isinstance(reward, Mapping)
-    return float(reward["score"])
+    if not isinstance(reward, Mapping):
+        return None
+    score = reward.get("score")
+    if not isinstance(score, (int, float)) or isinstance(score, bool) or not math.isfinite(score):
+        return None
+    return float(score)
 
 
 def _eval_group_key(sample: RolloutState) -> str:

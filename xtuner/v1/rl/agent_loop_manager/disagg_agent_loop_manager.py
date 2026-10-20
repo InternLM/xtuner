@@ -76,6 +76,7 @@ class DisaggAgentLoopManagerConfig(BaseModel):
         logger=None,
         sync_weights_interval: int = 1,
         rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
+        eval_mode: bool = False,
     ) -> DisaggAgentLoopManager:
         tasks = self.tasks if isinstance(self.tasks, list) else [self.tasks]
         if not tasks:
@@ -116,6 +117,7 @@ class DisaggAgentLoopManagerConfig(BaseModel):
             replay_buffer=replay_buffer,
             rollout_controller=rollout_controller,
             logger=logger,
+            eval_mode=eval_mode,
         )
 
 
@@ -174,6 +176,7 @@ class DisaggAgentLoopManager:
         replay_buffer: ReplayBuffer,
         rollout_controller: RolloutController,
         logger=None,
+        eval_mode: bool = False,
     ):
         if not task_runners:
             raise ValueError("DisaggAgentLoopManager requires at least one task runner.")
@@ -183,6 +186,7 @@ class DisaggAgentLoopManager:
         self.task_runners = task_runners
         self.replay_buffer = replay_buffer
         self._rollout_controller = rollout_controller
+        self.eval_mode = eval_mode
         self.data_sampler = (
             task_runners[0].sampler
             if len(task_runners) == 1
@@ -253,6 +257,7 @@ class DisaggAgentLoopManager:
                         stale_threshold=task.stale_threshold,
                         token_stale_threshold=task.token_stale_threshold,
                         expired_groups_retryable=task.expired_groups_retryable,
+                        eval_mode=self.eval_mode,
                     )
                 )
             )
@@ -282,6 +287,7 @@ class DisaggAgentLoopManager:
                 stale_threshold=task.stale_threshold,
                 token_stale_threshold=task.token_stale_threshold,
                 expired_groups_retryable=task.expired_groups_retryable,
+                eval_mode=self.eval_mode,
             )
             pause_time_s += await produce_strategy.pause_produce(ctx)
         self._pause_time_s = pause_time_s
@@ -385,6 +391,7 @@ class DisaggAgentLoopManager:
                     progress=progress,
                     current_train_step=train_step,
                     pause_time_s=self._consume_pause_time(),
+                    drain_failed=self.eval_mode,
                 )
                 if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
                     # 有数据的 expired batch 仍需训练本 step。

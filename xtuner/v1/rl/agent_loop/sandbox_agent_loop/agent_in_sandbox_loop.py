@@ -156,6 +156,24 @@ def _to_json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, default=str))
 
 
+def _snapshot_failure_evidence(rollout_state: RolloutState, rollout_item: AgentRolloutItem, logger) -> None:
+    """Best-effort evidence snapshot on a failed attempt.
+
+    Never raises: a serialization failure must not replace the original error
+    that brought the attempt down.
+    """
+    try:
+        rollout_state.extra_fields["agent_artifacts"] = _to_json_safe(rollout_item.artifacts)
+    except Exception:
+        logger.warning("Failed to serialize agent artifacts for a failed attempt", exc_info=True)
+    try:
+        rollout_state.extra_fields["agent_judgers"] = {
+            name: record.model_dump(mode="json") for name, record in rollout_item.judgers.items()
+        }
+    except Exception:
+        logger.warning("Failed to serialize agent judger records for a failed attempt", exc_info=True)
+
+
 def _selected_agent(item: AgentRolloutItem) -> dict[str, Any] | None:
     if item.infer.agent is None:
         return None
@@ -283,6 +301,7 @@ class AgentInSandboxLoop(AgentLoop):
     async def generate_sample(  # type: ignore[override]
         self, rollout_state: RolloutState, **kwargs
     ) -> list[RolloutState]:
+        rollout_item: AgentRolloutItem | None = None
         try:
             rollout_item = rollout_state.extra_fields["rollout_item"].model_copy(deep=True)
             if rollout_state.session_id is None:
@@ -295,11 +314,8 @@ class AgentInSandboxLoop(AgentLoop):
             rollout_state.status = Status.FAILED
             rollout_state.reward = None
             rollout_state.finish_reason = "error"
-            if "rollout_item" in locals():
-                rollout_state.extra_fields["agent_artifacts"] = _to_json_safe(rollout_item.artifacts)
-                rollout_state.extra_fields["agent_judgers"] = {
-                    name: record.model_dump(mode="json") for name, record in rollout_item.judgers.items()
-                }
+            if rollout_item is not None:
+                _snapshot_failure_evidence(rollout_state, rollout_item, self.logger)
             if self.mode == "eval":
                 rollout_state.response = ""
                 rollout_state.extra_fields["agent_status"] = "exception"
