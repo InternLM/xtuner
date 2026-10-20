@@ -209,9 +209,9 @@ class OffloadManager(metaclass=SingletonMeta):
         self.pin_memory_cache: dict = {}
 
     def clear_step(self, group: str | None = None) -> None:
-        """Release saved-tensor offload state after a completed backward.
+        """Release saved-tensor offload state at a training-step boundary.
 
-        Pinned CPU buffers stay cached for reuse; GPU tensors and runtime counters are released.
+        Pinned CPU buffers stay cached for reuse; GPU tensors and per-step counters are released.
 
         Args:
             group (str | None): Optional group to clear. If omitted, clear all groups.

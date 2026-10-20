@@ -1,4 +1,4 @@
-"""Completed microbatches keep scalar logs and parameter gradients, not activation caches."""
+"""Completed microbatches detach scalar logs; offload cleanup stays at step exit."""
 
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -15,7 +15,7 @@ class _Outputs(ModelOutputs):
 
 
 @pytest.mark.parametrize("fail_second", [False, True])
-def test_microbatch_cleanup_preserves_accumulation(monkeypatch, fail_second):
+def test_microbatch_loss_detach_preserves_accumulation(monkeypatch, fail_second):
     monkeypatch.setattr(train_engine, "DEVICE", "cpu")
     monkeypatch.setattr(train_engine, "ProberList", Mock())
     weight = torch.tensor(2.0, requires_grad=True)
@@ -34,7 +34,7 @@ def test_microbatch_cleanup_preserves_accumulation(monkeypatch, fail_second):
             return {}
 
         def __call__(self, **kwargs):
-            assert not runtime_cache
+            assert len(runtime_cache) == len(outputs)
             if outputs:
                 assert outputs[-1].loss.grad_fn is None
                 assert outputs[-1].mtp_loss.grad_fn is None
@@ -47,7 +47,7 @@ def test_microbatch_cleanup_preserves_accumulation(monkeypatch, fail_second):
 
         def post_micro_batch_forward(self, results):
             assert results == outputs
-            assert not runtime_cache
+            assert len(runtime_cache) == len(outputs)
             return {}
 
     engine = object.__new__(train_engine.TrainEngine)
@@ -59,11 +59,11 @@ def test_microbatch_cleanup_preserves_accumulation(monkeypatch, fail_second):
     if fail_second:
         with pytest.raises(RuntimeError, match="second forward failed"):
             engine.train_step(batches)
-        assert clears == [7.0, 7.0]
+        assert clears == [7.0]
     else:
         result = engine.train_step(batches)
         assert result["total_loss"] == 20.0
-        assert clears == [7.0, 14.0, 14.0]
+        assert clears == [14.0]
         assert all(out.loss.item() == 4 and out.mtp_loss.item() == 6 for out in outputs)
     assert not runtime_cache
     assert weight.grad.item() == (7.0 if fail_second else 14.0)
