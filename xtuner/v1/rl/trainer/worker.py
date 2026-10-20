@@ -1166,9 +1166,12 @@ class TrainingWorker(SingleAcceleratorWorker):
             distillation_config = self.config.distillation_config
             assert distillation_config is not None, f"Padding {key} requires distillation_config"
             top_k = distillation_config.loss_config.top_k
-            assert top_k is not None, f"Padding {key} requires loss_config.top_k"
             if key == "teacher_logprobs":
+                if top_k is None:
+                    # Sampled teacher targets carry one logprob per position.
+                    return torch.zeros(1, padding_len, dtype=torch.float32)
                 return torch.zeros(1, padding_len, top_k, dtype=torch.float32)
+            assert top_k is not None, f"Padding {key} requires loss_config.top_k"
             return torch.zeros(1, padding_len, top_k, dtype=torch.long)
         raise ValueError(f"Unknown pack loss input key: {key}")
 
