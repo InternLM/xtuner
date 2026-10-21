@@ -30,6 +30,7 @@ _TOOL_CALLS = [
     {"function": {"arguments": {}, "name": "a"}, "id": "a", "type": "function"},
     {"function": {"arguments": {}, "name": "b"}, "id": "b", "type": "function"},
 ]
+_IMAGE_PART = {"type": "image", "image": {"url": "unused.jpg", "image_wh": [112, 112]}}
 
 _CONTRACT_CASES = {
     # content 列表混排纯字符串与 text 字典（jinja 均按文本渲染）。
@@ -75,6 +76,37 @@ _CONTRACT_CASES = {
             {"role": "assistant", "content": "ASSISTANT_ANSWER"},
         ],
         "tools": _TOOLS,
+    },
+    # 结构化 output 渲染可见文本，而不是 Python 字符串化。
+    "tool_structured_text": {
+        "messages": [
+            {"role": "tool", "content": [{"output": [{"type": "text", "text": "done"}]}]},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ]
+    },
+    # output 内嵌套的 tool_reference 展开匹配的工具定义。
+    "tool_nested_reference": {
+        "messages": [
+            {"role": "tool", "content": [{"output": [{"type": "tool_reference", "name": "a"}]}]},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ],
+        "tools": _TOOLS,
+    },
+    # tool 角色的顶层/嵌套媒体渲染为三段式标记（渲染层；数据层能否加载另说）。
+    "tool_image_probe": {
+        "messages": [
+            {"role": "user", "content": "USER_INPUT"},
+            {"role": "assistant", "content": "", "tool_calls": [_TOOL_CALLS[0]]},
+            {"role": "tool", "content": [_IMAGE_PART], "tool_call_id": "a"},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ],
+        "tools": _TOOLS,
+    },
+    "tool_nested_image_probe": {
+        "messages": [
+            {"role": "tool", "content": [{"output": [_IMAGE_PART]}]},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ]
     },
 }
 
@@ -205,6 +237,22 @@ class TestGlm53Rendering:
             Glm53ChatMessages(messages=messages).tokenize(tokenizer, enable_thinking=False)
         with pytest.raises(AssertionError, match="enable_thinking"):
             glm53_tokenize_fn_slowspeed(tokenizer, messages, enable_thinking=False)
+
+    def test_string_tool_call_arguments_rejected(self):
+        # arguments 必须是对象；未解析的 JSON 字符串抛带修复提示的 ValueError（落入数据管线
+        # 脏样本错误集合，走丢弃通道），而不是 glm52 渲染器深处的 AttributeError 裸崩。
+        messages = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"function": {"name": "a", "arguments": '{"city": "beijing"}'}, "id": "a", "type": "function"}
+                ],
+            },
+        ]
+        with pytest.raises(ValueError, match="Parse JSON strings before tokenization"):
+            render_glm53_chat(messages, **GLM53_TEMPLATE_DEFAULTS)
 
     def test_all_generation_eos_are_supervised_at_assistant_boundaries(self, tokenizer):
         # 助手轮边界上的停止 token 必须计入 loss，否则模型学不会停。

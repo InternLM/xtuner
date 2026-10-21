@@ -28,7 +28,16 @@ in the official ``chat_template.jinja``:
    ``glm53_vl_tokenize_fn._expand_marker`` pairs the i-th payload with the i-th marker), so
    the VLM tokenize fn first flattens the messages the same way via :func:`sort_tool_messages`,
    making the payload collection order follow the rendered marker order.
-5. ``<|endoftext|>`` is appended only after the FINAL assistant message (the training stop
+5. Structured ``{"output": ...}`` entries render their output through ``visible_text`` and a
+   nested ``tool_reference`` list expands the matching tool definitions into
+   ``<tool_response><tools>...</tools></tool_response>`` (GLM-5.2's official template has
+   neither behavior, so these live here rather than in :mod:`glm52_chat`).
+6. ``tool_calls`` whose ``arguments`` are an unparsed JSON string are rejected with a
+   ``ValueError`` explaining the fix, instead of crashing with an ``AttributeError`` deep in
+   glm52's renderer. ``ValueError`` belongs to the data pipeline's dirty-data error set, so
+   such samples are discarded through the dirty-sample channel instead of killing the cache
+   worker.
+7. ``<|endoftext|>`` is appended only after the FINAL assistant message (the training stop
    suffix). The official template never emits EOS mid-conversation, so assistant→system and
    assistant→assistant boundaries get no extra token; only ``<|user|>``/``<|observation|>``
    act as supervised stop targets.
@@ -47,10 +56,12 @@ from .glm52_chat import (
     _append_literal,
     _assistant_content_and_reasoning,
     _encode_glm_text,
-    _render_tool_calls,
     _render_tools,
     _tokenize_with_loss_mask,
     _tool_to_json,
+)
+from .glm52_chat import (
+    _render_tool_calls as _render_tool_calls_glm52,
 )
 
 
@@ -88,6 +99,25 @@ def _visible_text(content: Any, _literal_spans=None, _offset: int = 0) -> str:
 
 def _id_of(obj: Mapping[str, Any]) -> Any:
     return obj.get("tool_call_id") or obj.get("id")
+
+
+def _render_tool_calls(tool_calls: List[Dict[str, Any]], _literal_spans=None, _offset: int = 0) -> str:
+    """Validate ``tool_calls`` then delegate to glm52's renderer.
+
+    String ``arguments`` (unparsed JSON) are rejected with a repair hint instead of crashing
+    with an ``AttributeError`` inside glm52's ``_tool_call_args``; the ``ValueError`` falls in
+    the VL pipeline's dirty-data error set, so the sample is discarded rather than killing the
+    cache worker.
+    """
+    for tool_call in tool_calls:
+        function = tool_call["function"] if "function" in tool_call else tool_call
+        arguments = function["arguments"]
+        if not isinstance(arguments, Mapping):
+            raise ValueError(
+                f"GLM-5.3-Flash tool {function['name']!r} arguments must be an object; "
+                f"got {type(arguments).__name__}. Parse JSON strings before tokenization."
+            )
+    return _render_tool_calls_glm52(tool_calls, _literal_spans, _offset)
 
 
 def _is_list_of_outputs(message: Mapping[str, Any]) -> bool:
