@@ -294,7 +294,9 @@ class DataloaderConfig(BaseDataloaderConfig):
     # Extra keyword arguments bound into the collator partial, for collators that need more than
     # the four arguments the dataloader supplies itself. `glm53_vl_sft_collator` needs
     # `image_token_id`/`merge_unit` to re-check its placeholder<->patch-count invariant after
-    # pack-level truncation; both are processor constants the dataloader cannot derive.
+    # pack-level truncation; both are processor constants the dataloader cannot derive. Its
+    # `media_dtype` must track the vision tower's parameter dtype (bf16 by default; set
+    # torch.float32 when the tower is trained in fp32, at the cost of 2x media memory).
     collator_kwargs: Annotated[dict, Parameter(help="extra kwargs bound into the collator")] = {}
     pack_to_max_length: Annotated[bool, Parameter(help="whether to pack to max length")] = True
     pack_level: Annotated[
