@@ -203,7 +203,9 @@ def sort_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
-def _render_tool_output(output: Any, tools: Optional[List[Dict[str, Any]]], _literal_spans=None, _offset: int = 0) -> str:
+def _render_tool_output(
+    output: Any, tools: Optional[List[Dict[str, Any]]], _literal_spans=None, _offset: int = 0
+) -> str:
     """Render one aggregated ``{output: ...}`` entry the way the official template's
     render_tool_response does: a tool_reference list expands to the referenced tool
     schemas, anything else renders through ``_visible_text`` (media parts become the
@@ -219,7 +221,9 @@ def _render_tool_output(output: Any, tools: Optional[List[Dict[str, Any]]], _lit
     return prefix + _visible_text(output, _literal_spans, _offset + len(prefix)) + "</tool_response>"
 
 
-def _render_tool_result(content: Any, tools: Optional[List[Dict[str, Any]]], _literal_spans=None, _offset: int = 0) -> str:
+def _render_tool_result(
+    content: Any, tools: Optional[List[Dict[str, Any]]], _literal_spans=None, _offset: int = 0
+) -> str:
     """GLM-5.3 version of the tool-result renderer.
 
     GLM-5.2 has no multimodal input, so its renderer emits media as a ``<reminder>`` text; the official GLM-5.3
@@ -247,7 +251,11 @@ def _render_tool_result(content: Any, tools: Optional[List[Dict[str, Any]]], _li
 
 
 def _render_tool_block(
-    messages: List[Dict[str, Any]], start: int, tools: Optional[List[Dict[str, Any]]], _literal_spans=None, _offset: int = 0
+    messages: List[Dict[str, Any]],
+    start: int,
+    tools: Optional[List[Dict[str, Any]]],
+    _literal_spans=None,
+    _offset: int = 0,
 ) -> str:
     """Render the contiguous tool-message block starting at ``start``.
 

@@ -82,13 +82,8 @@ def _render_tools(tools: List[Dict[str, Any]], _literal_spans=None, _offset: int
 def _assistant_content_and_reasoning(message: Mapping[str, Any]) -> tuple[str, str | None]:
     content = _visible_text(message.get("content", ""))
     reasoning_content = message.get("reasoning_content")
-    if isinstance(reasoning_content, str):
-        return content, reasoning_content
-    if "</think>" in content:
-        reasoning_content = content.split("</think>")[0].split("<think>")[-1]
-        content = content.split("</think>")[-1]
-        return content, reasoning_content
-    return content, None
+    # Reasoning is a structured field; think-tag spellings in content are always literal text.
+    return content, reasoning_content if isinstance(reasoning_content, str) else None
 
 
 def _tool_call_args(arguments: Mapping[str, Any], _literal_spans=None, _offset: int = 0) -> str:
@@ -247,6 +242,9 @@ def _content_tokenizer(tokenizer):
         raise ValueError("GLM special-token literals require a fast tokenizer with a tokenizers backend.")
     backend = copy.deepcopy(tokenizer.backend_tokenizer)
     backend.add_special_tokens(list(tokenizer.added_tokens_decoder.values()))
+    assert all(token.special for token in backend.get_added_tokens_decoder().values()), (
+        "The content tokenizer must mark every added token as special before encoding literals."
+    )
     backend.encode_special_tokens = True
     backend.no_padding()
     backend.no_truncation()
