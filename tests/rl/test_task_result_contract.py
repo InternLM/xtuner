@@ -14,7 +14,8 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import RolloutError
 
 @pytest.mark.parametrize("mode", ["train", "eval"])
 @pytest.mark.parametrize(
-    "failure", ["infra", "verifier", "missing_score", "nan", "transport_timeout", "cancel", "adapter"]
+    "failure",
+    ["infra", "verifier", "missing_score", "nan", "transport_timeout", "cancel", "adapter", "error", "abort"],
 )
 def test_invalid_attempt_never_exposes_a_reward(mode, failure):
     loop, state = Fixtures._make_loop(mode), Fixtures._make_state()
@@ -28,10 +29,10 @@ def test_invalid_attempt_never_exposes_a_reward(mode, failure):
         item.reward = float("nan")
     elif failure == "adapter":
         item.artifacts["response_message"]["extra_info"] = {"error": "connection failed"}
+    elif failure == "transport_timeout":
+        item.artifacts["response_message"].update(finish_reason="timeout", error="transport timed out")
     else:
-        item.artifacts["response_message"]["finish_reason"] = (
-            "timeout" if failure == "transport_timeout" else "cancelled"
-        )
+        item.artifacts["response_message"]["finish_reason"] = "cancelled" if failure == "cancel" else failure
     # A stale prior result must not survive a failed attempt.
     state.reward = {"score": 9}
     with patch.object(impl, "get_store") as store:
@@ -46,18 +47,64 @@ def test_invalid_attempt_never_exposes_a_reward(mode, failure):
 
 @pytest.mark.parametrize("mode", ["train", "eval"])
 @pytest.mark.parametrize("score", [0.0, 0.75])
-def test_confirmed_task_timeout_uses_verifier_score(mode, score):
+@pytest.mark.parametrize(
+    "finish_info",
+    [
+        None,
+        {},
+        {"backend_detail": "deadline"},
+        {"termination_reason": "task_budget_exhausted"},
+        {"agent_stopped": True},
+        {"termination_reason": "task_budget_exhausted", "agent_stopped": True},
+        {"termination_reason": "unknown", "agent_stopped": False},
+    ],
+)
+def test_completed_timeout_uses_verifier_score_without_termination_protocol(mode, score, finish_info):
     loop, state = Fixtures._make_loop(mode), Fixtures._make_state()
     item = Fixtures._make_item(RolloutStatus.COMPLETED, segment_count=1)
     item.reward = score
-    item.artifacts["response_message"].update(
-        finish_reason="timeout", finish_info={"termination_reason": "task_budget_exhausted", "agent_stopped": True}
-    )
+    response = item.artifacts["response_message"]
+    response["finish_reason"] = "timeout"
+    response.pop("finish_info", None)
+    if finish_info is not None:
+        response["finish_info"] = finish_info
     with patch.object(impl, "get_store", return_value=Fixtures._trace_store(1)):
         result = asyncio.run(loop._build_rollout_states(state, item))
     assert result[0].status == Status.COMPLETED
     assert result[0].reward["score"] == score
     assert result[0].finish_reason == "timeout"
+    if finish_info:
+        assert result[0].extra_fields["agent_finish_info"] == finish_info
+
+
+@pytest.mark.parametrize("mode", ["train", "eval"])
+@pytest.mark.parametrize("marked", [False, True])
+@pytest.mark.parametrize("failure", ["status", "execution", "adapter", "missing_score", "nan", "inf"])
+def test_timeout_metadata_does_not_override_failure_or_invalid_score(mode, marked, failure):
+    loop, state = Fixtures._make_loop(mode), Fixtures._make_state()
+    item = Fixtures._make_item(RolloutStatus.COMPLETED)
+    response = item.artifacts["response_message"]
+    response["finish_reason"] = "timeout"
+    response.pop("finish_info", None)
+    if marked:
+        response["finish_info"] = {"termination_reason": "task_budget_exhausted", "agent_stopped": True}
+    if failure == "status":
+        item.status = RolloutStatus.FAILED
+    elif failure == "execution":
+        item.error = RolloutError(category="transport_timeout", message="request timed out")
+    elif failure == "adapter":
+        response["extra_info"] = {"error": "request timed out"}
+    else:
+        item.reward = {"missing_score": None, "nan": float("nan"), "inf": float("inf")}[failure]
+    state.reward = {"score": 9}
+    with patch.object(impl, "get_store") as store:
+        result = asyncio.run(loop._build_rollout_states(state, item))
+    assert result == [state]
+    assert state.status == Status.FAILED
+    assert state.reward is None
+    assert state.error_msg
+    assert "agent_artifacts" in state.extra_fields
+    store.assert_not_called()
 
 
 @pytest.mark.parametrize("mode", ["train", "eval"])

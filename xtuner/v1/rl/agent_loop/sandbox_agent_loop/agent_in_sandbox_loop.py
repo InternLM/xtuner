@@ -204,8 +204,8 @@ def _extract_reward_payload(item: AgentRolloutItem) -> dict[str, Any] | None:
 def _task_result_error(item: AgentRolloutItem) -> str | None:
     """Only a completed, finite verifier score is a task outcome.
 
-    A task-budget timeout is scoreable only after the harness confirms the agent stopped. Transport timeouts and
-    adapter errors remain unscored.
+    The execution layer owns timeout classification and verifier ordering. A timeout label alone does not invalidate a
+    completed, scored attempt; explicit execution and adapter errors remain unscored.
     """
     if item.error is not None:
         return f"{item.error.stage}/{item.error.category}: {item.error.message}"
@@ -216,11 +216,7 @@ def _task_result_error(item: AgentRolloutItem) -> str | None:
     if response.get("error") or (isinstance(extra, dict) and extra.get("error")):
         return "Agent adapter failed; verifier output is not a valid task result"
     reason = response.get("finish_reason")
-    if reason == "timeout":
-        info = _finish_info(response) or {}
-        if info.get("termination_reason") != "task_budget_exhausted" or info.get("agent_stopped") is not True:
-            return "TimeoutError: task-budget exhaustion and agent termination were not confirmed"
-    elif reason in {"error", "cancelled", "abort"}:
+    if reason in {"error", "cancelled", "abort"}:
         return f"Agent attempt ended with {reason}"
     if item.reward is None or not math.isfinite(item.reward):
         return "Verifier did not produce a finite task score"

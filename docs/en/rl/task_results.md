@@ -5,10 +5,15 @@ score. Infrastructure errors, adapter failures, cancellation, missing scores and
 cleanup failures are unscored (`FAILED`, `reward=None`), never synthetic zeroes.
 Diagnostic artifacts and verifier records remain available on failed attempts.
 
-A task's time budget may expire with a valid verifier result. The harness must
-stop the agent before grading, and record `finish_reason="timeout"` together
-with `finish_info={"termination_reason": "task_budget_exhausted", "agent_stopped": true}` in the response artifact. An unqualified timeout is an
-infrastructure/unknown failure. Task scoring policy belongs to the verifier.
+Timeout classification, agent shutdown and verifier ordering belong to the
+execution layer. XTuner does not infer an infrastructure failure from
+`finish_reason="timeout"` alone: a completed attempt with no explicit error and
+a finite verifier score remains scored, including a genuine zero. Explicit
+execution or adapter errors still invalidate the result even when a score exists.
+No `termination_reason` or `agent_stopped` fields are required; existing
+`finish_info` metadata is retained for diagnostics without interpreting those
+fields as a termination protocol. This does not certify that an external agent
+has stopped or that grading ran against a stable environment.
 
 A valid evaluation score does not imply a trainable sample: training additionally
 requires recorded model tokens, logprobs and a valid trace. No trace is synthesized
@@ -82,10 +87,11 @@ attempts.
 
 ## Migrating harnesses and result consumers
 
-- A timeout with a valid verifier result is scoreable only when the harness
-  records both explicit task-budget termination and confirmation that the agent
-  stopped, as shown above. Do not relabel infrastructure timeouts as task-budget
-  exhaustion to obtain a score.
+- No new termination metadata is required from harnesses or `AsyncExternalAgent`
+  adapters. A timeout label alone does not override a completed, error-free,
+  finitely scored result. Execution layers remain responsible for reporting
+  actual failures through the existing status/error fields; do not clear errors
+  merely because a verifier score exists.
 - Infrastructure, adapter and cleanup failures remain `FAILED` even if a stale
   verifier record or diagnostic reward metadata exists. Consumers must accept
   `reward=None` and use the retained errors and artifacts for diagnosis.
