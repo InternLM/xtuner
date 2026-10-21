@@ -15,6 +15,7 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from safetensors import safe_open
+from torch.distributed.checkpoint.planner import LoadPlan
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
@@ -80,6 +81,15 @@ def _validate_optimizer_checkpoint_shapes(optimizer_state_dict, metadata) -> Non
                     f"{tuple(saved.size)}, expected {tuple(value.shape)}. "
                     "Do not resume optimizer state from a checkpoint that lost distributed shards."
                 )
+
+
+class _OptimizerShapeLoadPlanner(InterleavedShardLoadPlanner):
+    def create_local_plan(self) -> LoadPlan:
+        # DCP has already read metadata on each rank. Validate before planning
+        # tensor reads, without opening and unpickling .metadata a second time.
+        assert self.metadata is not None
+        _validate_optimizer_checkpoint_shapes(self.original_state_dict["optimizer"], self.metadata)
+        return super().create_local_plan()
 
 
 class CPUThreadTaskCoordinator:
@@ -559,10 +569,6 @@ class TrainEngine:
 
         load_optimizer = load_states or load_args
         state_dict = self._get_dcp_state_dict(cpu_offload=True, save_optimizer=load_optimizer)
-        if load_states:
-            _validate_optimizer_checkpoint_shapes(
-                state_dict["optimizer"], dcp.FileSystemReader(weights_dir).read_metadata()
-            )
 
         if self.has_freeze_params:
             set_options = StateDictOptions(cpu_offload=True, strict=False)
@@ -573,7 +579,7 @@ class TrainEngine:
             dcp.load(
                 state_dict=state_dict,
                 checkpoint_id=weights_dir,
-                planner=InterleavedShardLoadPlanner(),
+                planner=_OptimizerShapeLoadPlanner() if load_states else InterleavedShardLoadPlanner(),
             )
 
             set_model_state_dict(self.model, state_dict["model"], options=set_options)

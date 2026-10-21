@@ -119,6 +119,53 @@ def test_load_state_dict_never_stages_moments_on_device(monkeypatch, device):
     assert resumed._param_to_cpu_states_map[p]["exp_avg"] is resumed.state[p]["exp_avg"]
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("amsgrad", [False, True])
+@pytest.mark.parametrize(
+    "source_dtype,target_dtype",
+    [(torch.float32, torch.bfloat16), (torch.float32, torch.float16), (torch.bfloat16, torch.float32)],
+)
+def test_cross_precision_resume_matches_adamw(monkeypatch, device, amsgrad, source_dtype, target_dtype):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    monkeypatch.setattr(module, "DEVICE", device)
+    if device == "cpu":
+        monkeypatch.setattr(
+            module, "DEVICE_MODULE", SimpleNamespace(current_device=lambda: 0, synchronize=lambda: None)
+        )
+        monkeypatch.setattr(torch.Tensor, "pin_memory", lambda self: self)
+    else:
+        monkeypatch.setattr(module, "DEVICE_MODULE", torch.cuda)
+    source = torch.nn.Parameter(torch.arange(6, device=device, dtype=source_dtype).reshape(2, 3) / 6)
+    optimizer = module.SwapAdamW([source], lr=0.01, amsgrad=amsgrad, fused=False)
+    for i in range(3):
+        source.grad = torch.full_like(source, (i + 1) * 0.25)
+        optimizer.step()
+    checkpoint = copy.deepcopy(optimizer.state_dict())
+    restored = torch.nn.Parameter(source.detach().to(dtype=target_dtype))
+    reference = torch.nn.Parameter(restored.detach().clone())
+    resumed = module.SwapAdamW([restored], amsgrad=amsgrad, fused=False)
+    standard = torch.optim.AdamW([reference], amsgrad=amsgrad, fused=False)
+    resumed.load_state_dict(copy.deepcopy(checkpoint))
+    standard.load_state_dict(copy.deepcopy(checkpoint))
+    for key in resumed._state_keys:
+        value = resumed.state[restored][key]
+        if value is not None:
+            assert value.dtype == target_dtype
+            assert value.device.type == "cpu"
+            if device == "cuda":
+                assert value.is_pinned()
+            torch.testing.assert_close(value, standard.state[reference][key].cpu())
+    for param, opt in ((restored, resumed), (reference, standard)):
+        param.grad = torch.full_like(param, -0.75)
+        opt.step()
+    torch.testing.assert_close(restored, reference)
+    for key in resumed._state_keys:
+        if resumed.state[restored][key] is not None:
+            torch.testing.assert_close(resumed.state[restored][key], standard.state[reference][key].cpu())
+    assert resumed.state[restored]["step"].item() == 4
+
+
 def _sharded_resume_worker(rank, checkpoint_dir, rendezvous, amsgrad, asynchronous, device):
     if device == "cuda":
         torch.cuda.set_device(rank)
@@ -138,6 +185,8 @@ def _sharded_resume_worker(rank, checkpoint_dir, rendezvous, amsgrad, asynchrono
                     )
                 )
                 stack.enter_context(patch.object(torch.Tensor, "pin_memory", lambda self: self))
+                # Emulate pinning on CPU-only hosts; CUDA cases check real pinned storage.
+                stack.enter_context(patch.object(torch.Tensor, "is_pinned", lambda self: True))
                 empty_like = torch.empty_like
 
                 def unpinned_empty_like(*args, **kwargs):
@@ -185,6 +234,12 @@ def _sharded_resume_worker(rank, checkpoint_dir, rendezvous, amsgrad, asynchrono
                 "optimizer": get_optimizer_state_dict(restored, resumed, options=options),
             }
             dcp.load(state, checkpoint_id=checkpoint_dir, planner=InterleavedShardLoadPlanner())
+            loaded_moments = state["optimizer"]["state"]["weight"]
+            loaded_ptrs = {
+                key: value.to_local().data_ptr()
+                for key, value in loaded_moments.items()
+                if key in resumed._state_keys and value is not None
+            }
             set_model_state_dict(restored, state["model"], options=options)
             set_optimizer_state_dict(restored, resumed, state["optimizer"], options=options)
             for key in resumed._state_keys:
@@ -194,6 +249,7 @@ def _sharded_resume_worker(rank, checkpoint_dir, rendezvous, amsgrad, asynchrono
                     assert value.to_local().device.type == "cpu"
                     if device == "cuda":
                         assert value.to_local().is_pinned()
+                    assert value.to_local().data_ptr() == loaded_ptrs[key]
                     torch.testing.assert_close(value.to_local(), optimizer.state[model.weight][key].to_local())
                     assert (
                         value.to_local().data_ptr()
@@ -238,3 +294,64 @@ def test_incomplete_optimizer_checkpoint_is_rejected_before_loading():
         _validate_optimizer_checkpoint_shapes(state, metadata)
     metadata.state_dict_metadata["optimizer.state.weight.exp_avg"].size = torch.Size([8, 3])
     _validate_optimizer_checkpoint_shapes(state, metadata)
+
+
+@pytest.mark.parametrize("incomplete", [False, True])
+def test_load_dcp_reads_metadata_once_and_validates_before_tensor_reads(tmp_path, monkeypatch, incomplete):
+    from xtuner.v1.engine.train_engine import TrainEngine
+
+    if not torch.cuda.is_available():
+        monkeypatch.setattr(torch.cpu, "reset_peak_memory_stats", lambda: None, raising=False)
+        monkeypatch.setattr(torch.cpu, "max_memory_allocated", lambda: 0, raising=False)
+    model = torch.nn.Linear(3, 8, bias=False)
+    optimizer = torch.optim.AdamW(model.parameters(), fused=False)
+    model.weight.grad = torch.ones_like(model.weight)
+    optimizer.step()
+    options = StateDictOptions(cpu_offload=True)
+    state = {
+        "model": get_model_state_dict(model, options=options),
+        "optimizer": get_optimizer_state_dict(model, optimizer, options=options),
+    }
+    saved = copy.deepcopy(state)
+    if incomplete:
+        saved["optimizer"]["state"]["weight"]["exp_avg"] = torch.ones(2, 3)
+    checkpoint_dir = tmp_path / "weights"
+    dcp.save(saved, checkpoint_id=checkpoint_dir)
+    with torch.no_grad():
+        model.weight.zero_()
+        optimizer.state[model.weight]["exp_avg"].zero_()
+
+    calls = {"metadata": 0, "data": 0}
+    read_metadata = dcp.FileSystemReader.read_metadata
+    read_data = dcp.FileSystemReader.read_data
+
+    def counted_metadata(reader, *args, **kwargs):
+        calls["metadata"] += 1
+        return read_metadata(reader, *args, **kwargs)
+
+    def counted_data(reader, *args, **kwargs):
+        calls["data"] += 1
+        return read_data(reader, *args, **kwargs)
+
+    monkeypatch.setattr(dcp.FileSystemReader, "read_metadata", counted_metadata)
+    monkeypatch.setattr(dcp.FileSystemReader, "read_data", counted_data)
+    engine = SimpleNamespace(
+        model=model,
+        optimizer=optimizer,
+        has_freeze_params=False,
+        _get_dcp_state_dict=lambda **kwargs: state,
+    )
+    if incomplete:
+        # DCP wraps planner failures in a collective CheckpointException.
+        with pytest.raises(dcp.CheckpointException, match="lost distributed shards"):
+            TrainEngine.load_dcp(engine, checkpoint_dir)
+        assert calls == {"metadata": 1, "data": 0}
+        assert torch.count_nonzero(model.weight) == 0
+        assert torch.count_nonzero(optimizer.state[model.weight]["exp_avg"]) == 0
+    else:
+        TrainEngine.load_dcp(engine, checkpoint_dir)
+        assert calls == {"metadata": 1, "data": 1}
+        torch.testing.assert_close(model.weight, saved["model"]["weight"])
+        torch.testing.assert_close(
+            optimizer.state[model.weight]["exp_avg"], saved["optimizer"]["state"]["weight"]["exp_avg"]
+        )

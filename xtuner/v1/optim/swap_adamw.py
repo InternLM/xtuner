@@ -128,16 +128,36 @@ class SwapAdamW(torch.optim.AdamW):
                                 not isinstance(restored, DTensor) or restored.shape != param.shape
                             ):
                                 raise ValueError("Sharded SwapAdamW requires moments with complete DTensor metadata")
+                            if restored is not None and (
+                                restored.device_mesh != param.device_mesh or restored.placements != param.placements
+                            ):
+                                raise ValueError(
+                                    "Sharded SwapAdamW requires moments with matching mesh and placements"
+                                )
                             # DCP treats plain local tensors as replicated and saves
                             # only one rank. Keep global shape/placements in state;
                             # the swap map below aliases its pinned local storage.
-                            state_tensor = torch.empty_like(param, device="cpu", pin_memory=True)
-                            assert isinstance(state_tensor, DTensor)
-                            cpu_tensor = state_tensor.to_local()
-                            if restored is None:
-                                cpu_tensor.zero_()
+                            local_restored = restored.to_local() if restored is not None else None
+                            if (
+                                local_restored is not None
+                                and local_restored.device.type == "cpu"
+                                and local_restored.is_pinned()
+                                and local_restored.dtype == local_param.dtype
+                                and local_restored.shape == local_param.shape
+                                and local_restored.stride() == local_param.stride()
+                            ):
+                                # load_dcp still owns the loading targets here. Reuse
+                                # their storage instead of doubling pinned host memory.
+                                state_tensor = restored
+                                cpu_tensor = local_restored
                             else:
-                                cpu_tensor.copy_(restored.to_local())
+                                state_tensor = torch.empty_like(param, device="cpu", pin_memory=True)
+                                assert isinstance(state_tensor, DTensor)
+                                cpu_tensor = state_tensor.to_local()
+                                if local_restored is None:
+                                    cpu_tensor.zero_()
+                                else:
+                                    cpu_tensor.copy_(local_restored)
                             cpu_state_dtensor[key] = state_tensor
                         elif restored is None:
                             cpu_tensor = torch.zeros_like(
@@ -145,7 +165,9 @@ class SwapAdamW(torch.optim.AdamW):
                             ).pin_memory()
                             cpu_state_dtensor[key] = cpu_tensor
                         else:
-                            cpu_tensor = self._to_local_tensor(restored).to(device="cpu").pin_memory()
+                            cpu_tensor = (
+                                self._to_local_tensor(restored).to(device="cpu", dtype=local_param.dtype).pin_memory()
+                            )
                             cpu_state_dtensor[key] = cpu_tensor
                         cpu_state[key] = cpu_tensor
 
