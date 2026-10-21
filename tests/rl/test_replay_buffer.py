@@ -111,6 +111,32 @@ async def save_and_resume(
 
 
 class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
+    async def test_eval_consumes_terminal_groups_in_arrival_order(self):
+        for config_name, config in REPLAY_BUFFER_CONFIGS:
+            with self.subTest(replay_buffer_config=config_name):
+                buffer = config().build()
+                # A failed group contains two attempts, but consumes one group
+                # of quota. Neither successful status nor staleness wins priority.
+                await buffer.put(
+                    [make_rollout_state(1, status=Status.FAILED), make_rollout_state(2, status=Status.FAILED)],
+                    "eval",
+                )
+                await buffer.put([make_rollout_state(3, seq_staleness=100)], "eval")
+                await buffer.put([make_rollout_state(4, status=Status.ABORTED)], "eval")
+                await buffer.put([make_rollout_state(5, status=Status.FAILED)], "other")
+                statuses = [Status.COMPLETED, Status.FAILED]
+                self.assertEqual(await buffer.count("eval", statuses), 2)
+                self.assertTrue(await buffer.is_ready({"eval": 2}, group_status=statuses))
+                self.assertFalse(await buffer.is_ready({"eval": 2}))
+                batch, consumed = await buffer.take_batch({"eval": 1}, group_status=statuses, fifo=True)
+                self.assertEqual(group_uids(batch["eval"]), [[1, 2]])
+                self.assertEqual(consumed, {"eval": 1})
+                batch, _ = await buffer.take_batch({"eval": 1}, group_status=statuses, fifo=True)
+                self.assertEqual(group_uids(batch["eval"]), [[3]])
+                self.assertEqual(await buffer.count("eval", statuses), 0)
+                self.assertEqual(await buffer.count("eval", Status.ABORTED), 1)
+                self.assertEqual(await buffer.count("other", Status.FAILED), 1)
+
     async def test_common_query_count_and_take_batch_contract(self):
         # ReplayBuffer 的公共读写契约：按 task/status 隔离统计，并且 take_batch 会消费已取出的数据。
         for config_name, replay_buffer_config_cls in REPLAY_BUFFER_CONFIGS:

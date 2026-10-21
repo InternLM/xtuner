@@ -41,6 +41,7 @@ reference run. API is rewritten for the post-refactor distillation stack in this
 
 import json
 import os
+
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
@@ -54,13 +55,13 @@ from xtuner.v1.rl.agent_loop_manager import (
     SyncProduceStrategyConfig,
     TaskSpecConfig,
 )
-from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.rl.judger import ComposedJudgerConfig, GEO3KJudgerConfig, GSM8KJudgerConfig
 from xtuner.v1.rl.distillation import (
     DistillationConfig,
     RolloutTeacherConfig,
     RolloutTeacherLaunchConfig,
 )
+from xtuner.v1.rl.evaluator import EvaluatorConfig
+from xtuner.v1.rl.judger import ComposedJudgerConfig, GEO3KJudgerConfig, GSM8KJudgerConfig
 from xtuner.v1.rl.loss import DistillationLossConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
@@ -92,7 +93,8 @@ EVAL_DATA_SOURCE_TAGS = {
 
 
 def mopd_compute_metric(samples):
-    """Emit per-source accuracy so TensorBoard logs eval/gsm8k/acc, eval/geo3k/acc."""
+    """Emit per-source accuracy so TensorBoard logs eval/gsm8k/acc,
+    eval/geo3k/acc."""
     scores_by_source = {data_source: [] for data_source in EVAL_DATA_SOURCE_TAGS}
     for sample in samples:
         data_source = sample.extra_fields.get("origin_data_source")
@@ -104,14 +106,15 @@ def mopd_compute_metric(samples):
             raise ValueError(f"Missing reward score for evaluation data source: {data_source!r}")
         scores_by_source[data_source].append(float(reward["score"]))
 
-    missing_sources = [data_source for data_source, scores in scores_by_source.items() if not scores]
-    if missing_sources:
-        raise ValueError(f"Missing evaluation samples for data sources: {missing_sources}")
-
+    # The evaluator omits unscored attempts and reports their share separately.
+    # A source may have no valid scores; omit that source's metric instead of
+    # turning infrastructure failures into task scores or aborting evaluation.
     all_scores = [score for scores in scores_by_source.values() for score in scores]
-    metrics = {"score": sum(all_scores) / len(all_scores)}
+    metrics = {"score": sum(all_scores) / len(all_scores)} if all_scores else {}
     for data_source, tag in EVAL_DATA_SOURCE_TAGS.items():
         source_scores = scores_by_source[data_source]
+        if not source_scores:
+            continue
         metrics[f"{tag}/acc"] = sum(source_scores) / len(source_scores)
     return metrics
 

@@ -116,6 +116,11 @@ QueryDict: TypeAlias = dict[
 QueryType = Union[QueryDict, QueryNode]
 
 
+def _task_status_query(task_name: str, group_status: Status | list[Status]) -> QueryDict:
+    status_query = {"$in": group_status} if isinstance(group_status, list) else group_status
+    return {"$and": [{"task_name": task_name}, {"status": status_query}]}
+
+
 class StorageBackend(ABC):
     @abstractmethod
     async def put(self, item: StorageItem) -> int: ...
@@ -548,9 +553,9 @@ class ReplayBuffer:
         async with self._lock:
             return await self._policy.get(batch_size, query_dsl, self._storage)
 
-    async def count(self, task_name: str, group_status: Status) -> int:
+    async def count(self, task_name: str, group_status: Status | list[Status]) -> int:
         # 使用 DSL 字典进行查询
-        query_dsl: QueryDict = {"$and": [{"task_name": task_name}, {"status": group_status}]}
+        query_dsl = _task_status_query(task_name, group_status)
         async with self._lock:
             return await self._policy.count(query_dsl, self._storage)
 
@@ -610,13 +615,13 @@ class ReplayBuffer:
         self,
         task_batch_sizes: dict[str, int],
         *,
-        group_status: Status = Status.COMPLETED,
+        group_status: Status | list[Status] = Status.COMPLETED,
     ) -> bool:
         async with self._lock:
             for task_name, batch_size in task_batch_sizes.items():
                 if batch_size <= 0:
                     continue
-                query_dsl: QueryDict = {"$and": [{"task_name": task_name}, {"status": group_status}]}
+                query_dsl = _task_status_query(task_name, group_status)
                 if await self._policy.count(query_dsl, self._storage) < batch_size:
                     return False
         return True
@@ -625,18 +630,25 @@ class ReplayBuffer:
         self,
         task_batch_sizes: dict[str, int],
         *,
-        group_status: Status = Status.COMPLETED,
+        group_status: Status | list[Status] = Status.COMPLETED,
+        fifo: bool = False,
     ) -> tuple[dict[str, list[list[RolloutState]]], dict[str, int]]:
+        """Consume matching groups atomically, optionally in arrival order.
+
+        Evaluation uses FIFO across completed and failed groups so training staleness and outcome do not bias
+        selection.
+        """
         batch_by_task: dict[str, list[list[RolloutState]]] = {}
         consumed_counts: dict[str, int] = {}
+        policy = FIFOReplayPolicy() if fifo else self._policy
         async with self._lock:
             for task_name, batch_size in task_batch_sizes.items():
                 if batch_size <= 0:
                     batch_by_task[task_name] = []
                     consumed_counts[task_name] = 0
                     continue
-                query_dsl: QueryDict = {"$and": [{"task_name": task_name}, {"status": group_status}]}
-                task_batch = await self._policy.get(batch_size, query_dsl, self._storage)
+                query_dsl = _task_status_query(task_name, group_status)
+                task_batch = await policy.get(batch_size, query_dsl, self._storage)
                 batch_by_task[task_name] = task_batch
                 consumed_counts[task_name] = len(task_batch)
         return batch_by_task, consumed_counts

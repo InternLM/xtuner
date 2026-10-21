@@ -354,6 +354,7 @@ class DisaggAgentLoopManager:
         )
         task_batch_sizes = allocate_task_batch_sizes(self.task_runners, batch_size, train_step)
         current_model_step = train_step - 1
+        ready_statuses = [Status.COMPLETED, Status.FAILED] if self.eval_mode else Status.COMPLETED
 
         while not self._finish_event.is_set():
             if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
@@ -367,7 +368,7 @@ class DisaggAgentLoopManager:
                         result.group_gen_pause_time_s = pause_time_s
                     return result
                 # producer 已停且没有新模型可同步，立即暴露坏状态。
-                if not await self.replay_buffer.is_ready(task_batch_sizes):
+                if not await self.replay_buffer.is_ready(task_batch_sizes, group_status=ready_statuses):
                     leftover_counts = await self.replay_buffer.count_statuses(self.task_names, _LEFTOVER_STATUSES)
                     raise RuntimeError(
                         "AgentLoopManager reached EXPIRED_BATCH without a newer model or a ready batch: "
@@ -381,7 +382,7 @@ class DisaggAgentLoopManager:
                         f"task_batch_sizes={task_batch_sizes}, "
                         f"leftover_status_counts={leftover_counts}"
                     )
-            if await self.replay_buffer.is_ready(task_batch_sizes):
+            if await self.replay_buffer.is_ready(task_batch_sizes, group_status=ready_statuses):
                 result = await take_train_batch(
                     task_runners=self.task_runners,
                     replay_buffer=self.replay_buffer,

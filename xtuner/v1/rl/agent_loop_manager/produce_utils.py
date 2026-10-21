@@ -121,6 +121,12 @@ class BaseProduceContext:
     def consumer_step(self) -> int:
         return self.train_step
 
+    async def available_group_count(self) -> int:
+        """Count terminal evaluation attempts, or trainable groups during
+        training."""
+        statuses = [Status.COMPLETED, Status.FAILED] if self.eval_mode else Status.COMPLETED
+        return await self.replay_buffer.count(task_name=self.task_name, group_status=statuses)
+
     async def expired_count(self) -> int:
         return await self.replay_buffer.count(task_name=self.task_name, group_status=Status.EXPIRED)
 
@@ -603,20 +609,12 @@ async def take_train_batch(
     pause_time_s: float = 0.0,
     drain_failed: bool = False,
 ) -> ProduceBatchResult:
-    batch_by_task, consumed_counts = await replay_buffer.take_batch(task_batch_sizes)
     if drain_failed:
-        # 评测读取：补齐 FAILED 组，让基础设施失败样本以 reward=None 交付给
-        # evaluator（见 default_compute_metric_func 的 eval_failed_ratio）。
-        remaining = {
-            task_name: batch_size - consumed_counts.get(task_name, 0)
-            for task_name, batch_size in task_batch_sizes.items()
-        }
-        remaining = {task_name: left for task_name, left in remaining.items() if left > 0}
-        if remaining:
-            failed_by_task, failed_counts = await replay_buffer.take_batch(remaining, group_status=Status.FAILED)
-            for task_name, failed_groups in failed_by_task.items():
-                batch_by_task.setdefault(task_name, []).extend(failed_groups)
-                consumed_counts[task_name] = consumed_counts.get(task_name, 0) + failed_counts[task_name]
+        batch_by_task, consumed_counts = await replay_buffer.take_batch(
+            task_batch_sizes, group_status=[Status.COMPLETED, Status.FAILED], fifo=True
+        )
+    else:
+        batch_by_task, consumed_counts = await replay_buffer.take_batch(task_batch_sizes)
 
     for task in task_runners:
         if task.token_stale_threshold is None:

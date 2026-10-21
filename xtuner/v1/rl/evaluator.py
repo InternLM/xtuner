@@ -6,7 +6,7 @@ from typing import Annotated, Protocol, cast, runtime_checkable
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, Field
 
-from xtuner.v1.data_proto.rl_data import RolloutState
+from xtuner.v1.data_proto.rl_data import RolloutState, Status
 
 
 @runtime_checkable
@@ -51,6 +51,8 @@ def _reward_score(sample: RolloutState) -> float | None:
 
     None rewards (infrastructure failures) and non-finite scores are unscored, not synthetic zeroes.
     """
+    if sample.status == Status.FAILED:
+        return None
     reward = sample.reward
     if not isinstance(reward, Mapping):
         return None
@@ -125,9 +127,11 @@ class Evaluator:
         self,
         compute_metric_func: ComputeMetricProtocol | None = None,
         eval_batch_size: int = 0,
+        include_failed_samples: bool = False,
     ):
         self.compute_metric_func = compute_metric_func or default_compute_metric_func
         self.eval_batch_size = eval_batch_size
+        self.include_failed_samples = include_failed_samples or self.compute_metric_func is default_compute_metric_func
 
     def run(self, samples: list[RolloutState] | list[list[RolloutState]]) -> dict[str, float]:
         # 将 list[list[RolloutState]] 转换为 list[RolloutState]
@@ -135,7 +139,12 @@ class Evaluator:
             flat_samples = [sample for batch in cast(list[list[RolloutState]], samples) for sample in batch]
         else:
             flat_samples = cast(list[RolloutState], samples)
-        return self.compute_metric_func(flat_samples)
+        scored_samples = [sample for sample in flat_samples if _reward_score(sample) is not None]
+        metric_samples = flat_samples if self.include_failed_samples else scored_samples
+        # Legacy callbacks expect scored attempts, and some cannot accept an empty batch.
+        metrics = self.compute_metric_func(metric_samples) if metric_samples or self.include_failed_samples else {}
+        metrics["eval_failed_ratio"] = 1.0 - len(scored_samples) / len(flat_samples) if flat_samples else 0.0
+        return metrics
 
 
 class EvaluatorConfig(BaseModel):
@@ -151,8 +160,11 @@ class EvaluatorConfig(BaseModel):
         eval_sample_num (int): Fixed number of samples to evaluate. A positive
             value takes precedence over ``eval_sample_ratio``. Defaults to 0.
         compute_metric_func (ComputeMetricProtocol | None): Optional function
-            that receives evaluated rollout states and returns metrics. Defaults
-            to None.
+            that receives scored rollout states and returns metrics. Defaults
+            to None, which uses the failure-aware built-in metrics.
+        include_failed_samples (bool): Pass unscored attempts to a custom metric
+            function as well. Defaults to False. The evaluator always reports
+            ``eval_failed_ratio`` over all attempts, independently of this flag.
 
     **Examples:**
 
@@ -181,6 +193,11 @@ class EvaluatorConfig(BaseModel):
         Parameter(help="An optional metric computation function."),
     ] = None
 
+    include_failed_samples: Annotated[
+        bool,
+        Parameter(help="Pass unscored attempts to the custom metric function."),
+    ] = False
+
     def build(self, total_eval_samples: int = 0) -> "Evaluator":
         if self.eval_sample_num > 0:
             eval_batch_size = self.eval_sample_num
@@ -196,4 +213,5 @@ class EvaluatorConfig(BaseModel):
         return Evaluator(
             compute_metric_func=self.compute_metric_func,
             eval_batch_size=eval_batch_size,
+            include_failed_samples=self.include_failed_samples,
         )
