@@ -21,13 +21,12 @@ in the official ``chat_template.jinja``:
 4. A contiguous block of tool messages is rendered in the preceding assistant's ``tool_calls``
    order when the official template's can_sort rule holds (every result id is present, unique
    within the block, and matches a unique tool_call id); otherwise the message order is kept.
-   A block containing media always keeps the message order: media payloads pair to markers
-   positionally (the data collector walks messages in order and
+   Media blocks sort as well, matching the official template and the inference stack (which
+   always sorts and fills images in the sorted order). Media payloads pair to markers
+   positionally (the collector walks messages in order and
    ``glm53_vl_tokenize_fn._expand_marker`` pairs the i-th payload with the i-th marker), so
-   reordering would silently swap payloads. The official template reorders media blocks too,
-   but the official inference stack pairs images to markers positionally as well
-   (``transformers.processing_utils.get_text_with_replacements``), so that combination is
-   ill-defined upstream rather than a behavior training must mirror.
+   the VLM tokenize fn first reorders the messages themselves via :func:`sort_tool_messages`,
+   making the payload collection order follow the sorted marker order.
 5. ``<|endoftext|>`` is appended only after the FINAL assistant message (the training stop
    suffix). The official template never emits EOS mid-conversation, so assistant→system and
    assistant→assistant boundaries get no extra token; only ``<|user|>``/``<|observation|>``
@@ -46,9 +45,9 @@ from .glm52_chat import (
     _NEXT_ROLE_STOP_TOKENS,
     _assistant_content_and_reasoning,
     _render_tool_calls,
-    _render_tool_result,
     _render_tools,
     _tokenize_with_loss_mask,
+    _tool_to_json,
 )
 
 
@@ -95,64 +94,126 @@ def _is_list_of_outputs(message: Mapping[str, Any]) -> bool:
     )
 
 
-def _contains_media(content: Any) -> bool:
-    """Media items anywhere in ``content``: top-level parts or nested
-    ``{output: ...}`` entries."""
-    if isinstance(content, Mapping):
-        if content.get("type") in _MEDIA_PLACEHOLDER:
-            return True
-        return _contains_media(content.get("output"))
-    if isinstance(content, list):
-        return any(_contains_media(item) for item in content)
-    return False
+def _result_ids_of(message: Mapping[str, Any]) -> List[Any]:
+    if _is_list_of_outputs(message):
+        return [_id_of(entry) for entry in message["content"]]
+    return [_id_of(message)]
+
+
+def _sortable_call_ids(messages: List[Dict[str, Any]], start: int, end: int) -> Optional[List[Any]]:
+    """``tool_calls`` ids to sort the block ``messages[start:end+1]`` by, or
+    ``None``.
+
+    The official template's can_sort rule holds when the block follows an assistant with tool_calls, every result id is
+    present, unique within the block, and matches a tool_call id, and the tool_call ids themselves are present and
+    unique.
+    """
+    tool_calls = None
+    if start > 0 and messages[start - 1].get("role") == "assistant":
+        tool_calls = messages[start - 1].get("tool_calls") or None
+    if not tool_calls:
+        return None
+    result_ids: List[Any] = []
+    for message in messages[start : end + 1]:
+        result_ids.extend(_result_ids_of(message))
+    call_ids = [_id_of(tool_call) for tool_call in tool_calls]
+    if (
+        any(not result_id for result_id in result_ids)
+        or len(set(result_ids)) != len(result_ids)
+        or any(not call_id for call_id in call_ids)
+        or len(set(call_ids)) != len(call_ids)
+        or any(result_id not in call_ids for result_id in result_ids)
+    ):
+        return None
+    return call_ids
+
+
+def sort_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return ``messages`` with every sortable contiguous tool block reordered
+    into the preceding assistant's ``tool_calls`` order (the official
+    template's can_sort rule).
+
+    Media payloads pair to markers positionally, so rendering a reordered block alone would attach payloads collected
+    in message order to the wrong markers. Reordering the messages up front makes message order, marker order, and
+    payload order coincide, matching the official template and the inference stack, which always sorts and fills images
+    in the sorted order. Message objects are reused unchanged; only the list order differs.
+    """
+    out: List[Dict[str, Any]] = []
+    index = 0
+    while index < len(messages):
+        if messages[index].get("role") != "tool":
+            out.append(messages[index])
+            index += 1
+            continue
+        end = index
+        while end + 1 < len(messages) and messages[end + 1].get("role") == "tool":
+            end += 1
+        block = messages[index : end + 1]
+        call_ids = _sortable_call_ids(messages, index, end)
+        if call_ids is None:
+            out.extend(block)
+        else:
+            position = {call_id: i for i, call_id in enumerate(call_ids)}
+            out.extend(sorted(block, key=lambda m: min(position[result_id] for result_id in _result_ids_of(m))))
+        index = end + 1
+    return out
+
+
+def _render_tool_output(output: Any, tools: Optional[List[Dict[str, Any]]]) -> str:
+    """Render one aggregated ``{output: ...}`` entry the way the official template's
+    render_tool_response does: a tool_reference list expands to the referenced tool
+    schemas, anything else renders through ``_visible_text`` (media parts become the
+    two-stage placeholder markers)."""
+    if (
+        isinstance(output, list)
+        and output
+        and isinstance(output[0], Mapping)
+        and output[0].get("type") == "tool_reference"
+    ):
+        return _render_tool_result(output, tools)
+    return f"<tool_response>{_visible_text(output)}</tool_response>"
+
+
+def _render_tool_result(content: Any, tools: Optional[List[Dict[str, Any]]]) -> str:
+    """GLM-5.3 version of the tool-result renderer.
+
+    GLM-5.2 has no multimodal input, so its renderer emits media as a ``<reminder>`` text; the official GLM-5.3
+    template renders media parts in tool content as the two-stage placeholder markers instead, so this version goes
+    through GLM-5.3's ``_visible_text``.
+    """
+    if isinstance(content, str):
+        return f"<tool_response>{content}</tool_response>"
+    if isinstance(content, list) and content and isinstance(content[0], Mapping):
+        if content[0].get("type") == "tool_reference":
+            text = "<tool_response><tools>\n"
+            for tool_ref in content:
+                for tool in tools or []:
+                    tool = tool["function"] if "function" in tool else tool
+                    if tool.get("name") == tool_ref.get("name"):
+                        text += _tool_to_json(tool) + "\n"
+            return text + "</tools></tool_response>"
+        if "output" in content[0]:
+            return "".join(_render_tool_output(entry["output"], tools) for entry in content)
+    return f"<tool_response>{_visible_text(content)}</tool_response>"
 
 
 def _render_tool_block(messages: List[Dict[str, Any]], start: int, tools: Optional[List[Dict[str, Any]]]) -> str:
     """Render the contiguous tool-message block starting at ``start``.
 
     Results are emitted in the preceding assistant's ``tool_calls`` order when the official
-    template's can_sort rule holds: the block follows an assistant with tool_calls, every
-    result id is present, unique within the block, and matches a tool_call id, and the
-    tool_call ids themselves are present and unique. Any violation keeps the message order,
-    as does any block containing media: media payloads pair to markers positionally (the
-    collector walks messages in order), so reordering such a block would attach payloads to
-    the wrong markers.
+    template's can_sort rule holds (see ``_sortable_call_ids``); any violation keeps the
+    message order. Media blocks sort as well, matching the official template and the
+    inference stack: ``glm53_vl_tokenize_fn`` reorders the messages themselves via
+    ``sort_tool_messages`` before media collection, so payloads collected in message order
+    follow the sorted marker order.
     """
     end = start
     while end + 1 < len(messages) and messages[end + 1].get("role") == "tool":
         end += 1
     block = messages[start : end + 1]
 
-    tool_calls = None
-    if start > 0 and messages[start - 1].get("role") == "assistant":
-        tool_calls = messages[start - 1].get("tool_calls") or None
-
-    can_sort = bool(tool_calls)
-    if can_sort:
-        result_ids: list[Any] = []
-        for message in block:
-            if _is_list_of_outputs(message):
-                result_ids.extend(_id_of(entry) for entry in message["content"])
-            else:
-                result_ids.append(_id_of(message))
-        call_ids = [_id_of(tool_call) for tool_call in tool_calls or []]
-        if (
-            any(not result_id for result_id in result_ids)
-            or len(set(result_ids)) != len(result_ids)
-            or any(not call_id for call_id in call_ids)
-            or len(set(call_ids)) != len(call_ids)
-            or any(result_id not in call_ids for result_id in result_ids)
-        ):
-            can_sort = False
-    if can_sort and any(_contains_media(message.get("content")) for message in block):
-        # 媒体 payload 与 marker 是位置式配对：collector 按 messages 顺序收集，
-        # glm53_vl_tokenize_fn._expand_marker 把第 i 个 payload 换给第 i 个 marker。
-        # 重排只改 marker 顺序，会把图像换到别的 tool 结果上，且占位符计数校验发现不了。
-        # 官方模板无视媒体照样重排，但官方推理栈的媒体配对同样按位置
-        # （transformers processing_utils.get_text_with_replacements），该组合在上游无自洽定义。
-        can_sort = False
-
-    if not can_sort:
+    call_ids = _sortable_call_ids(messages, start, end)
+    if call_ids is None:
         return "".join(_render_tool_result(message.get("content", ""), tools) for message in block)
 
     text = ""
@@ -161,7 +222,7 @@ def _render_tool_block(messages: List[Dict[str, Any]], start: int, tools: Option
             if _is_list_of_outputs(message):
                 for entry in message["content"]:
                     if _id_of(entry) == call_id:
-                        text += f"<tool_response>{entry['output']}</tool_response>"
+                        text += _render_tool_output(entry["output"], tools)
             elif _id_of(message) == call_id:
                 text += _render_tool_result(message.get("content", ""), tools)
     return text

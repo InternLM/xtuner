@@ -16,7 +16,7 @@ import pytest
 
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.messages import Glm53ChatMessages
-from xtuner.v1.data_proto.messages.glm53_chat import glm53_tokenize_fn_slowspeed, render_glm53_chat
+from xtuner.v1.data_proto.messages.glm53_chat import glm53_tokenize_fn_slowspeed, render_glm53_chat, sort_tool_messages
 
 
 GLM_5_3_FLASH_PATH = os.environ["GLM_5_3_FLASH_PATH"]
@@ -109,7 +109,8 @@ _FALLBACK_CASES = {
     },
 }
 
-# 块内携带媒体时 XTuner 有意不启用 can_sort 重排（见 glm53_chat 模块 docstring 第 4 条）；
+# 携带媒体的 tool 块同样按 tool_calls 顺序重排，与官方 jinja、推理侧（始终排序、图片跟随
+# 重排后的顺序填充）对齐；payload 收集顺序由 sort_tool_messages 在收集前预排消息保证。
 # id 均满足 can_sort，纯文本对照见 _CONTRACT_CASES 的 tool_results_reversed / tool_aggregate_reversed。
 _MEDIA_BLOCK_CASES = {
     "tool_results_media_reversed": {
@@ -353,20 +354,34 @@ class TestGlm53OfficialTemplateContract:
         assert tokenized["labels"] == slow_labels
 
     @pytest.mark.parametrize("case_name", list(_MEDIA_BLOCK_CASES))
-    def test_media_block_keeps_message_order(self, tokenizer, case_name):
-        # 块内携带媒体时保持消息顺序：媒体 payload 与 marker 按位置配对（collector 按消息
-        # 顺序收集、_expand_marker 按出现顺序替换），重排会把图像换到别的 tool 结果上。
-        # 此处有意与官方 jinja 偏离——官方推理栈的媒体配对同样按位置
-        # （processing_utils.get_text_with_replacements），该组合在上游无自洽定义；
-        # 对官方渲染的断言固定其行为作为对照。
+    def test_media_block_sorts_like_official_jinja(self, tokenizer, case_name):
+        # 携带媒体的 tool 块同样按 tool_calls 顺序重排，与官方 jinja、推理侧（始终排序、
+        # 图片按重排后的顺序填充）行为对齐；payload 收集顺序由 sort_tool_messages 预排
+        # 消息保证（见 test_sort_tool_messages_reorders_media_block 与 tokenize fn 测试）。
         case = _MEDIA_BLOCK_CASES[case_name]
         messages, tools = case["messages"], case.get("tools")
 
         text, _ = render_glm53_chat(messages, tools=tools, **GLM53_TEMPLATE_DEFAULTS)
-        assert text.index("RESULT_B") < text.index("RESULT_A")
-
         hf_rendered = _render_from_hf(tokenizer, messages, tools=tools)
-        assert hf_rendered.index("RESULT_A") < hf_rendered.index("RESULT_B")
+        assert text == hf_rendered + tokenizer.eos_token
+        assert text.index("RESULT_A") < text.index("RESULT_B")
+
+    def test_sort_tool_messages_reorders_media_block(self):
+        # 预排序把乱序媒体块排成 tool_calls 顺序：媒体收集按消息顺序进行，随之与渲染后的
+        # marker 顺序一致，payload 不错配；渲染器对预排序结果再排是 no-op（输出相同）。
+        case = _MEDIA_BLOCK_CASES["tool_results_media_reversed"]
+        sorted_messages = sort_tool_messages(case["messages"])
+        assert [m["tool_call_id"] for m in sorted_messages if m["role"] == "tool"] == ["a", "b"]
+
+        text, _ = render_glm53_chat(sorted_messages, tools=case["tools"], **GLM53_TEMPLATE_DEFAULTS)
+        original, _ = render_glm53_chat(case["messages"], tools=case["tools"], **GLM53_TEMPLATE_DEFAULTS)
+        assert text == original
+
+    @pytest.mark.parametrize("case_name", list(_FALLBACK_CASES))
+    def test_sort_tool_messages_keeps_unsortable_blocks(self, case_name):
+        # can_sort 前提被破坏时不重排，消息保持原顺序。
+        case = _FALLBACK_CASES[case_name]
+        assert sort_tool_messages(case["messages"]) == case["messages"]
 
     def test_tool_results_are_never_supervised(self, tokenizer):
         for case_name in ("tool_results_reversed", "tool_aggregate_reversed"):

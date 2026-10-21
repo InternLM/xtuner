@@ -35,7 +35,7 @@ from transformers import AutoProcessor
 from transformers.models.glm5_next.image_processing_glm5_next import smart_resize as image_smart_resize
 from transformers.models.glm5_next.video_processing_glm5_next import smart_resize as video_smart_resize
 from transformers.video_utils import VideoMetadata
-from xtuner.v1.data_proto.messages.glm53_chat import _tokenize_with_loss_mask, render_glm53_chat
+from xtuner.v1.data_proto.messages.glm53_chat import _tokenize_with_loss_mask, render_glm53_chat, sort_tool_messages
 from xtuner.v1.utils import get_logger
 
 from ..data_item import CacheItem, Glm53VLDataItem
@@ -90,10 +90,9 @@ def _read_video_frames(video_path: str, frame_indices: list[int]) -> list[Image.
     """Read specific frames from a video directory (numbered image files) or a
     real video file.
 
-    Real video decoding uses ``decord`` directly rather than the qwen3_vl helpers: those assume
-    qwen's merge-paired timestamp convention (``len(frames_indices) == len(timestamps) * 2``),
-    which doesn't match GLM-5.3-Flash's own timestamp derivation (``VideoMetadata.timestamps``,
-    computed from ``fps`` + ``frames_indices`` alone).
+    Real video decoding uses ``decord`` directly rather than the qwen3_vl helpers: those assume qwen's merge-paired
+    timestamp convention (``len(frames_indices) == len(timestamps) * 2``), which doesn't match GLM-5.3-Flash's own
+    timestamp derivation (``VideoMetadata.timestamps``, computed from ``fps`` + ``frames_indices`` alone).
     """
     if os.path.isdir(video_path):
         files = sort_frames(os.listdir(video_path))
@@ -215,6 +214,13 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         )
 
     # ---- shared render/expand/tokenize, called by both cache and runtime paths ----
+
+    def __call__(self, item: dict, media_root: str = "", **kwargs):
+        # tool 块先按 tool_calls 顺序预排序：渲染器会按同一 can_sort 规则重排 marker，而媒体
+        # payload 由基类 __call__ 按消息原序收集、与 marker 位置式配对。先排消息让收集顺序
+        # 与渲染后的 marker 顺序一致（与官方 jinja、推理侧的“始终排序+图片跟随”行为对齐）。
+        item = {**item, "messages": sort_tool_messages(item["messages"])}
+        return super().__call__(item, media_root=media_root, **kwargs)
 
     def _render_base(self, data_item: dict) -> tuple[str, list[bool]]:
         self._check_no_literal_visual_marker(data_item)
