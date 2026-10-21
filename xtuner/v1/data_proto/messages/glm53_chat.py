@@ -21,12 +21,13 @@ in the official ``chat_template.jinja``:
 4. A contiguous block of tool messages is rendered in the preceding assistant's ``tool_calls``
    order when the official template's can_sort rule holds (every result id is present, unique
    within the block, and matches a unique tool_call id); otherwise the message order is kept.
-   Media blocks sort as well, matching the official template and the inference stack (which
-   always sorts and fills images in the sorted order). Media payloads pair to markers
-   positionally (the collector walks messages in order and
+   Media blocks sort as well. The official template's ordering unit is the result entry, not
+   the message: under can_sort it emits every entry matching a tool_call id in ``tool_calls``
+   order, pulling entries out of aggregated ``{"output": ...}`` messages. Media payloads pair
+   to markers positionally (the collector walks messages in order and
    ``glm53_vl_tokenize_fn._expand_marker`` pairs the i-th payload with the i-th marker), so
-   the VLM tokenize fn first reorders the messages themselves via :func:`sort_tool_messages`,
-   making the payload collection order follow the sorted marker order.
+   the VLM tokenize fn first flattens the messages the same way via :func:`sort_tool_messages`,
+   making the payload collection order follow the rendered marker order.
 5. ``<|endoftext|>`` is appended only after the FINAL assistant message (the training stop
    suffix). The official template never emits EOS mid-conversation, so assistant→system and
    assistant→assistant boundaries get no extra token; only ``<|user|>``/``<|observation|>``
@@ -129,14 +130,15 @@ def _sortable_call_ids(messages: List[Dict[str, Any]], start: int, end: int) -> 
 
 
 def sort_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Return ``messages`` with every sortable contiguous tool block reordered
+    """Return ``messages`` with every sortable contiguous tool block flattened
     into the preceding assistant's ``tool_calls`` order (the official
     template's can_sort rule).
 
-    Media payloads pair to markers positionally, so rendering a reordered block alone would attach payloads collected
-    in message order to the wrong markers. Reordering the messages up front makes message order, marker order, and
-    payload order coincide, matching the official template and the inference stack, which always sorts and fills images
-    in the sorted order. Message objects are reused unchanged; only the list order differs.
+    The official template's ordering unit is the result entry, not the message: under can_sort it emits each entry
+    matching a tool_call id in ``tool_calls`` order, pulling entries out of aggregated ``{"output": ...}`` messages.
+    Media payloads pair to markers positionally, so the messages are flattened the same way up front: aggregated
+    messages are split into single-entry shallow copies (other keys kept), plain messages are reused unchanged, and
+    every entry lands in ``tool_calls`` order. Blocks that fail the can_sort rule are returned unchanged.
     """
     out: List[Dict[str, Any]] = []
     index = 0
@@ -154,7 +156,13 @@ def sort_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             out.extend(block)
         else:
             position = {call_id: i for i, call_id in enumerate(call_ids)}
-            out.extend(sorted(block, key=lambda m: min(position[result_id] for result_id in _result_ids_of(m))))
+            units: List[Dict[str, Any]] = []
+            for message in block:
+                if _is_list_of_outputs(message):
+                    units.extend({**message, "content": [entry]} for entry in message["content"])
+                else:
+                    units.append(message)
+            out.extend(sorted(units, key=lambda unit: position[_result_ids_of(unit)[0]]))
         index = end + 1
     return out
 

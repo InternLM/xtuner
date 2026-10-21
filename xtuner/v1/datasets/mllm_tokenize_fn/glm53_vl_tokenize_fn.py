@@ -216,9 +216,9 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
     # ---- shared render/expand/tokenize, called by both cache and runtime paths ----
 
     def __call__(self, item: dict, media_root: str = "", **kwargs):
-        # tool 块先按 tool_calls 顺序预排序：渲染器会按同一 can_sort 规则重排 marker，而媒体
-        # payload 由基类 __call__ 按消息原序收集、与 marker 位置式配对。先排消息让收集顺序
-        # 与渲染后的 marker 顺序一致（与官方 jinja、推理侧的“始终排序+图片跟随”行为对齐）。
+        # tool 块先按 tool_calls 顺序拉平（排序单位是 entry，与官方 jinja 的发射语义一致）：
+        # 渲染器会按同一 can_sort 规则重排 marker，而媒体 payload 由基类 __call__ 按消息顺序
+        # 收集、与 marker 位置式配对。先拉平消息让收集顺序与渲染后的 marker 顺序一致。
         item = {**item, "messages": sort_tool_messages(item["messages"])}
         return super().__call__(item, media_root=media_root, **kwargs)
 
