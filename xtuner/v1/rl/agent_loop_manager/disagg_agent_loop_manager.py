@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.rl.agent_loop import AgentLoopConfig, IsValidSampleFn
+from xtuner.v1.rl.agent_loop.agent_loop import close_agent_loops
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
@@ -293,6 +294,9 @@ class DisaggAgentLoopManager:
         await self._rollout_controller.continue_generation.remote()  # type: ignore[attr-defined]
         self._status = AgentLoopManagerStatus.NORMAL
         self._update_event.clear()
+
+    async def close(self) -> None:
+        await close_agent_loops([task.agent_loop for task in self.task_runners])
 
     def shutdown(self) -> None:
         self._status = AgentLoopManagerStatus.FINISH

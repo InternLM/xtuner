@@ -1,7 +1,7 @@
 import asyncio
 import os
 from asyncio import AbstractEventLoop, Task
-from typing import Any, Callable, Coroutine, List, Optional
+from typing import Any, Awaitable, Callable, Coroutine, Iterable, List, Optional, TypeVar
 
 from xtuner.v1.utils.logger import get_logger
 
@@ -149,3 +149,59 @@ def asyncio_run(coro: Coroutine, loop: Optional[AbstractEventLoop] = None) -> An
         except Exception as exc:
             if os.getenv("XTUNER_ASYNCIO_DIAGNOSTICS"):
                 logger.warning(f"[AsyncioDiag] failed to stop asyncio diagnostics: {type(exc).__name__}: {exc}")
+
+
+class CleanupError(RuntimeError):
+    """Resource cleanup failed after all owners were given a chance to close.
+
+    Retain every original exception on Python 3.10 as well as newer runtimes.
+    """
+
+    def __init__(self, message: str, errors: list[BaseException]):
+        self.errors = tuple(errors)
+        super().__init__(message + ": " + "; ".join(f"{type(error).__name__}: {error}" for error in errors))
+
+
+_T = TypeVar("_T")
+
+
+async def await_cleanup(cleanup: Awaitable[_T]) -> _T:
+    """Join owned cleanup despite caller cancellation, then propagate
+    cancellation.
+
+    Cleanup implementations must bound their own external I/O. A cleanup failure remains visible as the cause if the
+    caller was also cancelled.
+    """
+    task = asyncio.ensure_future(cleanup)
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if task.cancelled():
+                break
+            cancellation = exc
+        except BaseException:
+            break
+    try:
+        result = task.result()
+    except BaseException as exc:
+        if cancellation is not None:
+            raise cancellation from exc
+        raise
+    if cancellation is not None:
+        raise cancellation
+    return result
+
+
+async def gather_cleanup(cleanups: Iterable[Awaitable[None]], message: str) -> None:
+    """Attempt every cleanup and retain all failures, including cancelled
+    owners."""
+
+    async def close_all() -> None:
+        results = await asyncio.gather(*cleanups, return_exceptions=True)
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if errors:
+            raise CleanupError(message, errors)
+
+    await await_cleanup(close_all())
