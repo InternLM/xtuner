@@ -21,6 +21,7 @@ TestGlm53MixedMediaAndTruncation
 TestGlm53MediaRoleContract
     test_media_is_collected_from_all_roles           system/assistant/tool 角色的图片也会被收集
     test_media_collection_preserves_input_order     媒体按原始消息顺序收集，与 HF 一致
+    test_tool_media_block_is_sorted_before_collection  逆序多媒体回归：tool 块先按 tool_calls 预排再收集
     test_string_content_parts_are_tolerated         content 列表混排纯字符串不崩溃
 TestGlm53DirtyDataDoesNotHalt
     test_bad_image_wh_is_discarded                  image_wh 形状非法：cache 丢弃、runtime 抛错
@@ -56,10 +57,7 @@ from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizerBase
 from transformers.video_utils import VideoMetadata
 from xtuner.v1.data_proto.messages.glm53_chat import _tokenize_with_loss_mask, render_glm53_chat
 from xtuner.v1.datasets.mllm_tokenize_fn import Glm53VLTokenizeFnConfig, Glm53VLTokenizeFunction
-from xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn import (
-    BaseMLLMTokenizeFunction,
-    collect_image_video_paths_and_extra,
-)
+from xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn import collect_image_video_paths_and_extra
 from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import _expand_marker
 from xtuner.v1.datasets.mllm_tokenize_fn.qwen3_vl_utils import sort_frames
 
@@ -418,7 +416,9 @@ class TestGlm53MixedMediaAndTruncation:
         # 图文+视频混合样本是未支持边界：cache 阶段 log warning 并按损坏样本丢弃（num_tokens=0，
         # 打包前过滤），runtime 仍抛出、由上游数据集换成无 loss 占位样本——两种状态都不中断训练，
         # 且都必须发生在加载任何媒体之前。
-        assert Glm53VLTokenizeFunction.__call__ is BaseMLLMTokenizeFunction.__call__
+        # Glm53VLTokenizeFunction 覆写 __call__ 仅为 tool 块预排序（sort_tool_messages，不触碰
+        # 媒体加载）；混合样本仍在基类 __call__ 的收集阶段被拒绝，下面的 load 断言保证拒绝
+        # 发生在任何媒体加载之前。
         load = Mock(side_effect=AssertionError("Mixed samples must be discarded before loading media"))
         monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn.load_image", load)
         logger_mock = Mock()
@@ -509,6 +509,42 @@ class TestGlm53MediaRoleContract:
 
         # HF apply_chat_template also collects media in input order before rendering the Jinja template.
         assert image_paths == ["system.jpg", "user.jpg", "assistant.jpg", "tool-b.jpg", "tool-a.jpg"]
+
+    def test_tool_media_block_is_sorted_before_collection(self, tokenize_fn: Glm53VLTokenizeFunction) -> None:
+        # 逆序多媒体回归：tool_calls=[a,b]、tool 消息按 b, a 输入时，__call__ 先按 tool_calls
+        # 顺序预排消息（sort_tool_messages），媒体收集顺序随之变为 [a 的图, b 的图]，与渲染
+        # 文本中的 marker 顺序一致（渲染按同一 can_sort 规则排序，对齐官方 jinja 与推理侧）。
+        def image(url: str) -> dict:
+            return {"type": "image", "image": {"url": url, "image_wh": [448, 448]}}
+
+        item = {
+            "messages": [
+                {"role": "user", "content": "q"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"function": {"arguments": {}, "name": "a"}, "id": "a", "type": "function"},
+                        {"function": {"arguments": {}, "name": "b"}, "id": "b", "type": "function"},
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "b",
+                    "content": [{"type": "text", "text": "RESULT_B"}, image("tool-b.jpg")],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "a",
+                    "content": [{"type": "text", "text": "RESULT_A"}, image("tool-a.jpg")],
+                },
+                {"role": "assistant", "content": "done"},
+            ]
+        }
+
+        tokenize_fn.state = "cache"
+        tokenize_fn(item)
+        assert tokenize_fn._image_path == ["tool-a.jpg", "tool-b.jpg"]
 
     def test_string_content_parts_are_tolerated(self, tokenize_fn: Glm53VLTokenizeFunction) -> None:
         # content 列表允许纯字符串与 text 字典混排（官方 jinja 按文本原样渲染）；media collector
