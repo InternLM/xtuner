@@ -139,6 +139,40 @@ def sort_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     Media payloads pair to markers positionally, so the messages are flattened the same way up front: aggregated
     messages are split into single-entry shallow copies (other keys kept), plain messages are reused unchanged, and
     every entry lands in ``tool_calls`` order. Blocks that fail the can_sort rule are returned unchanged.
+
+    数据级别示例（排序发生在第 4 级 entry，而非第 2 级 message）::
+
+        # ── 级别 1: conversation = messages + tools(整条样本) ──
+        tools = [
+            {"type": "function", "function": {"name": "a", "parameters": {...}}},
+            {"type": "function", "function": {"name": "b", "parameters": {...}}},
+            {"type": "function", "function": {"name": "c", "parameters": {...}}},
+        ]
+        messages = [
+            # ── 级别 2: message(messages 列表的元素,带 role) ──
+            {"role": "user", "content": "查一下"},
+            {"role": "assistant", "content": "", "tool_calls": [调用a, 调用b, 调用c]},  # 顺序: a, b, c
+
+            # ── 级别 3: tool block(下面两条连续 tool message,渲染为一个 <|observation|> 块) ──
+            {"role": "tool", "tool_call_id": "c", "content": [  # 分散形态: 这条 message 整体是一个 entry
+                {"type": "text", "text": "RESULT_C"},           # ← 级别 5: content part
+            ]},
+            # ↓ 聚合形态: content 是 entry 数组,内含 2 个 entry,顺序 b, a(与调用序相反)
+            #   测试用例 tool_aggregate_media_reversed 用的就是这种形态
+            {"role": "tool", "content": [
+                {"id": "b", "output": [                         # ← 级别 4: entry(id 在元素上)
+                    {"type": "text", "text": "RESULT_B"},       # ← 级别 5: content part
+                    {"type": "image_url", "image_url": {"url": "IMG_B"}},
+                ]},
+                {"id": "a", "output": [
+                    {"type": "text", "text": "RESULT_A"},
+                    {"type": "image_url", "image_url": {"url": "IMG_A"}},
+                ]},
+            ]},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ]
+
+        # 拉平结果: [entry a 的 message, entry b 的 message, entry c 的 message](顺序 == tool_calls)
     """
     out: List[Dict[str, Any]] = []
     index = 0
