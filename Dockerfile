@@ -264,6 +264,9 @@ ARG DEFAULT_PYPI_URL
 # RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 RUN pip install pystack py-spy --no-cache-dir -i ${DEFAULT_PYPI_URL}
 
+# install rdkit, boto3, nvidia-cudnn-frontend
+RUN pip install rdkit boto3 nvidia-cudnn-frontend==1.28.0 --no-cache-dir -i ${DEFAULT_PYPI_URL}
+
 # install lmdeploy and its missing runtime requirements
 ARG LMDEPLOY_VERSION
 ARG LMDEPLOY_URL
