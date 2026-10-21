@@ -1022,7 +1022,10 @@ class SandboxPool:
         raise RuntimeError(f"could not acquire sandbox group after {self._max_attempts} attempts: {last_err_msg}")
 
     async def _create(self, spec: SandboxSpec, *, record: StageRecord | None = None) -> tuple[Any, str]:
-        create_kwargs: dict[str, Any] = {}
+        user = spec.user and _expand_env_refs(spec.user) or os.getenv("SANDBOX_PROVIDER_USER")
+        if not user:
+            raise ValueError("sandbox spec must have user or SANDBOX_PROVIDER_USER must be set")
+        create_kwargs: dict[str, Any] = {"user": user}
         if spec.cluster_name:
             create_kwargs["cluster_name"] = spec.cluster_name
         if spec.env:

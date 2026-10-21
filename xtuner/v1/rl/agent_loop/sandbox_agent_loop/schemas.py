@@ -239,6 +239,7 @@ class SandboxSpec(BaseModel):
     key: str | None = None
     cluster_name: str | None = None
     env: str | None = None
+    user: str | None = None
     extra_params: dict[str, Any] = Field(default_factory=dict)
     dependencies: dict[str, SandboxSpec] = Field(default_factory=dict)
     provisioner: Any | None = None
