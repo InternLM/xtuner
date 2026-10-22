@@ -44,7 +44,9 @@ from xtuner.v1.utils import IGNORE_INDEX
 
 from .glm52_chat import (
     _NEXT_ROLE_STOP_TOKENS,
+    _append_literal,
     _assistant_content_and_reasoning,
+    _encode_glm_text,
     _render_tool_calls,
     _render_tools,
     _tokenize_with_loss_mask,
@@ -64,24 +66,24 @@ _MEDIA_PLACEHOLDER = {
 }
 
 
-def _visible_text(content: Any) -> str:
+def _visible_text(content: Any, _literal_spans=None, _offset: int = 0) -> str:
     if isinstance(content, str):
-        return content
+        return _append_literal("", content, _literal_spans, _offset)
     if isinstance(content, list):
         text = ""
         for item in content:
             if isinstance(item, str):
-                text += item
+                text = _append_literal(text, item, _literal_spans, _offset)
                 continue
             if not isinstance(item, Mapping):
                 continue
             item_type = item.get("type")
             if item_type == "text":
-                text += item.get("text", "")
+                text = _append_literal(text, item.get("text", ""), _literal_spans, _offset)
             elif item_type in _MEDIA_PLACEHOLDER:
                 text += _MEDIA_PLACEHOLDER[item_type]
         return text
-    return str(content)
+    return _append_literal("", str(content), _literal_spans, _offset)
 
 
 def _id_of(obj: Mapping[str, Any]) -> Any:
@@ -201,7 +203,9 @@ def sort_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
-def _render_tool_output(output: Any, tools: Optional[List[Dict[str, Any]]]) -> str:
+def _render_tool_output(
+    output: Any, tools: Optional[List[Dict[str, Any]]], _literal_spans=None, _offset: int = 0
+) -> str:
     """Render one aggregated ``{output: ...}`` entry the way the official template's
     render_tool_response does: a tool_reference list expands to the referenced tool
     schemas, anything else renders through ``_visible_text`` (media parts become the
@@ -212,11 +216,14 @@ def _render_tool_output(output: Any, tools: Optional[List[Dict[str, Any]]]) -> s
         and isinstance(output[0], Mapping)
         and output[0].get("type") == "tool_reference"
     ):
-        return _render_tool_result(output, tools)
-    return f"<tool_response>{_visible_text(output)}</tool_response>"
+        return _render_tool_result(output, tools, _literal_spans, _offset)
+    prefix = "<tool_response>"
+    return prefix + _visible_text(output, _literal_spans, _offset + len(prefix)) + "</tool_response>"
 
 
-def _render_tool_result(content: Any, tools: Optional[List[Dict[str, Any]]]) -> str:
+def _render_tool_result(
+    content: Any, tools: Optional[List[Dict[str, Any]]], _literal_spans=None, _offset: int = 0
+) -> str:
     """GLM-5.3 version of the tool-result renderer.
 
     GLM-5.2 has no multimodal input, so its renderer emits media as a ``<reminder>`` text; the official GLM-5.3
@@ -224,7 +231,7 @@ def _render_tool_result(content: Any, tools: Optional[List[Dict[str, Any]]]) -> 
     through GLM-5.3's ``_visible_text``.
     """
     if isinstance(content, str):
-        return f"<tool_response>{content}</tool_response>"
+        return _append_literal("<tool_response>", content, _literal_spans, _offset) + "</tool_response>"
     if isinstance(content, list) and content and isinstance(content[0], Mapping):
         if content[0].get("type") == "tool_reference":
             text = "<tool_response><tools>\n"
@@ -232,14 +239,24 @@ def _render_tool_result(content: Any, tools: Optional[List[Dict[str, Any]]]) -> 
                 for tool in tools or []:
                     tool = tool["function"] if "function" in tool else tool
                     if tool.get("name") == tool_ref.get("name"):
-                        text += _tool_to_json(tool) + "\n"
+                        text = _append_literal(text, _tool_to_json(tool), _literal_spans, _offset) + "\n"
             return text + "</tools></tool_response>"
         if "output" in content[0]:
-            return "".join(_render_tool_output(entry["output"], tools) for entry in content)
-    return f"<tool_response>{_visible_text(content)}</tool_response>"
+            text = ""
+            for entry in content:
+                text += _render_tool_output(entry["output"], tools, _literal_spans, _offset + len(text))
+            return text
+    prefix = "<tool_response>"
+    return prefix + _visible_text(content, _literal_spans, _offset + len(prefix)) + "</tool_response>"
 
 
-def _render_tool_block(messages: List[Dict[str, Any]], start: int, tools: Optional[List[Dict[str, Any]]]) -> str:
+def _render_tool_block(
+    messages: List[Dict[str, Any]],
+    start: int,
+    tools: Optional[List[Dict[str, Any]]],
+    _literal_spans=None,
+    _offset: int = 0,
+) -> str:
     """Render the contiguous tool-message block starting at ``start``.
 
     Results are emitted in the preceding assistant's ``tool_calls`` order when the official
@@ -256,7 +273,10 @@ def _render_tool_block(messages: List[Dict[str, Any]], start: int, tools: Option
 
     call_ids = _sortable_call_ids(messages, start, end)
     if call_ids is None:
-        return "".join(_render_tool_result(message.get("content", ""), tools) for message in block)
+        text = ""
+        for message in block:
+            text += _render_tool_result(message.get("content", ""), tools, _literal_spans, _offset + len(text))
+        return text
 
     text = ""
     for call_id in call_ids:
@@ -264,9 +284,9 @@ def _render_tool_block(messages: List[Dict[str, Any]], start: int, tools: Option
             if _is_list_of_outputs(message):
                 for entry in message["content"]:
                     if _id_of(entry) == call_id:
-                        text += _render_tool_output(entry["output"], tools)
+                        text += _render_tool_output(entry["output"], tools, _literal_spans, _offset + len(text))
             elif _id_of(message) == call_id:
-                text += _render_tool_result(message.get("content", ""), tools)
+                text += _render_tool_result(message.get("content", ""), tools, _literal_spans, _offset + len(text))
     return text
 
 
@@ -277,6 +297,7 @@ def render_glm53_chat(
     enable_thinking: bool = True,
     reasoning_effort: Literal["low", "high", "max"] = "max",
     clear_thinking: bool = False,
+    _literal_spans: list[tuple[int, int]] | None = None,
 ) -> tuple[str, list[bool]]:
     """渲染 GLM-5.3-Flash 对话；结构与 GLM-5.2 相同，媒体渲染为两段式 placeholder 标记。"""
     assert enable_thinking, (
@@ -287,9 +308,9 @@ def render_glm53_chat(
     text = ""
     loss_mask: list[bool] = []
 
-    def append(value: str, loss: bool) -> None:
+    def append(value: str, loss: bool, *, literal: bool = False) -> None:
         nonlocal text
-        text += value
+        text = _append_literal(text, value, _literal_spans) if literal else text + value
         loss_mask.extend([loss] * len(value))
 
     append("[gMASK]<sop>", False)
@@ -297,7 +318,7 @@ def render_glm53_chat(
     effective_reasoning_effort = reasoning_effort if reasoning_effort in ("low", "high") else "max"
     append(f"<|system|>Reasoning Effort: {effective_reasoning_effort.capitalize()}", False)
     if tools:
-        append(_render_tools(tools), False)
+        append(_render_tools(tools, _literal_spans, len(text)), False)
 
     last_user_index = -1
     for index, message in enumerate(messages):
@@ -310,9 +331,10 @@ def render_glm53_chat(
         if role == "user":
             boundary_loss = index > 0 and messages[index - 1].get("role") == "assistant" and previous_assistant_loss
             append(_NEXT_ROLE_STOP_TOKENS[role], boundary_loss)
-            append(_visible_text(message.get("content", "")), False)
+            append(_visible_text(message.get("content", ""), _literal_spans, len(text)), False)
         elif role == "system":
-            append(f"<|system|>{_visible_text(message.get('content', ''))}", False)
+            append("<|system|>", False)
+            append(_visible_text(message.get("content", ""), _literal_spans, len(text)), False)
         elif role == "assistant":
             content, reasoning_content = _assistant_content_and_reasoning(message)
             loss = bool(message.get("loss", True))
@@ -323,14 +345,15 @@ def render_glm53_chat(
             if render_reasoning:
                 assert reasoning_content is not None
                 append("<think>", False)
-                append(reasoning_content + "</think>", loss)
+                append(reasoning_content, loss, literal=True)
+                append("</think>", loss)
             else:
                 append("<think>", False)
                 append("</think>", loss)
             if content.strip():
-                append(content.strip(), loss)
+                append(content.strip(), loss, literal=True)
             if message.get("tool_calls"):
-                append(_render_tool_calls(message["tool_calls"]), loss)
+                append(_render_tool_calls(message["tool_calls"], _literal_spans, len(text)), loss)
             previous_assistant_loss = loss
             next_role = messages[index + 1].get("role") if index + 1 < len(messages) else None
             if next_role is None:
@@ -342,7 +365,7 @@ def render_glm53_chat(
                     index > 0 and messages[index - 1].get("role") == "assistant" and previous_assistant_loss
                 )
                 append(_NEXT_ROLE_STOP_TOKENS[role], boundary_loss)
-                append(_render_tool_block(messages, index, tools), False)
+                append(_render_tool_block(messages, index, tools, _literal_spans, len(text)), False)
             # 块内后续 tool 消息已由块起点统一渲染（含按 tool_calls 顺序的重排）。
 
     if add_generation_prompt:
@@ -362,6 +385,7 @@ def glm53_tokenize_fn_fastspeed(
     clear_thinking: bool = False,
     **kwargs,
 ) -> tuple[list[int], list[int]]:
+    literal_spans: list[tuple[int, int]] = []
     text, loss_mask = render_glm53_chat(
         messages,
         tools=tools,
@@ -369,8 +393,9 @@ def glm53_tokenize_fn_fastspeed(
         enable_thinking=enable_thinking,
         reasoning_effort=reasoning_effort,
         clear_thinking=clear_thinking,
+        _literal_spans=literal_spans,
     )
-    return _tokenize_with_loss_mask(tokenizer, text, loss_mask)
+    return _tokenize_with_loss_mask(tokenizer, text, loss_mask, literal_spans)
 
 
 def glm53_tokenize_fn_slowspeed(
@@ -384,6 +409,7 @@ def glm53_tokenize_fn_slowspeed(
     **kwargs,
 ) -> tuple[list[int], list[int]]:
     """慢速 golden 参考实现，见 ``glm52_tokenize_fn_slowspeed`` 的 docstring；算法相同。"""
+    full_spans: list[tuple[int, int]] = []
     full_text, _ = render_glm53_chat(
         messages,
         tools=tools,
@@ -391,8 +417,9 @@ def glm53_tokenize_fn_slowspeed(
         enable_thinking=enable_thinking,
         reasoning_effort=reasoning_effort,
         clear_thinking=clear_thinking,
+        _literal_spans=full_spans,
     )
-    total_ids = tokenizer.encode(full_text, add_special_tokens=False)
+    total_ids, _ = _encode_glm_text(tokenizer, full_text, full_spans)
     labels = [IGNORE_INDEX] * len(total_ids)
 
     curr_ptr = 0
@@ -400,6 +427,7 @@ def glm53_tokenize_fn_slowspeed(
         if message.get("role") != "assistant" or not message.get("loss", True):
             continue
 
+        prefix_spans: list[tuple[int, int]] = []
         prefix_text, _ = render_glm53_chat(
             messages[:index],
             tools=tools if index == 0 else None,
@@ -407,7 +435,9 @@ def glm53_tokenize_fn_slowspeed(
             enable_thinking=enable_thinking,
             reasoning_effort=reasoning_effort,
             clear_thinking=clear_thinking,
+            _literal_spans=prefix_spans,
         )
+        message_spans: list[tuple[int, int]] = []
         message_text, _ = render_glm53_chat(
             [m.copy() for m in messages[: index + 1]],
             tools=tools if index == 0 else None,
@@ -415,10 +445,11 @@ def glm53_tokenize_fn_slowspeed(
             enable_thinking=enable_thinking,
             reasoning_effort=reasoning_effort,
             clear_thinking=clear_thinking,
+            _literal_spans=message_spans,
         )
 
-        prefix_ids = tokenizer.encode(prefix_text, add_special_tokens=False)
-        message_ids = tokenizer.encode(message_text, add_special_tokens=False)
+        prefix_ids, _ = _encode_glm_text(tokenizer, prefix_text, prefix_spans)
+        message_ids, _ = _encode_glm_text(tokenizer, message_text, message_spans)
         content_ids = message_ids[len(prefix_ids) :]
         if not content_ids:
             continue
