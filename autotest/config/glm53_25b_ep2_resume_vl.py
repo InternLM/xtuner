@@ -12,7 +12,7 @@ MEDIA_ROOT = os.environ["MEDIA_ROOT"]
 MODEL_PATH = os.environ["MODEL_PATH"]
 DATA_PATH = os.environ["DATA_PATH"]
 
-ep_size = 2
+ep_size = 4
 
 model_cfg = Glm53BaseConfig.from_hf(MODEL_PATH)
 model_cfg.text_config.dispatcher = "deepep"
