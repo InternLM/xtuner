@@ -18,9 +18,44 @@ from torch.distributed.checkpoint.state_dict import (
     set_optimizer_state_dict,
 )
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import DTensor, Shard, distribute_tensor
+from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
+from torch.utils._python_dispatch import TorchDispatchMode
+from torch.utils._pytree import tree_leaves
 
 import xtuner.v1.optim.swap_adamw as module
+
+
+def _capture_buffers(optimizer):
+    return {param: dict(state) for param, state in optimizer.state.items()}
+
+
+def _assert_buffers_unchanged(optimizer, buffers):
+    for param, state in buffers.items():
+        for key, value in state.items():
+            assert optimizer.state[param][key] is value
+            if value is not None and key != "step":
+                assert (
+                    optimizer._param_to_cpu_states_map[param][key].data_ptr()
+                    == optimizer._to_local_tensor(value).data_ptr()
+                )
+
+
+class _NoNewStorage(TorchDispatchMode):
+    def __init__(self, *states):
+        super().__init__()
+        self.pointers = {
+            (value.device, value.untyped_storage().data_ptr())
+            for state in states
+            for value in tree_leaves(state)
+            if isinstance(value, torch.Tensor)
+        }
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        result = func(*args, **(kwargs or {}))
+        for value in tree_leaves(result):
+            if isinstance(value, torch.Tensor):
+                assert (value.device, value.untyped_storage().data_ptr()) in self.pointers, func
+        return result
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
@@ -49,6 +84,7 @@ def test_resume_matches_continuous_update(tmp_path, monkeypatch, device, amsgrad
     optimizer.param_groups[0]["lr"] = standard.param_groups[0]["lr"] = 0.025
     restored = copy.deepcopy(model)
     resumed = module.SwapAdamW(restored.parameters(), lr=0.2, amsgrad=amsgrad, fused=False)
+    buffers = _capture_buffers(resumed)
     if restore == "optimizer":
         resumed.load_state_dict(copy.deepcopy(optimizer.state_dict()))
     else:
@@ -58,6 +94,7 @@ def test_resume_matches_continuous_update(tmp_path, monkeypatch, device, amsgrad
         state = {"optimizer": get_optimizer_state_dict(restored, resumed, options=options)}
         dcp.load(state, checkpoint_id=tmp_path / "weights")
         set_optimizer_state_dict(restored, resumed, state["optimizer"], options=options)
+    _assert_buffers_unchanged(resumed, buffers)
     p = restored.weight
     assert resumed._param_to_group_map[p] is resumed.param_groups[0]
     for key in resumed._state_keys:
@@ -146,7 +183,10 @@ def test_cross_precision_resume_matches_adamw(monkeypatch, device, amsgrad, sour
     reference = torch.nn.Parameter(restored.detach().clone())
     resumed = module.SwapAdamW([restored], amsgrad=amsgrad, fused=False)
     standard = torch.optim.AdamW([reference], amsgrad=amsgrad, fused=False)
-    resumed.load_state_dict(copy.deepcopy(checkpoint))
+    buffers = _capture_buffers(resumed)
+    with _NoNewStorage(checkpoint, resumed.state_dict()):
+        resumed.load_state_dict(checkpoint)
+    _assert_buffers_unchanged(resumed, buffers)
     standard.load_state_dict(copy.deepcopy(checkpoint))
     for key in resumed._state_keys:
         value = resumed.state[restored][key]
@@ -229,6 +269,7 @@ def _sharded_resume_worker(rank, checkpoint_dir, rendezvous, amsgrad, asynchrono
                 assert len(saved.chunks) == 2
             restored = copy.deepcopy(model)
             resumed = module.SwapAdamW(restored.parameters(), lr=0.2, amsgrad=amsgrad, fused=False)
+            buffers = _capture_buffers(resumed)
             state = {
                 "model": get_model_state_dict(restored, options=options),
                 "optimizer": get_optimizer_state_dict(restored, resumed, options=options),
@@ -242,6 +283,7 @@ def _sharded_resume_worker(rank, checkpoint_dir, rendezvous, amsgrad, asynchrono
             }
             set_model_state_dict(restored, state["model"], options=options)
             set_optimizer_state_dict(restored, resumed, state["optimizer"], options=options)
+            _assert_buffers_unchanged(resumed, buffers)
             for key in resumed._state_keys:
                 value = resumed.state[restored.weight][key]
                 if value is not None:
@@ -255,6 +297,22 @@ def _sharded_resume_worker(rank, checkpoint_dir, rendezvous, amsgrad, asynchrono
                         value.to_local().data_ptr()
                         == resumed._param_to_cpu_states_map[restored.weight][key].data_ptr()
                     )
+            direct_state = copy.deepcopy(resumed.state_dict())
+            resumed.load_state_dict(direct_state)
+            _assert_buffers_unchanged(resumed, buffers)
+            bad_state = copy.deepcopy(direct_state)
+            bad_moment = bad_state["state"][0]["exp_avg"]
+            bad_state["state"][0]["exp_avg"] = DTensor.from_local(
+                bad_moment.to_local(),
+                mesh,
+                [Replicate()],
+                run_check=False,
+                shape=bad_moment.shape,
+                stride=bad_moment.stride(),
+            )
+            with pytest.raises(ValueError, match="mesh or placements"):
+                resumed.load_state_dict(bad_state)
+            _assert_buffers_unchanged(resumed, buffers)
             for m, opt in ((model, optimizer), (restored, resumed)):
                 m.weight.grad = torch.ones_like(m.weight) * -(rank + 1)
                 opt.step()
@@ -355,3 +413,115 @@ def test_load_dcp_reads_metadata_once_and_validates_before_tensor_reads(tmp_path
         torch.testing.assert_close(
             optimizer.state[model.weight]["exp_avg"], saved["optimizer"]["state"]["weight"]["exp_avg"]
         )
+
+
+@pytest.fixture
+def cpu_optimizer(monkeypatch):
+    monkeypatch.setattr(module, "DEVICE", "cpu")
+    monkeypatch.setattr(module, "DEVICE_MODULE", SimpleNamespace(current_device=lambda: 0, synchronize=lambda: None))
+    monkeypatch.setattr(torch.Tensor, "pin_memory", lambda self: self)
+    params = [torch.nn.Parameter(torch.ones(2, 3)) for _ in range(2)]
+    optimizer = module.SwapAdamW([{"params": [p], "lr": 0.01 * (i + 1)} for i, p in enumerate(params)], fused=False)
+    for param in params:
+        param.grad = torch.ones_like(param)
+    optimizer.step()
+    return optimizer
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "groups",
+        "params",
+        "duplicate_ids",
+        "missing_param",
+        "extra_param",
+        "missing_moment",
+        "extra_moment",
+        "shape",
+        "type",
+        "dtype",
+        "step_shape",
+        "amsgrad",
+    ],
+)
+def test_invalid_checkpoint_does_not_partially_update(cpu_optimizer, invalid):
+    optimizer = cpu_optimizer
+    before = copy.deepcopy(optimizer.state_dict())
+    incoming = copy.deepcopy(before)
+    incoming["param_groups"][0]["lr"] = 0.5
+    incoming["state"][0]["exp_avg"].fill_(123)
+    # Corrupt the second parameter to catch validation interleaved with writes.
+    state = incoming["state"][1]
+    if invalid == "groups":
+        incoming["param_groups"].pop()
+    elif invalid == "params":
+        incoming["param_groups"][1]["params"].append(2)
+    elif invalid == "duplicate_ids":
+        incoming["param_groups"][1]["params"] = [0]
+    elif invalid == "missing_param":
+        del incoming["state"][1]
+    elif invalid == "extra_param":
+        incoming["state"][2] = copy.deepcopy(state)
+    elif invalid == "missing_moment":
+        del state["exp_avg_sq"]
+    elif invalid == "extra_moment":
+        state["unexpected"] = None
+    elif invalid == "shape":
+        state["exp_avg_sq"] = torch.ones(1, 3)  # Broadcastable, but invalid.
+    elif invalid == "type":
+        state["exp_avg_sq"] = [1, 2]
+    elif invalid == "dtype":
+        state["exp_avg_sq"] = torch.ones(2, 3, dtype=torch.int64)
+    elif invalid == "step_shape":
+        state["step"] = torch.ones(2)
+    elif invalid == "amsgrad":
+        incoming["param_groups"][1]["amsgrad"] = True
+    buffers = _capture_buffers(optimizer)
+    with pytest.raises(ValueError):
+        optimizer.load_state_dict(incoming)
+    _assert_buffers_unchanged(optimizer, buffers)
+    after = optimizer.state_dict()
+    assert after["param_groups"] == before["param_groups"]
+    for param_id, values in before["state"].items():
+        for key, value in values.items():
+            torch.testing.assert_close(after["state"][param_id][key], value)
+
+
+def test_empty_state_resets_in_place_and_preserves_hooks(cpu_optimizer, monkeypatch):
+    optimizer = cpu_optimizer
+    buffers = _capture_buffers(optimizer)
+    groups = list(optimizer.param_groups)
+    state_object = optimizer.state
+    incoming = copy.deepcopy(optimizer.state_dict())
+    incoming["state"] = {}
+    events = []
+
+    def pre_hook(opt, state):
+        events.append("pre")
+        replacement = copy.deepcopy(state)
+        replacement["param_groups"][0]["lr"] = 0.125
+        return replacement
+
+    def post_hook(opt):
+        events.append("post")
+        assert opt.param_groups[0]["lr"] == 0.125
+        for state in opt.state.values():
+            for value in state.values():
+                if value is not None:
+                    assert torch.count_nonzero(value) == 0
+
+    def forbidden_init():
+        pytest.fail("load_state_dict must not reinitialize buffers")
+
+    monkeypatch.setattr(optimizer, "_init_swap_states", forbidden_init)
+    optimizer.register_load_state_dict_pre_hook(pre_hook)
+    optimizer.register_load_state_dict_post_hook(post_hook)
+    optimizer.load_state_dict(incoming)
+    assert events == ["pre", "post"]
+    assert optimizer.state is state_object
+    for group, original in zip(optimizer.param_groups, groups):
+        assert group is original
+        assert optimizer._param_to_group_map[group["params"][0]] is group
+    _assert_buffers_unchanged(optimizer, buffers)
+    assert incoming["param_groups"][0]["lr"] == 0.01
