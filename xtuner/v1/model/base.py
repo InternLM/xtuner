@@ -416,6 +416,23 @@ class TransformerConfig(XTunerBaseModelConfig):
         else:
             raise ValueError(f"Invalid head_type: {self.head_type}")
 
+    @property
+    def tie_head(self) -> bool:
+        """Whether the output head shares weights with the input embeddings.
+
+        A value head never ties with embeddings, regardless of
+        ``tie_word_embeddings``.
+        """
+        return self.tie_word_embeddings and self.head_type != "value_head"
+
+    def head_fp32(self, fsdp_cfg: FSDPConfig) -> bool:
+        """Whether the output head runs in float32 under FSDP.
+
+        A value head reads the dedicated ``fp32_value_head`` switch instead of
+        ``fp32_lm_head``.
+        """
+        return fsdp_cfg.fp32_value_head if self.head_type == "value_head" else fsdp_cfg.fp32_lm_head
+
 
 class ModelOutputs(PydanticBaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
@@ -648,21 +665,13 @@ class BaseModel(nn.Module):
 
         * 普通参数：走子类 to_hf_key_list（加 model. 前缀、layer 重命名、
           VL 的 language_model. 前缀、tie 时 lm_head → embed_tokens）。
-        * value_head 的 lm_head.*：仍走 to_hf_key_list 以保留 VL 前缀，但临时关掉
-          tie_word_embeddings，避免 ValueHead 被映射成 embed_tokens，然后再
-          lm_head → value_head。
+        * value_head 的 lm_head.*：子类通过 ``config.tie_head`` 判断 tie，
+          value head 天然不 tie，不会被映射成 embed_tokens；这里再做
+          lm_head → value_head 改名。
         """
         cleaned = self._clean_param_name(name)
         if getattr(self.config, "head_type", "lm_head") == "value_head" and cleaned.startswith("lm_head"):
-            tie = bool(getattr(self.config, "tie_word_embeddings", False))
-            if tie:
-                self.config.tie_word_embeddings = False
-            try:
-                hf_keys = self.to_hf_key_list(name)
-            finally:
-                if tie:
-                    self.config.tie_word_embeddings = True
-            return self._remap_critic_hf_keys(hf_keys)
+            return self._remap_critic_hf_keys(self.to_hf_key_list(name))
         else:
             return self.to_hf_key_list(name)
 
