@@ -40,6 +40,7 @@ TestGlm53CacheInvalidation
     test_glm53_hash_covers_every_init_parameter  逐参数 hash 失效 + __init__ 参数分类完备性
 """
 
+import base64
 import copy
 import inspect
 import os
@@ -972,3 +973,173 @@ def test_images_processed_incrementally_match_batched(tokenize_fn, tmp_path, mon
     assert actual["num_imgs"] == [3]
     for key in ("pixel_values", "image_grid_thw"):
         assert torch.equal(actual[key], expected[key]), key
+
+
+class TestGlm53Base64Images:
+    """Same bytes/messages via local, simulated OSS and inline image sources."""
+
+    @staticmethod
+    def _assert_equal(left, right):
+        assert left.keys() == right.keys()
+        for key in left:
+            if isinstance(left[key], torch.Tensor):
+                assert torch.equal(left[key], right[key]), key
+            else:
+                assert left[key] == right[key], key
+
+    @pytest.mark.parametrize(
+        "case", ["user_single", "user_multi", "tool_single", "tool_multi", "both", "reversed_tools"]
+    )
+    def test_source_parity(self, tokenize_fn, tmp_path, monkeypatch, case):
+        module = "xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn"
+        paths, uris, source_bytes = [], [], {}
+        for index, (size, color) in enumerate([((56, 84), (220, 10, 30)), ((112, 56), (10, 80, 240))]):
+            path = tmp_path / f"image{index}.png"
+            Image.new("RGB", size, color).save(path)
+            raw = path.read_bytes()
+            paths.append(str(path))
+            uris.append("data:image/png;base64," + base64.b64encode(raw).decode("ascii"))
+            source_bytes[f"s3://test/image{index}.png"] = raw
+
+        def image(index):
+            return {"type": "image", "image": {"url": paths[index], "image_wh": [[56, 84], [112, 56]][index]}}
+
+        def call(name):
+            return {"type": "function", "id": name, "function": {"name": name, "arguments": {}}}
+
+        def tool(name, content):
+            return {"role": "tool", "tool_call_id": name, "name": name, "content": content}
+
+        text = {"type": "text", "text": "between images"}
+        messages = [{"role": "user", "content": "Describe the images."}]
+        expected_order = [0]
+        if case.startswith("user") or case == "both":
+            messages[0]["content"] = [image(0)]
+        if case == "user_multi":
+            messages[0]["content"] += [text, image(1)]
+            expected_order = [0, 1]
+        if case.startswith("tool") or case in ("both", "reversed_tools"):
+            names = ["a", "b"] if case == "reversed_tools" else ["a"]
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "Inspect images.",
+                    "loss": False,
+                    "tool_calls": [call(name) for name in names],
+                }
+            )
+            if case == "reversed_tools":
+                messages += [tool("b", [image(1)]), tool("a", [image(0)])]
+                expected_order = [0, 1]
+            elif case == "both":
+                messages.append(tool("a", [text, image(1)]))
+                expected_order = [0, 1]
+            else:
+                content = [image(0)]
+                if case == "tool_multi":
+                    content += [text, image(1)]
+                    expected_order = [0, 1]
+                messages.append(tool("a", content))
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "The images have different colors.",
+                "reasoning_content": "Compare visible content.",
+                "loss": True,
+            }
+        )
+        local = {"messages": messages}
+        embedded, remote = copy.deepcopy(local), copy.deepcopy(local)
+        for item, replacements in [(embedded, uris), (remote, [f"image{i}.png" for i in range(2)])]:
+            for message in item["messages"]:
+                if isinstance(message.get("content"), list):
+                    for part in message["content"]:
+                        if part.get("type") == "image":
+                            part["image"]["url"] = replacements[paths.index(part["image"]["url"])]
+
+        before = copy.deepcopy(embedded)
+        tokenize_fn.state = "cache"
+        with monkeypatch.context() as patch:
+            no_decode = Mock(side_effect=AssertionError("cache must not decode images"))
+            patch.setattr(f"{module}.load_image_data_uri", no_decode)
+            local_cache, embedded_cache = tokenize_fn(local), tokenize_fn(embedded)
+            self._assert_equal(local_cache, embedded_cache)
+            no_decode.assert_not_called()
+        tokenize_fn.state = "runtime"
+        local_output = tokenize_fn(local)
+        tokenize_fn.oss_loader = Mock()
+        client = tokenize_fn.oss_loader.client
+        client.get.side_effect = source_bytes.__getitem__
+        remote_output = tokenize_fn(remote, media_root="s3://test/")
+        assert [c.args[0] for c in client.get.call_args_list] == [f"s3://test/image{i}.png" for i in expected_order]
+        client.get.reset_mock()
+        with monkeypatch.context() as patch:
+            path_loader = Mock(side_effect=AssertionError("embedded image must bypass media_root/path loader"))
+            patch.setattr(f"{module}.get_image_path", path_loader)
+            embedded_output = tokenize_fn(embedded, media_root="s3://test/")
+            path_loader.assert_not_called()
+        client.get.assert_not_called()
+        self._assert_equal(local_output, remote_output)
+        self._assert_equal(local_output, embedded_output)
+        assert tokenize_fn._image_path == [uris[i] for i in expected_order]
+        assert embedded == before
+        assert embedded_cache["num_tokens"] == embedded_output["num_tokens"]
+        assert embedded_cache["num_img_tokens"] == embedded_output["num_img_tokens"]
+        assert any(label != -100 for label in embedded_output["labels"])
+
+    @pytest.mark.parametrize("value", ["data:image/png;base64,@@@", " data:image/png;base64,YQ=="])
+    def test_invalid_uri_does_not_try_path_or_oss(self, tokenize_fn, monkeypatch, value):
+        path_loader = Mock(side_effect=AssertionError("unexpected path access"))
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn.get_image_path", path_loader)
+        tokenize_fn.oss_loader = Mock()
+        tokenize_fn.state = "runtime"
+        with pytest.raises(ValueError, match="Invalid image data URI"):
+            tokenize_fn(_image_item(value), media_root="s3://test/")
+        path_loader.assert_not_called()
+        tokenize_fn.oss_loader.client.get.assert_not_called()
+
+    def test_bare_base64_uses_reference_loader(self, tokenize_fn, image_fixture, monkeypatch):
+        loader = Mock(side_effect=lambda path: Image.open(image_fixture).convert("RGB"))
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn.load_image", loader)
+        tokenize_fn.state = "runtime"
+        tokenize_fn(_image_item("aGVsbG8="), media_root="/reference-root")
+        loader.assert_called_once_with("/reference-root/aGVsbG8=")
+
+    def test_image_and_pure_text_pack_parity(self, tokenize_fn, image_fixture):
+        from xtuner.v1.datasets.collator import glm53_vl_sft_collator
+
+        local = _image_item(image_fixture)
+        uri = "data:image/png;base64," + base64.b64encode(Path(image_fixture).read_bytes()).decode("ascii")
+        embedded = _image_item(uri)
+        text = {"messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi"}]}
+        tokenize_fn.state = "runtime"
+        text_output = tokenize_fn(text)
+        local_output, embedded_output = tokenize_fn(local), tokenize_fn(embedded)
+        packs = []
+        for image_output in (local_output, embedded_output):
+            pack = glm53_vl_sft_collator(
+                [[copy.deepcopy(text_output), image_output, copy.deepcopy(text_output)]],
+                pack_max_length=2 * text_output["num_tokens"] + image_output["num_tokens"] + 16,
+                padding_token_idx=0,
+                image_token_id=tokenize_fn.processor.image_token_id,
+                merge_unit=tokenize_fn.merge_unit,
+            )[0]
+            packs.append(pack)
+        assert torch.equal(packs[0]["shifted_labels"], packs[1]["shifted_labels"])
+        for field in (
+            "input_ids",
+            "cu_seq_lens_q",
+            "cu_seq_lens_k",
+            "pixel_values",
+            "image_grid_thw",
+            "mm_token_type_ids",
+            "num_img_tokens",
+            "num_padding",
+        ):
+            expected, actual = (getattr(pack["seq_ctx"], field) for pack in packs)
+            if isinstance(expected, torch.Tensor):
+                assert torch.equal(expected, actual), field
+            else:
+                assert expected == actual, field
+        assert packs[0]["seq_ctx"].pixel_values.dtype == torch.bfloat16

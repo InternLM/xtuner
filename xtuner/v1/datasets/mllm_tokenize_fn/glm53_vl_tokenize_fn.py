@@ -47,6 +47,7 @@ from .base_mllm_tokenize_fn import (
     get_image_path,
     load_image,
 )
+from .image_data_uri import is_data_uri, load_image_data_uri
 from .qwen3_vl_utils import Qwen3VLOSSLoader, pil_loader, sort_frames
 
 
@@ -317,13 +318,20 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         pixel_values_list = []
         image_grid_list = []
         for image_file in self._image_path:
-            image_path_ = get_image_path(image_file, media_root)
-            if self.oss_loader is not None and "s3://" in image_path_:
-                img_str = self.oss_loader.client.get(image_path_)
-                image = pil_loader(img_str)
+            # 按 Data Format Types（V0.5 Agent）§7.1-7.2：嵌入图片使用
+            # data:image/<subtype>;base64,<payload>（整体称为 data URI）。
+            # base64 图片直接内存解码，绕过 media_root / OSS；裸 base64 仍走引用路径，
+            # 畸形 data URI 交给加载器报错，不回退到引用路径。
+            if is_data_uri(image_file):
+                image = load_image_data_uri(image_file)
             else:
-                assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
-                image = load_image(image_path_)
+                image_path_ = get_image_path(image_file, media_root)
+                if self.oss_loader is not None and "s3://" in image_path_:
+                    img_str = self.oss_loader.client.get(image_path_)
+                    image = pil_loader(img_str)
+                else:
+                    assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
+                    image = load_image(image_path_)
             image = apply_exif_orientation(image)
             processed_i = self.image_processor(images=[image], return_tensors="pt")
             pixel_values_list.append(processed_i["pixel_values"])
