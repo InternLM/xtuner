@@ -4,7 +4,8 @@
 Per Data Format Types (V0.5 Agent), sections 7.1-7.2, image.url uses
 ``data:image/<subtype>;base64,<payload>`` for embedded images. The whole string
 is a data URI; only the payload after the comma is base64. Bare base64 strings
-remain references, while malformed data URIs must not fall back to path I/O.
+remain references. Only the exact lowercase ``data:`` prefix selects this loader;
+malformed inputs with that prefix must not fall back to path I/O.
 
 This is a training I/O adapter, not the full InternValidata image validator.
 Geometry metadata, MIME/container agreement and dataset policy limits remain the
@@ -20,17 +21,15 @@ import re
 from PIL import Image
 
 
-_DATA_URI_PREFIX = re.compile(r"^\s*data:", re.IGNORECASE)
 _IMAGE_HEADER = re.compile(r"data:image/[A-Za-z0-9.+-]+;base64")
 
 
 def is_data_uri(value: str) -> bool:
-    """Route even malformed data URIs to validation, never to a path loader.
+    """Recognize the exact ``data:`` prefix without whitespace/case normalization.
 
-    Whitespace/case are only tolerated for routing; the loader does not repair
-    them. Bare base64 strings are references and do not match this predicate.
+    All other strings use the existing reference-image loaders.
     """
-    return _DATA_URI_PREFIX.match(value) is not None
+    return value.startswith("data:")
 
 
 def load_image_data_uri(value: str) -> Image.Image:

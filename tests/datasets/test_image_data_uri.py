@@ -43,7 +43,17 @@ def test_jpeg_exif_matches_file_loader(tmp_path):
 
 @pytest.mark.parametrize(
     "value",
-    ["relative.png", "/absolute.png", "s3://bucket/a.png", "https://host/a.png", "aGVsbG8=", "data.png"],
+    [
+        "relative.png",
+        "/absolute.png",
+        "s3://bucket/a.png",
+        "https://host/a.png",
+        "aGVsbG8=",
+        "data.png",
+        " data:image/png;base64,YQ==",
+        "DATA:image/png;base64,YQ==",
+        "\t\nDaTa:image/png;base64,YQ==",
+    ],
 )
 def test_references_are_not_data_uris(value):
     assert not is_data_uri(value)
@@ -64,9 +74,6 @@ def test_references_are_not_data_uris(value):
         "data:image/png;base64,/w==\n",
         "data:image/png;base64,/ w==",
         "data:image/png;base64,你好",
-        " data:image/png;base64,YQ==",
-        "DATA:image/png;base64,YQ==",
-        "\t\nDaTa:image/png;base64,YQ==",
         "data:image/png;base64,cHJpdmF0ZS1ub3QtYW4taW1hZ2U=",
     ],
 )

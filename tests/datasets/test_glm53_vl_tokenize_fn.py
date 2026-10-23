@@ -1088,7 +1088,7 @@ class TestGlm53Base64Images:
         assert embedded_cache["num_img_tokens"] == embedded_output["num_img_tokens"]
         assert any(label != -100 for label in embedded_output["labels"])
 
-    @pytest.mark.parametrize("value", ["data:image/png;base64,@@@", " data:image/png;base64,YQ=="])
+    @pytest.mark.parametrize("value", ["data:image/png;base64,@@@", "data:image/png;base64,YQ=="])
     def test_invalid_uri_does_not_try_path_or_oss(self, tokenize_fn, monkeypatch, value):
         path_loader = Mock(side_effect=AssertionError("unexpected path access"))
         monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn.get_image_path", path_loader)
@@ -1099,12 +1099,13 @@ class TestGlm53Base64Images:
         path_loader.assert_not_called()
         tokenize_fn.oss_loader.client.get.assert_not_called()
 
-    def test_bare_base64_uses_reference_loader(self, tokenize_fn, image_fixture, monkeypatch):
+    @pytest.mark.parametrize("value", ["aGVsbG8=", " data:image/png;base64,YQ==", "DATA:image/png;base64,YQ=="])
+    def test_non_data_prefix_uses_reference_loader(self, tokenize_fn, image_fixture, monkeypatch, value):
         loader = Mock(side_effect=lambda path: Image.open(image_fixture).convert("RGB"))
         monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn.load_image", loader)
         tokenize_fn.state = "runtime"
-        tokenize_fn(_image_item("aGVsbG8="), media_root="/reference-root")
-        loader.assert_called_once_with("/reference-root/aGVsbG8=")
+        tokenize_fn(_image_item(value), media_root="/reference-root")
+        loader.assert_called_once_with(f"/reference-root/{value}")
 
     def test_image_and_pure_text_pack_parity(self, tokenize_fn, image_fixture):
         from xtuner.v1.datasets.collator import glm53_vl_sft_collator
