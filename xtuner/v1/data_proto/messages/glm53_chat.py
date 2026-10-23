@@ -73,6 +73,9 @@ from .glm52_chat import (
 from .glm52_chat import (
     _render_tool_calls as _render_tool_calls_glm52,
 )
+from .glm52_chat import (
+    _visible_text as _visible_text_glm52,
+)
 
 
 _END_OF_TEXT = "<|endoftext|>"
@@ -163,23 +166,7 @@ def _is_output_entry_list(content: Any) -> TypeGuard[List[Glm53ToolOutputEntry]]
 
 
 def _visible_text(content: Any, _literal_spans=None, _offset: int = 0) -> str:
-    if isinstance(content, str):
-        return _append_literal("", content, _literal_spans, _offset)
-    if isinstance(content, list):
-        text = ""
-        for item in content:
-            if isinstance(item, str):
-                text = _append_literal(text, item, _literal_spans, _offset)
-                continue
-            if not isinstance(item, Mapping):
-                continue
-            item_type = item.get("type")
-            if item_type == "text":
-                text = _append_literal(text, item.get("text", ""), _literal_spans, _offset)
-            elif item_type in _MEDIA_PLACEHOLDER:
-                text += _MEDIA_PLACEHOLDER[item_type]
-        return text
-    return _append_literal("", str(content), _literal_spans, _offset)
+    return _visible_text_glm52(content, _literal_spans, _offset, _media_placeholder=_MEDIA_PLACEHOLDER)
 
 
 def _id_of(obj: Mapping[str, Any]) -> Any:
