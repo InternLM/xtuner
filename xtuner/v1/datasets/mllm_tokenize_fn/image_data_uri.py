@@ -25,7 +25,8 @@ _IMAGE_HEADER = re.compile(r"data:image/[A-Za-z0-9.+-]+;base64")
 
 
 def is_data_uri(value: str) -> bool:
-    """Recognize the exact ``data:`` prefix without whitespace/case normalization.
+    """Recognize the exact ``data:`` prefix without whitespace/case
+    normalization.
 
     All other strings use the existing reference-image loaders.
     """
@@ -35,8 +36,8 @@ def is_data_uri(value: str) -> bool:
 def load_image_data_uri(value: str) -> Image.Image:
     """Decode a canonical image data URI into an independent RGB image.
 
-    Error messages deliberately omit the URI and suppress decoder exceptions
-    that could expose the input. No temporary file or network access is used.
+    Error messages deliberately omit the URI and suppress decoder exceptions that could expose the input. No temporary
+    file or network access is used.
     """
     header, separator, payload = value.partition(",")
     if not separator or _IMAGE_HEADER.fullmatch(header) is None or not payload:
