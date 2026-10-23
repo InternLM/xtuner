@@ -7,7 +7,9 @@ TestGlm53Rendering
     test_media_placeholder_matches_jinja        媒体占位符与 jinja 一致
 TestGlm53OfficialTemplateContract
     test_render_matches_official_jinja          逐字符对齐官方 jinja
+    test_can_sort_fallback_keeps_message_order  排序前提被破坏时回退为消息顺序
     test_mid_conversation_boundaries_use_their_actual_occurrence  对话中间无 EOS、边界 token loss 正确
+    test_tool_results_are_never_supervised      tool 结果不计入 loss
 TestGlm53MediaMessages
     媒体拉平视图 glm53_media_messages：真实 role、tool_reference 形态（B/C1）跳过
 """
@@ -121,6 +123,26 @@ _CONTRACT_CASES = {
     "tool_nested_image_probe": {
         "messages": [
             {"role": "tool", "content": [{"output": [_IMAGE_PART]}]},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ]
+    },
+    "assistant_image_probe": {
+        "messages": [
+            {"role": "user", "content": "USER_INPUT"},
+            {"role": "assistant", "content": [_IMAGE_PART]},
+        ]
+    },
+    "system_image_probe": {
+        "messages": [
+            {"role": "system", "content": [_IMAGE_PART]},
+            {"role": "user", "content": "USER_INPUT"},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ]
+    },
+    # 音频占位符在模板层有定义（运行时支持范围不在此断言）。
+    "audio_placeholder_probe": {
+        "messages": [
+            {"role": "user", "content": [{"type": "audio"}]},
             {"role": "assistant", "content": "ASSISTANT_ANSWER"},
         ]
     },
