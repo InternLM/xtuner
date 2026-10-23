@@ -24,7 +24,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor
-from torch.distributed.tensor.placement_types import Shard
+from torch.distributed.tensor.placement_types import Replicate, Shard
 
 from xtuner._testing.testcase import DeterministicDDPTestCase
 from xtuner.v1.config import FSDPConfig
@@ -101,9 +101,12 @@ class TestNewtonSchulz(DeterministicDDPTestCase):
     def test_muonsplit_step_matches_callback_contract(self):
         """Muon.step must invoke MuonSplit under the no-num_experts NS contract."""
         self.create_pg("cuda")
+        mesh = init_device_mesh("cuda", (self.world_size,), mesh_dim_names=("ns.fsdp",))
         split_sizes = (4, 4)
-        param = torch.nn.Parameter(torch.randn(8, 4, device="cuda", dtype=torch.float32))
-        param.grad = torch.randn_like(param)
+        param = torch.nn.Parameter(
+            distribute_tensor(torch.randn(8, 4, device="cuda", dtype=torch.float32), mesh, [Replicate()])
+        )
+        param.grad = distribute_tensor(torch.randn(8, 4, device="cuda", dtype=torch.float32), mesh, [Replicate()])
         optimizer = Muon(
             [{"params": [param]}],
             muon_split_sizes={param: split_sizes},

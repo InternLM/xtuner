@@ -1810,11 +1810,14 @@ def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7):
 
     Algorithm:
     1. Accept ``G`` as ``[rows, cols]`` (one matrix) or ``[batch, rows, cols]``
-       (batch of independent matrices). 4D+ is not supported.
+       (batch of independent matrices). 4D+ is not supported. A 2D input is
+       temporarily viewed as ``[1, rows, cols]`` inside this function only, so
+       the batched kernel path is shared by both ranks; the returned tensor
+       matches the input rank.
     2. Optionally transpose each matrix when ``rows > cols`` for cheaper Gram
        products, then normalize so each matrix has spectral norm at most 1.
     3. Run the fixed 5-step Newton-Schulz polynomial with batched matmul ``@``,
-       which applies independently on each batch element when ``G`` is 3D.
+       which applies independently on each batch element.
     4. Undo the optional transpose and return a tensor with the same shape as
        ``G``.
 
@@ -1836,6 +1839,11 @@ def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7):
         (2.8366, -3.0525, 1.2012),
     ]
 
+    squeeze_batch = False
+    if G.ndim == 2:
+        G = G.unsqueeze(0)
+        squeeze_batch = True
+
     X = G.to(dtype=torch.bfloat16)
 
     # Transpose if needed (when rows > cols) for numerical stability in NS iteration
@@ -1847,7 +1855,7 @@ def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7):
     # Ensure spectral norm is at most 1 for each matrix independently
     X = X / (X.norm(dim=(-2, -1), keepdim=True) + epsilon)
 
-    # Newton-Schulz iteration: works for both 2D and batched 3D via `@`
+    # Newton-Schulz iteration over independent batch matrices via `@`
     for a, b, c in ns_consts:
         A = X @ X.mT
         B = b * A + c * (A @ A)
@@ -1855,4 +1863,6 @@ def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7):
 
     if need_transpose:
         X = X.mT
+    if squeeze_batch:
+        X = X.squeeze(0)
     return X
