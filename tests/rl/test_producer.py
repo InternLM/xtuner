@@ -385,6 +385,28 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.failed_samples, 1)
         self.assertEqual(result.filtered_samples, 1)
 
+    async def test_producer_does_not_require_training_fields(self):
+        strategy = SyncProduceStrategyConfig().build()
+        ctx = self._build_context(
+            strategy, "eval_or_custom_loop", self._build_agent_loop(), self._build_sampler(), batch_size=1
+        )
+        state = make_rollout_state(1)
+        self.assertIsNone(state.input_ids)
+        self.assertIsNone(state.labels)
+        self.assertTrue(await ctx.put_generated_group([state]))
+        self.assertEqual(len(self.replay_buffer), 1)
+
+    async def test_inactive_loop_result_is_rejected_before_insertion(self):
+        strategy = SyncProduceStrategyConfig().build()
+        agent_loop = self._build_agent_loop()
+        state = make_rollout_state(1, status=Status.INIT)
+        agent_loop.generate_group = AsyncMock(return_value=[state])
+        ctx = self._build_context(strategy, "bad_status", agent_loop, self._build_sampler(), batch_size=1)
+        result = await ctx.generate_group([state])
+        with self.assertRaisesRegex(ValueError, "invalid generated status"):
+            await ctx.put_generated_group(result)
+        self.assertEqual(len(self.replay_buffer), 0)
+
     async def test_put_generated_group_releases_non_retryable_trace_sessions(self):
         # FAILED / FILTERED 不进入 replay buffer，必须在丢弃 RolloutState 前释放对应 trace session。
         cases = (

@@ -48,8 +48,7 @@ def _pytest_invocation_paths() -> list[Path]:
 def _should_install_import_stubs() -> bool:
     paths = _pytest_invocation_paths()
     return bool(paths) and all(
-        path.is_file() and path.parent == _RL_TEST_DIR and path.name in _LIGHTWEIGHT_TEST_FILES
-        for path in paths
+        path.is_file() and path.parent == _RL_TEST_DIR and path.name in _LIGHTWEIGHT_TEST_FILES for path in paths
     )
 
 
@@ -147,19 +146,16 @@ def _install_rl_trainer_worker_stubs() -> None:
 
     controller_mod = _new_module("xtuner.v1.rl.trainer.controller")
     controller_mod.TrainingController = TrainingController
-    controller_mod.ColateItem = object
-    controller_mod.__all__ = ["TrainingController", "ColateItem"]
+    controller_mod.__all__ = ["TrainingController"]
 
     worker_mod = _new_module("xtuner.v1.rl.trainer.worker")
     worker_mod.TrainingWorker = TrainingWorker
     worker_mod.WorkerConfig = WorkerConfig
-    worker_mod.WorkerInputItem = dict
     worker_mod.WorkerLogItem = dict
     worker_mod.WorkerTrainLogItem = dict
     worker_mod.__all__ = [
         "TrainingWorker",
         "WorkerConfig",
-        "WorkerInputItem",
         "WorkerLogItem",
         "WorkerTrainLogItem",
     ]
@@ -167,10 +163,8 @@ def _install_rl_trainer_worker_stubs() -> None:
     trainer_pkg.TrainingController = TrainingController
     trainer_pkg.WorkerConfig = WorkerConfig
     trainer_pkg.TrainingWorker = TrainingWorker
-    trainer_pkg.WorkerInputItem = dict
     trainer_pkg.WorkerLogItem = dict
     trainer_pkg.WorkerTrainLogItem = dict
-    trainer_pkg.ColateItem = object
 
     sys.modules.setdefault("xtuner.v1.rl.trainer", trainer_pkg)
     sys.modules.setdefault("xtuner.v1.rl.trainer.controller", controller_mod)

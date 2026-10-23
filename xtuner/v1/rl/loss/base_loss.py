@@ -102,6 +102,7 @@ class BaseRLLossConfig(CELossConfig):
         self,
         data: dict,
         sp_mesh: DeviceMesh | None = None,
+        device: str | torch.device = DEVICE,
     ) -> "BaseRLLossContext | None":
         """Build RL loss context from data dict.
 
@@ -114,6 +115,8 @@ class BaseRLLossConfig(CELossConfig):
                 - rollout_is_weights (torch.Tensor | None): Importance sampling weights
                 - ref_logprobs (torch.Tensor | None): Reference model log probabilities
             sp_mesh (DeviceMesh | None): Sequence parallel device mesh
+            device (str | torch.device): Target device of the built loss kwargs. Defaults to the
+                accelerator device; pass ``"cpu"`` to build the context before any device transfer.
 
         Returns:
             BaseRLLossContext | None: The built loss context, or None if required fields are missing
@@ -138,7 +141,7 @@ class BaseRLLossConfig(CELossConfig):
             rollout_logprobs=rollout_logprobs,
             is_weights=rollout_is_weights,
             ref_logprobs=ref_logprobs,
-        ).to(DEVICE)
+        ).to(device)
         if sp_mesh is not None and sp_mesh.size() > 1:
             loss_kwargs = loss_kwargs.sp_split(sp_mesh)
 
