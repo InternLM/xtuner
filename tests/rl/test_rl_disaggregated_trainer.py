@@ -132,9 +132,6 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer.eval_agent_loop_manager = SimpleNamespace(produce_batch=AsyncMock())
         trainer.evaluator = MagicMock(eval_batch_size=1, run=MagicMock(return_value={"acc": 1.0}))
         trainer._exp_tracker = MagicMock()
-        trainer._prepare_train_data = MagicMock(
-            return_value=([{"seq_ctx": "fake"}], {"batch_size": 1, "rewards/mean": 1.0})
-        )
         trainer._save_trajectories = MagicMock()
         trainer._save_eval_trajectories = MagicMock()
         trainer._release_trace_sessions = MagicMock(return_value=set())
@@ -144,7 +141,12 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._maybe_save_hf = MagicMock()
         trainer._checkpoint_no_save_replay_buffer = False
         trainer.train_controller = SimpleNamespace(
-            fit=MagicMock(return_value=[{"train_metrics": [], "sft_train_metrics": {}}]),
+            fit=MagicMock(
+                return_value=(
+                    [{"train_metrics": [], "sft_train_metrics": {}}],
+                    {"batch_size": 1, "rewards/mean": 1.0},
+                )
+            ),
             onload=MagicMock(return_value="onload"),
             offload=MagicMock(return_value="offload"),
             weight_update=MagicMock(return_value="update"),
