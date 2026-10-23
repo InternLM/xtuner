@@ -134,6 +134,9 @@ class Glm53ForConditionalGeneration(BaseComposeModel):
         # `mm_token_type_ids` are this rank's slice, the tower shards the patches merge-aligned,
         # and `_splice` gathers the features back before writing this rank's share.
         sp_mesh = seq_ctx.sequence_parallel_mesh
+        from xtuner.v1.datasets.lazy_media import resolve_lazy_media
+
+        seq_ctx = resolve_lazy_media(seq_ctx)
         input_ids = seq_ctx.input_ids
         assert input_ids is not None
         inputs_embeds = self.language_model.embed_tokens(input_ids)  # type: ignore[attr-defined]

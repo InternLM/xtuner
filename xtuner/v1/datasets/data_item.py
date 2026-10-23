@@ -15,6 +15,7 @@ class DataItem(CacheItem):
 
 class BaseMLLMDataItem(DataItem):
     num_imgs: list[int]
+    media_plan: NotRequired[dict]
 
 
 class InternS1DataItem(BaseMLLMDataItem, total=False):
