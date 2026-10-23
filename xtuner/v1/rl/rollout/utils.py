@@ -103,7 +103,6 @@ class SessionRouter:
 async def _resolve_routed_experts(routed_experts: np.ndarray | RayObjectRef) -> np.ndarray:
     if isinstance(routed_experts, RayObjectRef):
         routed_experts_value = await routed_experts
-        free_object_refs([routed_experts])
     else:
         routed_experts_value = routed_experts
     assert routed_experts_value is not None, "routed_experts should not be empty after resolution"
@@ -151,7 +150,12 @@ class PartialRolloutHandler:
         prompt_tokens: int,
         completion_tokens: int,
     ) -> RolloutState:
-        """Postprocess a partial rollout using the default semantics."""
+        """Postprocess a partial rollout using the default semantics.
+
+        The handler releases the history ref only when the rollout state owns it; refs borrowed from the TraceStore
+        must never be freed here. The current ref belongs to the caller, who releases it after this call if it created
+        it.
+        """
         rollout_state.finish_reason = finish_reason
         rollout_state.status = status
         history_response = rollout_state.response or ""
@@ -165,7 +169,9 @@ class PartialRolloutHandler:
         rollout_state.logprobs = history_logprobs + current_logprobs
 
         history_routed_experts = rollout_state.routed_experts
+        history_routed_experts_owner = rollout_state.routed_experts_owner
         if history_routed_experts is not None and routed_experts is not None:
+            history_routed_experts_ref = history_routed_experts
             routed_experts_expect_len = prompt_tokens + completion_tokens - 1
             history_routed_experts_expect_len = prompt_tokens - 1
 
@@ -209,6 +215,17 @@ class PartialRolloutHandler:
                 f"prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}"
             )
             rollout_state.routed_experts = ray.put(concat_routed_experts)
+            rollout_state.routed_experts_owner = "rollout"
+            # The concatenated result replaces both inputs. Free the current
+            # ref unconditionally: postprocess is only called by the direct
+            # rollout path, which produced it. Free the history ref only when
+            # this state owned it, never a TraceStore borrow still held by
+            # sibling segments.
+            free_object_refs(routed_experts)
+            if history_routed_experts_owner != "trace_store" and isinstance(
+                history_routed_experts_ref, (RayObjectRef, list)
+            ):
+                free_object_refs(history_routed_experts_ref)
             end_time = time.perf_counter()
             self.logger.debug(
                 f"[PartialRolloutHandler] Postprocess routed_experts concatenation time: {end_time - start_time:.4f} seconds"
@@ -221,6 +238,7 @@ class PartialRolloutHandler:
                 f"history_logprobs_len={len(history_logprobs)}, "
             )
             rollout_state.routed_experts = routed_experts
+            rollout_state.routed_experts_owner = "rollout"
         elif history_routed_experts is not None and routed_experts is None:
             # case3: 本次推理为超发的任务, token 还未生成时就被 abort了，所以本次 routed_experts 为空，并且response_ids, logprobs 需要也为空
             assert not current_response_ids and not current_logprobs, (
