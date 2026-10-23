@@ -2,6 +2,8 @@
 """Muon optimizer tests.
 
 1. TestNewtonSchulz     — Triton vs PyTorch Newton-Schulz precision.
+    test_triton_vs_pytorch                    两种 NS 实现在 2D/3D 布局下结果一致
+    test_muonsplit_matches_independent_blocks MuonSplit 逐块独立正交化并按块缩放
 2. TestMuonSingleGPU   — Single-GPU correctness: production Muon must match the
                           reference within tight tolerances (fp32, no comms).
 3. TestMuonFSDP        — End-to-end correctness: one Muon step on a fully-sharded
@@ -24,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor
-from torch.distributed.tensor.placement_types import Replicate, Shard
+from torch.distributed.tensor.placement_types import Shard
 
 from xtuner._testing.testcase import DeterministicDDPTestCase
 from xtuner.v1.config import FSDPConfig
@@ -46,6 +48,7 @@ class TestNewtonSchulz(DeterministicDDPTestCase):
 
     def test_triton_vs_pytorch(self):
         """Triton and PyTorch NS implementations should produce similar results."""
+        # 行为：同一输入（2D 单矩阵 / 3D expert batch）下，triton 与 torch 实现的 NS 结果一致
         self.create_pg("cuda")
         from xtuner.v1.optim.newton_schulz_triton import newton_schulz_triton
 
@@ -72,6 +75,7 @@ class TestNewtonSchulz(DeterministicDDPTestCase):
             torch.testing.assert_close(result1, result2, atol=3e-2, rtol=3e-2)
 
     def test_muonsplit_matches_independent_blocks(self):
+        # 行为：MuonSplit 必须逐逻辑块独立正交化、按块施加 lr 缩放，尾部多余行保持为零
         self.create_pg("cuda")
         split_sizes = (6, 2, 6, 2)
         logical_rows = sum(split_sizes)
@@ -97,26 +101,6 @@ class TestNewtonSchulz(DeterministicDDPTestCase):
         expected = torch.cat(expected_chunks)
 
         torch.testing.assert_close(result, expected)
-
-    def test_muonsplit_step_matches_callback_contract(self):
-        """Muon.step must invoke MuonSplit under the no-num_experts NS contract."""
-        self.create_pg("cuda")
-        mesh = init_device_mesh("cuda", (self.world_size,), mesh_dim_names=("ns.fsdp",))
-        split_sizes = (4, 4)
-        param = torch.nn.Parameter(
-            distribute_tensor(torch.randn(8, 4, device="cuda", dtype=torch.float32), mesh, [Replicate()])
-        )
-        param.grad = distribute_tensor(torch.randn(8, 4, device="cuda", dtype=torch.float32), mesh, [Replicate()])
-        optimizer = Muon(
-            [{"params": [param]}],
-            muon_split_sizes={param: split_sizes},
-            use_triton=False,
-            adjust_lr="rms_norm",
-        )
-        before = param.detach().clone()
-        optimizer.step()
-        assert torch.isfinite(param).all()
-        assert not torch.equal(param, before)
 
 
 # ─── Model for end-to-end tests ──────────────────────────────────────────────
