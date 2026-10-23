@@ -25,12 +25,12 @@ from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.config import AdamWConfig, FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.engine.train_engine import TrainEngine
+from xtuner.v1.loss.critic_loss import CriticLossConfig
 from xtuner.v1.model.base import BaseModel, XTunerBaseModelConfig
 from xtuner.v1.model.compose.qwen3_5.qwen3_5_config import Qwen3_5_VLMoE35BA3Config
 from xtuner.v1.model.moe.qwen3_5_text import Qwen3_5_VLTextMoE35BA3BConfig
 from xtuner.v1.module.head import ValueHead
 from xtuner.v1.module.mtp.config import MTPConfig
-from xtuner.v1.rl.loss.critic_loss import CriticLossConfig
 from xtuner.v1.utils.device import get_device
 
 
