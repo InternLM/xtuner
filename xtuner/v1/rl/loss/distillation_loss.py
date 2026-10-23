@@ -117,11 +117,12 @@ class DistillationLossConfig(BaseRLLossConfig):
         self,
         data: dict,
         sp_mesh: DeviceMesh | None = None,
-        device: str | torch.device = DEVICE,
+        device: str | torch.device | None = None,
     ) -> "DistillationLossContext | None":
         if "shifted_labels" not in data or "advantages" not in data:
             return None
-
+        if device is None:
+            device = DEVICE
         loss_kwargs = DistillationLossKwargs(
             shifted_labels=data["shifted_labels"],
             advantages=data["advantages"],
