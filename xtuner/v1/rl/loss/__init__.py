@@ -1,3 +1,5 @@
+from xtuner.v1.loss.critic_loss import CriticLossConfig, CriticLossContext, CriticLossKwargs
+
 from .base_loss import (
     BaseRLLossConfig,
     BaseRLLossContext,
