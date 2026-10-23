@@ -13,7 +13,7 @@ from .qwen3 import Qwen3Dense, Qwen3Dense2BConfig, Qwen3Dense4BConfig, Qwen3Dens
 
 class Qwen3VLTextDense(Qwen3Dense):
     def to_hf_key_list(self, key: str) -> list[str]:
-        if self.config.tie_word_embeddings and "lm_head" in key:
+        if self.config.tie_head and "lm_head" in key:
             key = key.replace("lm_head", "embed_tokens")
 
         if "layers" in key or "embed_tokens" in key:
