@@ -47,6 +47,8 @@ jobs:
   ete_test:
     if: ${{!cancelled() }}
     runs-on: [d_cluster]
+    # Self-hosted job limit. Default 360 (6 hours) was cancelling long NPU ETE runs.
+    timeout-minutes: 10080
     steps:
       - name: Clean workdir
         run: sudo git clean -ffdx
