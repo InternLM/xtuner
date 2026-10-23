@@ -4,6 +4,8 @@ TestGlm53TokenizeCacheRuntimeParity
     test_glm53_tokenize_cache_runtime_image_parity  图像：cache 预测与 runtime 实算一致
     test_glm53_tokenize_cache_runtime_video_parity  视频：同上
     test_glm53_frame_folder_samples_the_processed_frames  帧文件夹按重采样后的帧取下标
+TestGlm53ClearThinking
+    test_clear_thinking_wired_end_to_end    clear_thinking 全链路接通：历史轮屏蔽、cache/runtime 一致
 TestGlm53VisualPlaceholderAndTokenSemantics
     test_glm53_visual_placeholder_count             占位符数量等于 patch 数 / merge_unit
     test_glm53_num_img_tokens_is_per_vit_sequence   num_img_tokens 按 ViT 序列计数
@@ -185,6 +187,48 @@ class TestGlm53TokenizeCacheRuntimeParity:
 
         assert cache_ret["num_tokens"] == runtime_ret["num_tokens"] == len(runtime_ret["input_ids"])
         assert cache_ret["num_img_tokens"] == runtime_ret["num_img_tokens"]
+
+
+class TestGlm53ClearThinking:
+    def test_clear_thinking_wired_end_to_end(self, ckpt_path, tokenizer, image_fixture):
+        # clear_thinking 经 config → tokenize fn → render 全链路接通：最后一个 user 之前的
+        # 历史 assistant 整轮不监督（含无 reasoning 的轮次），之后的轮次照常监督；
+        # cache/runtime 两条路径一致。本样例的历史轮不带 reasoning，因此 input_ids 不变、
+        # 差异只体现在 loss；历史轮带 reasoning 时 reasoning 文本会被剥掉，input_ids 变短。
+        item = {
+            "messages": [
+                {"role": "user", "content": "first question"},
+                {"role": "assistant", "content": "HISTORICAL_ANSWER"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": {"url": image_fixture, "image_wh": [448, 448]}},
+                        {"type": "text", "text": "second question"},
+                    ],
+                },
+                {"role": "assistant", "content": "final answer", "reasoning_content": "actual reasoning"},
+            ]
+        }
+        fn = Glm53VLTokenizeFnConfig(processor_path=ckpt_path, clear_thinking=True).build(tokenizer, anno_name="test")
+        fn.state = "cache"
+        cache_ret = fn(item)
+        fn.state = "runtime"
+        runtime_ret = fn(item)
+        assert cache_ret["num_tokens"] == len(runtime_ret["input_ids"])
+
+        user_id = tokenizer.convert_tokens_to_ids("<|user|>")
+        last_user = max(index for index, token in enumerate(runtime_ret["input_ids"]) if token == user_id)
+        labels = runtime_ret["labels"]
+        assert all(label == -100 for label in labels[: last_user + 1])
+        assert any(label != -100 for label in labels[last_user:])
+
+        # 同一输入在 clear_thinking=False 下历史轮受监督；本样例历史轮无 reasoning，
+        # 两种开关下渲染文本相同，input_ids 完全不变（input_ids 不变的断言仅限此前提）。
+        plain = Glm53VLTokenizeFnConfig(processor_path=ckpt_path).build(tokenizer, anno_name="test")
+        plain.state = "runtime"
+        kept_ret = plain(item)
+        assert kept_ret["input_ids"] == runtime_ret["input_ids"]
+        assert any(label != -100 for label in kept_ret["labels"][: last_user + 1])
 
 
 class TestGlm53OSSLoader:
@@ -914,6 +958,7 @@ _HASH_PARAMS = {
     "add_generation_prompt",
     "enable_thinking",
     "reasoning_effort",
+    "clear_thinking",
 }
 
 # 不影响 cache 输出的参数：
@@ -948,6 +993,7 @@ _ALT_VALUES = {
     "add_generation_prompt": {"add_generation_prompt": True},
     "enable_thinking": {"enable_thinking": False},
     "reasoning_effort": {"reasoning_effort": "low"},
+    "clear_thinking": {"clear_thinking": True},
 }
 
 
