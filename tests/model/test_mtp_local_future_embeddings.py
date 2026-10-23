@@ -319,3 +319,32 @@ def test_nccl_local_future_cache_matches_full_roll_and_checkpoint_backward(tmp_p
         nprocs=2,
         join=True,
     )
+
+
+@pytest.mark.parametrize("reentrant", [False, True])
+def test_single_micro_releases_gather_before_checkpoint_backward(reentrant):
+    def run(release_cache):
+        layer = _CheckpointLayer(True, reentrant=reentrant)
+        block = MTPBlock(mtp_config=MTPConfig(num_layers=7, share_weights=True), mtp_layers=[layer])
+        source = (torch.arange(60, dtype=torch.float64).reshape(1, 20, 3) / 100).requires_grad_()
+        hidden = torch.full_like(source, 0.2, requires_grad=True)
+        ctx = _context(source)
+        # A differentiable stand-in for the full SP gather, with its own storage.
+        raw = source * 1.0
+        ctx._raw_inputs_embeds = raw
+        outputs = block(
+            hidden,
+            embed_tokens_fn=lambda _: pytest.fail("must use supplied embeddings"),
+            position_embeddings=(torch.empty(0), torch.empty(0)),
+            seq_ctx=ctx,
+        )
+        assert ctx._raw_inputs_embeds is None
+        if not release_cache:
+            ctx._raw_inputs_embeds = raw  # Reproduce the old cache lifetime for comparison.
+        del raw
+        loss = sum(out["hidden_states"].square().mean() for out in outputs)
+        loss.backward()
+        return loss.detach(), source.grad, hidden.grad, layer.weight.grad
+
+    for actual, expected in zip(run(True), run(False)):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)

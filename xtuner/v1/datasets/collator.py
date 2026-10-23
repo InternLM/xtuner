@@ -318,11 +318,63 @@ def glm53_vl_sft_collator(
     merge_unit: int,
     pack_to_max_length: bool = True,
     pad_chunk_size: int = 256,
+    media_dtype: torch.dtype = torch.bfloat16,
 ) -> list[ColateItem]:
+    """Collate GLM-5.3 packs into text contexts and concatenated media.
+
+    Args:
+        instances (list[list[Glm53VLDataItem]]): Tokenized items, one inner list per pack.
+        pack_max_length (int): Maximum packed token length.
+        padding_token_idx (int): Padding token id for ``input_ids``.
+        image_token_id (int): Image placeholder token id, re-checked against the patch
+            count after pack-level truncation.
+        merge_unit (int): Vision tower spatial-merge unit (``spatial_merge_size ** 2``).
+        pack_to_max_length (bool): Pad every pack up to ``pack_max_length``.
+        pad_chunk_size (int): Padding granularity when ``pack_to_max_length`` is off.
+        media_dtype (torch.dtype): Transport dtype applied element-wise to image/video
+            patches before the pack-level concat (worker side, pre-IPC). Keep it equal to
+            the vision tower's parameter dtype (bf16 by default); a lower-precision value
+            under an fp32 tower rounds the patches at pack time.
+
+    Returns:
+        list[ColateItem]: One ``{"seq_ctx", "shifted_labels"}`` dict per pack.
+    """
     ret: list[ColateItem] = []
     for instance in instances:
+        # 占位符计数与媒体特征不符的样本（纯文本含字面 <|image|>、cache/runtime 计数漂移等）
+        # 会在模型 splice 时计数错位崩溃；打包前丢弃并告警，不让单条异常样本中断训练——
+        # 线上 256 卡 Step 8 挂掉的直接原因就是此处原来的逐样本 assert。pack 末尾用 padding
+        # 补齐，丢样本不改变序列长度，DP 各 rank 的 collective 序列保持同步。
+        kept_instance: list[Glm53VLDataItem] = []
+        for data in instance:
+            placeholder_count = data["input_ids"].count(image_token_id)
+            expected_count = sum(data.get("num_img_tokens", [])) // merge_unit
+            if placeholder_count != expected_count:
+                logger.warning(
+                    f"GLM-5.3-Flash visual placeholder count {placeholder_count} != expected {expected_count}; "
+                    f"discard sample (num_tokens={data.get('num_tokens')}) from this pack instead of "
+                    "halting training."
+                )
+                continue
+            kept_instance.append(data)
+        if not kept_instance:
+            # 单样本 pack 是正常情况（长样本独占一个 pack、长度分组尾部等），整包被滤只说明
+            # 这个 pack 恰好没有好样本，推不出系统性故障；此时 raise 会让单条脏样本中断训练
+            # （E02 回归）。退回无 loss 占位项，照常走 build_text_ctx_labels：pack_to_max_length
+            # 补 padding 保持序列长度，labels 全 IGNORE 对 loss 贡献为 0，与 runtime 通道
+            # _discard_damaged_sample 的占位语义一致。系统性数据/代码问题由数据集级统计与
+            # 配置校验暴露，不在此处报错。
+            no_loss_placeholder: Glm53VLDataItem = {
+                "input_ids": [padding_token_idx] * 2,
+                "labels": [IGNORE_INDEX] * 2,
+                "num_tokens": 2,
+                "num_imgs": [0],
+                "num_img_tokens": [0],
+                "mm_token_type_ids": torch.zeros((1, 2), dtype=torch.long),
+            }
+            kept_instance = [no_loss_placeholder]
         seq_ctx, shifted_labels, instance = build_text_ctx_labels(  # type: ignore
-            instance,
+            kept_instance,
             pack_max_length,
             padding_token_idx,
             pack_to_max_length,
@@ -331,8 +383,12 @@ def glm53_vl_sft_collator(
 
         num_img_tokens: list[list[int]] = [data.get("num_img_tokens", [0]) for data in instance]
 
+        # Cast image/video patches to the transport dtype (default bf16) on the worker side,
+        # before cat and the cross-process IPC: the vision tower's patch_embed casts patches to
+        # its parameter dtype anyway, so fp32 media would only double the bytes crossing shm,
+        # main-process residency, and H2D. No-op when the dtypes already match.
         pixel_values: list | torch.Tensor | None
-        pixel_values = [i["pixel_values"] for i in instance if "pixel_values" in i]
+        pixel_values = [i["pixel_values"].to(media_dtype) for i in instance if "pixel_values" in i]
         pixel_values = torch.cat(pixel_values, dim=0) if pixel_values else None
 
         image_grid_thw: list | torch.Tensor | None
@@ -340,7 +396,9 @@ def glm53_vl_sft_collator(
         image_grid_thw = torch.cat(image_grid_thw, dim=0) if image_grid_thw else None
 
         pixel_values_videos: list | torch.Tensor | None
-        pixel_values_videos = [i["pixel_values_videos"] for i in instance if "pixel_values_videos" in i]
+        pixel_values_videos = [
+            i["pixel_values_videos"].to(media_dtype) for i in instance if "pixel_values_videos" in i
+        ]
         pixel_values_videos = torch.cat(pixel_values_videos, dim=0) if pixel_values_videos else None
 
         video_grid_thw: list | torch.Tensor | None
@@ -362,10 +420,11 @@ def glm53_vl_sft_collator(
             f"mm_token_type_ids length {mm_token_type_ids.shape[-1]} != input_ids length {seq_ctx.input_ids.shape[-1]}"
         )
 
-        # Re-assert the placeholder<->patch-count invariant per sample after truncation: this is
-        # the only layer that can desync media from text after tokenize-time construction
-        # (pack-level truncation), so re-checking its own invariant here catches a corrupted
-        # sample loudly instead of silently training on half a visual span (design doc §8.4).
+        # Re-assert the placeholder<->patch-count invariant per sample after truncation: the
+        # pre-filter above has already dropped samples that were corrupt on arrival, so a
+        # failure here means build_text_ctx_labels's own pack-level truncation desynced media
+        # from text — a packing bug, not dirty data, and it must stay loud instead of silently
+        # training on half a visual span (design doc §8.4).
         for data in instance:
             placeholder_count = data["input_ids"].count(image_token_id)
             expected_count = sum(data.get("num_img_tokens", [])) // merge_unit
