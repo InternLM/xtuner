@@ -618,16 +618,7 @@ class BaseModel(nn.Module):
         self._validate_head_checkpoint(Path(hf_path))
         hf_loader = HFCheckpointLoader(hf_path)
         loaded_keys, unloaded_keys, missing_keys = self._load_params(hf_loader, strict=strict)
-        # XTuner runtime critic 模型内部仍然叫：lm_head.weight
-        if self._maybe_init_unloaded_critic_head(hf_loader):
-            # 如果随机初始化 ValueHead，对 loaded_keys、unloaded_keys、missing_keys 进行更新
-            # missing_keys 是 HF 名，loaded_keys / unloaded_keys 是运行时名
-            loaded_keys.add("lm_head.weight")
-            unloaded_keys.discard("lm_head.weight")
-            head_load_spec = self.load_spec_mapping.get("lm_head.weight")
-            if head_load_spec is not None:
-                missing_keys -= set(head_load_spec.global_hf_keys)
-        return loaded_keys, unloaded_keys, missing_keys
+        return self._init_missing_critic_head(hf_loader, loaded_keys, unloaded_keys, missing_keys)
 
     def scale_and_reduce_grad(self):
         return
@@ -688,7 +679,7 @@ class BaseModel(nn.Module):
 
         A checkpoint exported by an actor (head_type="lm_head") may initialize a
         critic model (head_type="value_head"). Its value head is absent and
-        is initialized later by ``_maybe_init_unloaded_critic_head``. The reverse direction
+        is initialized later by ``_init_missing_critic_head``. The reverse direction
         is invalid because a critic checkpoint has no vocabulary head.
 
         Official HF checkpoints without this metadata are skipped. Vision and projector modules have no head_type and
@@ -716,8 +707,15 @@ class BaseModel(nn.Module):
             )
 
     @torch.no_grad()
-    def _maybe_init_unloaded_critic_head(self, hf_loader: HFCheckpointLoader) -> bool:
-        """Randomly initialize a critic ValueHead missing from the checkpoint.
+    def _init_missing_critic_head(
+        self,
+        hf_loader: HFCheckpointLoader,
+        loaded_keys: set[str],
+        unloaded_keys: set[str],
+        missing_keys: set[str],
+    ) -> tuple[set[str], set[str], set[str]]:
+        """Randomly initialize a critic ValueHead missing from the checkpoint,
+        and reconcile the key sets accordingly.
 
         The decision is based on the global checkpoint key map, not on the
         rank-local ``loaded_keys`` returned by ``_load_params``.  For a small
@@ -730,13 +728,18 @@ class BaseModel(nn.Module):
         checkpoint keys. The initialized weight is drawn from ``Normal(0,
         1 / (hidden_size + 1))``.
 
+        When the ValueHead is randomly initialized, the key sets are updated:
+        ``loaded_keys`` / ``unloaded_keys`` hold runtime names (the XTuner
+        runtime critic module is still named ``lm_head.weight``), while
+        ``missing_keys`` holds HF names.
+
         Returns:
-            True if ValueHead was randomly initialized, False otherwise.
+            The possibly-updated (loaded_keys, unloaded_keys, missing_keys).
         """
 
-        # 非critic模型直接返回 False
+        # 非critic模型直接返回
         if getattr(self.config, "head_type", "lm_head") != "value_head":
-            return False
+            return loaded_keys, unloaded_keys, missing_keys
 
         # critic 必须有可初始化的线性 head。
         lm_head = getattr(self, "lm_head", None)
@@ -757,7 +760,7 @@ class BaseModel(nn.Module):
                 "'lm_head.weight'. Check model initialization and _init_load_spec()."
             )
         if all(hf_loader.is_key_exist(key) for key in head_load_spec.global_hf_keys):
-            return False
+            return loaded_keys, unloaded_keys, missing_keys
 
         from xtuner.v1.utils import init_params
 
@@ -768,7 +771,12 @@ class BaseModel(nn.Module):
             f"Normal(mean=0, std={value_head_std:.6g}) because the checkpoint has no value_head weights; "
             "the rest of the model is loaded from the checkpoint."
         )
-        return True
+
+        # 随机初始化了 ValueHead，对 loaded_keys、unloaded_keys、missing_keys 进行对账
+        loaded_keys.add("lm_head.weight")
+        unloaded_keys.discard("lm_head.weight")
+        missing_keys -= set(head_load_spec.global_hf_keys)
+        return loaded_keys, unloaded_keys, missing_keys
 
     def trainable_parameters(self):
         params = [(name, param) for name, param in self.named_parameters() if param.requires_grad]
