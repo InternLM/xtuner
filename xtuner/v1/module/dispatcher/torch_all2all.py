@@ -3,6 +3,7 @@ from typing import Literal, TypeAlias, cast
 import torch
 import torch.distributed as dist
 from torch.autograd.function import Function
+from torch.distributed._functional_collectives import AsyncCollectiveTensor
 from typing_extensions import override
 
 from xtuner.v1.ops import permute, unpermute
@@ -77,6 +78,14 @@ class TorchAll2AllPostCombineResult(PostCombineResult): ...
 HiddenStates: TypeAlias = torch.Tensor
 
 
+def _record_stream(tensor: torch.Tensor, stream: torch.cuda.Stream) -> None:
+    # ACT dispatches non-view operations through wait_tensor. Register the storage
+    # without inserting a collective wait; the caller's events order its use.
+    while isinstance(tensor, AsyncCollectiveTensor):
+        tensor = tensor._get_acs_underlying_tensor()
+    tensor.record_stream(stream)
+
+
 def _dispatch(
     hidden_states: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -129,6 +138,7 @@ class _AsyncDispatch(Function):
         comm_stream: torch.cuda.Stream,
         process_group: dist.ProcessGroup,
     ):
+        compute_stream = torch.cuda.current_stream()
         with torch.cuda.stream(comm_stream):
             comm_stream.wait_event(forward_previous_event)
             out, tokens_per_expert, input_splits, output_splits = _dispatch(
@@ -137,9 +147,13 @@ class _AsyncDispatch(Function):
                 n_routed_experts,
                 process_group,
             )
+            hidden_states.record_stream(comm_stream)
+            topk_ids.record_stream(comm_stream)
             out.record_stream(comm_stream)
             tokens_per_expert.record_stream(comm_stream)
             forward_finished_event.record(comm_stream)
+        _record_stream(out, compute_stream)
+        tokens_per_expert.record_stream(compute_stream)
 
         ctx.input_shape = hidden_states.shape
         ctx.output_split_sizes = output_splits
@@ -161,6 +175,7 @@ class _AsyncDispatch(Function):
         if world_size == 1:
             return grad_output, None, None, None, None, None, None, None, None
 
+        compute_stream = torch.cuda.current_stream()
         with torch.cuda.stream(ctx.comm_stream):
             # ctx.comm_stream.wait_stream(compute_stream)
             if ctx.backward_previous_event is not None:
@@ -180,6 +195,7 @@ class _AsyncDispatch(Function):
 
             if ctx.backward_finished_event is not None:
                 ctx.backward_finished_event.record(ctx.comm_stream)
+        _record_stream(out, compute_stream)
         return out, None, None, None, None, None, None, None, None
 
 
@@ -200,6 +216,7 @@ class _AsyncCombine(Function):
         comm_stream: torch.cuda.Stream,
         process_group: dist.ProcessGroup,
     ):
+        compute_stream = torch.cuda.current_stream()
         with torch.cuda.stream(comm_stream):
             comm_stream.wait_event(forward_previous_event)
             out = all_to_all_single_autograd(
@@ -208,7 +225,9 @@ class _AsyncCombine(Function):
                 output_split_sizes=output_splits,
                 group=process_group,
             )
+            hidden_states.record_stream(comm_stream)
             forward_finished_event.record(comm_stream)
+        _record_stream(out, compute_stream)
 
         ctx.input_shape = hidden_states.shape
         ctx.output_split_sizes = output_splits
@@ -230,6 +249,7 @@ class _AsyncCombine(Function):
         if world_size == 1:
             return grad_output, None, None, None, None, None, None, None, None
 
+        compute_stream = torch.cuda.current_stream()
         with torch.cuda.stream(ctx.comm_stream):
             if ctx.backward_previous_event is not None:
                 ctx.comm_stream.wait_event(ctx.backward_previous_event)
@@ -248,6 +268,7 @@ class _AsyncCombine(Function):
 
             if ctx.backward_finished_event is not None:
                 ctx.backward_finished_event.record(ctx.comm_stream)
+        _record_stream(out, compute_stream)
         return out, None, None, None, None, None, None, None, None
 
 
