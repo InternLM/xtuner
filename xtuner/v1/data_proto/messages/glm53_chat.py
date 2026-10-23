@@ -24,10 +24,10 @@ in the official ``chat_template.jinja``:
    Media blocks sort as well. The official template's ordering unit is the result entry, not
    the message: under can_sort it emits every entry matching a tool_call id in ``tool_calls``
    order, pulling entries out of aggregated ``{"output": ...}`` messages. Media payloads pair
-   to markers positionally (the collector walks messages in order and
-   ``glm53_vl_tokenize_fn._expand_marker`` pairs the i-th payload with the i-th marker), so
-   the VLM tokenize fn first flattens the messages the same way via :func:`sort_tool_messages`,
-   making the payload collection order follow the rendered marker order.
+   to markers positionally (``glm53_vl_tokenize_fn._expand_marker`` pairs the i-th payload with
+   the i-th marker), so the VLM tokenize fn collects payloads from :func:`glm53_media_messages`,
+   which flattens messages with :func:`sort_tool_messages` internally, making the payload
+   collection order follow the rendered marker order.
 5. Structured ``{"output": ...}`` entries render their output through ``visible_text`` and a
    nested ``tool_reference`` list expands the matching tool definitions into
    ``<tool_response><tools>...</tools></tool_response>`` (GLM-5.2's official template has
@@ -327,8 +327,8 @@ def _render_tool_block(
     Results are emitted in the preceding assistant's ``tool_calls`` order when the official
     template's can_sort rule holds (see ``_sortable_call_ids``); any violation keeps the
     message order. Media blocks sort as well, matching the official template and the
-    inference stack: ``glm53_vl_tokenize_fn`` reorders the messages themselves via
-    ``sort_tool_messages`` before media collection, so payloads collected in message order
+    inference stack: media payloads are collected from :func:`glm53_media_messages`, which
+    applies the same ``sort_tool_messages`` ordering, so payloads collected in message order
     follow the sorted marker order.
     """
     end = start

@@ -21,7 +21,7 @@ TestGlm53MixedMediaAndTruncation
 TestGlm53MediaRoleContract
     test_media_is_collected_from_all_roles           system/assistant/tool 角色的图片也会被收集
     test_media_collection_preserves_input_order     媒体按原始消息顺序收集，与 HF 一致
-    test_tool_media_block_is_sorted_before_collection  逆序多媒体回归：tool 块先按 tool_calls 预排再收集
+    test_tool_media_block_is_sorted_before_collection  逆序多媒体回归：收集视图内部按 tool_calls 顺序排序
     test_nested_tool_output_media_is_collected_in_tool_calls_order  嵌套 tool 输出媒体按 tool_calls 顺序收集（#2184 移植）
     test_string_content_parts_are_tolerated         content 列表混排纯字符串不崩溃
 TestGlm53DirtyDataDoesNotHalt
@@ -416,10 +416,8 @@ class TestGlm53MixedMediaAndTruncation:
     ) -> None:
         # 图文+视频混合样本是未支持边界：cache 阶段 log warning 并按损坏样本丢弃（num_tokens=0，
         # 打包前过滤），runtime 仍抛出、由上游数据集换成无 loss 占位样本——两种状态都不中断训练，
-        # 且都必须发生在加载任何媒体之前。
-        # Glm53VLTokenizeFunction 覆写 __call__ 仅为 tool 块预排序（sort_tool_messages，不触碰
-        # 媒体加载）；混合样本仍在基类 __call__ 的收集阶段被拒绝，下面的 load 断言保证拒绝
-        # 发生在任何媒体加载之前。
+        # 且都必须发生在加载任何媒体之前。混合样本在基类 __call__ 的收集阶段被拒绝，下面的
+        # load 断言保证拒绝发生在任何媒体加载之前。
         load = Mock(side_effect=AssertionError("Mixed samples must be discarded before loading media"))
         monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn.load_image", load)
         logger_mock = Mock()
@@ -512,9 +510,10 @@ class TestGlm53MediaRoleContract:
         assert image_paths == ["system.jpg", "user.jpg", "assistant.jpg", "tool-b.jpg", "tool-a.jpg"]
 
     def test_tool_media_block_is_sorted_before_collection(self, tokenize_fn: Glm53VLTokenizeFunction) -> None:
-        # 逆序多媒体回归：tool_calls=[a,b]、tool 消息按 b, a 输入时，__call__ 先按 tool_calls
-        # 顺序预排消息（sort_tool_messages），媒体收集顺序随之变为 [a 的图, b 的图]，与渲染
-        # 文本中的 marker 顺序一致（渲染按同一 can_sort 规则排序，对齐官方 jinja 与推理侧）。
+        # 逆序多媒体回归：tool_calls=[a,b]、tool 消息按 b, a 输入时，收集视图
+        # glm53_media_messages 内部按 tool_calls 顺序排序（sort_tool_messages，与渲染器
+        # _render_tool_block 的 can_sort 重排同一规则），媒体收集顺序随之变为 [a 的图, b 的图]，
+        # 与渲染文本中的 marker 顺序一致（对齐官方 jinja 与推理侧）。
         def image(url: str) -> dict:
             return {"type": "image", "image": {"url": url, "image_wh": [448, 448]}}
 

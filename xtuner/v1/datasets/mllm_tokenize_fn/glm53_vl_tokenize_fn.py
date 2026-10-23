@@ -39,7 +39,6 @@ from xtuner.v1.data_proto.messages.glm53_chat import (
     _tokenize_with_loss_mask,
     glm53_media_messages,
     render_glm53_chat,
-    sort_tool_messages,
 )
 from xtuner.v1.utils import get_logger
 
@@ -220,13 +219,6 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         )
 
     # ---- shared render/expand/tokenize, called by both cache and runtime paths ----
-
-    def __call__(self, item: dict, media_root: str = "", **kwargs):
-        # tool 块先按 tool_calls 顺序拉平（排序单位是 entry，与官方 jinja 的发射语义一致）：
-        # 渲染器会按同一 can_sort 规则重排 marker，而媒体 payload 由基类 __call__ 按消息顺序
-        # 收集、与 marker 位置式配对。先拉平消息让收集顺序与渲染后的 marker 顺序一致。
-        item = {**item, "messages": sort_tool_messages(item["messages"])}
-        return super().__call__(item, media_root=media_root, **kwargs)
 
     def _collect_media(self, item: dict):
         # 渲染器为结构化 tool 输出（{"id": ..., "output": [...]} 条目）里嵌套的媒体同样发射
