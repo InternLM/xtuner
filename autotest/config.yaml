@@ -169,8 +169,6 @@ case:
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/opd_train_meta.json
                     - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/opd_eval_meta.json
                     - OPD_CONFIG_PATH=autotest/config/rl_qwen3_2B_vl_mopd_topk.py
-                    - XTUNER_RL_NUM_WORKERS=16
-                    - TOTAL_TRAIN_STEPS=5
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
             assert_info:
