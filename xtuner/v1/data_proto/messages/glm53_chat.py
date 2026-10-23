@@ -389,6 +389,22 @@ def glm53_media_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return media_messages
 
 
+def _render_tool_reference_list(
+    refs: List[Glm53ToolReferencePart], tools: Optional[List[Dict[str, Any]]], _literal_spans=None, _offset: int = 0
+) -> str:
+    """分支 B/C1 共用：展开 ``tool_reference`` 列表匹配的工具定义。
+
+    对应官方 tool_references_to_response 宏（jinja:18-31）。
+    """
+    text = "<tool_response><tools>\n"
+    for tool_ref in refs:
+        for tool in tools or []:
+            tool = tool["function"] if "function" in tool else tool
+            if tool.get("name") == tool_ref.get("name"):
+                text = _append_literal(text, _tool_to_json(tool), _literal_spans, _offset) + "\n"
+    return text + "</tools></tool_response>"
+
+
 def _render_tool_output(
     output: Any, tools: Optional[List[Dict[str, Any]]], _literal_spans=None, _offset: int = 0
 ) -> str:
@@ -398,7 +414,7 @@ def _render_tool_output(
     two-stage placeholder markers)."""
     if _is_tool_reference_list(output):
         # 分支 C1: output 是 tool_reference 列表,展开匹配的工具定义。
-        return _render_tool_result(output, tools, _literal_spans, _offset)
+        return _render_tool_reference_list(output, tools, _literal_spans, _offset)
     # 分支 C2: 字符串或 part 列表,经 visible_text 渲染(媒体发两段式 marker)。
     prefix = "<tool_response>"
     return prefix + _visible_text(output, _literal_spans, _offset + len(prefix)) + "</tool_response>"
@@ -418,13 +434,7 @@ def _render_tool_result(
         return _append_literal("<tool_response>", content, _literal_spans, _offset) + "</tool_response>"
     if _is_tool_reference_list(content):
         # 分支 B: content 整体是 tool_reference 列表,展开匹配的工具定义。
-        text = "<tool_response><tools>\n"
-        for tool_ref in content:
-            for tool in tools or []:
-                tool = tool["function"] if "function" in tool else tool
-                if tool.get("name") == tool_ref.get("name"):
-                    text = _append_literal(text, _tool_to_json(tool), _literal_spans, _offset) + "\n"
-        return text + "</tools></tool_response>"
+        return _render_tool_reference_list(content, tools, _literal_spans, _offset)
     if _is_output_entry_list(content):
         # 分支 C: 聚合 entry 列表,逐 entry 渲染(官方只探 content[0];后续 entry 缺
         # output 键时抛 KeyError 走脏数据丢弃,见模块 docstring 第 8 条)。
