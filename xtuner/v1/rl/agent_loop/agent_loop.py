@@ -25,6 +25,7 @@ from xtuner.v1.rl.utils import (
     create_task,
     register_cpu_resources,
 )
+from xtuner.v1.rl.utils.async_utils import gather_cleanup
 from xtuner.v1.utils import get_logger, ray_method
 from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
 
@@ -322,6 +323,13 @@ class AgentLoop(ABC):
         finally:
             await cancel_and_drain([pause_task])
 
+    async def close(self) -> None:
+        """Release loop-owned resources during framework shutdown.
+
+        Resource-owning loops should stop admission, drain active work and close their clients here. Implementations
+        must tolerate repeated calls and bound external I/O. Loops without persistent resources need no override.
+        """
+
     async def pause(self) -> None:
         self._judger_pause_event.set()
         try:
@@ -370,6 +378,9 @@ class RouterAgentLoop:
 
     def get_worker_status(self) -> dict[str, int]:
         return {str(worker): load for worker, load in self._worker_loads.items()}
+
+    async def close(self) -> None:
+        await close_agent_loops(list(self.workers))
 
     async def pause(self) -> None:
         await asyncio.gather(
@@ -428,6 +439,10 @@ class AgentLoopActor:
         return self.agent_loop.rollout_ctl
 
     @ray_method
+    async def close(self) -> None:
+        await self.agent_loop.close()
+
+    @ray_method
     async def pause(self) -> None:
         return await self.agent_loop.pause()
 
@@ -442,3 +457,19 @@ RayAgentLoop = cast(
 )
 RayAgentLoopProxy: TypeAlias = ActorProxy[AgentLoopActor]
 AgentLoopSpec: TypeAlias = AgentLoop | RayAgentLoopProxy | RouterAgentLoop
+
+
+async def _close_agent_loop(agent_loop: AgentLoopSpec) -> None:
+    """Close a loop locally or on its owning Ray actor."""
+    method = getattr(agent_loop, "close", None)
+    if method is not None:
+        if isinstance(agent_loop, ray.actor.ActorHandle):
+            await method.remote()
+        else:
+            await method()
+
+
+async def close_agent_loops(loops: list[AgentLoopSpec]) -> None:
+    """Close every owner even when another owner fails to release resources."""
+    owners = {id(loop): loop for loop in loops}
+    await gather_cleanup((_close_agent_loop(loop) for loop in owners.values()), "Agent loop cleanup failed")
