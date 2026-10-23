@@ -65,7 +65,7 @@ class Dense(BaseModel):
         self.embed_tokens = self.build_embeddings(config)
 
         # Make sure it works properly when not using fsdp
-        if config.tie_word_embeddings and config.head_type != "value_head":
+        if config.tie_head:
             self.lm_head.weight = self.embed_tokens.weight
 
         # TODO(@yehaochen): 把这两行移除 _maybe_compile_layers 要把 compile 相关的 setting 放到 fsdp_config 之外
@@ -221,11 +221,7 @@ class Dense(BaseModel):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
-        if self.config.head_type == "value_head":
-            head_fp32 = self.fsdp_config.fp32_value_head
-        else:
-            head_fp32 = self.fsdp_config.fp32_lm_head
-        if head_fp32:
+        if self.config.head_fp32(self.fsdp_config):
             head_mp_policy = MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32)
         else:
             head_mp_policy = mp_policy
@@ -267,11 +263,7 @@ class Dense(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=(
-                head_mp_policy
-                if self.config.tie_word_embeddings and self.config.head_type != "value_head"
-                else mp_policy
-            ),
+            mp_policy=(head_mp_policy if self.config.tie_head else mp_policy),
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.embed_tokens,
@@ -305,7 +297,7 @@ class Dense(BaseModel):
         self._to_empty_meta()
 
         # Make sure it works properly when using fsdp
-        if self.config.tie_word_embeddings and self.config.head_type != "value_head":
+        if self.config.tie_head:
             self.lm_head.weight = self.embed_tokens.weight
         return self
 

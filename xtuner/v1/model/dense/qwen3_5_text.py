@@ -15,7 +15,7 @@ class Qwen3_5_VLTextDense(Qwen3VLTextDense):
         # Emit the standalone language-model layout (``model.<...>``). The VLM nesting
         # under ``model.language_model.`` is applied by the config's ``hf_key_mapping``
         # so this tower stays unaware of how it is composed into the VLM.
-        if self.config.tie_word_embeddings and "lm_head" in key:
+        if self.config.tie_head and "lm_head" in key:
             key = key.replace("lm_head", "embed_tokens")
 
         if "layers" in key:
