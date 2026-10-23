@@ -4,6 +4,7 @@ from typing import Any, cast
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from pydantic import model_validator
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.nn.functional import all_reduce
 
@@ -22,6 +23,9 @@ class CriticLossConfig(BaseLossConfig):
     BaseRLLossConfig. It is used by ValueHead, not the language-model
     vocabulary head.
 
+    Only mode="eager" is supported: the value head output is 1-dim and
+    needs no chunking. Setting mode="chunk" raises a validation error.
+
     Args:
         cliprange_value (float): Clip range applied to the difference between
             the current value and old_values. Defaults to 0.2.
@@ -29,6 +33,14 @@ class CriticLossConfig(BaseLossConfig):
     """
 
     cliprange_value: float = 0.2
+
+    @model_validator(mode="after")
+    def _reject_chunk_mode(self):
+        if self.mode != "eager":
+            raise ValueError(
+                "CriticLossConfig only supports mode='eager'; the value head output is 1-dim and needs no chunking"
+            )
+        return self
 
     @property
     def loss_ctx_cls(self) -> type["CriticLossContext"]:
