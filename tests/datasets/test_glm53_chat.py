@@ -8,6 +8,8 @@ TestGlm53Rendering
 TestGlm53OfficialTemplateContract
     test_render_matches_official_jinja          逐字符对齐官方 jinja
     test_mid_conversation_boundaries_use_their_actual_occurrence  对话中间无 EOS、边界 token loss 正确
+TestGlm53MediaMessages
+    媒体拉平视图 glm53_media_messages：真实 role、tool_reference 形态（B/C1）跳过
 """
 
 import os
@@ -16,7 +18,12 @@ import pytest
 
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.messages import Glm53ChatMessages
-from xtuner.v1.data_proto.messages.glm53_chat import glm53_tokenize_fn_slowspeed, render_glm53_chat, sort_tool_messages
+from xtuner.v1.data_proto.messages.glm53_chat import (
+    glm53_media_messages,
+    glm53_tokenize_fn_slowspeed,
+    render_glm53_chat,
+    sort_tool_messages,
+)
 
 
 GLM_5_3_FLASH_PATH = os.environ["GLM_5_3_FLASH_PATH"]
@@ -30,6 +37,7 @@ _TOOL_CALLS = [
     {"function": {"arguments": {}, "name": "a"}, "id": "a", "type": "function"},
     {"function": {"arguments": {}, "name": "b"}, "id": "b", "type": "function"},
 ]
+_IMAGE_PART = {"type": "image", "image": {"url": "unused.jpg", "image_wh": [112, 112]}}
 
 _CONTRACT_CASES = {
     # content 列表混排纯字符串与 text 字典（jinja 均按文本渲染）。
@@ -76,6 +84,46 @@ _CONTRACT_CASES = {
         ],
         "tools": _TOOLS,
     },
+    # 结构化 output 渲染可见文本，而不是 Python 字符串化。
+    "tool_structured_text": {
+        "messages": [
+            {"role": "tool", "content": [{"output": [{"type": "text", "text": "done"}]}]},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ]
+    },
+    # output 内嵌套的 tool_reference 展开匹配的工具定义。
+    "tool_nested_reference": {
+        "messages": [
+            {"role": "tool", "content": [{"output": [{"type": "tool_reference", "name": "a"}]}]},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ],
+        "tools": _TOOLS,
+    },
+    # content 整体是 tool_reference 列表：官方 render_tool_response 的独立分支
+    # （jinja:81-82，优先于 is_list_of_outputs 判定），展开匹配的工具定义。
+    "tool_reference_content": {
+        "messages": [
+            {"role": "tool", "content": [{"type": "tool_reference", "name": "a"}], "tool_call_id": "a"},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ],
+        "tools": _TOOLS,
+    },
+    # tool 角色的顶层/嵌套媒体渲染为三段式标记（渲染层；数据层能否加载另说）。
+    "tool_image_probe": {
+        "messages": [
+            {"role": "user", "content": "USER_INPUT"},
+            {"role": "assistant", "content": "", "tool_calls": [_TOOL_CALLS[0]]},
+            {"role": "tool", "content": [_IMAGE_PART], "tool_call_id": "a"},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ],
+        "tools": _TOOLS,
+    },
+    "tool_nested_image_probe": {
+        "messages": [
+            {"role": "tool", "content": [{"output": [_IMAGE_PART]}]},
+            {"role": "assistant", "content": "ASSISTANT_ANSWER"},
+        ]
+    },
 }
 
 # can_sort 前提被破坏时，官方模板回退为消息顺序；这些样例与上面的排序样例互为对照。
@@ -102,6 +150,38 @@ _FALLBACK_CASES = {
         "messages": [
             {"role": "user", "content": "hi"},
             {"role": "tool", "content": "B", "tool_call_id": "b"},
+            {"role": "tool", "content": "A", "tool_call_id": "a"},
+            {"role": "assistant", "content": "done"},
+        ],
+        "tools": _TOOLS,
+    },
+    # 结果消息缺 id（jinja:190 的 not eid 分支）。
+    "missing_result_id": {
+        "messages": [
+            {"role": "assistant", "content": "", "tool_calls": _TOOL_CALLS},
+            {"role": "tool", "content": "B"},
+            {"role": "tool", "content": "A", "tool_call_id": "a"},
+            {"role": "assistant", "content": "done"},
+        ],
+        "tools": _TOOLS,
+    },
+    # tool_call 缺 id（jinja:211 的 not tc_id 分支）。
+    "missing_tool_call_id": {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"function": {"arguments": {}, "name": "a"}, "type": "function"}],
+            },
+            {"role": "tool", "content": "A", "tool_call_id": "a"},
+            {"role": "assistant", "content": "done"},
+        ],
+        "tools": _TOOLS,
+    },
+    # tool_call id 重复（jinja:214-218 的重复检测分支）。
+    "dup_tool_call_id": {
+        "messages": [
+            {"role": "assistant", "content": "", "tool_calls": [_TOOL_CALLS[0], _TOOL_CALLS[0]]},
             {"role": "tool", "content": "A", "tool_call_id": "a"},
             {"role": "assistant", "content": "done"},
         ],
@@ -205,6 +285,22 @@ class TestGlm53Rendering:
             Glm53ChatMessages(messages=messages).tokenize(tokenizer, enable_thinking=False)
         with pytest.raises(AssertionError, match="enable_thinking"):
             glm53_tokenize_fn_slowspeed(tokenizer, messages, enable_thinking=False)
+
+    def test_string_tool_call_arguments_rejected(self):
+        # arguments 必须是对象；未解析的 JSON 字符串抛带修复提示的 ValueError（落入数据管线
+        # 脏样本错误集合，走丢弃通道），而不是 glm52 渲染器深处的 AttributeError 裸崩。
+        messages = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"function": {"name": "a", "arguments": '{"city": "beijing"}'}, "id": "a", "type": "function"}
+                ],
+            },
+        ]
+        with pytest.raises(ValueError, match="Parse JSON strings before tokenization"):
+            render_glm53_chat(messages, **GLM53_TEMPLATE_DEFAULTS)
 
     def test_all_generation_eos_are_supervised_at_assistant_boundaries(self, tokenizer):
         # 助手轮边界上的停止 token 必须计入 loss，否则模型学不会停。
@@ -412,3 +508,42 @@ class TestGlm53OfficialTemplateContract:
             # start 处的 <|observation|> 是前一条 assistant 的停止目标（计入其 loss）；
             # 其后的 tool 结果内容完全不监督。
             assert all(label == -100 for label in tokenized["labels"][start + 1 : end])
+
+
+class TestGlm53MediaMessages:
+    def test_real_roles_and_entry_order(self):
+        # 合成消息保留来源消息的真实 role；聚合 entry 按 tool_calls 序拉平，C1 被跳过。
+        user_image = {"type": "image_url", "image_url": {"url": "u1.jpg"}}
+        tool_image = {"type": "image_url", "image_url": {"url": "b.jpg"}}
+        messages = [
+            {"role": "user", "content": [user_image]},
+            {"role": "assistant", "content": "", "tool_calls": _TOOL_CALLS},
+            {
+                "role": "tool",
+                "content": [
+                    {"id": "b", "output": [{"type": "text", "text": "B"}, tool_image]},
+                    {"id": "a", "output": [{"type": "tool_reference", "name": "a"}]},
+                ],
+            },
+        ]
+        assert glm53_media_messages(messages) == [
+            {"role": "user", "content": [user_image]},
+            {"role": "tool", "content": [tool_image]},
+        ]
+
+    def test_tool_reference_content_skipped(self):
+        # 形态 B：content 整体是 tool_reference 列表，渲染为工具 schema、无媒体，不产生合成消息。
+        messages = [
+            {"role": "assistant", "content": "", "tool_calls": [_TOOL_CALLS[0]]},
+            {"role": "tool", "tool_call_id": "a", "content": [{"type": "tool_reference", "name": "a"}]},
+        ]
+        assert glm53_media_messages(messages) == []
+
+    def test_plain_tool_message_keeps_tool_role(self):
+        # 形态 D：分散形态 tool 消息的媒体同样保留 "tool" role。
+        image = {"type": "image_url", "image_url": {"url": "t.jpg"}}
+        messages = [
+            {"role": "assistant", "content": "", "tool_calls": [_TOOL_CALLS[0]]},
+            {"role": "tool", "tool_call_id": "a", "content": [{"type": "text", "text": "R"}, image]},
+        ]
+        assert glm53_media_messages(messages) == [{"role": "tool", "content": [image]}]
