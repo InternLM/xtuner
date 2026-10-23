@@ -84,12 +84,13 @@ _MEDIA_PLACEHOLDER = {
 
 
 # tool 消息 content 的形态谱系，对应官方 render_tool_response 宏的四个分支
-# （chat_template.jinja:78-94，排序/拉平/渲染三处的分支注释共用这套编号）：
+# （chat_template.jinja:78-94，排序/拉平/渲染三处的分支注释共用这套编号；判定均按
+# 首元素探测，与官方一致）：
 #   A. 纯字符串
 #   B. tool_reference 列表（整体），渲染为工具 schema、无媒体
 #   C. 聚合 entry 列表（官方 is_list_of_outputs）：entry.output 再分
-#      C1. tool_reference 列表（渲染为 schema、无媒体）/ C2. 字符串或 part 列表
-#   D. part 列表（text/媒体/纯字符串混排）
+#      C1. tool_reference 列表（渲染为 schema、无媒体）/ C2. 其余 output（else 兜底，经 visible_text）
+#   D. 其余 content（else 兜底，经 visible_text；part 列表里的媒体发 marker，非标量 str() 化）
 # 运行时判定便宜的写成 TypeGuard；形状已由 guard 确定的位置直接 cast，不重复运行时校验。
 
 
