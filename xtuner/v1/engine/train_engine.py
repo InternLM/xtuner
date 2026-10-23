@@ -15,6 +15,7 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from safetensors import safe_open
+from torch.distributed.checkpoint.planner import LoadPlan
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
@@ -62,6 +63,33 @@ DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
 threading_lock = threading.Lock()
+
+
+def _validate_optimizer_checkpoint_shapes(optimizer_state_dict, metadata) -> None:
+    # DCP can read overlapping regions when the saved global shape is smaller.
+    # That is unsafe for optimizer moments: older SwapAdamW checkpoints lost
+    # all but one local shard and cannot be recovered as full training state.
+    for name, state in optimizer_state_dict["state"].items():
+        for key, value in state.items():
+            if not isinstance(value, torch.Tensor):
+                continue
+            fqn = f"optimizer.state.{name}.{key}"
+            saved = metadata.state_dict_metadata.get(fqn)
+            if saved is not None and hasattr(saved, "size") and saved.size != value.shape:
+                raise ValueError(
+                    f"Incomplete or incompatible optimizer checkpoint: {fqn} has global shape "
+                    f"{tuple(saved.size)}, expected {tuple(value.shape)}. "
+                    "Do not resume optimizer state from a checkpoint that lost distributed shards."
+                )
+
+
+class _OptimizerShapeLoadPlanner(InterleavedShardLoadPlanner):
+    def create_local_plan(self) -> LoadPlan:
+        # DCP has already read metadata on each rank. Validate before planning
+        # tensor reads, without opening and unpickling .metadata a second time.
+        assert self.metadata is not None
+        _validate_optimizer_checkpoint_shapes(self.original_state_dict["optimizer"], self.metadata)
+        return super().create_local_plan()
 
 
 class CPUThreadTaskCoordinator:
@@ -557,7 +585,7 @@ class TrainEngine:
             dcp.load(
                 state_dict=state_dict,
                 checkpoint_id=weights_dir,
-                planner=InterleavedShardLoadPlanner(),
+                planner=_OptimizerShapeLoadPlanner() if load_states else InterleavedShardLoadPlanner(),
             )
 
             set_model_state_dict(self.model, state_dict["model"], options=set_options)
