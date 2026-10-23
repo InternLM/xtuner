@@ -140,10 +140,12 @@ checkpoint_interval = 200
 
 # 1. resources: colocated Student workers; Teacher GPUs are reserved outside Ray.
 # Baseline 1x8: 2 Teacher GPUs + 6 Student GPUs. Prefer launcher-computed
-# XTUNER_RL_NUM_WORKERS when present (after Teacher placement).
+# XTUNER_RL_NUM_WORKERS when present (after Teacher placement). The launcher
+# clears the variable to an empty string while it discovers Teachers, so treat
+# empty as unset here.
 resources = AcceleratorResourcesConfig(
     accelerator="GPU",
-    num_workers=int(os.environ.get("XTUNER_RL_NUM_WORKERS", str(6 * NNODE))),
+    num_workers=int(os.environ.get("XTUNER_RL_NUM_WORKERS") or str(6 * NNODE)),
     num_cpus_per_worker=12,
     cpu_memory_per_worker=16 * 1024**3,  # 16 GB
 )
