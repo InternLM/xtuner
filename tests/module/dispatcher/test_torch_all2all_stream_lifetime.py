@@ -111,6 +111,11 @@ class TestAsyncAll2AllStreamLifetime:
         compute_stream.wait_event(finished)
         activation = output._get_acs_underlying_tensor()
         activation_ptr = activation.data_ptr()
+        # Warm up reduction allocations and autograd before the asynchronous window.
+        assert activation.sum().item() == hidden_states.numel()
+        anchor = torch.ones((), device="cuda", requires_grad=True)
+        anchor.clone().backward()
+        anchor.grad = None
         sums = []
 
         class SaveActivation(torch.autograd.Function):
@@ -127,7 +132,7 @@ class TestAsyncAll2AllStreamLifetime:
                 sums.append(value.sum())
                 return grad, None
 
-        loss = SaveActivation.apply(torch.ones((), device="cuda", requires_grad=True), activation)
+        loss = SaveActivation.apply(anchor, activation)
         del activation
         del output
         loss.backward()
