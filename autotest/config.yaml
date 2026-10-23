@@ -36,7 +36,424 @@ default_config:
                 - HF_HUB_OFFLINE=1
 
 case: 
-   
+    glm5-3-flash-sft-25B:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/glm53_25b.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                cpus_per_task: 120
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_GC_ENABLE=1
+                    - SWAP_OPTIMIZER=0
+                    - XTUNER_ACTIVATION_OFFLOAD=0
+                    - XTUNER_USE_CUTLASS_GROUP_GEMM=1
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: glm5-3-flash-sft-25B/tracker.jsonl
+                check_metrics:
+                    # MoE+parallel: late-step grad_norm has small denominator spikes; use p80.
+                    grad_norm:
+                        threshold: 0.35
+                        aggregate: 80
+                    loss/local_loss: 0.008
+                    loss/reduced_llm_loss: 0.008
+                    loss/reduced_mtp_loss:
+                        threshold: 0.015
+                        aggregate: 80
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 1500
+
+    glm5-3-flash-sft-25B-recompute:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/glm53_25b_recompute.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                cpus_per_task: 120
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_GC_ENABLE=1
+                    - SWAP_OPTIMIZER=0
+                    - XTUNER_ACTIVATION_OFFLOAD=0
+                    - XTUNER_DSA_TOPK_OFFLOAD=1
+                    - XTUNER_USE_CUTLASS_GROUP_GEMM=1
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: glm5-3-flash-sft-25B-recompute/tracker.jsonl
+                check_metrics:
+                    grad_norm:
+                        threshold: 0.35
+                        aggregate: 80
+                    loss/local_loss: 0.008
+                    loss/reduced_mtp_loss: 0.005
+                    loss/reduced_llm_loss: 0.008
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 1500
+
+    glm5-3-flash-sft-25B-mtp-fp8:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/glm53_25b_mtp_fp8.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                cpus_per_task: 120
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+            assert_info:
+                base_metric: glm5-3-flash-sft-25B-mtp-fp8/tracker.jsonl
+                check_metrics:
+                    grad_norm:
+                        threshold: 2.0
+                        aggregate: 80
+                    loss/local_loss: 0.01
+                    loss/reduced_llm_loss: 0.01
+                    # Shared MTP depth 4 + FP8 + square reduction.
+                    loss/reduced_mtp_loss:
+                        threshold: 0.03
+                        aggregate: 80
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.2
+                    runtime_info/text_tokens: 0
+            timeout: 1500
+
+    glm5-3-flash-sft-25B-sp2:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/glm53_25b_sp2.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                cpus_per_task: 120
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_ACTIVATION_OFFLOAD=0
+                    - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+            assert_info:
+                base_metric: glm5-3-flash-sft-25B-sp2/tracker.jsonl
+                check_metrics:
+                    grad_norm:
+                        threshold: 0.10
+                        aggregate: 80
+                    loss/local_loss: 0.005
+                    loss/reduced_llm_loss: 0.005
+                    loss/reduced_mtp_loss:
+                        threshold: 0.015
+                        aggregate: 80
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.20
+                    runtime_info/text_tokens: 0
+            timeout: 1500
+
+    glm5-3-flash-sft-25B-compile:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/glm53_25b_compile.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                cpus_per_task: 120
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_GC_ENABLE=1
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: glm5-3-flash-sft-25B-compile/tracker.jsonl
+                check_metrics:
+                    grad_norm:
+                        threshold: 0.35
+                        aggregate: 80
+                    loss/local_loss: 0.008
+                    loss/reduced_llm_loss: 0.008
+                    loss/reduced_mtp_loss:
+                        threshold: 0.015
+                        aggregate: 80
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.20
+                    runtime_info/text_tokens: 0
+            timeout: 2400
+
+    glm5-3-flash-sft-25B-ep8-sp2:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/glm53_25b_ep8_sp2.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 2
+                cpus_per_task: 80
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+            assert_info:
+                base_metric: glm5-3-flash-sft-25B-ep8-sp2/tracker.jsonl
+                check_metrics:
+                    grad_norm:
+                        threshold: 0.25
+                        aggregate: 80
+                    loss/local_loss: 0.005
+                    loss/reduced_llm_loss: 0.005
+                    loss/reduced_mtp_loss:
+                        threshold: 0.01
+                        aggregate: 80
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 1800
+
+    glm5-3-flash-sft-25B-vl:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/glm53_25b_vl.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                cpus_per_task: 80
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_ACTIVATION_OFFLOAD=0
+                    - XTUNER_GC_ENABLE=1
+            assert_info:
+                base_metric: glm5-3-flash-sft-25B-vl/tracker.jsonl
+                check_metrics:
+                    grad_norm:
+                        threshold: 0.35
+                        aggregate: 80
+                    loss/local_loss: 0.008
+                    loss/reduced_llm_loss: 0.008
+                    loss/reduced_mtp_loss:
+                        threshold: 0.015
+                        aggregate: 80
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 1800
+
+    glm5-3-flash-sft-25B-fp8-vl:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/glm53_25b_fp8_vl.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                cpus_per_task: 80
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+            assert_info:
+                base_metric: glm5-3-flash-sft-25B-fp8-vl/tracker.jsonl
+                check_metrics:
+                    grad_norm:
+                        threshold: 2.0
+                        aggregate: 80
+                    loss/local_loss: 0.01
+                    loss/reduced_llm_loss: 0.01
+                    loss/reduced_mtp_loss:
+                        threshold: 0.03
+                        aggregate: 80
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.2
+                    runtime_info/text_tokens: 0
+            timeout: 1800
+
+    glm5-3-flash-sft-25B-sp2-vl:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/glm53_25b_sp2_vl.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                cpus_per_task: 80
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+            assert_info:
+                base_metric: glm5-3-flash-sft-25B-sp2-vl/tracker.jsonl
+                check_metrics:
+                    grad_norm:
+                        threshold: 0.10
+                        aggregate: 80
+                    loss/local_loss: 0.005
+                    loss/reduced_llm_loss: 0.005
+                    loss/reduced_mtp_loss:
+                        threshold: 0.015
+                        aggregate: 80
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.20
+                    runtime_info/text_tokens: 0
+            timeout: 1800
+
+    glm5-3-flash-sft-25B-ep8-vl:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/glm53_25b_ep8_vl.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                cpus_per_task: 80
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - XTUNER_GC_ENABLE=1
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: glm5-3-flash-sft-25B-ep8-vl/tracker.jsonl
+                check_metrics:
+                    grad_norm:
+                        threshold: 0.25
+                        aggregate: 80
+                    loss/local_loss: 0.005
+                    loss/reduced_llm_loss: 0.005
+                    loss/reduced_mtp_loss:
+                        threshold: 0.01
+                        aggregate: 80
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 1800
+
+    glm5-3-flash-sft-25B-mtp-fp8-vl:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/glm53_25b_mtp_fp8_vl.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                cpus_per_task: 80
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+            assert_info:
+                base_metric: glm5-3-flash-sft-25B-mtp-fp8-vl/tracker.jsonl
+                check_metrics:
+                    grad_norm:
+                        threshold: 2.0
+                        aggregate: 80
+                    loss/local_loss: 0.01
+                    loss/reduced_llm_loss: 0.01
+                    loss/reduced_mtp_loss:
+                        threshold: 0.03
+                        aggregate: 80
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.2
+                    runtime_info/text_tokens: 0
+            timeout: 1800
+
+    glm5-3-flash-sft-25B-ep4-resume-vl:
+        -
+            type: sft
+            phase: first
+            parameters:
+                config: autotest/config/glm53_25b_ep4_resume_vl.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 2
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_GC_ENABLE=1
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+            assert_info:
+                base_metric: glm5-3-flash-sft-25B-ep4-resume-vl/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.08
+                    loss/local_loss: 0.001
+                    loss/reduced_llm_loss: 0.001
+                    loss/reduced_mtp_loss: 0.003
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 1800
+
+        -
+            type: sft
+            phase: resume
+            pre_action:
+                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output glm5-3-flash-sft-25B-ep4-resume-vl sft'
+            parameters:
+                config: autotest/config/glm53_25b_ep4_resume_vl.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 2
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_GC_ENABLE=1
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+            assert_info:
+                base_metric: glm5-3-flash-sft-25B-ep4-resume-vl/tracker-resume.jsonl
+                check_metrics:
+                    grad_norm: 0.08
+                    loss/local_loss: 0.001
+                    loss/reduced_llm_loss: 0.001
+                    loss/reduced_mtp_loss: 0.001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 1800   
     glm5-2-sft-30B-recompute:
         -
             type: sft
