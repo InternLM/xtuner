@@ -35,7 +35,12 @@ from transformers import AutoProcessor
 from transformers.models.glm5_next.image_processing_glm5_next import smart_resize as image_smart_resize
 from transformers.models.glm5_next.video_processing_glm5_next import smart_resize as video_smart_resize
 from transformers.video_utils import VideoMetadata
-from xtuner.v1.data_proto.messages.glm53_chat import _tokenize_with_loss_mask, render_glm53_chat, sort_tool_messages
+from xtuner.v1.data_proto.messages.glm53_chat import (
+    _tokenize_with_loss_mask,
+    glm53_media_messages,
+    render_glm53_chat,
+    sort_tool_messages,
+)
 from xtuner.v1.utils import get_logger
 
 from ..data_item import CacheItem, Glm53VLDataItem
@@ -44,6 +49,7 @@ from .base_mllm_tokenize_fn import (
     BaseMLLMTokenizeFnConfig,
     BaseMLLMTokenizeFunction,
     OSSLoaderConfig,
+    collect_image_video_paths_and_extra,
     get_image_path,
     load_image,
 )
@@ -221,6 +227,15 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         # 收集、与 marker 位置式配对。先拉平消息让收集顺序与渲染后的 marker 顺序一致。
         item = {**item, "messages": sort_tool_messages(item["messages"])}
         return super().__call__(item, media_root=media_root, **kwargs)
+
+    def _collect_media(self, item: dict):
+        # 渲染器为结构化 tool 输出（{"id": ..., "output": [...]} 条目）里嵌套的媒体同样发射
+        # placeholder marker，而基类收集器只看每条消息 content 的直接列表项，嵌套媒体会出现
+        # "渲染出 marker、却没有对应 payload" 的错配。glm53_media_messages 按渲染 marker 顺序
+        # 把所有媒体 part（含嵌套 output 内的）拉平成合成 user 消息，保证位置式配对不错位。
+        return collect_image_video_paths_and_extra(
+            glm53_media_messages(item["messages"]), allow_all_roles=self.allow_all_roles
+        )
 
     def _render_base(self, data_item: dict) -> tuple[str, list[bool]]:
         self._check_no_literal_visual_marker(data_item)

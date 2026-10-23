@@ -22,6 +22,7 @@ TestGlm53MediaRoleContract
     test_media_is_collected_from_all_roles           system/assistant/tool 角色的图片也会被收集
     test_media_collection_preserves_input_order     媒体按原始消息顺序收集，与 HF 一致
     test_tool_media_block_is_sorted_before_collection  逆序多媒体回归：tool 块先按 tool_calls 预排再收集
+    test_nested_tool_output_media_is_collected_in_tool_calls_order  嵌套 tool 输出媒体按 tool_calls 顺序收集（#2184 移植）
     test_string_content_parts_are_tolerated         content 列表混排纯字符串不崩溃
 TestGlm53DirtyDataDoesNotHalt
     test_bad_image_wh_is_discarded                  image_wh 形状非法：cache 丢弃、runtime 抛错
@@ -545,6 +546,48 @@ class TestGlm53MediaRoleContract:
         tokenize_fn.state = "cache"
         tokenize_fn(item)
         assert tokenize_fn._image_path == ["tool-a.jpg", "tool-b.jpg"]
+
+    def test_nested_tool_output_media_is_collected_in_tool_calls_order(
+        self, tokenize_fn: Glm53VLTokenizeFunction
+    ) -> None:
+        # 结构化 tool 输出（聚合 {"id": ..., "output": [...]} 条目）里嵌套的媒体：渲染层会为它们
+        # 发射 placeholder marker（与官方 jinja 一致），收集层必须递归进 output、按渲染 marker
+        # 顺序（tool_calls 顺序）提取 payload——否则 marker 已渲染却没有对应 payload，样本只能
+        # 被计数校验当脏数据丢弃（#2192 评审意见；收集实现移植自 #2184 的 glm53_media_messages）。
+        def image(url: str) -> dict:
+            return {"type": "image", "image": {"url": url, "image_wh": [448, 448]}}
+
+        item = {
+            "messages": [
+                {"role": "user", "content": "q"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"function": {"arguments": {}, "name": "a"}, "id": "a", "type": "function"},
+                        {"function": {"arguments": {}, "name": "b"}, "id": "b", "type": "function"},
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {"id": "b", "output": [{"type": "text", "text": "RESULT_B"}, image("nested-b.jpg")]},
+                        {"id": "a", "output": [{"type": "text", "text": "RESULT_A"}, image("nested-a.jpg")]},
+                    ],
+                },
+                {"role": "assistant", "content": "done"},
+            ]
+        }
+
+        image_paths, video_paths, extra = tokenize_fn._collect_media(item)
+        assert image_paths == ["nested-a.jpg", "nested-b.jpg"]
+        assert video_paths == []
+        assert extra["image_wh"] == [[448, 448], [448, 448]]
+
+        # 端到端：cache 路径不再因 "渲染出 marker、却没有 payload" 把该形态误丢弃。
+        tokenize_fn.state = "cache"
+        assert tokenize_fn(item)["num_tokens"] > 0
+        assert tokenize_fn._image_path == ["nested-a.jpg", "nested-b.jpg"]
 
     def test_string_content_parts_are_tolerated(self, tokenize_fn: Glm53VLTokenizeFunction) -> None:
         # content 列表允许纯字符串与 text 字典混排（官方 jinja 按文本原样渲染）；media collector

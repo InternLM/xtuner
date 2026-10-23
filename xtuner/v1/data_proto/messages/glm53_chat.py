@@ -233,6 +233,41 @@ def sort_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def glm53_media_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Lift every media part into flat ``{"role": "user", "content":
+    [media...]}`` messages, in rendered marker order, for media payload
+    collection.
+
+    The renderer emits a two-stage placeholder marker for media parts anywhere in the conversation --
+    including nested inside structured tool outputs (``{"id": ..., "output": [...]}`` entries) -- while
+    ``collect_image_video_paths_and_extra`` only sees the direct content parts of each message. Feeding it
+    this flattened view keeps payloads positionally paired with the rendered markers: tool blocks follow
+    the same can_sort ordering the template renders with (``sort_tool_messages``, idempotent on
+    pre-sorted input), each aggregated entry's ``output`` is lifted in entry order, and tool_reference
+    outputs (which render as tool schemas, not media) are skipped.
+    """
+    media_messages: List[Dict[str, Any]] = []
+    for message in sort_tool_messages(messages):
+        content = message.get("content", "")
+        if message.get("role") == "tool" and _is_list_of_outputs(message):
+            outputs = [entry["output"] for entry in content]
+        else:
+            outputs = [content]
+        for output in outputs:
+            if not isinstance(output, list):
+                continue
+            if output and isinstance(output[0], Mapping) and output[0].get("type") == "tool_reference":
+                continue
+            media = [
+                part
+                for part in output
+                if isinstance(part, Mapping) and part.get("type") in ("image", "image_url", "video", "video_url")
+            ]
+            if media:
+                media_messages.append({"role": "user", "content": media})
+    return media_messages
+
+
 def _render_tool_output(
     output: Any, tools: Optional[List[Dict[str, Any]]], _literal_spans=None, _offset: int = 0
 ) -> str:
