@@ -136,6 +136,7 @@ class AgentLoopManagerConfig(BaseModel):
         logger=None,
         sync_weights_interval: int = 1,
         rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
+        eval_mode: bool = False,
     ) -> AgentLoopManager:
         tasks = self.tasks if isinstance(self.tasks, list) else [self.tasks]
         if not tasks:
@@ -176,6 +177,7 @@ class AgentLoopManagerConfig(BaseModel):
             replay_buffer=replay_buffer,
             rollout_controller=rollout_controller,
             logger=logger,
+            eval_mode=eval_mode,
         )
 
 
@@ -197,6 +199,7 @@ class AgentLoopManager:
         replay_buffer: ReplayBuffer,
         rollout_controller: RolloutController,
         logger=None,
+        eval_mode: bool = False,
     ):
         if not task_runners:
             raise ValueError("AgentLoopManager requires at least one task runner.")
@@ -206,6 +209,7 @@ class AgentLoopManager:
         self.task_runners = task_runners
         self.replay_buffer = replay_buffer
         self._rollout_controller = rollout_controller
+        self.eval_mode = eval_mode
         self.data_sampler = (
             task_runners[0].sampler
             if len(task_runners) == 1
@@ -265,6 +269,7 @@ class AgentLoopManager:
                         stale_threshold=task.stale_threshold,
                         token_stale_threshold=task.token_stale_threshold,
                         expired_groups_retryable=task.expired_groups_retryable,
+                        eval_mode=self.eval_mode,
                     )
                 )
             )
@@ -290,6 +295,7 @@ class AgentLoopManager:
                     stale_threshold=task.stale_threshold,
                     token_stale_threshold=task.token_stale_threshold,
                     expired_groups_retryable=task.expired_groups_retryable,
+                    eval_mode=self.eval_mode,
                 )
             )
         result = await take_train_batch(
@@ -301,6 +307,7 @@ class AgentLoopManager:
             progress=local_progress,
             current_train_step=train_step,
             pause_time_s=pause_time_s,
+            drain_failed=self.eval_mode,
         )
         assert result.rollout_states, (
             "AgentLoopManager.produce_batch() must return non-empty rollout_states for colocated training. "

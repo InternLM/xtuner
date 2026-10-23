@@ -22,6 +22,7 @@ from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import (
     TaskSpecConfig,
 )
 from xtuner.v1.rl.agent_loop_manager.disagg_agent_loop_manager import (
+    AgentLoopManagerStatus,
     DisaggAgentLoopManager,
     DisaggAgentLoopManagerConfig,
     DisaggTaskSpecConfig,
@@ -33,6 +34,7 @@ from xtuner.v1.rl.agent_loop_manager.produce_utils import (
     _TaskRunner,
 )
 from xtuner.v1.rl.agent_loop_manager.producer import SyncProduceStrategyConfig
+from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
 from xtuner.v1.train.rl_trainer import _migrate_legacy_is_valid_sample_fn
 
 
@@ -449,6 +451,39 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy_a.cleanup_expired_groups_retryable, [True])
         self.assertEqual(strategy_b.called_expired_groups_retryable, [False])
         self.assertEqual(strategy_b.cleanup_expired_groups_retryable, [False])
+
+    async def test_disagg_eval_delivers_all_failed_batch(self):
+        for expired in (False, True):
+            with self.subTest(expired=expired):
+                replay_buffer = AsyncReplayBufferConfig().build()
+                failed = RolloutState(
+                    rollout_id=1,
+                    group_id=1,
+                    message=[{"role": "user", "content": "test"}],
+                    status=Status.FAILED,
+                    reward=None,
+                    error_msg="sandbox unavailable",
+                )
+                await replay_buffer.put([failed], "eval")
+                manager = DisaggAgentLoopManager(
+                    task_runners=[
+                        _TaskRunner(
+                            task_name="eval",
+                            agent_loop=_fake_agent_loop(),
+                            produce_strategy=DisaggAsyncProduceStrategyConfig().build(),
+                            sampler=_FakeSampler(),
+                        )
+                    ],
+                    replay_buffer=replay_buffer,
+                    rollout_controller=_fake_rollout_controller(),
+                    eval_mode=True,
+                )
+                if expired:
+                    manager._status = AgentLoopManagerStatus.EXPIRED_BATCH
+                result = await asyncio.wait_for(manager.get_batch(batch_size=1, train_step=1), timeout=2.0)
+                self.assertEqual(result.rollout_states, [[failed]])
+                self.assertEqual(manager._produce_progress.consumed_samples["eval"], 1)
+                self.assertEqual(await replay_buffer.count("eval", Status.FAILED), 0)
 
     async def test_disagg_get_batch_aggregates_multi_task_results_without_colocate_surface(self):
         # 非共卡 get_batch 使用后台 progress 消费 replay buffer，不依赖共卡 produce_batch 继承面。

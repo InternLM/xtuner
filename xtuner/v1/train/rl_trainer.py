@@ -819,7 +819,8 @@ class BaseRLTrainer:
 
         if self._enable_evaluate:
             assert cfg.eval_agent_loop_manager_cfg is not None
-            # 评测始终走一次同步 rollout。
+            # 评测始终走一次同步 rollout。eval_mode 让失败组以真实状态交付给 evaluator，
+            # 而不是被静默丢弃或以 0 分混入 accuracy。
             self.eval_agent_loop_manager = cast(
                 AgentLoopManager,
                 cfg.eval_agent_loop_manager_cfg.build(
@@ -829,6 +830,7 @@ class BaseRLTrainer:
                     logger=self.logger,
                     sync_weights_interval=cfg.sync_weights_interval,
                     rollout_teacher_scorer_config=None,
+                    eval_mode=True,
                 ),
             )
 

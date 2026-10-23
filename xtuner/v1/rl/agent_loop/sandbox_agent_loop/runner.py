@@ -12,6 +12,7 @@ lagent-style runner config (``dict(type=Runner, ...)``), plus
 
 from __future__ import annotations
 
+import math
 import time
 import traceback
 from copy import deepcopy
@@ -121,6 +122,8 @@ class Runner:
                     )
                     score = float(await self.validate.run(item, pool, validate_record))
                 t_validate = time.monotonic() - t2
+                if not math.isfinite(score):
+                    raise ValueError("Verifier returned a non-finite score")
                 item.reward = score
 
                 item.status = RolloutStatus.COMPLETED

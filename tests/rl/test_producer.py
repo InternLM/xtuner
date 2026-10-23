@@ -35,7 +35,8 @@ from xtuner.v1.rl.agent_loop_manager import (
     SamplerConfig,
     SyncProduceStrategyConfig,
 )
-from xtuner.v1.rl.agent_loop_manager.produce_utils import _TaskRunner, build_produce_batch_result
+from xtuner.v1.rl.agent_loop_manager.produce_utils import _TaskRunner, build_produce_batch_result, take_train_batch
+from xtuner.v1.rl.evaluator import Evaluator
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
 
 
@@ -463,6 +464,160 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             pause_time_s=0.0,
         )
         self.assertEqual(result.filtered_samples, 2)
+
+    async def test_put_generated_group_eval_delivers_failed_groups(self):
+        # eval 模式下 FAILED 组以真实状态进入 replay buffer 并计入交付；
+        # 训练模式照旧丢弃且不落库。
+        task_name = "test_eval_failed_delivery"
+        strategy = SyncProduceStrategyConfig().build()
+
+        def build_ctx(eval_mode):
+            ctx = self._build_context(
+                strategy,
+                task_name,
+                self._build_agent_loop(),
+                self._build_sampler(),
+                batch_size=1,
+            )
+            ctx.eval_mode = eval_mode
+            return ctx
+
+        self.assertFalse(
+            await build_ctx(eval_mode=False).put_generated_group([make_rollout_state(1, status=Status.FAILED)])
+        )
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.FAILED), 0)
+
+        failed_group = [make_rollout_state(2, status=Status.FAILED), make_rollout_state(3, status=Status.FAILED)]
+        self.assertTrue(await build_ctx(eval_mode=True).put_generated_group(failed_group))
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.FAILED), 1)
+        self.assertTrue(all(item.status == Status.FAILED for item in failed_group))
+
+    async def test_take_train_batch_drains_failed_groups_for_eval(self):
+        # 评测读取补齐 FAILED 组：eval batch 同时拿到 COMPLETED 与 FAILED 组，
+        # 训练读取（drain_failed=False）只拿 COMPLETED。
+        task_name = "test_eval_drain_failed"
+        strategy = SyncProduceStrategyConfig().build()
+        ctx = self._build_context(
+            strategy,
+            task_name,
+            self._build_agent_loop(),
+            self._build_sampler(),
+            batch_size=2,
+        )
+        completed_group = [make_rollout_state(1, status=Status.COMPLETED, reward_score=0.5)]
+        failed_group = [make_rollout_state(2, status=Status.FAILED), make_rollout_state(3, status=Status.FAILED)]
+        self.assertTrue(await ctx.put_generated_group(completed_group))
+        ctx.eval_mode = True
+        self.assertTrue(await ctx.put_generated_group(failed_group))
+
+        task_runner = _TaskRunner(
+            task_name=task_name,
+            agent_loop=self._build_agent_loop(),
+            produce_strategy=strategy,
+            sampler=self._build_sampler(),
+        )
+
+        async def take(drain_failed):
+            return await take_train_batch(
+                task_runners=[task_runner],
+                replay_buffer=self.replay_buffer,
+                logger=MagicMock(),
+                manager_name="test",
+                task_batch_sizes={task_name: 2},
+                progress=self._build_progress(task_name, target=2),
+                current_train_step=0,
+                drain_failed=drain_failed,
+            )
+
+        eval_result = await take(drain_failed=True)
+        self.assertEqual(len(eval_result.rollout_states), 2)
+        statuses = {group[0].status for group in eval_result.rollout_states}
+        self.assertEqual(statuses, {Status.COMPLETED, Status.FAILED})
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.FAILED), 0)
+
+        # 训练读取（drain_failed=False）：新放入 COMPLETED + FAILED 各一组，只交付 COMPLETED，
+        # FAILED 组留在 buffer。
+        self.assertTrue(
+            await ctx.put_generated_group([make_rollout_state(5, status=Status.COMPLETED, reward_score=0.5)])
+        )
+        self.assertTrue(await ctx.put_generated_group([make_rollout_state(4, status=Status.FAILED)]))
+        train_result = await take(drain_failed=False)
+        statuses = {group[0].status for group in train_result.rollout_states}
+        self.assertEqual(statuses, {Status.COMPLETED})
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.FAILED), 1)
+
+    async def test_eval_producers_count_failed_attempts_without_oversampling(self):
+        # Exercise real production and consumption, including the configured
+        # oversampling that must only apply to training. Repeat the window to
+        # catch failed attempts leaking into a later evaluation.
+        for config in (
+            SyncProduceStrategyConfig(),
+            AsyncProduceStrategyConfig(over_sample_threshold=1.0),
+            AsyncProduceStrategyConfig(over_sample_threshold=1.0, max_pending_tasks=1),
+            DisaggAsyncProduceStrategyConfig(over_sample_threshold=1.0),
+        ):
+            for all_failed in (True, False):
+                with self.subTest(strategy=type(config).__name__, all_failed=all_failed):
+                    self.setUp()
+                    strategy = config.build()
+                    sampler = self._build_sampler()
+                    agent_loop = self._build_agent_loop()
+                    attempted_ids = []
+
+                    async def generate(group, **kwargs):
+                        await asyncio.sleep(0.001)
+                        attempted_ids.append(group[0].group_id)
+                        for state in group:
+                            failed = all_failed or state.group_id % 2 == 0
+                            state.status = Status.FAILED if failed else Status.COMPLETED
+                            state.reward = None if failed else {"score": 1.0}
+                        return group
+
+                    agent_loop.generate_group = generate
+                    task = _TaskRunner(
+                        task_name="eval", agent_loop=agent_loop, produce_strategy=strategy, sampler=sampler
+                    )
+                    for window in range(2):
+                        build_context = (
+                            self._build_disagg_context
+                            if isinstance(config, DisaggAsyncProduceStrategyConfig)
+                            else self._build_context
+                        )
+                        ctx = build_context(strategy, "eval", agent_loop, sampler, batch_size=2)
+                        ctx.eval_mode = True
+                        try:
+                            await asyncio.wait_for(strategy.produce_batch(ctx), timeout=2.0)
+                        finally:
+                            await strategy.pause_produce(ctx)
+                        result = await take_train_batch(
+                            task_runners=[task],
+                            replay_buffer=self.replay_buffer,
+                            logger=MagicMock(),
+                            manager_name="eval",
+                            task_batch_sizes={"eval": 2},
+                            progress=ctx.progress,
+                            current_train_step=0,
+                            drain_failed=True,
+                        )
+                        states = [state for group in result.rollout_states for state in group]
+                        self.assertEqual({state.group_id for state in states}, {2 * window, 2 * window + 1})
+                        self.assertEqual(len(states), 2)
+                        metrics = Evaluator().run(result.rollout_states)
+                        self.assertEqual(metrics["eval_failed_ratio"], 1.0 if all_failed else 0.5)
+                        self.assertEqual(metrics["accuracy"], 0.0 if all_failed else 1.0)
+                        self.assertEqual(await self.replay_buffer.count("eval", Status.FAILED), 0)
+                        self.assertEqual(await self.replay_buffer.count("eval", Status.COMPLETED), 0)
+                        self.assertEqual(sorted(attempted_ids), list(range(2 * (window + 1))))
+
+    async def test_sync_eval_uses_already_buffered_attempts(self):
+        strategy = SyncProduceStrategyConfig().build()
+        agent_loop = self._build_agent_loop()
+        agent_loop.generate_group = AsyncMock(side_effect=AssertionError("Unexpected extra evaluation attempt"))
+        ctx = self._build_context(strategy, "eval", agent_loop, self._build_sampler(), batch_size=1)
+        ctx.eval_mode = True
+        await ctx.put_generated_group([make_rollout_state(99, status=Status.FAILED)])
+        await strategy.produce_batch(ctx)
+        self.assertEqual(await self.replay_buffer.count("eval", Status.FAILED), 1)
 
     async def test_sync_produce_strategy(self):
         # 验证同步生产策略会生产指定数量的 completed rollout group 并写入 replay buffer。

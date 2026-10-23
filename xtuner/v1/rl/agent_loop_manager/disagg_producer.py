@@ -221,7 +221,7 @@ class DisaggProduceContext(BaseProduceContext):
         return self.update_event.is_set()
 
     async def available_count(self) -> int:
-        completed_count = await self.replay_buffer.count(task_name=self.task_name, group_status=Status.COMPLETED)
+        completed_count = await self.available_group_count()
         return self.progress.consumed_samples[self.task_name] + completed_count
 
 
@@ -414,7 +414,9 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
 
         # normal 使用固定超发预算；tail-batch 只补必要缺口。
         total_target = ctx.total_target
-        oversample_budget = 0 if tail_batch_triggered else math.ceil(self.over_sample_threshold * ctx.task_batch_size)
+        oversample_budget = (
+            0 if ctx.eval_mode or tail_batch_triggered else math.ceil(self.over_sample_threshold * ctx.task_batch_size)
+        )
         scheduled_target = total_target + oversample_budget
         logger.info(
             f"Starting produce_batch for task {ctx.task_name} with total_target={total_target}, "

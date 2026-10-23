@@ -7,5 +7,6 @@ Reinforcement Learning
    model.md
    dataset.md
    rl_trainer.md
+   ../task_results.md
    loss.md
    on_policy_distillation.md

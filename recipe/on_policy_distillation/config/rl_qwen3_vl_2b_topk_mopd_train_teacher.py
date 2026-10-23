@@ -1,4 +1,5 @@
-"""Qwen3-VL-2B multi-teacher Top-K OPD e2e (training-engine Teachers, 50 steps).
+"""Qwen3-VL-2B multi-teacher Top-K OPD e2e (training-engine Teachers, 50
+steps).
 
 Same models / data / training shape as the sampled-token mopd e2e, but Teacher
 targets come from frozen FSDP Teachers inside each TrainingWorker
@@ -41,6 +42,7 @@ from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLQwen3VLTokenizeFnConfig
 from xtuner.v1.model import Qwen3Dense4BConfig, Qwen3VLDense2BConfig, Qwen3VLDense4BConfig
+from xtuner.v1.module.rope import RopeParametersConfig
 from xtuner.v1.rl.advantage import GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.agent_loop_manager import (
@@ -60,7 +62,6 @@ from xtuner.v1.rl.utils import (
     AcceleratorResourcesConfig,
     CPUResourcesConfig,
 )
-from xtuner.v1.module.rope import RopeParametersConfig
 from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
 
 
@@ -84,7 +85,8 @@ EVAL_DATA_SOURCE_TAGS = {
 
 
 def mopd_compute_metric(samples):
-    """Emit per-source accuracy so TensorBoard logs eval/gsm8k/acc, eval/geo3k/acc."""
+    """Emit per-source accuracy so TensorBoard logs eval/gsm8k/acc,
+    eval/geo3k/acc."""
     scores_by_source = {data_source: [] for data_source in EVAL_DATA_SOURCE_TAGS}
     for sample in samples:
         data_source = sample.extra_fields.get("origin_data_source")
@@ -96,14 +98,15 @@ def mopd_compute_metric(samples):
             raise ValueError(f"Missing reward score for evaluation data source: {data_source!r}")
         scores_by_source[data_source].append(float(reward["score"]))
 
-    missing_sources = [data_source for data_source, scores in scores_by_source.items() if not scores]
-    if missing_sources:
-        raise ValueError(f"Missing evaluation samples for data sources: {missing_sources}")
-
+    # The evaluator omits unscored attempts and reports their share separately.
+    # A source may have no valid scores; omit that source's metric instead of
+    # turning infrastructure failures into task scores or aborting evaluation.
     all_scores = [score for scores in scores_by_source.values() for score in scores]
-    metrics = {"score": sum(all_scores) / len(all_scores)}
+    metrics = {"score": sum(all_scores) / len(all_scores)} if all_scores else {}
     for data_source, tag in EVAL_DATA_SOURCE_TAGS.items():
         source_scores = scores_by_source[data_source]
+        if not source_scores:
+            continue
         metrics[f"{tag}/acc"] = sum(source_scores) / len(source_scores)
     return metrics
 

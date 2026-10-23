@@ -116,7 +116,7 @@ class ProduceContext(BaseProduceContext):
         return self.progress.target_samples[self.task_name]
 
     async def completed_count(self) -> int:
-        return await self.replay_buffer.count(task_name=self.task_name, group_status=Status.COMPLETED)
+        return await self.available_group_count()
 
 
 class ProduceStrategyConfig(ABC, BaseModel):
@@ -279,9 +279,9 @@ class ProduceStrategy(ABC):
 class SyncProduceStrategy(ProduceStrategy):
     async def produce_batch(self, ctx: ProduceContext) -> None:
         pending_tasks = set()
-        completed_sample_count = await ctx.replay_buffer.count(task_name=ctx.task_name, group_status=Status.COMPLETED)
+        completed_sample_count = await ctx.available_group_count()
 
-        for _ in range(ctx.task_batch_size):
+        for _ in range(max(0, ctx.task_batch_size - completed_sample_count)):
             rollout_state = await ctx.sampler.sample(task_name=ctx.task_name)
             task = create_task(ctx.generate_group(rollout_state))
             pending_tasks.add(task)
@@ -395,7 +395,9 @@ class AsyncProduceStrategy(ProduceStrategy):
 
         # normal 使用固定超发预算；tail-batch 只补必要缺口。
         batch_target = ctx.batch_target
-        oversample_budget = 0 if tail_batch_triggered else math.ceil(self.over_sample_threshold * ctx.task_batch_size)
+        oversample_budget = (
+            0 if ctx.eval_mode or tail_batch_triggered else math.ceil(self.over_sample_threshold * ctx.task_batch_size)
+        )
         scheduled_target = batch_target + oversample_budget
         logger.info(
             f"Starting produce_batch for task {ctx.task_name} with batch_target={batch_target}, "
