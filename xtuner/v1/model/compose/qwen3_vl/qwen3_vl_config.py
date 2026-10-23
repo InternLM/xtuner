@@ -6,7 +6,11 @@ from pydantic import ConfigDict
 from typing_extensions import Self
 
 from xtuner.v1.model.base import TransformerConfig, XTunerBaseModelConfig
-from xtuner.v1.model.dense.qwen3vl_text import Qwen3VLTextDense4BConfig, Qwen3VLTextDense8BConfig
+from xtuner.v1.model.dense.qwen3vl_text import (
+    Qwen3VLTextDense2BConfig,
+    Qwen3VLTextDense4BConfig,
+    Qwen3VLTextDense8BConfig,
+)
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoE235BA22Config
 from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE30BA3Config, Qwen3VLTextMoE235BA22Config
 from xtuner.v1.module.rope import RopeParametersConfig
@@ -134,6 +138,23 @@ class Qwen3VLMoE235BA22Config(Qwen3VLBaseConfig):
     vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
     projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig(text_hidden_size=4096)
     text_config: Qwen3MoE235BA22Config = Qwen3VLTextMoE235BA22Config(
+        max_position_embeddings=262144,
+        rope_parameters_cfg=RopeParametersConfig(
+            rope_theta=5000000.0,
+            rope_type="qwen3_vl",
+            mrope_section=[24, 20, 20],
+        ),
+    )
+
+
+class Qwen3VLDense2BConfig(Qwen3VLBaseConfig):
+    vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig(
+        depth=24, hidden_size=1024, intermediate_size=4096, deepstack_visual_indexes=[5, 11, 17]
+    )
+    projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig(
+        vision_hidden_size=1024, text_hidden_size=2048, deepstack_visual_indexes=[5, 11, 17]
+    )
+    text_config: Qwen3VLTextDense2BConfig = Qwen3VLTextDense2BConfig(
         max_position_embeddings=262144,
         rope_parameters_cfg=RopeParametersConfig(
             rope_theta=5000000.0,

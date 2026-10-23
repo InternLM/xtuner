@@ -2,6 +2,7 @@ import contextlib
 import gc
 import inspect
 import json
+import math
 import os
 import pickle
 import sys
@@ -34,7 +35,7 @@ from mmengine.runner import set_random_seed
 from pydantic import BaseModel, ConfigDict, field_serializer, field_validator, model_serializer, model_validator
 from torch.distributed import init_process_group
 from torch.distributed.device_mesh import init_device_mesh
-from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
+from torch.optim.lr_scheduler import LambdaLR, LinearLR, SequentialLR
 from typing_extensions import NotRequired, Self, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -1219,13 +1220,29 @@ class Trainer:
                 total_iters=scheduler_step - warmup_steps,
             )
         elif lr_cfg.lr_type == "cosine":
-            scheduler = CosineAnnealingLR(
-                self._engine.optimizer, T_max=scheduler_step - warmup_steps, eta_min=lr_cfg.lr_min
-            )
+            # CosineAnnealingLR uses one absolute eta_min for every parameter group,
+            # making a low-LR head converge to the same floor as the base group
+            # (and even increase its LR if its initial LR is below eta_min).
+            # Instead, apply one cosine multiplier to each group's initial LR:
+            # lr_min is the base LR floor, and a head with base_lr / 64 ends at
+            # lr_min / 64, preserving its LR ratio throughout the schedule.
+            min_ratio = lr_cfg.lr_min / self._engine.optimizer.defaults["lr"]
+
+            def cosine_fn(step: int) -> float:
+                progress = min(step / (scheduler_step - warmup_steps), 1.0)
+                return min_ratio + (1 - min_ratio) * (1 + math.cos(math.pi * progress)) / 2
+
+            scheduler = LambdaLR(self._engine.optimizer, cosine_fn)
         elif lr_cfg.lr_type == "constant":
             scheduler = LambdaLR(self._engine.optimizer, lambda x: 1.0)
         else:
             raise ValueError(f"Unsupported lr type: {lr_cfg.lr_type}")
+        # SequentialLR initializes only its first (warmup) scheduler, leaving the
+        # main scheduler at step -1. With a zero milestone, its first step only
+        # advances the main scheduler to 0, repeating the peak LR for one update.
+        # Skip the wrapper when there is no warmup to avoid this one-step delay.
+        if warmup_steps == 0:
+            return scheduler
         lr_scheduler = SequentialLR(
             optimizer=self._engine.optimizer,
             schedulers=[warmup_scheduler, scheduler],
@@ -1508,6 +1525,9 @@ class Trainer:
         set_random_seed(seed)
 
     def _try_bind_numa(self):
+        if os.getenv("XTUNER_DISABLE_NUMA", "0") == "1":
+            logger.info(f"Rank: {self.rank} skip numa binding because XTUNER_DISABLE_NUMA=1.")
+            return
         if str(DEVICE) != "cuda":
             log_rank0.info("Current device is not cuda, skip numa binding.")
             return
@@ -2142,6 +2162,7 @@ class Trainer:
         env = {
             "XTUNER_DETERMINISTIC": os.getenv("XTUNER_DETERMINISTIC"),
             "XTUNER_GC_ENABLE": os.getenv("XTUNER_GC_ENABLE"),
+            "XTUNER_DISABLE_NUMA": os.getenv("XTUNER_DISABLE_NUMA"),
             "XTUNER_FILE_OPEN_CONCURRENCY": os.getenv("XTUNER_FILE_OPEN_CONCURRENCY"),
             "XTUNER_TOKENIZE_CHUNK_SIZE": os.getenv("XTUNER_TOKENIZE_CHUNK_SIZE"),
             "XTUNER_TOKENIZE_WORKERS": os.getenv("XTUNER_TOKENIZE_WORKERS"),
