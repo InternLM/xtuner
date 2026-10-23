@@ -240,7 +240,7 @@ class Glm53TextMoE(MoE):
         return MTPBlock(mtp_config=mtp_config, mtp_layers=[mtp_layer])
 
     def to_hf_key_list(self, key: str) -> list[str]:
-        if self.config.tie_word_embeddings and "lm_head" in key:
+        if self.config.tie_head and "lm_head" in key:
             key = key.replace("lm_head", "embed_tokens")
 
         if key.startswith("mtp_block."):
