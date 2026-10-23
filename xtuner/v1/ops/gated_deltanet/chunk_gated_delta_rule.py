@@ -16,6 +16,8 @@ from fla.ops.gated_delta_rule.chunk import (
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
+from ..fla_compat import fla_call
+
 
 @torch.library.custom_op(
     "gated_deltanet::chunk_gated_delta_rule_fwd",
@@ -43,7 +45,11 @@ def chunk_gated_delta_rule_fwd(
         chunk_indices = prepare_chunk_indices(cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu)
     # XTuner does not use FLA context parallelism; keep the custom op schema compile-friendly.
     cp_context = None
-    g, o, A, final_state, initial_state = origin_chunk_gated_delta_rule_fwd(
+    # fla_call adapts the 0.4.2 kwarg convention to the installed FLA version
+    # (0.5.2 renames `transpose_state_layout` to `state_v_first`). FLA 0.5.2
+    # additionally returns `g_input` as a 6th output, which XTuner ignores.
+    fwd_outputs = fla_call(
+        origin_chunk_gated_delta_rule_fwd,
         q=q,
         k=k,
         v=v,
@@ -57,6 +63,7 @@ def chunk_gated_delta_rule_fwd(
         chunk_indices=chunk_indices,
         transpose_state_layout=transpose_state_layout,
     )
+    g, o, A, final_state, initial_state = fwd_outputs[:5]
     # initial_state is None in current XTuner implementation,
     # if not None, clone it to ensure the output of this custom operator must not also be an input
     initial_state = initial_state.clone() if initial_state is not None else initial_state
@@ -145,7 +152,10 @@ def chunk_gated_delta_rule_bwd(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     # XTuner does not use FLA context parallelism; keep the custom op schema compile-friendly.
     cp_context = None
-    dq, dk, dv, db, dg, dh0 = origin_chunk_gated_delta_rule_bwd(
+    # FLA 0.5.2 additionally returns `dA_log` / `ddt_bias` gradients, which
+    # XTuner does not consume (it never passes A_log/dt_bias).
+    bwd_outputs = fla_call(
+        origin_chunk_gated_delta_rule_bwd,
         q=q,
         k=k,
         v=v,
@@ -161,6 +171,7 @@ def chunk_gated_delta_rule_bwd(
         chunk_indices=chunk_indices,
         transpose_state_layout=transpose_state_layout,
     )
+    dq, dk, dv, db, dg, dh0 = bwd_outputs[:6]
     return dq, dk, dv, db, dg, dh0
 
 
