@@ -50,7 +50,7 @@ in the official ``chat_template.jinja``:
 """
 
 from collections.abc import Mapping
-from typing import Any, Dict, List, Literal, Optional, TypedDict, TypeGuard, cast
+from typing import Any, Dict, List, Literal, Optional, TypedDict, TypeGuard, Union, cast
 
 from pydantic import BaseModel, ConfigDict
 
@@ -104,7 +104,7 @@ class Glm53TextPart(TypedDict):
 class Glm53MediaPart(TypedDict, total=False):
     """Image/video content part（分支 C2/D 的媒体项）；payload 键名与 ``type`` 一致。"""
 
-    type: str  # image / image_url / video / video_url
+    type: Literal["image", "image_url", "video", "video_url"]
     image: Dict[str, Any]
     image_url: Dict[str, Any]
     video: Dict[str, Any]
@@ -118,6 +118,13 @@ class Glm53ToolReferencePart(TypedDict):
     name: str
 
 
+# 分支 C2/D 经 visible_text 渲染的 part 列表项：text / 媒体 part，或混排的纯字符串。
+Glm53VisiblePart = Union[Glm53TextPart, Glm53MediaPart, str]
+
+# 分支 C 单条 entry 的 ``output``：C1 为 tool_reference 列表；C2 为字符串或 part 列表。
+Glm53ToolOutput = Union[str, List[Glm53ToolReferencePart], List[Glm53VisiblePart]]
+
+
 class Glm53ToolOutputEntry(TypedDict, total=False):
     """聚合结果条目 ``{"id": ..., "output": ...}``（分支 C）。
 
@@ -127,7 +134,7 @@ class Glm53ToolOutputEntry(TypedDict, total=False):
 
     id: str
     tool_call_id: str
-    output: Any
+    output: Glm53ToolOutput
 
 
 def _is_media_part(part: Any) -> TypeGuard[Glm53MediaPart]:
