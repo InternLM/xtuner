@@ -32,9 +32,12 @@ class AdamWConfig(OptimConfig):
     betas: Annotated[Tuple[float, float], Parameter(help="Beta coefficients for Adam optimizer")] = (0.9, 0.95)
     eps: Annotated[float, Parameter(help="Epsilon value for numerical stability in Adam optimizer")] = 1e-8
     foreach: Annotated[Optional[bool], Parameter(help="Use foreach implementation for AdamW")] = None
+    fused: Annotated[Optional[bool], Parameter(help="Use fused implementation for AdamW")] = None
     swap_optimizer: Annotated[Optional[bool], Parameter(help="Swap optimizer states to host memory.")] = False
 
     def build(self, model):
+        if self.foreach and self.fused:
+            raise ValueError("AdamW foreach and fused implementations are mutually exclusive")
         params = [p for p in model.parameters() if p.requires_grad]
 
         trainable_parameters_names = model.trainable_parameters()
@@ -61,9 +64,16 @@ class AdamWConfig(OptimConfig):
                 eps=self.eps,
                 weight_decay=self.weight_decay,
                 foreach=self.foreach,
+                fused=self.fused,
             )
         return torch.optim.AdamW(
-            params, lr=self.lr, betas=self.betas, eps=self.eps, weight_decay=self.weight_decay, foreach=self.foreach
+            params,
+            lr=self.lr,
+            betas=self.betas,
+            eps=self.eps,
+            weight_decay=self.weight_decay,
+            foreach=self.foreach,
+            fused=self.fused,
         )
 
 
