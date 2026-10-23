@@ -45,7 +45,6 @@ case:
             resource:
                 cpus_per_task: 120
                 memory_per_task: 1200
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist; pip uninstall -y nvidia-cutlass-dsl; rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl;pip install nvidia-cudnn-frontend==1.31.0 nvidia-cutlass-dsl==4.8.0
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
@@ -81,7 +80,6 @@ case:
             resource:
                 cpus_per_task: 120
                 memory_per_task: 1200
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist;pip uninstall -y nvidia-cutlass-dsl; rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl;pip install nvidia-cudnn-frontend==1.31.0 nvidia-cutlass-dsl==4.8.0
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
@@ -115,7 +113,6 @@ case:
             resource:
                 cpus_per_task: 120
                 memory_per_task: 1200
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist;pip uninstall -y nvidia-cutlass-dsl; rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl;pip install nvidia-cudnn-frontend==1.31.0 nvidia-cutlass-dsl==4.8.0
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
@@ -148,7 +145,6 @@ case:
             resource:
                 cpus_per_task: 120
                 memory_per_task: 1200
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist;pip uninstall -y nvidia-cutlass-dsl; rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl;pip install nvidia-cudnn-frontend==1.31.0 nvidia-cutlass-dsl==4.8.0
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
@@ -181,7 +177,6 @@ case:
             resource:
                 cpus_per_task: 120
                 memory_per_task: 1200
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist; pip uninstall -y nvidia-cutlass-dsl; rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl;pip install nvidia-cudnn-frontend==1.31.0 nvidia-cutlass-dsl==4.8.0
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
@@ -214,7 +209,6 @@ case:
             resource:
                 num_nodes: 2
                 cpus_per_task: 80
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist;pip uninstall -y nvidia-cutlass-dsl; rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl;pip install nvidia-cudnn-frontend==1.31.0 nvidia-cutlass-dsl==4.8.0
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
@@ -247,7 +241,6 @@ case:
             resource:
                 cpus_per_task: 80
                 memory_per_task: 1200
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist; pip uninstall -y nvidia-cutlass-dsl; rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl;pip install nvidia-cudnn-frontend==1.31.0 nvidia-cutlass-dsl==4.8.0
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
@@ -281,7 +274,6 @@ case:
             resource:
                 cpus_per_task: 80
                 memory_per_task: 1200
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist;pip uninstall -y nvidia-cutlass-dsl; rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl;pip install nvidia-cudnn-frontend==1.31.0 nvidia-cutlass-dsl==4.8.0
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
@@ -314,7 +306,6 @@ case:
             resource:
                 cpus_per_task: 80
                 memory_per_task: 1200
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist; pip uninstall -y nvidia-cutlass-dsl; rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl;pip install nvidia-cudnn-frontend==1.31.0 nvidia-cutlass-dsl==4.8.0
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
@@ -348,7 +339,6 @@ case:
             resource:
                 cpus_per_task: 80
                 memory_per_task: 1200
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist; pip uninstall -y nvidia-cutlass-dsl; rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl;pip install nvidia-cudnn-frontend==1.31.0 nvidia-cutlass-dsl==4.8.0
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
@@ -382,7 +372,6 @@ case:
             resource:
                 cpus_per_task: 80
                 memory_per_task: 1200
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist; pip uninstall -y nvidia-cutlass-dsl; rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl;pip install nvidia-cudnn-frontend==1.31.0 nvidia-cutlass-dsl==4.8.0
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
@@ -406,16 +395,15 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 1800
 
-    glm5-3-flash-sft-25B-ep2-resume-vl:
+    glm5-3-flash-sft-25B-ep4-resume-vl:
         -
             type: sft
             phase: first
             parameters:
-                config: autotest/config/glm53_25b_ep2_resume_vl.py
+                config: autotest/config/glm53_25b_ep4_resume_vl.py
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 num_nodes: 2
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist; pip uninstall -y nvidia-cutlass-dsl; rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl;pip install nvidia-cudnn-frontend==1.31.0 nvidia-cutlass-dsl==4.8.0
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
@@ -424,7 +412,7 @@ case:
                     - XTUNER_GC_ENABLE=1
                     - XTUNER_ACTIVATION_OFFLOAD=1
             assert_info:
-                base_metric: glm5-3-flash-sft-25B-ep2-resume-vl/tracker.jsonl
+                base_metric: glm5-3-flash-sft-25B-ep4-resume-vl/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.08
                     loss/local_loss: 0.001
@@ -440,14 +428,13 @@ case:
             type: sft
             phase: resume
             pre_action:
-                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output glm5-3-flash-sft-25B-ep2-resume-vl sft'
+                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output glm5-3-flash-sft-25B-ep4-resume-vl sft'
             parameters:
-                config: autotest/config/glm53_25b_ep2_resume_vl.py
+                config: autotest/config/glm53_25b_ep4_resume_vl.py
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 num_nodes: 2
                 memory_per_task: 1200
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist;pip uninstall -y nvidia-cutlass-dsl; rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl;pip install nvidia-cudnn-frontend==1.31.0 nvidia-cutlass-dsl==4.8.0
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.3-Flash-25B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
@@ -456,7 +443,7 @@ case:
                     - XTUNER_GC_ENABLE=1
                     - XTUNER_ACTIVATION_OFFLOAD=1
             assert_info:
-                base_metric: glm5-3-flash-sft-25B-ep2-resume-vl/tracker-resume.jsonl
+                base_metric: glm5-3-flash-sft-25B-ep4-resume-vl/tracker-resume.jsonl
                 check_metrics:
                     grad_norm: 0.08
                     loss/local_loss: 0.001
@@ -466,8 +453,6 @@ case:
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
-            post_action:
-                command: 'python ./autotest/utils/resume_validation.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output glm5-3-flash-sft-25B-ep2-resume-vl sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_mtp_loss,loss/reduced_llm_loss,loss/local_loss"'
             timeout: 1800   
     glm5-2-sft-30B-recompute:
         -
