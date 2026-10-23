@@ -4,8 +4,30 @@ from typing import Any
 import pytest
 import torch
 import torch.distributed as dist
+import torch.distributed._functional_collectives as funcol
 
-from xtuner.v1.module.dispatcher.torch_all2all import _AsyncCombine, _AsyncDispatch
+import xtuner.v1.module.dispatcher.torch_all2all as all2all
+from xtuner.v1.module.dispatcher.torch_all2all import _AsyncCombine, _AsyncDispatch, _record_stream
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_record_stream_does_not_wait_for_collective(wrapped: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise real ACT dispatch, stubbing only the CPU stream kernel and collective wait."""
+    tensor = torch.ones(4)
+    output = funcol.AsyncCollectiveTensor(tensor) if wrapped else tensor
+    recorded = []
+    waits = []
+    monkeypatch.setattr(funcol, "wait_tensor", lambda value: waits.append(value) or value)
+    library = torch.library.Library("aten", "IMPL", "CPU")
+    try:
+        library.impl("record_stream", lambda value, stream: recorded.append(value))
+        _record_stream(output, torch.Stream(device="cpu"))
+    finally:
+        library._destroy()
+    assert not waits
+    assert len(recorded) == 1 and recorded[0] is tensor
+    if wrapped:
+        assert not output.completed
 
 
 @pytest.mark.gpu
@@ -63,3 +85,71 @@ class TestAsyncAll2AllStreamLifetime:
         comm_stream.synchronize()
         assert all(value.item() == grad_output.numel() for value in sums)
         torch.cuda.empty_cache()
+
+    def test_combine_saved_activation_is_not_reused_during_backward(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Autograd releases saved forward storage before its queued GPU reads finish."""
+        if not torch.cuda.is_available():
+            pytest.skip("requires CUDA")
+
+        torch.cuda.set_device(0)
+        torch.cuda.empty_cache()
+        compute_stream = torch.cuda.current_stream()
+        comm_stream = torch.cuda.Stream()
+        hidden_states = torch.ones(1 << 22, device="cuda", dtype=torch.bfloat16)
+        previous = torch.cuda.Event()
+        finished = torch.cuda.Event()
+        previous.record(compute_stream)
+
+        def fake_collective(value: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+            return funcol.AsyncCollectiveTensor(value.clone())
+
+        monkeypatch.setattr(all2all, "all_to_all_single_autograd", fake_collective)
+        output = _AsyncCombine.forward(
+            SimpleNamespace(), hidden_states, [], [], previous, finished, None, None, comm_stream, None
+        )
+        assert not output.completed
+        compute_stream.wait_event(finished)
+        activation = output._get_acs_underlying_tensor()
+        activation_ptr = activation.data_ptr()
+        sums = []
+
+        class SaveActivation(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx: Any, anchor: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+                ctx.save_for_backward(value)
+                return anchor.clone()
+
+            @staticmethod
+            def backward(ctx: Any, grad: torch.Tensor) -> tuple[torch.Tensor, None]:
+                (value,) = ctx.saved_tensors
+                # Keep the read queued while autograd releases its saved tensor.
+                torch.cuda._sleep(100_000_000)
+                sums.append(value.sum())
+                return grad, None
+
+        loss = SaveActivation.apply(torch.ones((), device="cuda", requires_grad=True), activation)
+        del activation
+        del output
+        loss.backward()
+        del loss
+        compute_done = torch.cuda.Event()
+        compute_done.record(compute_stream)
+        assert not compute_done.query()
+
+        deterministic = torch.are_deterministic_algorithms_enabled()
+        warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+        fill = torch.utils.deterministic.fill_uninitialized_memory
+        try:
+            torch.use_deterministic_algorithms(True)
+            torch.utils.deterministic.fill_uninitialized_memory = True
+            with torch.cuda.stream(comm_stream):
+                reused = torch.empty_like(hidden_states)
+            # In the regression, this allocation reuses the activation and fills it with NaN.
+            assert reused.data_ptr() != activation_ptr
+            compute_stream.synchronize()
+            comm_stream.synchronize()
+            assert all(value.item() == hidden_states.numel() for value in sums)
+        finally:
+            torch.cuda.synchronize()
+            torch.utils.deterministic.fill_uninitialized_memory = fill
+            torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
