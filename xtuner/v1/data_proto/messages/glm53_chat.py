@@ -41,10 +41,16 @@ in the official ``chat_template.jinja``:
    suffix). The official template never emits EOS mid-conversation, so assistant→system and
    assistant→assistant boundaries get no extra token; only ``<|user|>``/``<|observation|>``
    act as supervised stop targets.
+8. Tool-message shapes are classified by probing only ``content[0]`` (the official
+   ``is_list_of_outputs`` and ``tool_reference`` checks do the same), so an aggregated list
+   whose LATER entry lacks an ``output`` key raises ``KeyError`` and the sample is discarded
+   through the dirty-data channel. The official template silently renders an empty
+   ``<tool_response></tool_response>`` for such entries; the discard is deliberate -- silently
+   empty supervision is harder to detect than a dropped sample.
 """
 
 from collections.abc import Mapping
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, TypedDict, TypeGuard, cast
 
 from pydantic import BaseModel, ConfigDict
 
@@ -75,6 +81,73 @@ _MEDIA_PLACEHOLDER = {
     "audio_url": "<|begin_of_audio|><|end_of_audio|>",
     "input_audio": "<|begin_of_audio|><|end_of_audio|>",
 }
+
+
+# tool 消息 content 的形态谱系，对应官方 render_tool_response 宏的四个分支
+# （chat_template.jinja:78-94，排序/拉平/渲染三处的分支注释共用这套编号）：
+#   A. 纯字符串
+#   B. tool_reference 列表（整体），渲染为工具 schema、无媒体
+#   C. 聚合 entry 列表（官方 is_list_of_outputs）：entry.output 再分
+#      C1. tool_reference 列表（渲染为 schema、无媒体）/ C2. 字符串或 part 列表
+#   D. part 列表（text/媒体/纯字符串混排）
+# 运行时判定便宜的写成 TypeGuard；形状已由 guard 确定的位置直接 cast，不重复运行时校验。
+
+
+class Glm53TextPart(TypedDict):
+    """``{"type": "text", "text": ...}`` content part（分支 C2/D 的文本项）。"""
+
+    type: Literal["text"]
+    text: str
+
+
+class Glm53MediaPart(TypedDict, total=False):
+    """Image/video content part（分支 C2/D 的媒体项）；payload 键名与 ``type`` 一致。"""
+
+    type: str  # image / image_url / video / video_url
+    image: Dict[str, Any]
+    image_url: Dict[str, Any]
+    video: Dict[str, Any]
+    video_url: Dict[str, Any]
+
+
+class Glm53ToolReferencePart(TypedDict):
+    """``{"type": "tool_reference", "name": ...}``（分支 B/C1）：展开同名工具的 schema。"""
+
+    type: Literal["tool_reference"]
+    name: str
+
+
+class Glm53ToolOutputEntry(TypedDict, total=False):
+    """聚合结果条目 ``{"id": ..., "output": ...}``（分支 C）。
+
+    ``output`` 为 ``str`` 或 part 列表（C2），或 ``List[Glm53ToolReferencePart]``（C1）；
+    id 可在 ``id`` 或 ``tool_call_id`` 键上（官方 id_of 宏）。
+    """
+
+    id: str
+    tool_call_id: str
+    output: Any
+
+
+def _is_media_part(part: Any) -> TypeGuard[Glm53MediaPart]:
+    return isinstance(part, Mapping) and part.get("type") in ("image", "image_url", "video", "video_url")
+
+
+def _is_tool_reference_list(value: Any) -> TypeGuard[List[Glm53ToolReferencePart]]:
+    """分支 B/C1：首项为 tool_reference 的非空列表（官方同样只探首项）。"""
+    return (
+        isinstance(value, list)
+        and len(value) > 0
+        and isinstance(value[0], Mapping)
+        and value[0].get("type") == "tool_reference"
+    )
+
+
+def _is_output_entry_list(content: Any) -> TypeGuard[List[Glm53ToolOutputEntry]]:
+    """分支 C：首元素带 ``output`` 键的非空列表（官方 is_list_of_outputs 宏）。"""
+    return (
+        isinstance(content, list) and len(content) > 0 and isinstance(content[0], Mapping) and "output" in content[0]
+    )
 
 
 def _visible_text(content: Any, _literal_spans=None, _offset: int = 0) -> str:
@@ -172,7 +245,8 @@ def sort_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     messages are split into single-entry shallow copies (other keys kept), plain messages are reused unchanged, and
     every entry lands in ``tool_calls`` order. Blocks that fail the can_sort rule are returned unchanged.
 
-    数据级别示例（排序发生在第 4 级 entry，而非第 2 级 message）::
+    数据级别示例（排序发生在第 4 级 entry，而非第 2 级 message；形态编号与文件
+    顶部类型谱系一致，覆盖官方 render_tool_response 宏的全部分支）::
 
         # ── 级别 1: conversation = messages + tools(整条样本) ──
         tools = [
@@ -186,10 +260,17 @@ def sort_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             {"role": "assistant", "content": "", "tool_calls": [调用a, 调用b, 调用c]},  # 顺序: a, b, c
 
             # ── 级别 3: tool block(下面两条连续 tool message,渲染为一个 <|observation|> 块) ──
-            {"role": "tool", "tool_call_id": "c", "content": [  # 分散形态: 这条 message 整体是一个 entry
+            # 形态 D: content 是 part 列表;分散形态,这条 message 整体是一个排序单位(id 在 message 上)
+            {"role": "tool", "tool_call_id": "c", "content": [
                 {"type": "text", "text": "RESULT_C"},           # ← 级别 5: content part
             ]},
-            # ↓ 聚合形态: content 是 entry 数组,内含 2 个 entry,顺序 b, a(与调用序相反)
+            # 形态 A: content 是纯字符串,同样整条 message 是一个排序单位
+            # {"role": "tool", "tool_call_id": "x", "content": "RESULT_X"},
+            # 形态 B: content 整体是 tool_reference 列表(渲染为工具 schema、无媒体),
+            # 仍按 message 上的 id 参与排序
+            # {"role": "tool", "tool_call_id": "y",
+            #  "content": [{"type": "tool_reference", "name": "a"}]},
+            # ↓ 形态 C: 聚合形态,content 是 entry 数组,内含 2 个 entry,顺序 b, a(与调用序相反)
             #   测试用例 tool_aggregate_media_reversed 用的就是这种形态
             {"role": "tool", "content": [
                 {"id": "b", "output": [                         # ← 级别 4: entry(id 在元素上)
@@ -200,11 +281,17 @@ def sort_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     {"type": "text", "text": "RESULT_A"},
                     {"type": "image_url", "image_url": {"url": "IMG_A"}},
                 ]},
+                # 形态 C1: entry.output 是 tool_reference 列表(渲染为 schema、无媒体),
+                # 仍按 entry 的 id 参与排序;上面的 b/a 两个 entry 即形态 C2(字符串或 part 列表)
+                # {"id": "z", "output": [{"type": "tool_reference", "name": "b"}]},
             ]},
             {"role": "assistant", "content": "ASSISTANT_ANSWER"},
         ]
 
-        # 拉平结果: [entry a 的 message, entry b 的 message, entry c 的 message](顺序 == tool_calls)
+        # E. can_sort 成立时的拉平结果: [entry a 的 message, entry b 的 message, entry c 的 message]
+        #    (顺序 == tool_calls)
+        # F. can_sort 任一条件不满足(无前置 assistant tool_calls / 结果 id 缺失或块内重复 /
+        #    结果 id 不在 tool_calls / tool_call id 缺失或重复)时,块保持消息原序,不拉平。
     """
     out: List[Dict[str, Any]] = []
     index = 0
@@ -225,8 +312,11 @@ def sort_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             units: List[Dict[str, Any]] = []
             for message in block:
                 if _is_list_of_outputs(message):
-                    units.extend({**message, "content": [entry]} for entry in message["content"])
+                    # 形态 C: 聚合消息拆成单 entry 浅拷贝(其他键保留)。
+                    entries = cast(List[Glm53ToolOutputEntry], message["content"])
+                    units.extend({**message, "content": [entry]} for entry in entries)
                 else:
+                    # 形态 A/B/D: 整条 message 是一个排序单位。
                     units.append(message)
             out.extend(sorted(units, key=lambda unit: position[_result_ids_of(unit)[0]]))
         index = end + 1
@@ -234,9 +324,8 @@ def sort_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def glm53_media_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Lift every media part into flat ``{"role": "user", "content":
-    [media...]}`` messages, in rendered marker order, for media payload
-    collection.
+    """Lift every media part into flat one-source messages in rendered marker
+    order, for media payload collection.
 
     The renderer emits a two-stage placeholder marker for media parts anywhere in the conversation --
     including nested inside structured tool outputs (``{"id": ..., "output": [...]}`` entries) -- while
@@ -245,26 +334,58 @@ def glm53_media_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     the same can_sort ordering the template renders with (``sort_tool_messages``, idempotent on
     pre-sorted input), each aggregated entry's ``output`` is lifted in entry order, and tool_reference
     outputs (which render as tool schemas, not media) are skipped.
+
+    Each synthesized message carries the REAL role of its source message (``user`` for user content,
+    ``tool`` for tool results whether plain or aggregated): the role on this view is provenance, not a
+    filter. ``GLM53VLTokenizeFunction`` collects with ``allow_all_roles=True``, so role gating stays
+    entirely in this flatten step, which lifts exactly the media the renderer emits markers for.
+
+    数据级别示例（形态编号同 sort_tool_messages 的示例）::
+
+        messages = [
+            {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "U1"}}]},
+            {"role": "assistant", "content": "", "tool_calls": [调用a, 调用b]},  # 顺序: a, b
+            {"role": "tool", "content": [                    # 形态 C: 聚合 entry 列表
+                {"id": "b", "output": [                      # C2: part 列表,含媒体
+                    {"type": "text", "text": "RESULT_B"},
+                    {"type": "image_url", "image_url": {"url": "IMG_B"}},
+                ]},
+                {"id": "a", "output": [                      # C1: tool_reference 列表
+                    {"type": "tool_reference", "name": "a"},
+                ]},
+            ]},
+            # 形态 B(content 整体是 tool_reference 列表)与形态 A(纯字符串)同样无媒体,
+            # 不产生合成消息。
+        ]
+
+        # 拉平结果(entry 按 tool_calls 序 a→b 排列;role 保留来源消息的真实角色):
+        # [
+        #     {"role": "user", "content": [U1 的 image part]},
+        #     {"role": "tool", "content": [IMG_B 的 image part]},  # 来源是 entry b 所在的 tool 消息
+        #     # entry a 是 C1(tool_reference),渲染为工具 schema、无媒体,被跳过
+        # ]
     """
     media_messages: List[Dict[str, Any]] = []
     for message in sort_tool_messages(messages):
         content = message.get("content", "")
-        if message.get("role") == "tool" and _is_list_of_outputs(message):
-            outputs = [entry["output"] for entry in content]
+        if message.get("role") == "tool" and _is_output_entry_list(content):
+            # 形态 C: 聚合 entry 列表,逐 entry 取 output(后续 entry 缺 output 键时抛
+            # KeyError 走脏数据丢弃,见模块 docstring 第 8 条)。
+            outputs: List[Any] = [entry["output"] for entry in content]
         else:
+            # 形态 A/B/D: 整条消息的 content 即一个结果的 output。
             outputs = [content]
         for output in outputs:
             if not isinstance(output, list):
+                # 形态 A / C2 的字符串 output: 无媒体。
                 continue
-            if output and isinstance(output[0], Mapping) and output[0].get("type") == "tool_reference":
+            if _is_tool_reference_list(output):
+                # 形态 B / C1: 渲染为工具 schema,不产生媒体 marker,跳过。
                 continue
-            media = [
-                part
-                for part in output
-                if isinstance(part, Mapping) and part.get("type") in ("image", "image_url", "video", "video_url")
-            ]
+            # 形态 C2/D 的 part 列表: 按序收集媒体 part,与渲染 marker 位置式配对。
+            media = [part for part in output if _is_media_part(part)]
             if media:
-                media_messages.append({"role": "user", "content": media})
+                media_messages.append({"role": message["role"], "content": media})
     return media_messages
 
 
@@ -275,13 +396,10 @@ def _render_tool_output(
     render_tool_response does: a tool_reference list expands to the referenced tool
     schemas, anything else renders through ``_visible_text`` (media parts become the
     two-stage placeholder markers)."""
-    if (
-        isinstance(output, list)
-        and output
-        and isinstance(output[0], Mapping)
-        and output[0].get("type") == "tool_reference"
-    ):
+    if _is_tool_reference_list(output):
+        # 分支 C1: output 是 tool_reference 列表,展开匹配的工具定义。
         return _render_tool_result(output, tools, _literal_spans, _offset)
+    # 分支 C2: 字符串或 part 列表,经 visible_text 渲染(媒体发两段式 marker)。
     prefix = "<tool_response>"
     return prefix + _visible_text(output, _literal_spans, _offset + len(prefix)) + "</tool_response>"
 
@@ -296,21 +414,25 @@ def _render_tool_result(
     through GLM-5.3's ``_visible_text``.
     """
     if isinstance(content, str):
+        # 分支 A: 纯字符串结果。
         return _append_literal("<tool_response>", content, _literal_spans, _offset) + "</tool_response>"
-    if isinstance(content, list) and content and isinstance(content[0], Mapping):
-        if content[0].get("type") == "tool_reference":
-            text = "<tool_response><tools>\n"
-            for tool_ref in content:
-                for tool in tools or []:
-                    tool = tool["function"] if "function" in tool else tool
-                    if tool.get("name") == tool_ref.get("name"):
-                        text = _append_literal(text, _tool_to_json(tool), _literal_spans, _offset) + "\n"
-            return text + "</tools></tool_response>"
-        if "output" in content[0]:
-            text = ""
-            for entry in content:
-                text += _render_tool_output(entry["output"], tools, _literal_spans, _offset + len(text))
-            return text
+    if _is_tool_reference_list(content):
+        # 分支 B: content 整体是 tool_reference 列表,展开匹配的工具定义。
+        text = "<tool_response><tools>\n"
+        for tool_ref in content:
+            for tool in tools or []:
+                tool = tool["function"] if "function" in tool else tool
+                if tool.get("name") == tool_ref.get("name"):
+                    text = _append_literal(text, _tool_to_json(tool), _literal_spans, _offset) + "\n"
+        return text + "</tools></tool_response>"
+    if _is_output_entry_list(content):
+        # 分支 C: 聚合 entry 列表,逐 entry 渲染(官方只探 content[0];后续 entry 缺
+        # output 键时抛 KeyError 走脏数据丢弃,见模块 docstring 第 8 条)。
+        text = ""
+        for entry in content:
+            text += _render_tool_output(entry["output"], tools, _literal_spans, _offset + len(text))
+        return text
+    # 分支 D: part 列表或其他标量,经 visible_text 渲染。
     prefix = "<tool_response>"
     return prefix + _visible_text(content, _literal_spans, _offset + len(prefix)) + "</tool_response>"
 
@@ -347,7 +469,9 @@ def _render_tool_block(
     for call_id in call_ids:
         for message in block:
             if _is_list_of_outputs(message):
-                for entry in message["content"]:
+                # 形态 C: 聚合消息,抽出 id 匹配的 entry 渲染。
+                entries = cast(List[Glm53ToolOutputEntry], message["content"])
+                for entry in entries:
                     if _id_of(entry) == call_id:
                         text += _render_tool_output(entry["output"], tools, _literal_spans, _offset + len(text))
             elif _id_of(message) == call_id:
