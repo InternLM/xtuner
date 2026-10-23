@@ -2,6 +2,8 @@
 """Muon optimizer tests.
 
 1. TestNewtonSchulz     — Triton vs PyTorch Newton-Schulz precision.
+    test_triton_vs_pytorch                    两种 NS 实现在 2D/3D 布局下结果一致
+    test_muonsplit_matches_independent_blocks MuonSplit 逐块独立正交化并按块缩放
 2. TestMuonSingleGPU   — Single-GPU correctness: production Muon must match the
                           reference within tight tolerances (fp32, no comms).
 3. TestMuonFSDP        — End-to-end correctness: one Muon step on a fully-sharded
@@ -33,7 +35,7 @@ from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.model.base import BaseModel, XTunerBaseModelConfig
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseMLP
 from xtuner.v1.optim import AdamW, SwapAdamW
-from xtuner.v1.optim.muon import Muon, _muonsplit_newton_schulz, zeropower_via_newtonschulz5
+from xtuner.v1.optim.muon import Muon, _muonsplit_newton_schulz, muon_update_newton_schulz, zeropower_via_newtonschulz5
 
 
 # ─── Test: Newton-Schulz functions ───────────────────────────────────────────
@@ -46,6 +48,7 @@ class TestNewtonSchulz(DeterministicDDPTestCase):
 
     def test_triton_vs_pytorch(self):
         """Triton and PyTorch NS implementations should produce similar results."""
+        # 行为：同一输入（2D 单矩阵 / 3D expert batch）下，triton 与 torch 实现的 NS 结果一致
         self.create_pg("cuda")
         from xtuner.v1.optim.newton_schulz_triton import newton_schulz_triton
 
@@ -57,16 +60,22 @@ class TestNewtonSchulz(DeterministicDDPTestCase):
         ]
 
         for num_experts, M, N in test_cases:
-            G = torch.randn(num_experts * M, N, device="cuda", dtype=torch.float32)
+            # num_experts==1 uses a plain 2D matrix; MoE uses an explicit 3D batch.
+            G = (
+                torch.randn(M, N, device="cuda", dtype=torch.float32)
+                if num_experts == 1
+                else torch.randn(num_experts, M, N, device="cuda", dtype=torch.float32)
+            )
 
-            result1 = zeropower_via_newtonschulz5(G, epsilon=1e-7, num_experts=num_experts)
-            result2 = newton_schulz_triton(G, epsilon=1e-7, num_experts=num_experts)
+            result1 = zeropower_via_newtonschulz5(G, epsilon=1e-7)
+            result2 = newton_schulz_triton(G, epsilon=1e-7)
 
             assert not torch.isnan(result1).any()
             assert not torch.isnan(result2).any()
             torch.testing.assert_close(result1, result2, atol=3e-2, rtol=3e-2)
 
     def test_muonsplit_matches_independent_blocks(self):
+        # 行为：MuonSplit 必须逐逻辑块独立正交化、按块施加 lr 缩放，尾部多余行保持为零
         self.create_pg("cuda")
         split_sizes = (6, 2, 6, 2)
         logical_rows = sum(split_sizes)
@@ -75,7 +84,6 @@ class TestNewtonSchulz(DeterministicDDPTestCase):
         result = _muonsplit_newton_schulz(
             G,
             epsilon=1e-7,
-            num_experts=1,
             newton_schulz_func=zeropower_via_newtonschulz5,
             split_sizes=split_sizes,
             adjust_lr="rms_norm",
@@ -189,9 +197,9 @@ class ToyMoEModel(BaseModel):
 class ReferenceMuon(torch.optim.Optimizer):
     """Self-contained single-process reference for Muon + AdamW.
 
-    Classifies parameters using the same name-based rules as MuonConfig.build():
-    - 2D+ tensors (excluding embed_tokens, lm_head, effectively-1D) → Muon
-    - Everything else → AdamW
+    Classifies parameters using the same rules as MuonConfig.build():
+    - 2D tensors (excluding embed_tokens, lm_head, effectively-1D) → Muon
+    - Conv/3D tensors and everything else → AdamW
     """
 
     FUSED_W1W3_PATTERNS = ("fused_w1w3",)
@@ -221,7 +229,7 @@ class ReferenceMuon(torch.optim.Optimizer):
         for name, p in model.named_parameters():
             if not p.requires_grad:
                 continue
-            is_muon = p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name and p.numel() not in p.shape
+            is_muon = p.ndim == 2 and "embed_tokens" not in name and "lm_head" not in name and p.numel() not in p.shape
             if is_muon:
                 ne = self._get_num_experts(name, n_routed_experts)
                 muon_groups.append(
@@ -747,9 +755,9 @@ class TestMuonFSDP(DeterministicDDPTestCase):
 
         ns_calls: list[tuple[int, ...]] = []
 
-        def track_newton_schulz(x, epsilon, num_experts):
+        def track_newton_schulz(x, epsilon):
             ns_calls.append(tuple(x.shape))
-            return zeropower_via_newtonschulz5(x, epsilon=epsilon, num_experts=num_experts)
+            return zeropower_via_newtonschulz5(x, epsilon=epsilon)
 
         optimizer = Muon(
             params,
@@ -802,14 +810,20 @@ class TestMuonFSDP(DeterministicDDPTestCase):
             param.grad = distribute_tensor(gradient, mesh, (Shard(0),))
             params.append(param)
 
-            update = zeropower_via_newtonschulz5(gradient, epsilon=1e-7, num_experts=num_experts)
+            update = muon_update_newton_schulz(
+                gradient,
+                newton_schulz_func=zeropower_via_newtonschulz5,
+                flatten=False,
+                epsilon=1e-7,
+                num_experts=num_experts,
+            )
             expected_params.append(initial - update * 0.01)
 
-        ns_calls: list[tuple[tuple[int, ...], int]] = []
+        ns_calls: list[tuple[int, ...]] = []
 
-        def track_newton_schulz(x, epsilon, num_experts):
-            ns_calls.append((tuple(x.shape), num_experts))
-            return zeropower_via_newtonschulz5(x, epsilon=epsilon, num_experts=num_experts)
+        def track_newton_schulz(x, epsilon):
+            ns_calls.append(tuple(x.shape))
+            return zeropower_via_newtonschulz5(x, epsilon=epsilon)
 
         optimizer = Muon(
             [{"params": params, "num_experts": num_experts}],
@@ -823,7 +837,8 @@ class TestMuonFSDP(DeterministicDDPTestCase):
 
         # Sub-group all-gather reconstructs one complete expert per param on every rank;
         # all-to-all would instead hand a single rank the whole (rows, cols) matrix.
-        assert ns_calls == [((rows // num_experts, cols), 1)] * len(params)
+        # Sub-group path reconstructs one expert matrix per param (2D, not a batch).
+        assert ns_calls == [(rows // num_experts, cols)] * len(params)
 
         local_rows = rows // fsdp_size
         for param, expected in zip(params, expected_params):
@@ -852,7 +867,7 @@ class TestMuonFSDP(DeterministicDDPTestCase):
         cols, num_experts = 4, 6
         params = []
         expected_params = []
-        ns_shapes: list[tuple[tuple[int, ...], int]] = []
+        ns_shapes: list[tuple[int, ...]] = []
         coordinate = mesh.get_coordinate()
         assert coordinate is not None
         fsdp_rank, ep_rank = coordinate
@@ -872,17 +887,19 @@ class TestMuonFSDP(DeterministicDDPTestCase):
             expected_by_mesh = expected.view(fsdp_size, ep_size, local_rows, cols)
             for reference_ep_rank in range(ep_size):
                 ep_gradient = gradient_by_mesh[:, reference_ep_rank].reshape(fsdp_size * local_rows, cols)
-                ep_update = zeropower_via_newtonschulz5(
+                ep_update = muon_update_newton_schulz(
                     ep_gradient,
+                    newton_schulz_func=zeropower_via_newtonschulz5,
+                    flatten=False,
                     epsilon=1e-7,
                     num_experts=num_experts // ep_size,
                 )
                 expected_by_mesh[:, reference_ep_rank].sub_(ep_update.reshape(fsdp_size, local_rows, cols) * 0.01)
             expected_params.append(expected)
 
-        def track_newton_schulz(x, epsilon, num_experts):
-            ns_shapes.append((tuple(x.shape), num_experts))
-            return zeropower_via_newtonschulz5(x, epsilon=epsilon, num_experts=num_experts)
+        def track_newton_schulz(x, epsilon):
+            ns_shapes.append(tuple(x.shape))
+            return zeropower_via_newtonschulz5(x, epsilon=epsilon)
 
         optimizer = Muon(
             [{"params": params, "num_experts": num_experts}],
@@ -899,7 +916,7 @@ class TestMuonFSDP(DeterministicDDPTestCase):
         # AGRS (selective Newton-Schulz) and the ragged exchange (nothing sent to the idle rank)
         # leave the batch to the rank that assembles it; padding hands every rank a matrix.
         if remainder_strategy == "pad_all2all" or fsdp_rank == 0:
-            assert sorted(ns_shapes) == [((6, cols), 3), ((12, cols), 3)]
+            assert sorted(ns_shapes) == [(3, 2, cols), (3, 4, cols)]
         else:
             assert not ns_shapes
 

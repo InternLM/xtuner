@@ -1,12 +1,21 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""Muon 卷积参数的逻辑矩阵形状回归测试。
+"""Muon 优化器布局契约与 checkpoint 兼容的行为测试。
 
-TestMuonConvLayout
+TestMuonMatrixLayoutContract          NS 布局契约（公共入口，纯 CPU）
+    test_callback_receives_contract_layout    flatten/batch/expert 布局下回调收到契约形状且输出还原
+    test_invalid_expert_layout_is_rejected    非法 expert 布局在公共入口触发断言
+TestNewtonSchulzLayoutEquivalence     NS 数值等价（单进程 GPU）
+    test_batched_and_flattened_ns_match_per_matrix  batch 与逐矩阵、flatten 与等价 2D 的结果逐位一致
+TestMuonConvLayout                    Muon.step 端到端（2 卡 DDP）
     test_flattened_convolutions_match_matrix_updates  分片/复制布局下 3D/4D/5D 与等价二维参数更新一致
-    test_existing_policies_keep_their_ratios          expert、非 flatten 和 MuonSplit 保持既有规则
+    test_existing_policies_keep_their_ratios          step 后 NS 矩阵行列与 lr_ratio 所用行列一致
     test_legacy_checkpoint_restores_logical_matrix_ratio  忽略旧 checkpoint 比例并保留动量及训练状态
     test_updated_group_configuration_matches_fresh_optimizer  配置变化后与同配置新优化器更新一致
     test_dcp_checkpoint_restores_groups_and_refreshes_update_ratio  DCP 磁盘往返恢复后继续更新并写回正确比例
+TestMuonDerivedState                  optimizer state 派生字段行为（纯 CPU）
+    test_initial_state_is_lazy                          未 step 时 state 延迟创建，param_groups 保留全部参数
+    test_legacy_state_is_preserved_without_mutating_checkpoint  旧 state 原样恢复且不改写 checkpoint
+    test_invalid_muonsplit_is_rejected_at_initialization        非法 MuonSplit 配置在初始化时拒绝
 """
 
 import copy
@@ -25,7 +34,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Replicate, Shard, distribute_tensor
 
 from xtuner._testing import DeterministicDDPTestCase
-from xtuner.v1.optim.muon import Muon
+from xtuner.v1.optim.muon import Muon, muon_update_newton_schulz, zeropower_via_newtonschulz5
 
 
 def _matrix_lr_ratio(rows: int, columns: int, mode: Literal["rms_norm", "spectral_norm", "none"]) -> float:
@@ -36,9 +45,100 @@ def _matrix_lr_ratio(rows: int, columns: int, mode: Literal["rms_norm", "spectra
     return 0.2 * math.sqrt(max(rows, columns))
 
 
+class TestMuonMatrixLayoutContract:
+    """NS 布局契约：muon_update_newton_schulz 按 flatten/num_experts 把参数 reshape 成 2D/3D 交给回调。"""
+
+    @pytest.mark.parametrize(
+        ("shape", "flatten", "num_experts", "expected"),
+        [
+            ((64, 128), False, 1, (64, 128)),  # 普通 2D：单矩阵
+            ((32, 3, 2, 2), True, 1, (32, 12)),  # flatten：高维摊平成单矩阵
+            ((512, 128), False, 8, (8, 64, 128)),  # expert：拼接 2D 展开成 batch
+            ((2, 3, 4, 5), False, 1, (6, 4, 5)),  # 非 flatten：前导维作 batch
+        ],
+    )
+    def test_callback_receives_contract_layout(
+        self, shape: tuple[int, ...], flatten: bool, num_experts: int, expected: tuple[int, ...]
+    ) -> None:
+        # 回调必须收到契约布局，且返回值被 reshape 回原始形状
+        received: list[tuple[int, ...]] = []
+
+        def recording_func(x: torch.Tensor, epsilon: float) -> torch.Tensor:
+            received.append(tuple(x.shape))
+            return x
+
+        X = torch.randn(shape)
+        out = muon_update_newton_schulz(
+            X,
+            newton_schulz_func=recording_func,
+            flatten=flatten,
+            epsilon=1e-7,
+            num_experts=num_experts,
+        )
+        assert received == [expected]
+        assert tuple(out.shape) == shape
+
+    @pytest.mark.parametrize(
+        ("shape", "num_experts", "message"),
+        [
+            ((16, 6, 4), 2, "concatenated 2D expert layout"),  # expert 组必须是拼接 2D
+            ((15, 4), 2, "not divisible by num_experts"),  # 行数必须整除 expert 数
+        ],
+    )
+    def test_invalid_expert_layout_is_rejected(self, shape: tuple[int, ...], num_experts: int, message: str) -> None:
+        # 非法 expert 布局必须在公共入口响铃，而不是静默丢维度
+        with pytest.raises(AssertionError, match=message):
+            muon_update_newton_schulz(
+                torch.randn(shape),
+                newton_schulz_func=lambda x, epsilon: x,
+                flatten=False,
+                epsilon=1e-7,
+                num_experts=num_experts,
+            )
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+class TestNewtonSchulzLayoutEquivalence:
+    """NS 数值等价：batch 布局与逐矩阵、flatten 布局与等价 2D 的结果逐位一致。"""
+
+    def test_batched_and_flattened_ns_match_per_matrix(self) -> None:
+        # batch NS 必须等于逐矩阵 NS 的堆叠；flatten conv 必须等于其 2D 等价矩阵
+        batched = torch.randn(3, 5, 4, device="cuda", dtype=torch.float32)
+        batched_result = muon_update_newton_schulz(
+            batched,
+            newton_schulz_func=zeropower_via_newtonschulz5,
+            flatten=False,
+            epsilon=1e-7,
+            num_experts=1,
+        )
+        per_matrix = torch.stack(
+            [zeropower_via_newtonschulz5(batched[i], epsilon=1e-7) for i in range(batched.size(0))]
+        )
+        torch.testing.assert_close(batched_result, per_matrix, atol=0, rtol=0)
+
+        conv = torch.randn(8, 2, 3, 4, device="cuda", dtype=torch.float32)
+        matrix = conv.reshape(8, -1)
+        conv_result = muon_update_newton_schulz(
+            conv,
+            newton_schulz_func=zeropower_via_newtonschulz5,
+            flatten=True,
+            epsilon=1e-7,
+            num_experts=1,
+        )
+        matrix_result = muon_update_newton_schulz(
+            matrix,
+            newton_schulz_func=zeropower_via_newtonschulz5,
+            flatten=True,
+            epsilon=1e-7,
+            num_experts=1,
+        )
+        torch.testing.assert_close(conv_result.reshape_as(matrix), matrix_result, atol=0, rtol=0)
+
+
 @pytest.mark.gpu
 class TestMuonConvLayout(DeterministicDDPTestCase):
-    """仅改变参数存储形状，不应改变 flatten=True 的普通 Muon 更新。"""
+    """Muon.step 端到端：形状/策略/checkpoint 变化下的更新行为（2 卡 DDP）。"""
 
     @property
     def world_size(self) -> int:
@@ -87,29 +187,44 @@ class TestMuonConvLayout(DeterministicDDPTestCase):
                 )
 
     def test_existing_policies_keep_their_ratios(self) -> None:
-        """按参数组读取 flatten，保留 expert 形状规则和 MuonSplit 的块内缩放。"""
+        """Muon.step must orthogonalize with the same rows/cols used by lr_ratio."""
         self.create_pg("cuda")
         mesh = init_device_mesh("cuda", (self.world_size,), mesh_dim_names=("conv.fsdp",))
-        for mode in ("rms_norm", "spectral_norm", "none"):
-            unflattened = torch.nn.Parameter(distribute_tensor(torch.zeros(16, 6, 4, device="cuda"), mesh, [Shard(0)]))
-            expert = torch.nn.Parameter(distribute_tensor(torch.zeros(16, 6, 4, device="cuda"), mesh, [Shard(0)]))
-            split = torch.nn.Parameter(distribute_tensor(torch.zeros(8, 4, device="cuda"), mesh, [Shard(0)]))
+        # label, param shape, group extras, optional MuonSplit sizes, expected NS (rows, cols)
+        policies = (
+            ("unflattened", (16, 6, 4), {"flatten": False}, None, (6, 4)),
+            ("expert", (16, 4), {"num_experts": 2}, None, (8, 4)),
+            ("muonsplit", (8, 4), {}, (4, 4), (4, 4)),
+        )
+        # 同源性契约与 adjust_lr 模式无关（各模式的公式差异由 flatten conv 用例覆盖），单模式即可
+        for label, shape, group_extras, split_sizes, matrix_rc in policies:
+            ns_matrix_shapes: list[tuple[int, int]] = []
+
+            def track_newton_schulz(x, epsilon, _shapes=ns_matrix_shapes):
+                _shapes.append((int(x.shape[-2]), int(x.shape[-1])))
+                return zeropower_via_newtonschulz5(x, epsilon=epsilon)
+
+            param = torch.nn.Parameter(distribute_tensor(torch.randn(shape, device="cuda"), mesh, [Replicate()]))
+            param.grad = distribute_tensor(torch.randn(shape, device="cuda"), mesh, [Replicate()])
             optimizer = Muon(
-                [
-                    {"params": [unflattened], "flatten": False},
-                    {"params": [expert], "num_experts": 2},
-                    {"params": [split]},
-                ],
+                [{"params": [param], **group_extras}],
                 flatten=True,
-                adjust_lr=mode,
-                muon_split_sizes={split: (4, 4)},
+                adjust_lr="rms_norm",
+                use_triton=False,
+                weight_decay=0.0,
+                newton_schulz_func=track_newton_schulz,
+                muon_split_sizes={param: split_sizes} if split_sizes is not None else None,
             )
-            optimizer.load_state_dict(copy.deepcopy(optimizer.state_dict()))
-            groups = optimizer.param_groups
-            assert optimizer._param_lr_ratio(unflattened, groups[0]) == _matrix_lr_ratio(6, 4, mode)
-            assert optimizer._param_lr_ratio(expert, groups[1]) == _matrix_lr_ratio(3, 4, mode)
-            assert optimizer._param_lr_ratio(split, groups[2]) == 1.0
-            assert all("lr_ratio" not in state for state in optimizer.state_dict()["state"].values())
+            optimizer.step()
+
+            assert ns_matrix_shapes, f"{label}: Newton-Schulz was not invoked"
+            assert all(rc == matrix_rc for rc in ns_matrix_shapes), (
+                f"{label}: NS matrix shapes {ns_matrix_shapes} != {matrix_rc}"
+            )
+            expected_ratio = 1.0 if split_sizes is not None else _matrix_lr_ratio(*matrix_rc, "rms_norm")
+            assert all(state["lr_ratio"] == expected_ratio for state in optimizer.state_dict()["state"].values()), (
+                f"{label}: state lr_ratio mismatch"
+            )
 
     def test_legacy_checkpoint_restores_logical_matrix_ratio(self) -> None:
         """忽略旧比例，恢复参数组和动量/step，继续更新与二维参考一致。"""
