@@ -83,10 +83,111 @@ def _verify_packed_alignment(packed_batch: PackedBatch) -> None:
             assert optional_field.shape[1] == seq_len, f"{field_name}: {optional_field.shape[1]} vs {seq_len}"
 
 
-class TrainingController:
-    def __init__(self, workers: list[TrainingWorker]) -> None:
+class TrainingWorkerGroup:
+    """Role-scoped wrapper around one set of training worker handles.
+
+    The first migration stage only registers the actor group. ``attached`` is
+    reserved for critic/reference/teacher groups in a later stage.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        workers: list[Any],
+        *,
+        attached: bool = False,
+        can_sync_rollout: bool = False,
+    ) -> None:
+        """Create a role-scoped view over training worker handles.
+
+        Args:
+            name: Logical role name, for example ``"actor"``. The name is
+                also used by :class:`TrainingController` for dispatch.
+            workers: Ray actor handles that belong to this role. All handles
+                are expected to represent the same data-parallel worker set.
+            attached: Whether this role is hosted in the actor process. It is
+                reserved for the future critic/reference/teacher roles and is
+                not active in the actor-only migration stage.
+            can_sync_rollout: Whether this group is allowed to push weights to
+                the rollout workers. This must be true only for the actor.
+        """
+        if not name:
+            raise ValueError("worker group name must not be empty")
+        self.name = name
         self.workers = workers
+        self.attached = attached
+        self.can_sync_rollout = can_sync_rollout
+
+    @staticmethod
+    def _call(worker: Any, method: str, *args, **kwargs):
+        call = getattr(worker, method)
+        remote = getattr(call, "remote", None)
+        return remote(*args, **kwargs) if remote is not None else call(*args, **kwargs)
+
+    def fit(
+        self,
+        packed_data_batches: list[PackedBatch],
+        data_replicate_size: int,
+        rollout_idx: int,
+    ) -> list[WorkerLogItem]:
+        """Dispatch already-packed data using the existing DP assignment."""
+        if not self.workers:
+            return []
+        if data_replicate_size <= 0 or len(self.workers) % data_replicate_size != 0:
+            raise ValueError("worker count must be divisible by data_replicate_size")
+
+        dp_size = len(self.workers) // data_replicate_size
+        data_batch_refs: dict[int, ray.ObjectRef] = {}
+        handles = []
+        for worker_idx, worker in enumerate(self.workers):
+            dp_idx = worker_idx // data_replicate_size
+            if dp_idx not in data_batch_refs:
+                data_batch_refs[dp_idx] = ray.put(packed_data_batches[dp_idx::dp_size])
+            handles.append(
+                self._call(
+                    worker,
+                    "fit",
+                    data_batches=data_batch_refs[dp_idx],
+                    rollout_idx=rollout_idx,
+                )
+            )
+        try:
+            return ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        finally:
+            data_batch_refs.clear()
+
+    def broadcast_host(self, method: str, *args, **kwargs):
+        """Broadcast a worker lifecycle method and resolve its results."""
+        handles = [self._call(worker, method, *args, **kwargs) for worker in self.workers]
+        if handles and isinstance(handles[0], ray.ObjectRef):
+            return ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        return handles
+
+
+class TrainingController:
+    def __init__(self, workers: list[TrainingWorker] | None = None) -> None:
+        self.workers = workers or []
         self.logger = get_logger()
+        self._groups: dict[str, TrainingWorkerGroup] = {}
+        self.register(TrainingWorkerGroup("actor", self.workers, can_sync_rollout=True))
+
+    def register(self, group: TrainingWorkerGroup) -> None:
+        if group.name in self._groups:
+            raise ValueError(f"duplicate worker group: {group.name}")
+        self._groups[group.name] = group
+
+    def group(self, name: str) -> TrainingWorkerGroup:
+        try:
+            return self._groups[name]
+        except KeyError as exc:
+            raise KeyError(f"worker group is not registered: {name}") from exc
+
+    def switch_role_modules(self, role: str) -> None:
+        """Reserve the role-switching boundary for later attached roles."""
+        if role != "actor":
+            raise KeyError(f"role is not available in actor-only stage: {role}")
+        # The current TrainingWorker has only actor modules, so selecting the
+        # actor role is already the steady state and requires no remote call.
 
     # TODO(hha): 这个逻辑不够通用，应该复用 sft 函数，从而支持 expand soft pack
     def _get_pack_infos(self, dataset, num_tokens, target, random=None):
@@ -274,6 +375,13 @@ class TrainingController:
         return sorted(packed_data_batches, key=lambda x: x["seq_ctx"].max_length_q, reverse=True)
 
     def fit(self, data_batches: list[ColateItem], pack_max_length: int, rollout_idx: int) -> list[WorkerLogItem]:
+        """Run the actor-only training path for one batch."""
+        return self.train_grpo_batch(data_batches, pack_max_length, rollout_idx)
+
+    def train_grpo_batch(
+        self, data_batches: list[ColateItem], pack_max_length: int, rollout_idx: int
+    ) -> list[WorkerLogItem]:
+        """Keep the existing packing path and route its result to actor."""
         has_rollout_routed_experts = False
         language_cfg = None
         if data_batches[0]["seq_ctx"].rollout_routed_experts is not None:
@@ -381,20 +489,12 @@ class TrainingController:
             pad_data_samples = [pad_data for _ in range(pad_num)]
             packed_data_batches = packed_data_batches + pad_data_samples
 
-        handles = []
-        data_batch_refs = {}
-        for worker_idx, worker in enumerate(self.workers):
-            dp_idx = worker_idx // data_replicate_size
-            if dp_idx not in data_batch_refs:
-                data_batch_refs[dp_idx] = ray.put(packed_data_batches[dp_idx::dp_size])
-            handles.append(
-                worker.fit.remote(  # type: ignore[attr-defined]
-                    data_batches=data_batch_refs[dp_idx],
-                    rollout_idx=rollout_idx,
-                )
-            )
         try:
-            log_infos = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+            log_infos = self.group("actor").fit(
+                packed_data_batches,
+                data_replicate_size=data_replicate_size,
+                rollout_idx=rollout_idx,
+            )
         finally:
             # free pixel values ref
             free_pixel_value_refs: list[ray.ObjectRef] = []
@@ -403,29 +503,28 @@ class TrainingController:
                     free_pixel_value_refs.extend(data["seq_ctx"].pixel_values)
             if len(free_pixel_value_refs) > 0:
                 free_object_refs(free_pixel_value_refs)
-            del data_batch_refs
             del packed_data_batches
         return log_infos
 
     def offload(self, target: Literal["model", "optimizer", "all"] = "all"):
         if target == "model":
-            ray.get([worker.offload_model.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
+            self.group("actor").broadcast_host("offload_model")
         elif target == "optimizer":
-            ray.get([worker.offload_optimizer.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
+            self.group("actor").broadcast_host("offload_optimizer")
         elif target == "all":
-            ray.get([worker.offload_model.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
-            ray.get([worker.offload_optimizer.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
+            self.group("actor").broadcast_host("offload_model")
+            self.group("actor").broadcast_host("offload_optimizer")
         return
 
     def onload(self, target: Literal["model", "optimizer", "all"] = "all"):
         """Onload the model or optimizer of the training workers."""
         if target == "model":
-            ray.get([worker.onload_model.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
+            self.group("actor").broadcast_host("onload_model")
         elif target == "optimizer":
-            ray.get([worker.onload_optimizer.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
+            self.group("actor").broadcast_host("onload_optimizer")
         elif target == "all":
-            ray.get([worker.onload_model.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
-            ray.get([worker.onload_optimizer.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
+            self.group("actor").broadcast_host("onload_model")
+            self.group("actor").broadcast_host("onload_optimizer")
         return
 
     def bind_rollout_weight_update(
@@ -434,59 +533,44 @@ class TrainingController:
         targets,
         rollout_config,
     ):
-        ray.get(
-            [
-                worker.bind_rollout_weight_update.remote(
-                    targets=targets,
-                    rollout_config=rollout_config,
-                )
-                for worker in self.workers
-            ]
+        self.group("actor").broadcast_host(
+            "bind_rollout_weight_update",
+            targets=targets,
+            rollout_config=rollout_config,
         )
 
     def weight_update(self, **kwargs):
-        """Update the weights from the training workers."""
-        handles = [worker.weight_update.remote(**kwargs) for worker in self.workers]
-        ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
-        return
+        """Update rollout weights from the actor group only."""
+        actor = self.group("actor")
+        if not actor.can_sync_rollout:
+            raise RuntimeError("actor group is not configured for rollout sync")
+        actor.broadcast_host("weight_update", **kwargs)
 
     def has_registered_weight_checkpoint(self) -> bool:
-        handles = [worker.has_registered_weight_checkpoint.remote() for worker in self.workers]
-        return all(ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT))
+        return all(self.group("actor").broadcast_host("has_registered_weight_checkpoint"))
 
     def suspend_train_nccl_process_groups(self):
         """Suspend train-side NCCL process groups after weight sync."""
-        handles = [
-            worker.suspend_train_nccl_process_groups.remote()  # type: ignore[attr-defined]
-            for worker in self.workers
-        ]
-        results = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        results = self.group("actor").broadcast_host("suspend_train_nccl_process_groups")
         self.logger.info(f"Suspended train NCCL process groups: {_summarize_process_group_results(results)}")
         return results
 
     def resume_train_nccl_process_groups(self):
         """Resume train-side NCCL process groups before training."""
-        handles = [
-            worker.resume_train_nccl_process_groups.remote()  # type: ignore[attr-defined]
-            for worker in self.workers
-        ]
-        results = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        results = self.group("actor").broadcast_host("resume_train_nccl_process_groups")
         self.logger.info(f"Resumed train NCCL process groups: {_summarize_process_group_results(results)}")
         return results
 
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
-        handles = [worker.save_hf.remote(hf_dir, save_dtype) for worker in self.workers]  # type: ignore
-        ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        self.group("actor").broadcast_host("save_hf", hf_dir, save_dtype)
         return
 
     def resume(self, load_checkpoint_cfg: LoadCheckpointConfig):
         """Resume the training workers from the checkpoint."""
-        handles = [worker.resume.remote(load_checkpoint_cfg) for worker in self.workers]  # type: ignore
-        ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        self.group("actor").broadcast_host("resume", load_checkpoint_cfg)
         return
 
     def save(self, dcp_dir: str, no_save_optimizer: bool = False):
         """Save the DCP checkpoint of the training workers."""
-        handles = [worker.save.remote(dcp_dir, no_save_optimizer) for worker in self.workers]  # type: ignore
-        ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        self.group("actor").broadcast_host("save", dcp_dir, no_save_optimizer)
         return
