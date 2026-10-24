@@ -209,6 +209,7 @@ def build_grouped_linear(
             parallel_style=parallel_style,
             ep_tp_mesh=ep_tp_mesh,
             num_fused_projections=num_fused_projections,
+            enable_fused_moe_activation=float8_cfg.enable_fused_moe_activation,
         )
     else:
         raise NotImplementedError(

@@ -6,6 +6,8 @@ import triton
 import triton.language as tl
 from torch.library import triton_op, wrap_triton
 
+from xtuner.v1.float8.triton_kernels.quantization import quantize_per_column
+
 
 def get_cuda_autotune_config():
     return [
@@ -128,8 +130,7 @@ def trans_per_tile_quant_expand_128x_kernel(
         input_block = tl.load(input_offset, mask=(offs_m < group_end)[:, None] & mask_n[None, :], other=0).to(
             tl.float32
         )
-        output_block_scale = tl.max(tl.abs(input_block), 0) / fmax
-        output_block_scale = tl.clamp(output_block_scale, 1e-12, 3e38)
+        input_quant, output_block_scale = quantize_per_column(input_block, fmin, fmax)
         scales_block_ptr = (
             output_scales_ptr
             + (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)) * stride_out_scale_n
@@ -138,14 +139,13 @@ def trans_per_tile_quant_expand_128x_kernel(
         )
         tl.store(scales_block_ptr, output_block_scale, mask=mask_n)
 
-        input_quant = input_block / output_block_scale[None, :]
         # avoid int32 overflow when seqlen is large
         output_offset = (
             output_ptr
             + offs_n[None, :].to(tl.int64) * stride_out_n
             + offs_m_expand[:, None].to(tl.int64) * stride_out_m
         )
-        output_block = tl.clamp(input_quant, fmin, fmax).to(output_ptr.dtype.element_ty)
+        output_block = input_quant.to(output_ptr.dtype.element_ty)
         tl.store(
             output_offset,
             output_block,
