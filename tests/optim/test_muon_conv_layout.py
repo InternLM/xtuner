@@ -275,13 +275,13 @@ class TestMuonConvLayout(DeterministicDDPTestCase):
 
 
 class TestMuonDerivedState:
-    def test_initial_state_keeps_untouched_parameters(self) -> None:
+    def test_initial_state_is_lazy(self) -> None:
         trainable = torch.nn.Parameter(torch.ones(8, 3, 2, 2))
         untouched = torch.nn.Parameter(torch.ones(4, 4), requires_grad=False)
         optimizer = Muon([trainable, untouched], flatten=True)
         state = optimizer.state_dict()
-        assert len(state["state"]) == 2
-        assert all(param_state == {} for param_state in state["state"].values())
+        assert state["state"] == {}
+        assert len(state["param_groups"][0]["params"]) == 2
 
     def test_legacy_state_is_preserved_without_mutating_checkpoint(self) -> None:
         param = torch.nn.Parameter(torch.ones(8, 3, 2, 2))

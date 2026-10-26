@@ -12,6 +12,8 @@
 
 import copy
 import math
+import tempfile
+from pathlib import Path
 from typing import Callable, Literal, overload
 
 import parametrize
@@ -26,10 +28,11 @@ from torch.distributed.tensor.placement_types import Shard
 
 from xtuner._testing.testcase import DeterministicDDPTestCase
 from xtuner.v1.config import FSDPConfig
-from xtuner.v1.config.optim import MuonConfig
+from xtuner.v1.config.optim import AdamWConfig, MuonConfig
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.model.base import BaseModel, XTunerBaseModelConfig
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseMLP
+from xtuner.v1.optim import AdamW, SwapAdamW
 from xtuner.v1.optim.muon import Muon, _muonsplit_newton_schulz, zeropower_via_newtonschulz5
 
 
@@ -414,6 +417,125 @@ class TestMuonSingleGPU(DeterministicDDPTestCase):
                 rtol=1e-5,
                 msg=f"mismatch on '{name}': max_abs={abs_diff.max().item():.2e}, max_rel={rel_diff.max().item():.2e}",
             )
+
+    def test_swap_optimizer_matches_device_state_and_loads_pinned(self):
+        """Real Muon and AdamW groups keep identical updates when their state is swapped."""
+        self.create_pg("cuda")
+        config = ToyMoEModelConfig(compile_cfg=False)
+        fsdp = FSDPConfig(param_dtype=torch.float32, reduce_dtype=torch.float32, torch_compile=False)
+
+        def build(seed: int, swap: bool):
+            torch.manual_seed(seed)
+            model = config.build().to("cuda")
+            model.fully_shard(fsdp)
+            optimizer = MuonConfig(lr=0.01, weight_decay=0.01, swap_optimizer=swap).build(model)
+            return model, optimizer
+
+        model, optimizer = build(42, False)
+        swap_model, swap_optimizer = build(42, True)
+        for step in range(3):
+            torch.manual_seed(step)
+            input_ids = torch.randint(0, config.vocab_size, (1, 8), device="cuda")
+            for current_model, current_optimizer in ((model, optimizer), (swap_model, swap_optimizer)):
+                current_model(input_ids).backward()
+                current_optimizer.step()
+                current_optimizer.zero_grad()
+            for p, q in zip(model.parameters(), swap_model.parameters()):
+                assert torch.equal(p.to_local(), q.to_local())
+
+        engine = object.__new__(TrainEngine)
+        engine.optimizer = optimizer
+        assert engine.put_optimizer_to_device("cpu") is True
+        assert all(
+            value.to_local().device.type == "cpu"
+            for state in optimizer.state.values()
+            for value in state.values()
+            if isinstance(value, torch.Tensor)
+        )
+        assert engine.put_optimizer_to_device("cuda") is True
+        assert engine.put_optimizer_to_device("cuda") is False
+        engine.optimizer = swap_optimizer
+        assert engine.put_optimizer_to_device("cpu") is False
+        assert engine.put_optimizer_to_device("cuda") is False
+
+        for group, swap_group in zip(optimizer.param_groups, swap_optimizer.param_groups):
+            assert group["algorithm"] == swap_group["algorithm"]
+            for p, q in zip(group["params"], swap_group["params"]):
+                for key in ("momentum", "variance") if group["algorithm"] == "adamw" else ("momentum",):
+                    actual = swap_optimizer.state[q][key].to_local()
+                    assert actual.device.type == "cpu" and actual.is_pinned()
+                    assert torch.equal(optimizer.state[p][key].to_local().cpu(), actual)
+
+        loaded_model, loaded_optimizer = build(0, True)
+        with tempfile.TemporaryDirectory() as directory:
+            saved_engine = object.__new__(TrainEngine)
+            saved_engine.model = swap_model
+            saved_engine.model_cfg = swap_model.config
+            saved_engine.optimizer = swap_optimizer
+            saved_engine.save_dcp(Path(directory) / "checkpoint")
+
+            loaded_engine = object.__new__(TrainEngine)
+            loaded_engine.model = loaded_model
+            loaded_engine.model_cfg = loaded_model.config
+            loaded_engine.optimizer = loaded_optimizer
+            loaded_engine.has_freeze_params = False
+            loaded_engine.load_dcp(Path(directory) / "checkpoint")
+
+        for p, q in zip(swap_model.parameters(), loaded_model.parameters()):
+            assert torch.equal(p.to_local(), q.to_local())
+        for group, loaded_group in zip(optimizer.param_groups, loaded_optimizer.param_groups):
+            for p, q in zip(group["params"], loaded_group["params"]):
+                for key in ("momentum", "variance") if group["algorithm"] == "adamw" else ("momentum",):
+                    actual = loaded_optimizer.state[q][key].to_local()
+                    assert actual.device.type == "cpu" and actual.is_pinned()
+                    assert torch.equal(optimizer.state[p][key].to_local().cpu(), actual)
+
+        input_ids = torch.randint(0, config.vocab_size, (1, 8), device="cuda")
+        for current_model, current_optimizer in ((swap_model, swap_optimizer), (loaded_model, loaded_optimizer)):
+            current_model(input_ids).backward()
+            current_optimizer.step()
+        for p, q in zip(swap_model.parameters(), loaded_model.parameters()):
+            assert torch.equal(p.to_local(), q.to_local())
+
+    @parametrize.parametrize("swap", [False, True])
+    def test_adamw_state_device_policy(self, swap: bool):
+        """AdamW moves existing state; SwapAdamW keeps its pinned state on the host."""
+        self.create_pg("cuda")
+        model = ToyMoEModelConfig(compile_cfg=False).build().to("cuda")
+        optimizer = AdamWConfig(lr=0.01, swap_optimizer=swap).build(model)
+        assert isinstance(optimizer, SwapAdamW if swap else AdamW)
+        for group in optimizer.param_groups:
+            for param in group["params"]:
+                param.grad = torch.ones_like(param)
+        optimizer.step()
+
+        engine = object.__new__(TrainEngine)
+        engine.optimizer = optimizer
+        values = {
+            (param, key): value.detach().cpu().clone()
+            for param, state in optimizer.state.items()
+            for key, value in state.items()
+            if isinstance(value, torch.Tensor)
+        }
+        assert engine.put_optimizer_to_device("cpu") is not swap
+        assert all(
+            value.device.type == "cpu"
+            for state in optimizer.state.values()
+            for value in state.values()
+            if isinstance(value, torch.Tensor)
+        )
+        assert engine.put_optimizer_to_device("cpu") is False
+        assert engine.put_optimizer_to_device("cuda") is not swap
+        assert engine.put_optimizer_to_device("cuda") is False
+        for (param, key), expected in values.items():
+            actual = optimizer.state[param][key]
+            assert actual.device.type == ("cpu" if swap else "cuda")
+            assert torch.equal(actual.cpu(), expected)
+
+        for group in optimizer.param_groups:
+            for param in group["params"]:
+                param.grad = torch.ones_like(param)
+        optimizer.step()
 
     @parametrize.parametrize("clip_grad_mode", ["all", "adamw_only"])
     def test_clip_grad_norm_respects_config(self, clip_grad_mode: Literal["all", "adamw_only"]):

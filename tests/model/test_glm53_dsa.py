@@ -183,6 +183,24 @@ class TestKpoolPoolLayout:
             ids = pool[pool >= 0]
             assert (ids < 5).all() or (ids >= 5).all()
 
+    def test_padded_pool_is_never_selected(self) -> None:
+        ctx = _seq_ctx([4, 4])
+        pool_index = build_pool_index(ctx, seq_len=8, index_kpool=4, device="cpu")
+        torch.testing.assert_close(pool_index[-1], torch.full((4,), -1, dtype=torch.int64))
+
+        q = torch.ones(1, 8, 2, 4)
+        k = torch.ones(1, 8, 4)
+        gate = torch.zeros_like(k)
+        weights = torch.ones(1, 8, 2)
+        ape = torch.zeros(4, 4)
+        selected = torch_kpool_topk_indices(
+            q, k, gate, weights, ape, ctx, index_head_dim=4, index_topk=8, index_kpool=4, alignment=1
+        )
+        for row in range(8):
+            valid = selected[row, 0][selected[row, 0] >= 0]
+            doc_start = 0 if row < 4 else 4
+            assert set(valid.tolist()) == set(range(doc_start, row + 1))
+
     def test_pads_up_to_alignment(self):
         # index_topk=2048, index_kpool=4 -> semantic width 2051.
         assert kpool_output_width(2048, 4, alignment=512) == 2560

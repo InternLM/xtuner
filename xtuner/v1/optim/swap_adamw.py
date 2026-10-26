@@ -7,13 +7,15 @@ from torch.optim.adam import adam as torch_adam
 
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 
+from .adamw import AdamW
+
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 logger = get_logger()
 
 
-class SwapAdamW(torch.optim.AdamW):
+class SwapAdamW(AdamW):
     """AdamW optimizer with optimizer-state swap between device and host.
 
     Optimizer states are kept canonically on pinned CPU memory. During optimizer step, state tensors are copied to
@@ -143,6 +145,10 @@ class SwapAdamW(torch.optim.AdamW):
             group["decoupled_weight_decay"] = True
         for post_hook in self._optimizer_load_state_dict_post_hooks.values():
             post_hook(self)
+
+    def put_state_to_device(self, device: torch.device | str) -> bool:
+        """Keep the canonical optimizer state on the host."""
+        return False
 
     @staticmethod
     def _to_local_tensor(tensor: torch.Tensor) -> torch.Tensor:

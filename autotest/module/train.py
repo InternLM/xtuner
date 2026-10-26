@@ -79,13 +79,19 @@ class Train:
             elif train_type == "rl":
                 infer_type = config.get("parameters", {}).get("infer_backend", "lmdeploy")
                 accelerator = config.get("parameters", {}).get("accelerator", "GPU")
+                launch_script = config.get("parameters", {}).get("launch_script")
                 command = (
                     f"cd {current_dir}; pwd; {pip_package}; {image_version_check}"
                     f"export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
                     + cudnn_patch
                     + debug_keepalive
-                    + f"bash -x autotest/utils/ci_run_rl.sh {accelerator} {infer_type} {config_path} ${{MODEL_PATH}} ${{DATA_PATH}} ${{EVAL_DATA_PATH}}"
                 )
+                if launch_script:
+                    # OPD-style launchers start their own servers (e.g. rollout
+                    # teachers) and read the rest of the setup from envs.
+                    command += f'bash -x {launch_script} "${{MODEL_PATH}}" "${{DATA_PATH}}"'
+                else:
+                    command += f"bash -x autotest/utils/ci_run_rl.sh {accelerator} {infer_type} {config_path} ${{MODEL_PATH}} ${{DATA_PATH}} ${{EVAL_DATA_PATH}}"
                 if debug_keepalive:
                     command += "; wait"
                 return command, config

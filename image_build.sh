@@ -8,8 +8,11 @@ export ADAPTIVE_GEMM_URL=https://github.com/InternLM/AdaptiveGEMM@10411e08b182e8
 export GROUPED_GEMM_URL=https://github.com/InternLM/GroupedGEMM@aa5ffb21cb626d6cd61d99fc42958127b0b99be7
 export DEEP_EP_URL=https://github.com/deepseek-ai/DeepEP@9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee # v1.2.1
 export DEEP_GEMM_URL=https://github.com/deepseek-ai/DeepGEMM@88965b078186ee7510ab9fc4f1d5ebc19adfa8d1 # v2.6.1 88965b0
-export CAUSAL_CONV1D_URL=https://github.com/Dao-AILab/causal-conv1d@da6dbaa9fd5a919967f14d3fd031da1288ad5025 # v1.6.0
+export CAUSAL_CONV1D_URL=https://github.com/Dao-AILab/causal-conv1d@c51519fb10d92ffa257c1982e1831d3243454b2f # v1.6.1
 export FLA_URL="${FLA_URL-https://github.com/HAOCHENYE/flash-linear-attention@tmp-tensor-cache}"
+
+export DEEPSELECT_URL=https://github.com/deepseek-ai/DeepSelect@0f03b68748b304863fdf0181a11458d04ae533a9
+export FLASHMLA_URL=https://github.com/deepseek-ai/FlashMLA@9241ae3ef9bac614dd25e45e507e089f888280e0
 
 export TORCH_VERSION=${TORCH_VERSION:-"2.9.1"}
 export LMDEPLOY_VERSION="${LMDEPLOY_VERSION:-0.17.0}"
@@ -34,6 +37,8 @@ docker build . \
   --build-arg ADAPTIVE_GEMM_URL="$ADAPTIVE_GEMM_URL" \
   --build-arg FLASH_ATTN_URL=$FLASH_ATTN_URL \
   --build-arg GROUPED_GEMM_URL=$GROUPED_GEMM_URL \
+  --build-arg DEEPSELECT_URL=$DEEPSELECT_URL \
+  --build-arg FLASHMLA_URL=$FLASHMLA_URL \
   --build-arg CAUSAL_CONV1D_URL=$CAUSAL_CONV1D_URL \
   --build-arg FLA_URL="$FLA_URL" \
   --build-arg DEEP_EP_URL=$DEEP_EP_URL \

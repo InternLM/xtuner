@@ -1,14 +1,23 @@
-from pathlib import Path
-from typing import Annotated
+# `xtuner.compile_cache` only uses the standard library and must run before any
+# third-party import: when local compile-cache mode is enabled it repoints
+# XTUNER_COMPILE_CACHE_DIR to the node-local warmed cache, which `xtuner/v1/__init__.py`
+# reads while setting the per-compiler cache paths.
+from xtuner import compile_cache
 
-import torch.distributed as dist
-from cyclopts import App, Parameter
-from cyclopts.group import Group
 
-from xtuner.v1.train.arguments import TrainingArguments
-from xtuner.v1.train.trainer import Trainer
-from xtuner.v1.utils import Config
-from xtuner.v1.utils.misc import monkey_patch_hf_modules_cache
+compile_cache.activate_local_cache()
+
+from pathlib import Path  # noqa: E402
+from typing import Annotated  # noqa: E402
+
+import torch.distributed as dist  # noqa: E402
+from cyclopts import App, Parameter  # noqa: E402
+from cyclopts.group import Group  # noqa: E402
+
+from xtuner.v1.train.arguments import TrainingArguments  # noqa: E402
+from xtuner.v1.train.trainer import Trainer  # noqa: E402
+from xtuner.v1.utils import Config  # noqa: E402
+from xtuner.v1.utils.misc import monkey_patch_hf_modules_cache  # noqa: E402
 
 
 app = App(
@@ -38,8 +47,17 @@ def main(
     trainer = Trainer.from_config(trainer_cfg)
     trainer.fit()
 
+    # fit() ends with a global barrier; on abnormal exit this is skipped and the shared
+    # cache keeps its last consistent state.
+    cache_state = compile_cache.writeback(barrier=dist.barrier if dist.is_initialized() else None)
+
     if dist.is_initialized():
         dist.destroy_process_group()
+
+    # A shared-filesystem merge can outlast the process-group timeout; keep it outside
+    # distributed synchronization while retaining automatic write-back in the CLI.
+    if cache_state is not None and cache_state.global_rank == 0:
+        compile_cache.merge_staging(cache_state)
 
 
 if __name__ == "__main__":

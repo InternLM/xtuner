@@ -20,8 +20,19 @@ logger = get_logger()
 
 IMAGE_TOKEN_ALIAS = "XTUNER-ALIAS-ALIAS-XTUNER-2025"
 
+# TODO: 错误契约的目标形态：导致训练失败的 error 只应是一个显式自定义的 DataFatalError，
+# 除此之外的任何 error 都视为可丢弃的脏数据，不允许中断训练。当前先以 RuntimeError 约定
+# 脏数据边界（见下），后续引入 DataFatalError 后可据此收敛异常类型。
+# 单条脏数据在采集/几何预测阶段可能抛出的异常类型：一律按损坏样本走 _discard_damaged_sample
+# 通道（cache 警告丢弃、runtime 由上游换无 loss 占位样本）。AssertionError 刻意不在其中——
+# 配置/代码错误（如 enable_thinking=False）每条样本都会触发，必须逃逸暴露而非被静默吞掉。
+_DIRTY_DATA_ERRORS = (RuntimeError, KeyError, ValueError, IndexError, TypeError, ZeroDivisionError)
+
 
 def collect_image_video_paths_and_extra(messages: list[dict], allow_all_roles: bool = False):
+    # 单条样本的脏数据（缺 wh、wh 形状/数量不对等）一律抛 RuntimeError：cache 阶段由
+    # BaseMLLMTokenizeFunction.__call__ 捕获并按损坏样本丢弃（num_tokens=0），runtime 由上游
+    # 数据集换成无 loss 占位样本——不能抛 AssertionError，否则 cache 构建的 worker 进程直接死亡。
     image_paths = []
     image_wh_list = []
     video_wh_list = []
@@ -42,24 +53,28 @@ def collect_image_video_paths_and_extra(messages: list[dict], allow_all_roles: b
                         if "image_wh" in c[key]:
                             image_wh = c[key]["image_wh"]
                             if isinstance(image_wh[0], (list, tuple)):
-                                assert len(image_wh) == 1, (
-                                    f"Only one image size is supported for each image. but got {image_wh}"
-                                )
+                                if len(image_wh) != 1:
+                                    raise RuntimeError(
+                                        f"Only one image size is supported for each image. but got {image_wh}"
+                                    )
                                 image_wh = image_wh[0]
                             image_wh_list.append(image_wh)
-                            assert len(image_wh) == 2, f"image_wh should be [width, height], but got {image_wh}"
+                            if len(image_wh) != 2:
+                                raise RuntimeError(f"image_wh should be [width, height], but got {image_wh}")
                     if ctype in ("video_url", "video"):
                         key = "video_url" if "video_url" in c else "video"
                         video_paths.append(c[key]["url"])
                         video_wh = c[key].get("image_wh")
                         if video_wh is not None:
                             if isinstance(video_wh[0], (list, tuple)):
-                                assert len(video_wh) == 1, (
-                                    f"Only one video size is supported for each video. but got {video_wh}"
-                                )
+                                if len(video_wh) != 1:
+                                    raise RuntimeError(
+                                        f"Only one video size is supported for each video. but got {video_wh}"
+                                    )
                                 video_wh = video_wh[0]
                             video_wh_list.append(video_wh)
-                            assert len(video_wh) == 2, f"video_wh should be [width, height], but got {video_wh}"
+                            if len(video_wh) != 2:
+                                raise RuntimeError(f"video_wh should be [width, height], but got {video_wh}")
 
                         video_extra_dict = {}
 
@@ -76,14 +91,12 @@ def collect_image_video_paths_and_extra(messages: list[dict], allow_all_roles: b
                         if len(video_extra_dict) > 0:
                             video_extra_info_list.append(video_extra_dict)
 
-    if len(image_wh_list) > 0:
-        assert len(image_wh_list) == len(image_paths), "If image_wh is provided, it should match the number of images."
-    if len(video_wh_list) > 0:
-        assert len(video_wh_list) == len(video_paths), "If video_wh is provided, it should match the number of videos."
-    if len(video_extra_info_list) > 0:
-        assert len(video_extra_info_list) == len(video_paths), (
-            "If video_extra_info is provided, it should match the number of videos."
-        )
+    if len(image_wh_list) > 0 and len(image_wh_list) != len(image_paths):
+        raise RuntimeError("If image_wh is provided, it should match the number of images.")
+    if len(video_wh_list) > 0 and len(video_wh_list) != len(video_paths):
+        raise RuntimeError("If video_wh is provided, it should match the number of videos.")
+    if len(video_extra_info_list) > 0 and len(video_extra_info_list) != len(video_paths):
+        raise RuntimeError("If video_extra_info is provided, it should match the number of videos.")
     return (
         image_paths,
         video_paths,
@@ -223,51 +236,50 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
 
     @with_proxy_attention_flops
     def __call__(self, item: dict, media_root: str = "", **kwargs) -> T | CacheItem:  # type: ignore[override]
+        # 公开接口按“采集媒体 → 拒绝不支持的组合 → cache 或 runtime → 返回”线性展开：状态判断
+        # 只出现一次，cache 的异常出口（try 包住三种计算）与 runtime 的内存整理各自只出现一次。
         try:
-            self._image_path, self._video_path, extra_info = collect_image_video_paths_and_extra(
-                item["messages"], allow_all_roles=self.allow_all_roles
-            )
+            self._image_path, self._video_path, extra_info = self._collect_media(item)
             self._image_wh_list = extra_info["image_wh"]
             self._video_wh_list = extra_info["video_wh"]
             self._video_extra_info_list = extra_info["video_extra_info"]
-        except NotImplementedError as e:
-            # 模型家族显式不支持的数据边界按脏样本处理。
-            return self._discard_damaged_sample(str(e))
-        except RuntimeError as e:
-            if self.state == "cache":
-                print(f"!!!! RuntimeError: {e} of {self.data_name} when tokenize cache item. skip {item}!")
-                ret = CacheItem(num_tokens=0, num_img_tokens=[0])
-                return ret
-            else:
-                raise RuntimeError(f"!!!! RuntimeError: {e} of {self.data_name}")
+        except (NotImplementedError, *_DIRTY_DATA_ERRORS) as e:
+            # 模型家族显式不支持的数据边界与单条脏数据统一走丢弃通道；runtime 侧不能吞——
+            # NotImplementedError 原样上抛（上游按不支持边界处理），其余包 RuntimeError 暴露。
+            if self.state != "cache":
+                if isinstance(e, NotImplementedError):
+                    raise
+                raise RuntimeError(f"!!!! {type(e).__name__}: {e} of {self.data_name}") from e
+            return self._discard_damaged_sample(f"{type(e).__name__}: {e} of {self.data_name}")
         if len(self._image_path) > 0 and len(self._video_path) > 0:
-            raise NotImplementedError(
+            return self._discard_damaged_sample(
                 "Mixed image and video samples in one record are not supported by "
-                f"{type(self).__name__}; please split them into separate records."
+                f"{type(self).__name__}; please split them into separate records. "
+                f"data_name: {self.data_name}, data_id: {item.get('id', '')}."
             )
+        if self.state == "cache":
+            try:
+                if len(self._image_path) > 0:
+                    return self.calc_num_tokens_multi_modal_get_item(item)
+                if len(self._video_path) > 0:
+                    return self.calc_num_tokens_video_get_item(item)
+                return self.calc_num_tokens_pure_text_get_item(item)
+            except _DIRTY_DATA_ERRORS as e:
+                return self._discard_damaged_sample(f"{type(e).__name__}: {e} of {self.data_name}")
         if len(self._image_path) > 0:
-            if self.state == "cache":
-                ret = self.calc_num_tokens_multi_modal_get_item(item)
-            else:
-                ret = self.multi_modal_get_item(item, media_root)
-                if self._trim_memory_counter % self._trim_memory_interval == 0:
-                    trim_memory()
-                self._trim_memory_counter += 1
+            ret = self.multi_modal_get_item(item, media_root)
         elif len(self._video_path) > 0:
-            if self.state == "cache":
-                ret = self.calc_num_tokens_video_get_item(item)
-            else:
-                ret = self.video_get_item(item, media_root)
-                if self._trim_memory_counter % self._trim_memory_interval == 0:
-                    trim_memory()
-                self._trim_memory_counter += 1
+            ret = self.video_get_item(item, media_root)
         else:
-            if self.state == "cache":
-                ret = self.calc_num_tokens_pure_text_get_item(item)
-            else:
-                ret = self.pure_text_get_item(item)
-
+            ret = self.pure_text_get_item(item)
+        if len(self._image_path) > 0 or len(self._video_path) > 0:
+            if self._trim_memory_counter % self._trim_memory_interval == 0:
+                trim_memory()
+            self._trim_memory_counter += 1
         return ret
+
+    def _collect_media(self, item: dict):
+        return collect_image_video_paths_and_extra(item["messages"], allow_all_roles=self.allow_all_roles)
 
     def hash(self) -> str:
         if self._hash is None:

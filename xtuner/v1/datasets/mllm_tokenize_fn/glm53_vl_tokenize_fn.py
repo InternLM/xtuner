@@ -21,19 +21,25 @@ preprocessing path makes internally. Verified bitwise-equal to the real processo
 """
 
 import copy
+import json
 import os
+from collections.abc import Mapping
 from typing import Any, Literal
 
 import numpy as np
 import torch
 from PIL import Image
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from transformers import AutoProcessor
 from transformers.models.glm5_next.image_processing_glm5_next import smart_resize as image_smart_resize
 from transformers.models.glm5_next.video_processing_glm5_next import smart_resize as video_smart_resize
 from transformers.video_utils import VideoMetadata
-from xtuner.v1.data_proto.messages.glm53_chat import _tokenize_with_loss_mask, render_glm53_chat
+from xtuner.v1.data_proto.messages.glm53_chat import (
+    _tokenize_with_loss_mask,
+    glm53_media_messages,
+    render_glm53_chat,
+)
 from xtuner.v1.utils import get_logger
 
 from ..data_item import CacheItem, Glm53VLDataItem
@@ -42,9 +48,11 @@ from .base_mllm_tokenize_fn import (
     BaseMLLMTokenizeFnConfig,
     BaseMLLMTokenizeFunction,
     OSSLoaderConfig,
+    collect_image_video_paths_and_extra,
     get_image_path,
     load_image,
 )
+from .image_data_uri import is_data_uri, load_image_data_uri
 from .qwen3_vl_utils import Qwen3VLOSSLoader, pil_loader, sort_frames
 
 
@@ -88,10 +96,9 @@ def _read_video_frames(video_path: str, frame_indices: list[int]) -> list[Image.
     """Read specific frames from a video directory (numbered image files) or a
     real video file.
 
-    Real video decoding uses ``decord`` directly rather than the qwen3_vl helpers: those assume
-    qwen's merge-paired timestamp convention (``len(frames_indices) == len(timestamps) * 2``),
-    which doesn't match GLM-5.3-Flash's own timestamp derivation (``VideoMetadata.timestamps``,
-    computed from ``fps`` + ``frames_indices`` alone).
+    Real video decoding uses ``decord`` directly rather than the qwen3_vl helpers: those assume qwen's merge-paired
+    timestamp convention (``len(frames_indices) == len(timestamps) * 2``), which doesn't match GLM-5.3-Flash's own
+    timestamp derivation (``VideoMetadata.timestamps``, computed from ``fps`` + ``frames_indices`` alone).
     """
     if os.path.isdir(video_path):
         files = sort_frames(os.listdir(video_path))
@@ -214,7 +221,17 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
     # ---- shared render/expand/tokenize, called by both cache and runtime paths ----
 
+    def _collect_media(self, item: dict):
+        # 渲染器为结构化 tool 输出（{"id": ..., "output": [...]} 条目）里嵌套的媒体同样发射
+        # placeholder marker，而基类收集器只看每条消息 content 的直接列表项，嵌套媒体会出现
+        # "渲染出 marker、却没有对应 payload" 的错配。glm53_media_messages 按渲染 marker 顺序
+        # 把所有媒体 part（含嵌套 output 内的）拉平成合成 user 消息，保证位置式配对不错位。
+        return collect_image_video_paths_and_extra(
+            glm53_media_messages(item["messages"]), allow_all_roles=self.allow_all_roles
+        )
+
     def _render_base(self, data_item: dict) -> tuple[str, list[bool]]:
+        self._check_no_literal_visual_marker(data_item)
         messages = list(data_item["messages"])
         if self.system_message is not None and (not messages or messages[0].get("role") != "system"):
             messages = [{"role": "system", "content": self.system_message}, *messages]
@@ -225,6 +242,49 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             enable_thinking=self.enable_thinking,
             reasoning_effort=self.reasoning_effort,
         )
+
+    def _check_no_literal_visual_marker(self, data_item: dict) -> None:
+        # 字面 <|image|>/<|video|> 不只坑纯文本：_expand_marker 按首次出现位置展开，若文本（如
+        # tool 输出里的代码片段）中的字面标记位于真实媒体标记之前，patch 会展开到字面字符串的
+        # 位置；真实标记再被 max_length 截掉时，占位符数量恰好等于 patch 数，cache/runtime/
+        # collator 三层计数校验全部放行，而媒体绑定已经错位。所以在渲染/展开之前扫描所有会被
+        # renderer 输出的文本来源，把这类样本按脏数据交给统一丢弃通道；媒体结构项
+        # （{"type": "image"} 等）不参与扫描——它们展开后就是合法的真实标记。
+        texts: list[str] = []
+        for message in data_item["messages"]:
+            content = message.get("content", "")
+            parts = content if isinstance(content, list) else [content]
+            texts.extend(part for part in parts if isinstance(part, str))
+            texts.extend(
+                part.get("text", "") for part in parts if isinstance(part, Mapping) and part.get("type") == "text"
+            )
+            if message.get("role") == "assistant":
+                reasoning_content = message.get("reasoning_content")
+                if isinstance(reasoning_content, str):
+                    texts.append(reasoning_content)
+                for tool_call in message.get("tool_calls") or []:
+                    tool_call = tool_call.get("function", tool_call)
+                    texts.append(str(tool_call.get("name", "")))
+                    texts.extend(
+                        value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+                        for value in (tool_call.get("arguments") or {}).values()
+                    )
+            elif message.get("role") == "tool":
+                for part in parts:
+                    if isinstance(part, Mapping) and "output" in part:
+                        output = part["output"]
+                        texts.append(output if isinstance(output, str) else str(output))
+        for tool in data_item.get("tools") or []:
+            texts.append(json.dumps(tool.get("function", tool), ensure_ascii=False))
+
+        for text in texts:
+            for marker in (_IMAGE_MARKER, _VIDEO_MARKER):
+                if marker in text:
+                    raise RuntimeError(
+                        f"GLM-5.3-Flash sample contains literal visual placeholder marker {marker!r} in "
+                        f"message text before media expansion, data_name: {self.data_name}, "
+                        f"data_id: {data_item.get('id', '')}. Discard this data."
+                    )
 
     def _finalize(self, text: str, loss_mask: list[bool]) -> tuple[list[int], list[int], list[int]]:
         input_ids, labels = _tokenize_with_loss_mask(self.tokenizer, text, loss_mask)
@@ -265,13 +325,20 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         pixel_values_list = []
         image_grid_list = []
         for image_file in self._image_path:
-            image_path_ = get_image_path(image_file, media_root)
-            if self.oss_loader is not None and "s3://" in image_path_:
-                img_str = self.oss_loader.client.get(image_path_)
-                image = pil_loader(img_str)
+            # 按 Data Format Types（V0.5 Agent）§7.1-7.2：嵌入图片使用
+            # data:image/<subtype>;base64,<payload>（整体称为 data URI）。
+            # base64 图片直接内存解码，绕过 media_root / OSS；裸 base64 仍走引用路径，
+            # 仅严格以小写 data: 开头时进入此分支；该分支内格式错误不回退到引用路径。
+            if is_data_uri(image_file):
+                image = load_image_data_uri(image_file)
             else:
-                assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
-                image = load_image(image_path_)
+                image_path_ = get_image_path(image_file, media_root)
+                if self.oss_loader is not None and "s3://" in image_path_:
+                    img_str = self.oss_loader.client.get(image_path_)
+                    image = pil_loader(img_str)
+                else:
+                    assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
+                    image = load_image(image_path_)
             image = apply_exif_orientation(image)
             processed_i = self.image_processor(images=[image], return_tensors="pt")
             pixel_values_list.append(processed_i["pixel_values"])
@@ -352,10 +419,13 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         return sampled.tolist(), (grid_t, grid_h, grid_w)
 
     def calc_num_tokens_video_get_item(self, data_item: dict) -> CacheItem:
-        assert len(self._video_extra_info_list) == len(self._video_path), (
-            "GLM-5.3-Flash video cache prediction requires origin_video_length/origin_fps "
-            f"metadata for every video, data_name: {self.data_name}."
-        )
+        if len(self._video_extra_info_list) != len(self._video_path):
+            # 单条样本缺视频元数据属脏数据；RuntimeError 由 __call__ 转成警告+丢弃（cache），
+            # 不能用 assert——cache worker 进程里 AssertionError 逃逸会杀死 worker 并挂住主进程。
+            raise RuntimeError(
+                "GLM-5.3-Flash video cache prediction requires origin_video_length/origin_fps "
+                f"metadata for every video, data_name: {self.data_name}."
+            )
         grids: list[list[int]] = []
         metadata_list = []
         for video_file, (width, height), extra in zip(
@@ -440,10 +510,25 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
     # ---- pure text ----
 
+    def _check_no_literal_visual_tokens(self, input_ids: list[int]) -> None:
+        # tokenize 层的最后兜底：渲染入口的 _check_no_literal_visual_marker 已在源头（含多模态
+        # 样本）拦截字面 <|image|>/<|video|>，这里兜住其余路径漏进的字面占位 token——它会被
+        # create_mm_token_type_ids 标成视觉类型，混进含真实媒体的 pack 后 splice 计数错位、
+        # collator 断言崩溃（线上 256 卡 Step 8 事故的根因）。在 splice 掩码能区分字面/真实
+        # 占位符的正确修复落地前，这类样本按脏数据丢弃：cache 由 __call__ 的脏数据捕获转成
+        # 警告 + num_tokens=0，runtime 抛出后由上游数据集换无 loss 占位样本——两种状态都不中断训练。
+        n_literal = input_ids.count(self.processor.image_token_id)
+        if n_literal > 0:
+            raise RuntimeError(
+                f"GLM-5.3-Flash pure-text sample contains {n_literal} literal visual placeholder "
+                f"token(s) (e.g. '<|image|>' in text), data_name: {self.data_name}."
+            )
+
     def calc_num_tokens_pure_text_get_item(self, data_item) -> CacheItem:
         text, loss_mask = self._render_base(data_item)
         input_ids, labels = _tokenize_with_loss_mask(self.tokenizer, text, loss_mask)
         input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
+        self._check_no_literal_visual_tokens(input_ids)
         return {"num_tokens": len(input_ids), "num_img_tokens": [0]}
 
     def pure_text_get_item(self, data_item: dict) -> Glm53VLDataItem:
@@ -451,6 +536,7 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         input_ids, labels, mm_token_type_ids = self._finalize(text, loss_mask)
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
         mm_token_type_ids = mm_token_type_ids[: len(input_ids)]
+        self._check_no_literal_visual_tokens(input_ids)
         return Glm53VLDataItem(
             input_ids=input_ids,
             labels=labels,
@@ -479,8 +565,11 @@ class Glm53VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     # construction raise at validation time; defaulted here to the name the renderer implements.
     chat_template: str = "glm5.3"
     processor_path: str
-    min_pixels: int | None = None
-    max_pixels: int | None = None
+    # 非正的像素上限曾在构造期放行、到每张图的 HF smart_resize 才抛 ValueError——落在
+    # _DIRTY_DATA_ERRORS 里被 cache 当成单条脏样本静默丢弃，所有图片样本无声消失。配置错误
+    # 必须在构造期暴露，靠这里拦住，不靠每样本的丢弃通道。
+    min_pixels: int | None = Field(default=None, gt=0)
+    max_pixels: int | None = Field(default=None, gt=0)
     oss_loader_cfg: OSSLoaderConfig | None = None
     fps: float | None = None
     max_frames: int | None = None

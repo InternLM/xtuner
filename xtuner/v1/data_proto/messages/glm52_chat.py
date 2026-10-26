@@ -1,6 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import copy
 import json
 from collections.abc import Mapping
+from functools import lru_cache
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict
@@ -16,20 +18,28 @@ _END_OF_TEXT = "<|endoftext|>"
 _NEXT_ROLE_STOP_TOKENS = {"user": "<|user|>", "tool": "<|observation|>"}
 
 
-def _visible_text(content: Any) -> str:
+def _append_literal(text: str, value: str, spans: list[tuple[int, int]] | None, offset: int = 0) -> str:
+    if spans is not None and value:
+        spans.append((offset + len(text), offset + len(text) + len(value)))
+    return text + value
+
+
+def _visible_text(content: Any, _literal_spans=None, _offset: int = 0, _media_placeholder=None) -> str:
     if isinstance(content, str):
-        return content
+        return _append_literal("", content, _literal_spans, _offset)
     if isinstance(content, list):
         text = ""
         for item in content:
             if isinstance(item, str):
-                text += item
+                text = _append_literal(text, item, _literal_spans, _offset)
                 continue
             if not isinstance(item, Mapping):
                 continue
             item_type = item.get("type")
             if item_type == "text":
-                text += item.get("text", "")
+                text = _append_literal(text, item.get("text", ""), _literal_spans, _offset)
+            elif _media_placeholder is not None and item_type in _media_placeholder:
+                text += _media_placeholder[item_type]
             elif item_type in _MEDIA_TYPES:
                 media_type = item_type.replace("_url", "").replace("input_", "")
                 text += (
@@ -37,7 +47,7 @@ def _visible_text(content: Any) -> str:
                     "ability. Try different methods.</reminder>"
                 )
         return text
-    return str(content)
+    return _append_literal("", str(content), _literal_spans, _offset)
 
 
 def _tool_to_json(tool: Mapping[str, Any]) -> str:
@@ -49,7 +59,7 @@ def _tool_to_json(tool: Mapping[str, Any]) -> str:
     return "{" + ", ".join(parts) + "}"
 
 
-def _render_tools(tools: List[Dict[str, Any]]) -> str:
+def _render_tools(tools: List[Dict[str, Any]], _literal_spans=None, _offset: int = 0) -> str:
     text = (
         "<|system|>\n"
         "# Tools\n\n"
@@ -61,7 +71,7 @@ def _render_tools(tools: List[Dict[str, Any]]) -> str:
         tool = tool["function"] if "function" in tool else tool
         if tool.get("defer_loading"):
             continue
-        text += _tool_to_json(tool) + "\n"
+        text = _append_literal(text, _tool_to_json(tool), _literal_spans, _offset) + "\n"
     text += (
         "</tools>\n\n"
         "For each function call, output the function name and arguments within the following XML format:\n"
@@ -71,52 +81,63 @@ def _render_tools(tools: List[Dict[str, Any]]) -> str:
     return text
 
 
-def _assistant_content_and_reasoning(message: Mapping[str, Any]) -> tuple[str, str | None]:
-    content = _visible_text(message.get("content", ""))
+def _assistant_content_and_reasoning(
+    message: Mapping[str, Any], _media_placeholder: Optional[Mapping[str, str]] = None
+) -> tuple[str, str | None]:
+    """Shared by GLM-5.2/5.3: ``_media_placeholder`` selects how media parts in
+    assistant content render — as the given placeholder markers (GLM-5.3) when
+    provided, or as ``<reminder>`` degradation text (GLM-5.2, the default)."""
+    content = _visible_text(message.get("content", ""), _media_placeholder=_media_placeholder)
     reasoning_content = message.get("reasoning_content")
-    if isinstance(reasoning_content, str):
-        return content, reasoning_content
-    if "</think>" in content:
-        reasoning_content = content.split("</think>")[0].split("<think>")[-1]
-        content = content.split("</think>")[-1]
-        return content, reasoning_content
-    return content, None
+    # Reasoning is a structured field; think-tag spellings in content are always literal text.
+    return content, reasoning_content if isinstance(reasoning_content, str) else None
 
 
-def _tool_call_args(arguments: Mapping[str, Any]) -> str:
+def _tool_call_args(arguments: Mapping[str, Any], _literal_spans=None, _offset: int = 0) -> str:
     text = ""
     for key, value in arguments.items():
-        text += f"<arg_key>{key}</arg_key><arg_value>"
-        text += value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        text += "<arg_key>"
+        text = _append_literal(text, str(key), _literal_spans, _offset)
+        text += "</arg_key><arg_value>"
+        value = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        text = _append_literal(text, value, _literal_spans, _offset)
         text += "</arg_value>"
     return text
 
 
-def _render_tool_calls(tool_calls: List[Dict[str, Any]]) -> str:
+def _render_tool_calls(tool_calls: List[Dict[str, Any]], _literal_spans=None, _offset: int = 0) -> str:
     text = ""
     for tool_call in tool_calls:
         tool_call = tool_call["function"] if "function" in tool_call else tool_call
-        text += f"<tool_call>{tool_call['name']}"
-        text += _tool_call_args(tool_call["arguments"])
+        text += "<tool_call>"
+        text = _append_literal(text, str(tool_call["name"]), _literal_spans, _offset)
+        text += _tool_call_args(tool_call["arguments"], _literal_spans, _offset + len(text))
         text += "</tool_call>"
     return text
 
 
-def _render_tool_result(content: Any, tools: Optional[List[Dict[str, Any]]]) -> str:
-    if isinstance(content, str):
-        return f"<tool_response>{content}</tool_response>"
+def _render_tool_result(
+    content: Any, tools: Optional[List[Dict[str, Any]]], _literal_spans=None, _offset: int = 0
+) -> str:
+    text = "<tool_response>"
     if isinstance(content, list) and content and isinstance(content[0], Mapping):
         if content[0].get("type") == "tool_reference":
-            text = "<tool_response><tools>\n"
+            text += "<tools>\n"
             for tool_ref in content:
                 for tool in tools or []:
                     tool = tool["function"] if "function" in tool else tool
                     if tool.get("name") == tool_ref.get("name"):
-                        text += _tool_to_json(tool) + "\n"
+                        text = _append_literal(text, _tool_to_json(tool), _literal_spans, _offset) + "\n"
             return text + "</tools></tool_response>"
         if "output" in content[0]:
-            return "".join(f"<tool_response>{tool_result['output']}</tool_response>" for tool_result in content)
-    return f"<tool_response>{_visible_text(content)}</tool_response>"
+            text = ""
+            for tool_result in content:
+                text += "<tool_response>"
+                text = _append_literal(text, str(tool_result["output"]), _literal_spans, _offset)
+                text += "</tool_response>"
+            return text
+    text += _visible_text(content, _literal_spans, _offset + len(text))
+    return text + "</tool_response>"
 
 
 def _assistant_generated_segments(
@@ -147,14 +168,15 @@ def render_glm52_chat(
     enable_thinking: bool = True,
     reasoning_effort: Literal["high", "max"] = "max",
     clear_thinking: bool = False,
+    _literal_spans: list[tuple[int, int]] | None = None,
 ) -> tuple[str, list[bool]]:
     """渲染 GLM-5.2 对话；XTuner 默认保留多轮历史 reasoning 用于 SFT。"""
     text = ""
     loss_mask: list[bool] = []
 
-    def append(value: str, loss: bool) -> None:
+    def append(value: str, loss: bool, *, literal: bool = False) -> None:
         nonlocal text
-        text += value
+        text = _append_literal(text, value, _literal_spans) if literal else text + value
         loss_mask.extend([loss] * len(value))
 
     append("[gMASK]<sop>", False)
@@ -162,7 +184,7 @@ def render_glm52_chat(
         effective_reasoning_effort = "high" if reasoning_effort == "high" else "max"
         append(f"<|system|>Reasoning Effort: {effective_reasoning_effort.capitalize()}", False)
     if tools:
-        append(_render_tools(tools), False)
+        append(_render_tools(tools, _literal_spans, len(text)), False)
 
     last_user_index = -1
     for index, message in enumerate(messages):
@@ -176,9 +198,10 @@ def render_glm52_chat(
         if role == "user":
             boundary_loss = index > 0 and messages[index - 1].get("role") == "assistant" and previous_assistant_loss
             append(_NEXT_ROLE_STOP_TOKENS[role], boundary_loss)
-            append(_visible_text(message.get("content", "")), False)
+            append(_visible_text(message.get("content", ""), _literal_spans, len(text)), False)
         elif role == "system":
-            append(f"<|system|>{_visible_text(message.get('content', ''))}", False)
+            append("<|system|>", False)
+            append(_visible_text(message.get("content", ""), _literal_spans, len(text)), False)
         elif role == "assistant":
             content, reasoning_content = _assistant_content_and_reasoning(message)
             loss = bool(message.get("loss", True))
@@ -189,14 +212,15 @@ def render_glm52_chat(
             if render_reasoning:
                 assert reasoning_content is not None
                 append("<think>", False)
-                append(reasoning_content + "</think>", loss)
+                append(reasoning_content, loss, literal=True)
+                append("</think>", loss)
             else:
                 append("<think>", False)
                 append("</think>", loss and enable_thinking)
             if content.strip():
-                append(content.strip(), loss)
+                append(content.strip(), loss, literal=True)
             if message.get("tool_calls"):
-                append(_render_tool_calls(message["tool_calls"]), loss)
+                append(_render_tool_calls(message["tool_calls"], _literal_spans, len(text)), loss)
             previous_assistant_loss = loss
             next_role = messages[index + 1].get("role") if index + 1 < len(messages) else None
             if next_role is None:
@@ -208,7 +232,7 @@ def render_glm52_chat(
                     index > 0 and messages[index - 1].get("role") == "assistant" and previous_assistant_loss
                 )
                 append(_NEXT_ROLE_STOP_TOKENS[role], boundary_loss)
-            append(_render_tool_result(message.get("content", ""), tools), False)
+            append(_render_tool_result(message.get("content", ""), tools, _literal_spans, len(text)), False)
 
     if add_generation_prompt:
         append("<|assistant|>", False)
@@ -217,16 +241,68 @@ def render_glm52_chat(
     return text, loss_mask
 
 
-def _tokenize_with_loss_mask(
-    tokenizer: PreTrainedTokenizer, text: str, loss_mask: list[bool]
-) -> tuple[list[int], list[int]]:
+@lru_cache(maxsize=8)
+def _content_tokenizer(tokenizer):
+    """Private encode-only backend; do not change the tokenizer used for decode
+    or VL."""
+    if not hasattr(tokenizer, "backend_tokenizer"):
+        raise ValueError("GLM special-token literals require a fast tokenizer with a tokenizers backend.")
+    backend = copy.deepcopy(tokenizer.backend_tokenizer)
+    backend.add_special_tokens(list(tokenizer.added_tokens_decoder.values()))
+    assert all(token.special for token in backend.get_added_tokens_decoder().values()), (
+        "The content tokenizer must mark every added token as special before encoding literals."
+    )
+    backend.encode_special_tokens = True
+    backend.no_padding()
+    backend.no_truncation()
+    return backend
+
+
+def _encode_glm_text(tokenizer, text: str, literal_spans: list[tuple[int, int]] | None = None):
     try:
         encoded = tokenizer(text, return_offsets_mapping=True, add_special_tokens=False)
-        input_ids = encoded["input_ids"]
-        offset_mapping = encoded["offset_mapping"]
+        input_ids, offsets = encoded["input_ids"], encoded["offset_mapping"]
     except Exception:
-        input_ids, offset_mapping = get_offset_mapping(tokenizer, text)
+        input_ids, offsets = get_offset_mapping(tokenizer, text)
+    if not literal_spans:
+        return input_ids, offsets
 
+    added_ids = set(tokenizer.get_added_vocab().values())
+    controls = []
+    span_index = 0
+    has_literal = False
+    for token_id, (start, end) in zip(input_ids, offsets):
+        if token_id not in added_ids or start == end:
+            continue
+        while span_index < len(literal_spans) and literal_spans[span_index][1] <= start:
+            span_index += 1
+        if span_index < len(literal_spans) and literal_spans[span_index][0] < end:
+            has_literal = True
+        else:
+            controls.append((token_id, start, end))
+    if not has_literal:
+        return input_ids, offsets
+
+    # Only genuine controls delimit BPE runs. Literal spellings stay with their context.
+    backend = _content_tokenizer(tokenizer)
+    input_ids, offsets = [], []
+    cursor = 0
+    for token_id, start, end in [*controls, (None, len(text), len(text))]:
+        if cursor < start:
+            content = backend.encode(text[cursor:start], add_special_tokens=False)
+            input_ids.extend(content.ids)
+            offsets.extend((cursor + left, cursor + right) for left, right in content.offsets)
+        if token_id is not None:
+            input_ids.append(token_id)
+            offsets.append((start, end))
+        cursor = end
+    return input_ids, offsets
+
+
+def _tokenize_with_loss_mask(
+    tokenizer: PreTrainedTokenizer, text: str, loss_mask: list[bool], literal_spans=None
+) -> tuple[list[int], list[int]]:
+    input_ids, offset_mapping = _encode_glm_text(tokenizer, text, literal_spans)
     labels = []
     for token_id, (start, end) in zip(input_ids, offset_mapping):
         if start == end or not any(loss_mask[start:end]):
@@ -246,6 +322,7 @@ def glm52_tokenize_fn_fastspeed(
     clear_thinking: bool = False,
     **kwargs,
 ) -> tuple[list[int], list[int]]:
+    literal_spans: list[tuple[int, int]] = []
     text, loss_mask = render_glm52_chat(
         messages,
         tools=tools,
@@ -253,8 +330,9 @@ def glm52_tokenize_fn_fastspeed(
         enable_thinking=enable_thinking,
         reasoning_effort=reasoning_effort,
         clear_thinking=clear_thinking,
+        _literal_spans=literal_spans,
     )
-    return _tokenize_with_loss_mask(tokenizer, text, loss_mask)
+    return _tokenize_with_loss_mask(tokenizer, text, loss_mask, literal_spans)
 
 
 def glm52_tokenize_fn_slowspeed(
@@ -276,6 +354,7 @@ def glm52_tokenize_fn_slowspeed(
     4. 从上次命中位置开始在 total_ids 里顺序查找 suffix，找到后复制到 labels。
     """
     # SFT 渲染保持官方轮间格式，并在没有后继角色边界时补标准 EOS。
+    full_spans: list[tuple[int, int]] = []
     full_text, _ = render_glm52_chat(
         messages,
         tools=tools,
@@ -283,8 +362,9 @@ def glm52_tokenize_fn_slowspeed(
         enable_thinking=enable_thinking,
         reasoning_effort=reasoning_effort,
         clear_thinking=clear_thinking,
+        _literal_spans=full_spans,
     )
-    total_ids = tokenizer.encode(full_text, add_special_tokens=False)
+    total_ids, _ = _encode_glm_text(tokenizer, full_text, full_spans)
     labels = [IGNORE_INDEX] * len(total_ids)
 
     # 记录搜索起点，避免多轮对话里把后续 assistant 的 suffix 匹配到前面的同文案片段。
@@ -294,6 +374,7 @@ def glm52_tokenize_fn_slowspeed(
             continue
 
         # 历史前缀以 generation prompt 结束；prefix 之后的 token 才是当前 assistant 生成区间。
+        prefix_spans: list[tuple[int, int]] = []
         prefix_text, _ = render_glm52_chat(
             messages[:index],
             tools=tools if index == 0 else None,
@@ -301,10 +382,12 @@ def glm52_tokenize_fn_slowspeed(
             enable_thinking=enable_thinking,
             reasoning_effort=reasoning_effort,
             clear_thinking=clear_thinking,
+            _literal_spans=prefix_spans,
         )
 
         # 当前截断渲染可能和 full render 不同，例如历史 thinking 会被模板清掉；是否能在 full
         # render 中匹配上 suffix，正是 golden 语义的一部分。
+        message_spans: list[tuple[int, int]] = []
         message_text, _ = render_glm52_chat(
             [m.copy() for m in messages[: index + 1]],
             tools=tools if index == 0 else None,
@@ -312,10 +395,11 @@ def glm52_tokenize_fn_slowspeed(
             enable_thinking=enable_thinking,
             reasoning_effort=reasoning_effort,
             clear_thinking=clear_thinking,
+            _literal_spans=message_spans,
         )
 
-        prefix_ids = tokenizer.encode(prefix_text, add_special_tokens=False)
-        message_ids = tokenizer.encode(message_text, add_special_tokens=False)
+        prefix_ids, _ = _encode_glm_text(tokenizer, prefix_text, prefix_spans)
+        message_ids, _ = _encode_glm_text(tokenizer, message_text, message_spans)
         content_ids = message_ids[len(prefix_ids) :]
         if not content_ids:
             continue
