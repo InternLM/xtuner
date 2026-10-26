@@ -19,7 +19,7 @@ default_config:
             cpus_per_task: 120
             memory_per_task: 512
             image: ailab-llmrazor/xtuner:pt29_latest
-            pip_package: pip install -e .[all]; pip install more-itertools
+            pip_package: pip install 'ray[default]==2.58.0';pip install -e .[all]; pip install more-itertools
             envs: 
                 - HF_HUB_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/models/hf_hub
     eval:
