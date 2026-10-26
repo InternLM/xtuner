@@ -7,10 +7,10 @@ import ray
 import torch
 
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import _prepare_rollout_routed_experts_for_router
-from xtuner.v1.rl.trainer.worker import (
-    TrainingWorker,
+from xtuner.v1.rl.trainer.role_worker import (
     _as_rollout_routed_experts_tensor,
     _rollout_routed_experts_storage_dtype,
+    resolve_routed_experts,
 )
 
 
@@ -29,22 +29,16 @@ def test_rollout_routed_experts_reject_uint16_overflow(expert_ids: np.ndarray):
         _as_rollout_routed_experts_tensor(expert_ids, n_routed_experts=65536)
 
 
-def _fake_worker(*, n_routed_experts: int, pack_max_length: int = 2):
-    language_cfg = SimpleNamespace(
+def _language_cfg(*, n_routed_experts: int):
+    return SimpleNamespace(
         n_routed_experts=n_routed_experts,
         num_hidden_layers=2,
         num_experts_per_tok=2,
     )
-    config = SimpleNamespace(
-        model_cfg=language_cfg,
-        free_rollout_routed_experts_in_worker=False,
-        pack_max_length=pack_max_length,
-    )
-    return SimpleNamespace(config=config, sp_mesh=None)
 
 
 def test_training_worker_keeps_ray_routes_and_padding_in_uint16():
-    worker = _fake_worker(n_routed_experts=65536)
+    model_cfg = _language_cfg(n_routed_experts=65536)
     route_ref = ray.ObjectRef(bytes(28))
     routed_experts = np.array([[[0, 255], [256, 65535]]], dtype=np.uint16)
     padding_marker = torch.empty(1)
@@ -53,8 +47,8 @@ def test_training_worker_keeps_ray_routes_and_padding_in_uint16():
         rollout_routed_experts=[route_ref, padding_marker],
     )
 
-    with patch("xtuner.v1.rl.trainer.worker.ray.get", return_value=routed_experts):
-        TrainingWorker._add_rollout_routed_experts(worker, seq_ctx, seq_ctx.rollout_routed_experts)
+    with patch("xtuner.v1.rl.trainer.role_worker.ray.get", return_value=routed_experts):
+        resolve_routed_experts(seq_ctx, model_cfg=model_cfg, pack_max_length=2)
 
     assert seq_ctx.rollout_routed_experts.dtype == torch.uint16
     torch.testing.assert_close(
@@ -64,20 +58,20 @@ def test_training_worker_keeps_ray_routes_and_padding_in_uint16():
 
 
 def test_training_worker_uses_uint16_for_full_padding_batch():
-    worker = _fake_worker(n_routed_experts=257)
+    model_cfg = _language_cfg(n_routed_experts=257)
     seq_ctx = SimpleNamespace(
         input_ids=torch.zeros((1, 2), dtype=torch.long),
         rollout_routed_experts=torch.empty(0),
     )
 
-    TrainingWorker._add_rollout_routed_experts(worker, seq_ctx, seq_ctx.rollout_routed_experts)
+    resolve_routed_experts(seq_ctx, model_cfg=model_cfg, pack_max_length=2)
 
     assert seq_ctx.rollout_routed_experts.dtype == torch.uint16
     assert seq_ctx.rollout_routed_experts.shape == (2, 2, 2)
 
 
 def test_training_worker_preserves_long_fallback():
-    worker = _fake_worker(n_routed_experts=65537, pack_max_length=1)
+    model_cfg = _language_cfg(n_routed_experts=65537)
     route_ref = ray.ObjectRef(bytes(28))
     routed_experts = np.array([[[65536, 0], [1, 2]]], dtype=np.int64)
     seq_ctx = SimpleNamespace(
@@ -85,8 +79,8 @@ def test_training_worker_preserves_long_fallback():
         rollout_routed_experts=[route_ref],
     )
 
-    with patch("xtuner.v1.rl.trainer.worker.ray.get", return_value=routed_experts):
-        TrainingWorker._add_rollout_routed_experts(worker, seq_ctx, seq_ctx.rollout_routed_experts)
+    with patch("xtuner.v1.rl.trainer.role_worker.ray.get", return_value=routed_experts):
+        resolve_routed_experts(seq_ctx, model_cfg=model_cfg, pack_max_length=1)
 
     assert seq_ctx.rollout_routed_experts.dtype == torch.long
     assert seq_ctx.rollout_routed_experts[0, 0, 0].item() == 65536

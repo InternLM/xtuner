@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import queue
 import threading
 from abc import ABC, abstractmethod
@@ -170,6 +171,10 @@ def resolve_routed_experts(
         out_rollout_routed_expert.append(rollout_routed_expert)
 
     seq_ctx.rollout_routed_experts = torch.cat(out_rollout_routed_expert, dim=0)  # max_len,l,e
+    assert seq_ctx.rollout_routed_experts.size(0) == seq_ctx.input_ids.size(1), (
+        f"rollout_routed_experts.size(0) {seq_ctx.rollout_routed_experts.size(0)} "
+        f"!= input_ids.size(1) {seq_ctx.input_ids.size(1)}"
+    )
 
 
 def free_rollout_routed_expert_refs(samples: list[TrainSample], *, sp_mesh: DeviceMesh | None) -> None:
@@ -510,8 +515,6 @@ class RoleWorker(ABC):
     def _maybe_profiling(self, global_train_step: int) -> Any:
         """Profile matching steps when the role enables profiling; no-op
         default."""
-        import contextlib
-
         return contextlib.nullcontext()
 
     def _extra_step_metrics(self) -> dict[str, float]:

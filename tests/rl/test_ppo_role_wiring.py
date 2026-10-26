@@ -1,3 +1,35 @@
+"""PPO 角色化架构的行为测试。
+
+覆盖的行为（一级为 TestClass，二级为 test 函数）：
+
+- TestGAEAdvantageEstimation —— GAE 优势/回报估计的数值语义
+  - test_gae_places_outcome_reward_on_the_last_supervised_token
+  - test_gae_uses_one_discount_for_advantage_and_return
+  - test_gae_resets_at_trajectory_boundaries_and_skips_observations
+  - test_session_scope_places_one_reward_on_the_last_segment
+  - test_normalization_does_not_rewrite_critic_returns
+- TestTrainingSchedule —— 训练调度（多 pass 顺序 / update 切分 / warmup 计数）
+  - test_critic_pass_order_shuffles_after_the_first_pass
+  - test_absolute_warmup_counts_optimizer_updates
+- TestRoleSwitching —— worker 侧角色切换与 RPC 守卫
+  - test_switch_role_offloads_others_and_onloads_target
+  - test_requires_role_rejects_unconfigured_and_inactive
+- TestCriticConstruction —— critic 构造对宿主拓扑的复用
+  - test_critic_reuses_host_fsdp_and_sp_topology
+- TestWorkerSegmentGAE —— worker 本地 segment GAE 对缓存 values 的消费
+  - test_compute_segment_gae_uses_cached_values
+  - test_compute_segment_gae_non_contributing_replica_returns_no_stats
+  - test_compute_segment_gae_rejects_missing_reward_score
+- TestControllerPPOGuards —— controller 对 PPO 前置条件的守卫
+  - test_gae_without_critic_is_rejected
+- TestSessionGAEDispatch —— session GAE 跨 rank values 的散射对齐
+  - test_session_gae_scatters_values_by_pack_plan
+  - test_session_gae_rejects_value_count_mismatch
+  - test_session_gae_rejects_uncovered_samples
+- TestCheckpointOrchestration —— checkpoint 保存/恢复的角色编排
+  - test_checkpoint_cover_every_configured_role
+"""
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,9 +46,9 @@ from xtuner.v1.rl.advantage import GAEAdvantageConfig, GAEEstimator
 from xtuner.v1.rl.advantage.gae import action_gae, terminal_rewards
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.rl.trainer.critic_worker import CriticWorker, CriticWorkerConfig
-from xtuner.v1.rl.trainer.pack import TokenTensorBatch
+from xtuner.v1.rl.trainer.pack import TokenBatchProto
 from xtuner.v1.rl.trainer.schedule import build_lr_scheduler, partition_indices, pass_order
-from xtuner.v1.rl.trainer.worker import TrainingWorker, TrainSample
+from xtuner.v1.rl.trainer.worker import TrainingWorker, TrainSample, requires_role
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 
 
@@ -33,8 +65,11 @@ def _state(**overrides) -> RolloutState:
     return RolloutState(**fields)
 
 
-class TestPPORoleWiring(unittest.TestCase):
+class TestGAEAdvantageEstimation(unittest.TestCase):
+    """GAE 优势/回报估计的数值语义（public: GAEEstimator.compute_gae / action_gae）。"""
+
     def test_gae_places_outcome_reward_on_the_last_supervised_token(self):
+        # 行为：结局 reward 只落在最后一个被监督的 token 上
         estimator = GAEAdvantageConfig(
             gae_gamma=1.0,
             gae_lambda=1.0,
@@ -49,6 +84,7 @@ class TestPPORoleWiring(unittest.TestCase):
         self.assertEqual(returns, [[0.0, 1.0, 1.0]])
 
     def test_gae_uses_one_discount_for_advantage_and_return(self):
+        # 行为：advantage 与 return 使用同一套折扣参数
         estimator = GAEAdvantageConfig(gae_lambda=0.0, normalize_actor_advantage=False).build()
         advantages, returns = estimator.compute_gae(
             [_state(labels=[0, 1, 2], reward={"score": 1.0})],
@@ -58,6 +94,7 @@ class TestPPORoleWiring(unittest.TestCase):
         self.assertEqual(returns, [[0.0, 1.0]])
 
     def test_gae_resets_at_trajectory_boundaries_and_skips_observations(self):
+        # 行为：GAE 在轨迹边界重置且跳过观测位
         values = torch.tensor([0.0, 10.0])
         mask = torch.tensor([True, True])
         rewards = terminal_rewards(torch.tensor([1.0, 0.0]), mask, torch.tensor([0, 1, 2]))
@@ -77,6 +114,7 @@ class TestPPORoleWiring(unittest.TestCase):
         self.assertEqual(observed.tolist(), [1.0, 0.0, 1.0])
 
     def test_session_scope_places_one_reward_on_the_last_segment(self):
+        # 行为：session 作用域下 reward 落在会话最后一个分段末尾
         estimator = GAEAdvantageConfig(
             gae_lambda=0.0,
             reward_scope="session",
@@ -104,6 +142,7 @@ class TestPPORoleWiring(unittest.TestCase):
         self.assertEqual(returns, [[0.0, 0.0], [0.0, 1.0]])
 
     def test_normalization_does_not_rewrite_critic_returns(self):
+        # 行为：advantage 归一化不改动 critic 的 returns
         estimator = GAEAdvantageConfig(gae_lambda=1.0, normalize_actor_advantage=True).build()
         states = [
             _state(rollout_id=1, group_id=0, reward={"score": 1.0}),
@@ -117,7 +156,12 @@ class TestPPORoleWiring(unittest.TestCase):
         flat = [value for sample in advantages for value in sample]
         self.assertAlmostEqual(sum(flat) / len(flat), 0.0, places=5)
 
+
+class TestTrainingSchedule(unittest.TestCase):
+    """训练调度行为（public: pass_order / partition_indices / build_lr_scheduler）。"""
+
     def test_critic_pass_order_shuffles_after_the_first_pass(self):
+        # 行为：多 pass 复训首 pass 保序、后续 pass 洗牌；update 切分均匀
         self.assertEqual(pass_order(4, rollout_idx=1, pass_index=0, seed=0), [0, 1, 2, 3])
         shuffled = pass_order(4, rollout_idx=1, pass_index=1, seed=0)
         self.assertEqual(sorted(shuffled), [0, 1, 2, 3])
@@ -125,6 +169,7 @@ class TestPPORoleWiring(unittest.TestCase):
         self.assertEqual(partition_indices([0, 1, 2, 3, 4], 2), [[0, 1, 2], [3, 4]])
 
     def test_absolute_warmup_counts_optimizer_updates(self):
+        # 行为：warmup 按 optimizer 更新次数而非 rollout 步数计数
         parameter = torch.nn.Parameter(torch.zeros(1))
         optimizer = torch.optim.AdamW([parameter], lr=1e-6)
         scheduler = build_lr_scheduler(
@@ -138,37 +183,76 @@ class TestPPORoleWiring(unittest.TestCase):
         scheduler.step()
         self.assertAlmostEqual(optimizer.param_groups[0]["lr"], 1e-6)
 
-    def test_attach_and_switch_route_to_host_workers(self):
-        # Test doubles mimic Ray actor handles: methods are exposed as `.remote` callables,
-        # and ray.get is patched so no Ray runtime is needed.
-        class Worker:
-            def __init__(self):
-                self.attached = {}
-                self.role = "actor"
-                self.attach = SimpleNamespace(remote=self._attach)
-                self.switch_role_modules = SimpleNamespace(remote=self._switch_role_modules)
 
-            def _attach(self, name, worker_cls, worker_cfg):
-                self.attached[name] = (worker_cls, worker_cfg)
+class TestRoleSwitching(unittest.TestCase):
+    """worker 侧角色切换与 RPC 守卫（public: switch_role / requires_role）。"""
 
-            def _switch_role_modules(self, role):
-                self.role = role
+    def test_switch_role_offloads_others_and_onloads_target(self):
+        # 行为：切换角色时其余角色下卡、目标角色上卡，重复切换幂等重执行
+        worker = TrainingWorker.__new__(TrainingWorker)
+        actor, critic = MagicMock(), MagicMock()
+        actor.role_name, critic.role_name = "actor", "critic"
+        worker.actor, worker.critic = actor, critic
+        worker._current_role = "actor"
 
-        workers = [Worker(), Worker()]
-        controller = TrainingController(workers=workers)
-        with patch("xtuner.v1.rl.trainer.controller.ray.get"):
-            controller.attach_role("critic", object, {"head": "value"})
+        TrainingWorker.switch_role(worker, "critic")
+        actor.offload.assert_called_once()
+        actor.onload.assert_not_called()
+        critic.onload.assert_called_once()
+        critic.offload.assert_not_called()
+        self.assertEqual(worker._current_role, "critic")
 
-        self.assertEqual(controller._roles, {"critic"})
-        self.assertEqual(workers[0].attached["critic"][1], {"head": "value"})
-        with patch("xtuner.v1.rl.trainer.controller.ray.get"):
-            controller.switch_role("critic")
-        self.assertEqual([worker.role for worker in workers], ["critic", "critic"])
-        with patch("xtuner.v1.rl.trainer.controller.ray.get"):
-            controller.switch_role("actor")
-        self.assertEqual(workers[1].role, "actor")
+        # Declarative: re-switching to the same role re-runs ensure-state
+        # (onload called again); the role methods decide what actually moves.
+        TrainingWorker.switch_role(worker, "critic")
+        self.assertEqual(critic.onload.call_count, 2)
+        self.assertEqual(critic.offload.call_count, 0)
+        self.assertEqual(worker._current_role, "critic")
+
+        TrainingWorker.switch_role(worker, None)
+        critic.offload.assert_called_once()
+        actor.onload.assert_not_called()
+        self.assertIsNone(worker._current_role)
+
+        # 切换到未注册角色立即报 KeyError，且不改变当前记账。
+        worker.critic = None
+        with self.assertRaisesRegex(KeyError, "not registered"):
+            TrainingWorker.switch_role(worker, "critic")
+        self.assertIsNone(worker._current_role)
+
+    def test_requires_role_rejects_unconfigured_and_inactive(self):
+        # 行为：RPC 守卫区分『角色未配置』与『角色未激活』两种拒绝
+        worker = TrainingWorker.__new__(TrainingWorker)
+        actor = MagicMock()
+        actor.role_name = "actor"
+        worker.actor, worker.critic = actor, None
+        worker._current_role = "actor"
+
+        @requires_role("critic")
+        def critic_rpc(self_):
+            return "ok"
+
+        # critic not configured on this worker
+        with self.assertRaisesRegex(RuntimeError, "not configured"):
+            critic_rpc(worker)
+
+        @requires_role("actor")
+        def actor_rpc(self_):
+            return "ok"
+
+        # configured but not the active role
+        worker._current_role = None
+        with self.assertRaisesRegex(RuntimeError, "requires active role"):
+            actor_rpc(worker)
+        worker._current_role = "actor"
+        self.assertEqual(actor_rpc(worker), "ok")
+
+
+class TestCriticConstruction(unittest.TestCase):
+    """critic 构造复用宿主拓扑（TrainEngine/build_lr_scheduler 为进程外重依赖，mock 之）。"""
 
     def test_critic_reuses_host_fsdp_and_sp_topology(self):
+        # 行为：critic 构造复用宿主的 FSDP/SP 拓扑而非自带配置
         self.assertNotIn("fsdp_cfg", CriticWorkerConfig.model_fields)
         self.assertNotIn("sp_size", CriticWorkerConfig.model_fields)
 
@@ -180,7 +264,7 @@ class TestPPORoleWiring(unittest.TestCase):
             load_from="/tmp/critic",
         )
         fsdp_cfg = FSDPConfig(torch_compile=False)
-        host = SimpleNamespace(config=SimpleNamespace(fsdp_cfg=fsdp_cfg), sp_mesh=object())
+        host = SimpleNamespace(config=SimpleNamespace(fsdp_cfg=fsdp_cfg), sp_mesh=object(), logger=MagicMock(), rank=0)
 
         with (
             patch("xtuner.v1.rl.trainer.critic_worker.TrainEngine") as train_engine,
@@ -189,41 +273,18 @@ class TestPPORoleWiring(unittest.TestCase):
             worker = CriticWorker(critic_cfg, host=host)
 
         self.assertIs(worker.host, host)
-        self.assertIs(worker.sp_mesh, host.sp_mesh)
         self.assertIs(train_engine.call_args.kwargs["fsdp_cfg"], fsdp_cfg)
         self.assertIs(build_scheduler.call_args.args[0], train_engine.return_value.optimizer)
         train_engine.return_value.from_hf.assert_called_once_with("/tmp/critic", strict=False)
-        self.assertFalse(critic_cfg.model_cfg.compile_cfg)
+        # torch.compile gating lives in the host init (TrainingWorker.__init__),
+        # not in role construction.
 
-    def test_critic_requires_host_worker(self):
-        model_cfg = Qwen3Dense0P6BConfig(head_type="value_head")
-        critic_cfg = CriticWorkerConfig(
-            model_cfg=model_cfg,
-            optim_cfg=AdamWConfig(lr=1e-6, foreach=False),
-            lr_cfg=LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6),
-            load_from="/tmp/critic",
-        )
-        with self.assertRaisesRegex(ValueError, "must be attached"):
-            CriticWorker(critic_cfg, host=None)
 
-    def test_segment_gae_scope_is_detected(self):
-        controller = TrainingController(
-            workers=[],
-            advantage_estimator=GAEEstimator(reward_scope="segment"),
-        )
-        self.assertEqual(controller._gae_reward_scope, "segment")
-
-        session_controller = TrainingController(
-            workers=[],
-            advantage_estimator=GAEEstimator(reward_scope="session"),
-        )
-        self.assertEqual(session_controller._gae_reward_scope, "session")
-
-    def test_non_gae_estimator_has_no_reward_scope(self):
-        controller = TrainingController(workers=[], advantage_estimator=None)
-        self.assertIsNone(controller._gae_reward_scope)
+class TestWorkerSegmentGAE(unittest.TestCase):
+    """worker 本地 segment GAE 的行为（public: CriticWorker.compute_segment_gae）。"""
 
     def test_compute_segment_gae_uses_cached_values(self):
+        # 行为：segment GAE 消费缓存的 critic values 并产出 advantages/returns/统计
         labels = torch.tensor([[[-100, 2, 3]]]).reshape(1, 3)
         values = torch.tensor([[[0.2, 0.1, 0.3]]]).reshape(1, 3)
         sample = TrainSample(
@@ -252,6 +313,7 @@ class TestPPORoleWiring(unittest.TestCase):
         self.assertEqual(sample.advantages[:, 1:].sum().item(), stats["sum"])
 
     def test_compute_segment_gae_non_contributing_replica_returns_no_stats(self):
+        # 行为：非贡献副本本地照常产出 advantage 但不返回全局统计
         sample = TrainSample(
             seq_ctx=MagicMock(),
             shifted_labels=torch.tensor([[[-100, 2]]]).reshape(1, 2),
@@ -276,6 +338,7 @@ class TestPPORoleWiring(unittest.TestCase):
         self.assertIsNotNone(sample.returns)
 
     def test_compute_segment_gae_rejects_missing_reward_score(self):
+        # 行为：缺少 reward score 的样本被明确拒绝
         sample = TrainSample(
             seq_ctx=MagicMock(),
             shifted_labels=torch.tensor([[[-100, 2]]]).reshape(1, 2),
@@ -295,83 +358,49 @@ class TestPPORoleWiring(unittest.TestCase):
                 contribute_to_global_stats=True,
             )
 
-    def test_save_hf_includes_attached_critic(self):
-        worker = TrainingWorker.__new__(TrainingWorker)
-        worker._engine = MagicMock()
-        critic_worker = MagicMock()
-        teacher_worker = MagicMock()
-        worker._attached = {"critic": critic_worker, "teacher": teacher_worker}
-        worker._sft_dataloader = None
-        worker.logger = MagicMock()
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            checkpoint_path = Path(tmpdir) / "ckpt-step-1"
-            checkpoint_path.mkdir()
-            actor_path = checkpoint_path / "actor"
-            actor_path.mkdir()
-            (actor_path / ".metadata").write_text("")
-            (checkpoint_path / "critic").mkdir()
-            (checkpoint_path / "teacher").mkdir()
-            TrainingWorker.save(worker, checkpoint_path, no_save_optimizer=True)
-            self.assertEqual(
-                worker._engine.save_dcp.call_args.kwargs["weights_dir"],
-                checkpoint_path / "actor",
-            )
-            critic_worker.save.assert_called_once_with(checkpoint_path / "critic", no_save_optimizer=True)
-            teacher_worker.save.assert_not_called()
-
-            TrainingWorker.resume(
-                worker,
-                LoadCheckpointConfig(checkpoint_path=checkpoint_path, load_optimizer_states=False),
-            )
-            critic_worker.resume.assert_called_once()
-            teacher_worker.resume.assert_not_called()
-
-            TrainingWorker.save_hf(worker, checkpoint_path / "hf", save_dtype=torch.float16)
-
-        self.assertEqual(
-            worker._engine.save_hf.call_args.args,
-            (checkpoint_path / "hf" / "actor", torch.float16),
-        )
-        critic_worker.save_hf.assert_called_once_with(checkpoint_path / "hf" / "critic", torch.float16)
-        teacher_worker.save_hf.assert_not_called()
-
-        critic = CriticWorker.__new__(CriticWorker)
-        critic._engine = MagicMock()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            critic_path = Path(tmpdir) / "critic"
-            critic_path.mkdir()
-            critic.save(critic_path, no_save_optimizer=True)
-            critic_path.joinpath(".metadata").write_text("")
-            critic.resume(critic_path)
-
-        critic._engine.save_dcp.assert_called_once_with(
-            weights_dir=critic_path,
-            save_optimizer=False,
-        )
-        critic._engine.load_dcp.assert_called_once_with(
-            weights_dir=critic_path,
-            load_states=True,
-            load_args=True,
-        )
-        critic.save_hf(Path("/tmp/critic-hf"), save_dtype=torch.float16)
-        critic._engine.save_hf.assert_called_once_with(
-            hf_dir=Path("/tmp/critic-hf"),
-            save_dtype=torch.float16,
-        )
-
-    def test_actor_only_switch_rejects_unknown_role(self):
-        controller = TrainingController(workers=[])
-        with self.assertRaises(KeyError):
-            controller.switch_role("critic")
+class TestControllerPPOGuards(unittest.TestCase):
+    """controller 对 PPO 前置条件的守卫（public: TrainingController.fit）。"""
 
     def test_gae_without_critic_is_rejected(self):
+        # 行为：GAE 估计器在没有 critic 角色时 fit 直接拒绝
         controller = TrainingController(workers=[], advantage_estimator=GAEEstimator())
         with self.assertRaises(RuntimeError):
             controller.fit([[]], pack_max_length=8, rollout_idx=0)
 
 
-class TestSessionGAEAdvantageDispatch(unittest.TestCase):
+class TestCheckpointOrchestration(unittest.TestCase):
+    """checkpoint 保存/恢复的角色编排（public: save/resume/save_hf）。"""
+
+    def test_checkpoint_cover_every_configured_role(self):
+        # 行为：save/resume/save_hf 以 role-first 目录覆盖每个已配置角色及 SFT 状态
+        worker = TrainingWorker.__new__(TrainingWorker)
+        actor, critic = MagicMock(), MagicMock()
+        actor.role_name, critic.role_name = "actor", "critic"
+        worker.actor, worker.critic = actor, critic
+        worker.logger = MagicMock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = Path(tmpdir) / "ckpt-step-1"
+            checkpoint_path.mkdir()
+            TrainingWorker.save(worker, checkpoint_path, no_save_optimizer=True)
+            actor.save.assert_called_once_with(checkpoint_path / "actor", True)
+            critic.save.assert_called_once_with(checkpoint_path / "critic", True)
+            # SFT state is actor-owned and written at the checkpoint root.
+            actor.save_sft_state.assert_called_once_with(checkpoint_path)
+
+            cfg = LoadCheckpointConfig(checkpoint_path=checkpoint_path, load_optimizer_states=False)
+            TrainingWorker.resume(worker, cfg)
+            actor.resume.assert_called_once_with(checkpoint_path / "actor", cfg)
+            critic.resume.assert_called_once_with(checkpoint_path / "critic", cfg)
+            actor.resume_sft_state.assert_called_once_with(checkpoint_path)
+
+            TrainingWorker.save_hf(worker, str(checkpoint_path / "hf"), save_dtype=torch.float16)
+        actor.save_hf.assert_called_once_with(checkpoint_path / "hf" / "actor", torch.float16)
+        critic.save_hf.assert_called_once_with(checkpoint_path / "hf" / "critic", torch.float16)
+
+
+class TestSessionGAEDispatch(unittest.TestCase):
     """Session GAE must scatter per-rank critic values back to global sample order
     before running the estimator, reading only replica-0 batches."""
 
@@ -383,6 +412,7 @@ class TestSessionGAEAdvantageDispatch(unittest.TestCase):
         return controller
 
     def test_session_gae_scatters_values_by_pack_plan(self):
+        # 行为：session GAE 按 pack plan 把各 rank values 散射回全局样本序且只读 replica-0
         # Four samples across two DP ranks with scrambled global indices; replica
         # positions 1 and 3 hold decoy values that must never be read.
         rollout_items = [
@@ -399,16 +429,16 @@ class TestSessionGAEAdvantageDispatch(unittest.TestCase):
             },
             "plan_log": {},
         }
-        decoy = TokenTensorBatch.cat_samples([torch.tensor([9.9, 9.9])])
+        decoy = TokenBatchProto.concat([torch.tensor([9.9, 9.9])])
         value_batches = [
-            TokenTensorBatch.cat_samples(
+            TokenBatchProto.concat(
                 [
                     torch.tensor(dense_values[2], dtype=torch.float32),
                     torch.tensor(dense_values[0], dtype=torch.float32),
                 ]
             ),
             decoy,
-            TokenTensorBatch.cat_samples(
+            TokenBatchProto.concat(
                 [
                     torch.tensor(dense_values[3], dtype=torch.float32),
                     torch.tensor(dense_values[1], dtype=torch.float32),
@@ -439,11 +469,12 @@ class TestSessionGAEAdvantageDispatch(unittest.TestCase):
         self.assertIsNone(advantage_stats)
 
     def test_session_gae_rejects_value_count_mismatch(self):
+        # 行为：values 行数与样本数不匹配时拒绝
         rollout_items = [_state(uid=0, rollout_id=10, labels=[-100, 5, 6], reward={"score": 1.0})]
         pack_plan = {"dp_plans": {0: {"global_indices": [0], "plan": [[[0]]]}}, "plan_log": {}}
         # Rank 0 reports two local value rows for one packed sample.
         value_batches = [
-            TokenTensorBatch.cat_samples([torch.tensor([0.1, 0.2]), torch.tensor([0.3, 0.4])]),
+            TokenBatchProto.concat([torch.tensor([0.1, 0.2]), torch.tensor([0.3, 0.4])]),
         ]
         with self.assertRaisesRegex(ValueError, "do not match the packed samples"):
             self._controller()._estimate_advantages(
@@ -451,13 +482,14 @@ class TestSessionGAEAdvantageDispatch(unittest.TestCase):
             )
 
     def test_session_gae_rejects_uncovered_samples(self):
+        # 行为：plan 未覆盖全部样本时拒绝
         # Sample 1 is claimed by no DP rank, so its dense value slot stays empty.
         rollout_items = [
             _state(uid=0, rollout_id=10, labels=[-100, 5], reward={"score": 1.0}),
             _state(uid=1, rollout_id=11, labels=[6, 7], reward={"score": 1.0}),
         ]
         pack_plan = {"dp_plans": {0: {"global_indices": [0], "plan": [[[0]]]}}, "plan_log": {}}
-        value_batches = [TokenTensorBatch.cat_samples([torch.tensor([0.1, 0.2])])]
+        value_batches = [TokenBatchProto.concat([torch.tensor([0.1, 0.2])])]
         with self.assertRaisesRegex(RuntimeError, "do not cover every training sample"):
             self._controller()._estimate_advantages(
                 {"reward_groups": []}, rollout_items, pack_plan, value_batches, data_replicate_size=1

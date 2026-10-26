@@ -1,8 +1,9 @@
-"""TrainingWorker rollout-to-train-item 转换的 contract 测试。
+"""RolloutState -> TrainSample 转换的 contract 测试。
 
-``TrainingWorker._get_train_sample / _get_train_items`` 是 RolloutState -> (seq_ctx, loss_inputs)
+``TrainingWorker._get_train_sample``（seq_ctx/labels/logprobs/teacher targets）与
+``TrainingWorker._add_sample_fields``（advantage 暂存）是 RolloutState -> 训练样本
 的唯一入口：shift、scalar advantage 逐监督位广播、rollout logprob shift、position 布局统一、
-seq_ctx 构造、teacher target 对齐与 CPU per-item loss_inputs 构建都在这一步完成。本文件只测该
+seq_ctx 构造、teacher target 对齐在这一步完成、advantage 由 _add_sample_fields 写入。本文件只测该
 纯转换逻辑，不启动 Ray、模型或 rollout backend。
 
 当前测试点：
@@ -10,7 +11,7 @@ seq_ctx 构造、teacher target 对齐与 CPU per-item loss_inputs 构建都在�
 - scalar advantage 广播：prompt 占位与 labels=-100 的语义洞位为 0，监督位为 group advantage。
 - use_3d_position_ids=True 时文本样本广播出三轴 MRoPE 位置；False 时保持 1D。
 - VLM 样本：prompt 段 3D position 续写 response、mm_info/pixel_values 透传、routed_experts 挂到 seq_ctx。
-- 蒸馏：rollout teacher target 对齐结果进入 loss_inputs（sampled 无 target_token_ids，topk 有）。
+- 蒸馏：rollout teacher target 对齐结果进入 sample.teacher_targets（sampled 无 target_token_ids，topk 有）。
 - token advantage 与 shifted labels 等长，语义洞与 prompt 不参与监督。
 """
 
@@ -23,23 +24,35 @@ import torch
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, TeacherTargets
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter, RolloutTeacherConfig
 from xtuner.v1.rl.loss import DistillationLossConfig, GRPOLossConfig
-from xtuner.v1.rl.trainer.pack import TokenTensorBatch
+from xtuner.v1.rl.trainer.actor_worker import ActorWorker
+from xtuner.v1.rl.trainer.pack import TokenBatchProto
 from xtuner.v1.rl.trainer.worker import TrainingWorker
 
 
 def _convert(worker, states, advantages, use_3d=False):
     samples = [worker._get_train_sample(state, use_3d) for state in states]
+    worker._cached_samples = samples
     if advantages and isinstance(advantages[0], list):
-        advantages = TokenTensorBatch.cat_samples([torch.tensor(row, dtype=torch.float32) for row in advantages])
-    return worker._get_train_items(samples, advantages)
+        advantages = TokenBatchProto.concat([torch.tensor(row, dtype=torch.float32) for row in advantages])
+    worker._add_sample_fields("advantages", advantages)
+    return samples
 
 
 class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
     def _make_worker(self, distillation: DistillationTrainerAdapter | None = None) -> TrainingWorker:
         # 生产契约：蒸馏开启时 train_worker_cfg.loss_cfg 即 distillation_config.loss_config。
         worker = TrainingWorker.__new__(TrainingWorker)
-        worker.config = SimpleNamespace(loss_cfg=GRPOLossConfig(policy_loss_cfg={"loss_type": "vanilla"}))
-        worker._distillation = distillation if distillation is not None else DistillationTrainerAdapter(None)
+        worker.config = SimpleNamespace(
+            pack_max_length=16,
+            loss_cfg=GRPOLossConfig(policy_loss_cfg={"loss_type": "vanilla"}),
+        )
+        actor = ActorWorker.__new__(ActorWorker)
+        actor.config = worker.config
+        actor._distillation = distillation if distillation is not None else DistillationTrainerAdapter(None)
+        actor._staged = {}
+        actor.mtp_config = None
+        actor.host = worker
+        worker.actor = actor
         return worker
 
     def _state(
@@ -108,25 +121,25 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             supervised_mask=[1, 0, 1],
         )
 
-        items = _convert(worker, [state], [1.5])
+        samples = _convert(worker, [state], [1.5])
 
-        self.assertEqual(len(items), 1)
-        seq_ctx = items[0]["seq_ctx"]
-        loss_kwargs = SimpleNamespace(**items[0]["loss_inputs"])
+        self.assertEqual(len(samples), 1)
+        seq_ctx = samples[0].seq_ctx
+        sample = samples[0]
         self.assertEqual(seq_ctx.input_ids.tolist(), [[10, 11, 12, 20, 21]])
-        self.assertEqual(loss_kwargs.shifted_labels.tolist(), [[-100, -100, 20, -100, 22]])
+        self.assertEqual(sample.shifted_labels.tolist(), [[-100, -100, 20, -100, 22]])
         torch.testing.assert_close(
-            loss_kwargs.advantages,
+            sample.advantages,
             torch.tensor([[0.0, 0.0, 1.5, 0.0, 1.5]], dtype=torch.float32),
         )
         torch.testing.assert_close(
-            loss_kwargs.rollout_logprobs,
+            sample.rollout_logprobs,
             torch.tensor([[0.0, 0.0, 0.1, 0.2, 0.3]], dtype=torch.float32),
         )
-        self.assertIsNone(getattr(loss_kwargs, "teacher_logprobs", None))
-        self.assertIsNone(getattr(loss_kwargs, "target_token_ids", None))
-        self.assertIsNone(getattr(loss_kwargs, "teacher_indices", None))
-        for tensor in (loss_kwargs.shifted_labels, loss_kwargs.advantages, loss_kwargs.rollout_logprobs):
+        self.assertIsNone(sample.teacher_targets.get("teacher_logprobs"))
+        self.assertIsNone(sample.teacher_targets.get("target_token_ids"))
+        self.assertIsNone(sample.teacher_targets.get("teacher_indices"))
+        for tensor in (sample.shifted_labels, sample.advantages, sample.rollout_logprobs):
             self.assertEqual(tensor.shape[1], seq_ctx.input_ids.shape[1])
 
     def test_advantages_follow_each_sample_scalar(self):
@@ -134,14 +147,14 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
         first = self._state(uid=1, response_ids=[20, 21], supervised_mask=[1, 1])
         second = self._state(uid=2, response_ids=[30, 31], supervised_mask=[1, 0])
 
-        items = _convert(worker, [first, second], [1.5, -2.0])
+        samples = _convert(worker, [first, second], [1.5, -2.0])
 
         torch.testing.assert_close(
-            items[0]["loss_inputs"].get("advantages"),
+            samples[0].advantages,
             torch.tensor([[0.0, 0.0, 1.5, 1.5]], dtype=torch.float32),
         )
         torch.testing.assert_close(
-            items[1]["loss_inputs"].get("advantages"),
+            samples[1].advantages,
             torch.tensor([[0.0, 0.0, -2.0, 0.0]], dtype=torch.float32),
         )
 
@@ -149,17 +162,17 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
         worker = self._make_worker()
         state = self._state(response_ids=[20, 21])
 
-        items = _convert(worker, [state], [0.0])
+        samples = _convert(worker, [state], [0.0])
 
-        torch.testing.assert_close(items[0]["seq_ctx"].position_ids, torch.arange(4).reshape(1, -1))
+        torch.testing.assert_close(samples[0].seq_ctx.position_ids, torch.arange(4).reshape(1, -1))
 
     def test_text_positions_broadcast_to_3d_in_mixed_batches(self):
         worker = self._make_worker()
         state = self._state(response_ids=[20, 21])
 
-        items = _convert(worker, [state], [0.0], use_3d=True)
+        samples = _convert(worker, [state], [0.0], use_3d=True)
 
-        position_ids = items[0]["seq_ctx"].position_ids
+        position_ids = samples[0].seq_ctx.position_ids
         self.assertEqual(tuple(position_ids.shape), (3, 1, 4))
         torch.testing.assert_close(
             position_ids,
@@ -179,9 +192,9 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             routed_experts=routed_experts,
         )
 
-        items = _convert(worker, [state], [0.25], use_3d=True)
+        samples = _convert(worker, [state], [0.25], use_3d=True)
 
-        seq_ctx = items[0]["seq_ctx"]
+        seq_ctx = samples[0].seq_ctx
         self.assertEqual(seq_ctx.input_ids.tolist(), [[100, 101, 102]])
         self.assertEqual(tuple(seq_ctx.position_ids.shape), (3, 1, 3))
         self.assertIs(seq_ctx.pixel_values, pixel_values)
@@ -189,7 +202,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
         self.assertIs(seq_ctx.rollout_routed_experts, routed_experts)
 
     def _enable_rollout_distillation(self, worker: TrainingWorker, loss_config: DistillationLossConfig) -> None:
-        worker._distillation = DistillationTrainerAdapter(
+        worker.actor._distillation = DistillationTrainerAdapter(
             DistillationConfig(
                 loss_config=loss_config,
                 teachers=[RolloutTeacherConfig(name="teacher", endpoints=["http://teacher"])],
@@ -198,7 +211,7 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
         )
         worker.config.loss_cfg = loss_config
 
-    def test_topk_teacher_targets_land_in_loss_inputs(self):
+    def test_topk_teacher_targets_land_in_teacher_targets(self):
         worker = self._make_worker()
         self._enable_rollout_distillation(
             worker,
@@ -218,16 +231,16 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             extra_fields={"origin_data_source": "agent_math"},
         )
 
-        items = _convert(worker, [state], [0.0])
+        samples = _convert(worker, [state], [0.0])
 
-        loss_kwargs = SimpleNamespace(**items[0]["loss_inputs"])
-        self.assertEqual(loss_kwargs.shifted_labels.tolist(), [[-100, 20, -100, 22]])
+        sample = samples[0]
+        self.assertEqual(sample.shifted_labels.tolist(), [[-100, 20, -100, 22]])
         self.assertEqual(
-            loss_kwargs.target_token_ids.tolist(),
+            sample.teacher_targets["target_token_ids"].tolist(),
             [[[0, 0], [100, 101], [102, 103], [104, 105]]],
         )
         torch.testing.assert_close(
-            loss_kwargs.teacher_logprobs,
+            sample.teacher_targets["teacher_logprobs"],
             torch.tensor([[[0.0, 0.0], [-0.5, -0.6], [-0.7, -0.8], [-0.9, -1.0]]], dtype=torch.float32),
         )
 
@@ -249,24 +262,24 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             extra_fields={"origin_data_source": "agent_math"},
         )
 
-        items = _convert(worker, [state], [0.0])
+        samples = _convert(worker, [state], [0.0])
 
-        loss_kwargs = SimpleNamespace(**items[0]["loss_inputs"])
-        self.assertIsNone(getattr(loss_kwargs, "target_token_ids", None))
+        sample = samples[0]
+        self.assertIsNone(sample.teacher_targets.get("target_token_ids"))
         torch.testing.assert_close(
-            loss_kwargs.teacher_logprobs,
+            sample.teacher_targets["teacher_logprobs"],
             torch.tensor([[0.0, 0.0, -0.7, -0.9]], dtype=torch.float32),
         )
 
     def test_token_advantages_mask_prompt_and_semantic_holes(self):
         worker = self._make_worker()
         state = self._state(supervised_mask=[1, 0, 1])
-        items = _convert(worker, [state], [[1, 2, 3, 4, 5]])
-        torch.testing.assert_close(items[0]["loss_inputs"]["advantages"], torch.tensor([[0.0, 0.0, 3.0, 0.0, 5.0]]))
+        samples = _convert(worker, [state], [[1, 2, 3, 4, 5]])
+        torch.testing.assert_close(samples[0].advantages, torch.tensor([[0.0, 0.0, 3.0, 0.0, 5.0]]))
 
     def test_token_advantages_require_shifted_length(self):
         worker = self._make_worker()
-        with self.assertRaisesRegex(ValueError, "Token advantage length mismatch"):
+        with self.assertRaisesRegex(ValueError, "Token advantages length mismatch"):
             _convert(worker, [self._state()], [[1.0]])
 
 

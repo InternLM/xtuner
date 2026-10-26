@@ -1,23 +1,26 @@
-"""TrainingWorker 侧训练数据构造的 contract 测试（RolloutState → (seq_ctx, loss_inputs) → pack）。
+"""角色拆分后训练数据构造的 contract 测试（RolloutState → TrainSample → (seq_ctx, loss_ctx) pack）。
 
-重构后 token 级张量构造从 controller 移到 training worker，本文件只测两段公开纯逻辑，
-不启动 Ray、模型或 rollout backend：
+token 级张量构造由宿主 ``TrainingWorker`` 与角色 worker 分两段完成，本文件只测这两段公开
+纯逻辑，不启动 Ray actor、模型或 rollout backend：
 
-- ``_get_train_sample / _get_train_items``：shift、advantage 张量化、seq_ctx 构造、
-  distillation teacher targets 附加，保留 CPU 原始 loss_inputs
-  （use_3d_position_ids 时给文本样本补 3D 轴）。
-- ``_pack_train_items`` / ``_pack_one_batch``：按 controller 的 index-only 打包计划把
-  (seq_ctx, loss_inputs) 拼成 ``pack_max_length`` 定长的 pack：loss_kwargs 张量沿序列维 cat、
-  模板键（rollout_logprobs / teacher 字段）在空 pack 上以固定 padding 值填充，最后重建
-  pack 级 loss_ctx（仍在 CPU，设备迁移与 sp 切分留给 ``_fit``），保证跨 rank collective
-  形状一致。
+- ``TrainingWorker._get_train_sample`` + ``_add_sample_fields``：shift、seq_ctx 构造、
+  distillation teacher targets 附加（经 ``ActorWorker.get_rollout_teacher_targets``）、
+  advantage 经样本缓存写入（``TrainSample.advantages``；use_3d_position_ids 时给文本样本
+  补 3D 轴）。loss context 构造被推迟到 pack 阶段。
+- ``TrainingWorker.pack_seq_ctx`` + ``ActorWorker.pack_loss_ctx``（内部走
+  ``_pack_loss_fields`` / ``RoleWorker._pack_loss_rows``）：按 controller 的 index-only
+  打包计划把样本拼成 ``pack_max_length`` 定长的 pack：seq_ctx 与 loss_kwargs 张量沿序列维
+  cat、模板键（rollout_logprobs / teacher 字段）在空 pack 上以固定 padding 值填充，最后
+  重建 pack 级 loss_ctx（仍在 CPU），保证跨 rank collective 形状一致。
+- ``resolve_routed_experts``（role_worker 自由函数）：把 rollout 侧 routed-experts
+  object ref 物化为 pack 级 CPU 张量（segmented 语义保留 ``[1:]``）。
 
 当前测试点：
 - shift 布局、advantage 与 shifted_labels 逐位置对齐（regression: advantage 曾比 input_ids
   长 1 导致 pack 后整体错位）。
 - 混合批文本样本补 3D MRoPE 轴；VLM multimodal 字段与 3D position 原样保留。
 - topk / sampled teacher targets 与 shifted 布局对齐（prompt 段补零行，语义洞保留行）。
-- pack 模板要求的 loss 键必须在所有真实样本中存在；空 pack 的模板键用 padding 值填充。
+- pack 模板要求的 teacher loss 键必须在所有真实样本中存在；空 pack 的模板键用 padding 值填充。
 - padding 区取值表：labels=-100、advantages/rollout_logprobs=0、teacher_indices=-1、
   teacher 张量按 top_k 补零；3D position 补 arange、routed experts 补 dummy id。
 """
@@ -37,9 +40,10 @@ from xtuner.v1.datasets.mllm_tokenize_fn.qwenvl_rope2d import get_rope_index_3
 from xtuner.v1.rl.agent_loop.agent_loop import AgentLoop
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter, RolloutTeacherConfig
 from xtuner.v1.rl.loss import DistillationLossConfig, GRPOLossConfig
+from xtuner.v1.rl.trainer.actor_worker import ActorWorker
 from xtuner.v1.rl.trainer.pack import RLDataPacker
-from xtuner.v1.rl.trainer.pack import TokenTensorBatch
-from xtuner.v1.rl.trainer.worker import TrainBatchAttr, TrainingWorker, get_train_seq_ctx
+from xtuner.v1.rl.trainer.role_worker import resolve_routed_experts
+from xtuner.v1.rl.trainer.worker import TrainBatchAttr, TrainingWorker, TrainSample, get_train_seq_ctx
 
 
 def _rollout_distillation_config(loss_config: DistillationLossConfig) -> DistillationConfig:
@@ -50,7 +54,16 @@ def _rollout_distillation_config(loss_config: DistillationLossConfig) -> Distill
     )
 
 
-def _make_worker(distillation_config=None) -> TrainingWorker:
+def _train_teacher_config() -> SimpleNamespace:
+    # 只配置 train teachers（最小 distillation 形状），用于 teacher_indices 模板键路径。
+    return SimpleNamespace(
+        rollout_teachers=[],
+        train_teachers=[object()],
+        loss_config=SimpleNamespace(uses_sampled_token_targets=True),
+    )
+
+
+def _make_worker(distillation_config=None, model_cfg=None) -> TrainingWorker:
     # 真实配置下 rollout teacher 依赖 loss_cfg 为 DistillationLossConfig，teacher 模板键才能进入 loss_ctx。
     loss_cfg = (
         distillation_config.loss_config
@@ -62,9 +75,19 @@ def _make_worker(distillation_config=None) -> TrainingWorker:
         pack_max_length=16,
         loss_cfg=loss_cfg,
         distillation_config=distillation_config,
-        model_cfg=SimpleNamespace(n_routed_experts=8),
+        model_cfg=model_cfg or SimpleNamespace(n_routed_experts=8),
     )
-    worker._distillation = DistillationTrainerAdapter(distillation_config)
+    worker.sp_mesh = SimpleNamespace(size=lambda: 1)
+    worker._cached_samples = None
+    worker._cached_pack_plan = None
+    worker._cached_batch_attr = None
+    actor = ActorWorker.__new__(ActorWorker)
+    actor.config = worker.config
+    actor._distillation = DistillationTrainerAdapter(distillation_config)
+    actor._staged = {}
+    actor.mtp_config = None
+    actor.host = worker
+    worker.actor = actor
     return worker
 
 
@@ -141,13 +164,57 @@ def _batch_attr(
     }
 
 
-def _convert(worker: TrainingWorker, states: list[RolloutState], advantages: list[float], use_3d: bool = False):
+def _convert(
+    worker: TrainingWorker,
+    states: list[RolloutState],
+    advantages: list[float] | None = None,
+    use_3d: bool = False,
+) -> list[TrainSample]:
+    # 宿主侧转换 + advantage 写入缓存：转换阶段不触 loss context。
     samples = [worker._get_train_sample(state, use_3d) for state in states]
-    return worker._get_train_items(samples, advantages)
+    worker._cached_samples = samples
+    if advantages is not None:
+        worker._add_sample_fields("advantages", advantages)
+    return samples
 
 
-class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
-    """RolloutState → (seq_ctx, loss_ctx)：shift、advantage 张量化、seq_ctx、teacher targets 与 CPU loss_inputs。"""
+def _sample_fields(sample: TrainSample) -> dict[str, torch.Tensor]:
+    # 一个样本的全部 CPU loss 输入行（键名与 packed loss_kwargs 一致）。
+    fields = {"shifted_labels": sample.shifted_labels}
+    if sample.advantages is not None:
+        fields["advantages"] = sample.advantages
+    if sample.rollout_logprobs is not None:
+        fields["rollout_logprobs"] = sample.rollout_logprobs
+    fields.update(sample.teacher_targets)
+    return fields
+
+
+def _pack(
+    worker: TrainingWorker,
+    samples: list[TrainSample],
+    plan,
+    use_3d: bool = False,
+    pack_loss_keys: list[str] | None = None,
+    has_routed_experts: bool = False,
+) -> list[list[tuple[SequenceContext, object]]]:
+    # 复刻 actor fit 的 pack 路径：宿主拼 seq_ctx，角色拼 loss_ctx；step 布局与 plan 一致。
+    worker._cached_samples = samples
+    worker._cached_pack_plan = plan
+    worker._cached_batch_attr = _batch_attr(use_3d, pack_loss_keys, has_routed_experts)
+    steps = []
+    with patch("xtuner.v1.rl.trainer.actor_worker.DEVICE", "cpu"):
+        for step in plan:
+            packed = []
+            for pack in step:
+                seq_ctx = worker.pack_seq_ctx(pack)
+                loss_dict = worker.actor.pack_loss_ctx(pack, seq_ctx)
+                packed.append((seq_ctx, loss_dict["lm"]))
+            steps.append(packed)
+    return steps
+
+
+class TestConvertRolloutItemsToTrainSamples(unittest.TestCase):
+    """RolloutState → TrainSample：shift、advantage 写入、seq_ctx、teacher targets；loss ctx 延迟构造。"""
 
     def test_text_path_shifts_and_aligns_loss_inputs(self):
         # 文本主路径固定 token 布局：input_ids 去掉 response 最后一个 token，label/logprob 对齐预测位置。
@@ -160,30 +227,31 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             routed_experts=routed_experts,
         )
 
-        items = _convert(worker, [state], [1.5])
+        samples = _convert(worker, [state], [1.5])
 
-        self.assertEqual(len(items), 1)
-        seq_ctx = items[0]["seq_ctx"]
-        loss_kwargs = SimpleNamespace(**items[0]["loss_inputs"])
+        self.assertEqual(len(samples), 1)
+        seq_ctx = samples[0].seq_ctx
         self.assertEqual(seq_ctx.input_ids.tolist(), [[10, 11, 12, 20, 21]])
-        self.assertEqual(loss_kwargs.shifted_labels.tolist(), [[-100, -100, 20, -100, 22]])
+        self.assertEqual(samples[0].shifted_labels.tolist(), [[-100, -100, 20, -100, 22]])
         torch.testing.assert_close(
-            loss_kwargs.rollout_logprobs,
+            samples[0].rollout_logprobs,
             torch.tensor([[0.0, 0.0, 0.1, 0.2, 0.3]], dtype=torch.float32),
         )
         # advantage 与 shifted_labels 逐位置对齐: prompt 段为 0, mask=0 处为 0。
         torch.testing.assert_close(
-            loss_kwargs.advantages,
+            samples[0].advantages,
             torch.tensor([[0.0, 0.0, 1.5, 0.0, 1.5]], dtype=torch.float32),
         )
         self.assertIs(seq_ctx.rollout_routed_experts, routed_experts)
 
     def test_conversion_defers_loss_context_construction_until_packing(self):
+        # 转换 + advantage 写入阶段不 build loss context；pack 阶段才构建。
         worker = _make_worker()
         with patch.object(type(worker.config.loss_cfg), "build", side_effect=AssertionError("premature loss context")):
-            items = _convert(worker, [_make_state()], [1.0])
-        self.assertEqual(set(items[0]), {"seq_ctx", "loss_inputs"})
-        packed = worker._pack_train_items(items, [[[0]]], _batch_attr())
+            samples = _convert(worker, [_make_state()], [1.0])
+        self.assertIsNotNone(samples[0].advantages)
+        self.assertIsNotNone(samples[0].seq_ctx.input_ids)
+        packed = _pack(worker, samples, [[[0]]])
         self.assertEqual(packed[0][0][1].loss_kwargs.shifted_labels.shape[1], worker.config.pack_max_length)
 
     def test_mixed_batch_extends_text_positions_to_3d(self):
@@ -200,10 +268,10 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             logprobs=[0.0, -0.1, -0.2, -0.3, -0.4],
         )
 
-        items = _convert(worker, [reasoning, agentic], [0.5, 0.5], use_3d=True)
+        samples = _convert(worker, [reasoning, agentic], [0.5, 0.5], use_3d=True)
 
-        self.assertEqual(tuple(items[0]["seq_ctx"].position_ids.shape), (3, 1, 5))
-        agentic_position_ids = items[1]["seq_ctx"].position_ids
+        self.assertEqual(tuple(samples[0].seq_ctx.position_ids.shape), (3, 1, 5))
+        agentic_position_ids = samples[1].seq_ctx.position_ids
         self.assertEqual(tuple(agentic_position_ids.shape), (3, 1, 4))
         torch.testing.assert_close(
             agentic_position_ids,
@@ -223,9 +291,9 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             mm_info={"pixel_values": pixel_values, "image_grid_thw": image_grid_thw},
         )
 
-        items = _convert(worker, [state], [0.25], use_3d=True)
+        samples = _convert(worker, [state], [0.25], use_3d=True)
 
-        seq_ctx = items[0]["seq_ctx"]
+        seq_ctx = samples[0].seq_ctx
         self.assertEqual(seq_ctx.input_ids.tolist(), [[100, 101, 102]])
         self.assertEqual(tuple(seq_ctx.position_ids.shape), (3, 1, 3))
         self.assertEqual(seq_ctx.position_ids.dtype, torch.long)
@@ -284,27 +352,27 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             teacher_logprobs=[[-0.5, -0.6], [-0.7, -0.8], [-0.9, -1.0]],
         )
 
-        items = _convert(worker, [state], [0.0])
+        samples = _convert(worker, [state], [0.0])
 
-        self.assertEqual(len(items), 1)
-        loss_kwargs = SimpleNamespace(**items[0]["loss_inputs"])
-        self.assertEqual(loss_kwargs.shifted_labels.tolist(), [[-100, 20, -100, 22]])
+        self.assertEqual(len(samples), 1)
+        sample = samples[0]
+        self.assertEqual(sample.shifted_labels.tolist(), [[-100, 20, -100, 22]])
         self.assertEqual(
-            loss_kwargs.target_token_ids.tolist(),
+            sample.teacher_targets["target_token_ids"].tolist(),
             [[[0, 0], [100, 101], [102, 103], [104, 105]]],
         )
         torch.testing.assert_close(
-            loss_kwargs.teacher_logprobs,
+            sample.teacher_targets["teacher_logprobs"],
             torch.tensor([[[0.0, 0.0], [-0.5, -0.6], [-0.7, -0.8], [-0.9, -1.0]]], dtype=torch.float32),
         )
         with patch("xtuner.v1.rl.loss.distillation_loss.DEVICE", "cpu"):
             loss_ctx = loss_config.build(
                 {
-                    "shifted_labels": loss_kwargs.shifted_labels,
-                    "advantages": loss_kwargs.advantages,
-                    "old_logprobs": torch.zeros_like(loss_kwargs.shifted_labels, dtype=torch.float32),
-                    "teacher_logprobs": loss_kwargs.teacher_logprobs,
-                    "target_token_ids": loss_kwargs.target_token_ids,
+                    "shifted_labels": sample.shifted_labels,
+                    "advantages": sample.advantages,
+                    "old_logprobs": torch.zeros_like(sample.shifted_labels, dtype=torch.float32),
+                    "teacher_logprobs": sample.teacher_targets["teacher_logprobs"],
+                    "target_token_ids": sample.teacher_targets["target_token_ids"],
                 }
             )
         assert loss_ctx is not None
@@ -334,16 +402,16 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             teacher_logprobs=[[-0.7, -0.8], [-0.9, -1.0]],
         )
 
-        items = _convert(worker, [state], [0.0])
+        samples = _convert(worker, [state], [0.0])
 
-        loss_kwargs = SimpleNamespace(**items[0]["loss_inputs"])
-        self.assertEqual(loss_kwargs.shifted_labels.tolist(), [[-100, -100, -100, 21, 22]])
+        sample = samples[0]
+        self.assertEqual(sample.shifted_labels.tolist(), [[-100, -100, -100, 21, 22]])
         self.assertEqual(
-            loss_kwargs.target_token_ids.tolist(),
+            sample.teacher_targets["target_token_ids"].tolist(),
             [[[0, 0], [0, 0], [0, 0], [102, 103], [104, 105]]],
         )
         torch.testing.assert_close(
-            loss_kwargs.teacher_logprobs,
+            sample.teacher_targets["teacher_logprobs"],
             torch.tensor([[[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [-0.7, -0.8], [-0.9, -1.0]]], dtype=torch.float32),
         )
 
@@ -372,35 +440,32 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             teacher_logprobs=[-1.1, -1.2, -1.3],
         )
 
-        items = _convert(worker, [plain_state, agentic_state], [0.0, 0.0])
+        samples = _convert(worker, [plain_state, agentic_state], [0.0, 0.0])
 
-        self.assertEqual(len(items), 2)
+        self.assertEqual(len(samples), 2)
         torch.testing.assert_close(
-            items[0]["loss_inputs"].get("teacher_logprobs"),
+            samples[0].teacher_targets.get("teacher_logprobs"),
             torch.tensor([[0.0, 0.0, 0.0, -0.7, -0.9]], dtype=torch.float32),
         )
         torch.testing.assert_close(
-            items[1]["loss_inputs"].get("teacher_logprobs"),
+            samples[1].teacher_targets.get("teacher_logprobs"),
             torch.tensor([[0.0, -1.1, -1.2, -1.3]], dtype=torch.float32),
         )
-        self.assertIsNone(items[0]["loss_inputs"].get("target_token_ids"))
-        self.assertIsNone(items[1]["loss_inputs"].get("target_token_ids"))
+        self.assertIsNone(samples[0].teacher_targets.get("target_token_ids"))
+        self.assertIsNone(samples[1].teacher_targets.get("target_token_ids"))
 
 
 class TestPackTrainItems(unittest.TestCase):
-    """(seq_ctx, loss_inputs) 列表 → 定长 pack：拼接、padding 值表、模板键与 pack 级 loss_ctx 重建。"""
-
-    def _pack(self, worker, items, plan, use_3d=False, pack_loss_keys=None, has_routed_experts=False):
-        return worker._pack_train_items(items, plan, _batch_attr(use_3d, pack_loss_keys, has_routed_experts))
+    """TrainSample 列表 → 定长 pack：拼接、padding 值表、模板键与 pack 级 loss_ctx 重建。"""
 
     def test_packs_concatenate_along_sequence(self):
         # 两个样本按 plan 顺序拼进一个 pack，padding 区补满 pack_max_length。
         worker = _make_worker()
         first = _make_state(uid=1, response_ids=[20, 21], logprobs=[0.1, 0.2])
         second = _make_state(uid=2, prompt_ids=[30, 31], response_ids=[40], logprobs=[-0.3])
-        items = _convert(worker, [first, second], [1.0, 2.0])
+        samples = _convert(worker, [first, second], [1.0, 2.0])
 
-        step_batches = self._pack(worker, items, [[[0, 1]]])
+        step_batches = _pack(worker, samples, [[[0, 1]]])
 
         self.assertEqual(len(step_batches), 1)
         seq_ctx, loss_ctx = step_batches[0][0]
@@ -452,14 +517,14 @@ class TestPackTrainItems(unittest.TestCase):
                     teacher_logprobs=[[-token / 1000, -token / 2000] for token in response],
                 )
             )
-        items = _convert(worker, states, [float(index + 1) for index in range(len(states))])
+        samples = _convert(worker, states, [float(index + 1) for index in range(len(states))])
         originals = [
             {
-                "input_ids": item["seq_ctx"].input_ids.clone(),
-                "position_ids": item["seq_ctx"].position_ids.clone(),
-                **{key: value.clone() for key, value in item["loss_inputs"].items() if value is not None},
+                "input_ids": sample.seq_ctx.input_ids.clone(),
+                "position_ids": sample.seq_ctx.position_ids.clone(),
+                **{key: value.clone() for key, value in _sample_fields(sample).items()},
             }
-            for item in items
+            for sample in samples
         ]
         for strategy in ("legacy", "greedy", "balance", "native"):
             with self.subTest(strategy=strategy):
@@ -467,7 +532,7 @@ class TestPackTrainItems(unittest.TestCase):
                     plans, _ = RLDataPacker(10, 3, 1, 2, pack_strategy=strategy, pack_seed=7).pack(lengths)
                 restored = {}
                 for plan in plans:
-                    batches = self._pack(worker, items, plan, pack_loss_keys=["rollout_logprobs"])
+                    batches = _pack(worker, samples, plan, pack_loss_keys=["rollout_logprobs"])
                     self.assertEqual(len(batches), len(plan))
                     for step_plan, step_batches in zip(plan, batches):
                         self.assertEqual(len(step_batches), len(step_plan))
@@ -499,9 +564,9 @@ class TestPackTrainItems(unittest.TestCase):
                             torch.testing.assert_close(restored[index][key], expected, rtol=0, atol=0)
                             # Packing must also leave its source fields untouched.
                             source = (
-                                getattr(items[index]["seq_ctx"], key)
+                                getattr(samples[index].seq_ctx, key)
                                 if key in ("input_ids", "position_ids")
-                                else items[index]["loss_inputs"][key]
+                                else _sample_fields(samples[index])[key]
                             )
                             torch.testing.assert_close(source, expected, rtol=0, atol=0)
 
@@ -513,20 +578,20 @@ class TestPackTrainItems(unittest.TestCase):
             prompt_ids=[10, 11, 12, 10, 11, 12, 10, 11, 12, 10, 11, 12, 10, 11, 12, 10],
             response_ids=[20],
         )
-        items = _convert(worker, [state], [1.0])
-        self.assertEqual(items[0]["seq_ctx"].input_ids.shape[1], worker.config.pack_max_length)
+        samples = _convert(worker, [state], [1.0])
+        self.assertEqual(samples[0].seq_ctx.input_ids.shape[1], worker.config.pack_max_length)
 
-        step_batches = self._pack(worker, items, [[[0]]])
+        step_batches = _pack(worker, samples, [[[0]]])
 
         seq_ctx, _ = step_batches[0][0]
-        torch.testing.assert_close(seq_ctx.input_ids, items[0]["seq_ctx"].input_ids)
+        torch.testing.assert_close(seq_ctx.input_ids, samples[0].seq_ctx.input_ids)
         self.assertEqual(seq_ctx.num_padding, 0)
 
     def test_empty_pack_materializes_all_padding(self):
         # 调度占位空 pack：整包都是 padding（全零 input_ids + labels=-100 + advantages=0）。
         worker = _make_worker()
 
-        step_batches = self._pack(worker, [], [[[]]])
+        step_batches = _pack(worker, [], [[[]]])
 
         seq_ctx, loss_ctx = step_batches[0][0]
         seq_len = seq_ctx.input_ids.shape[1]
@@ -541,7 +606,7 @@ class TestPackTrainItems(unittest.TestCase):
         # pack_loss_keys 声明的批级模板键在空 pack 上也要物化，保证跨 rank collective 形状一致。
         worker = _make_worker()
 
-        step_batches = self._pack(worker, [], [[[]]], pack_loss_keys=["rollout_logprobs"])
+        step_batches = _pack(worker, [], [[[]]], pack_loss_keys=["rollout_logprobs"])
 
         _, loss_ctx = step_batches[0][0]
         rollout_logprobs = loss_ctx.loss_kwargs.rollout_logprobs
@@ -561,7 +626,7 @@ class TestPackTrainItems(unittest.TestCase):
         )
         worker = _make_worker(_rollout_distillation_config(loss_config))
 
-        step_batches = self._pack(worker, [], [[[]]])
+        step_batches = _pack(worker, [], [[[]]])
 
         _, loss_ctx = step_batches[0][0]
         loss_kwargs = loss_ctx.loss_kwargs
@@ -575,25 +640,28 @@ class TestPackTrainItems(unittest.TestCase):
         )
 
     def test_mixed_presence_within_pack_raises(self):
-        # 同一 pack 模板要求的 loss 键必须在所有真实样本中存在，混出即 fail fast。
+        # 同一 pack 模板要求的 teacher loss 键必须在所有真实样本中存在，混出即 fail fast。
         worker = _make_worker()
-        items = [
-            {
-                "seq_ctx": SequenceContext.from_input_ids((torch.tensor([[1, 2]]),), device="cpu"),
-                "loss_inputs": {
-                    "shifted_labels": torch.tensor([[-100, 2]]),
-                    "advantages": torch.zeros(1, 2),
-                    "rollout_logprobs": torch.zeros(1, 2),
-                },
-            },
-            {
-                "seq_ctx": SequenceContext.from_input_ids((torch.tensor([[3, 4]]),), device="cpu"),
-                "loss_inputs": {"shifted_labels": torch.tensor([[3, 4]]), "advantages": torch.zeros(1, 2)},
-            },
+        worker.config.distillation_config = _train_teacher_config()
+        samples = [
+            TrainSample(
+                seq_ctx=SequenceContext.from_input_ids((torch.tensor([[1, 2]]),), device="cpu"),
+                shifted_labels=torch.tensor([[-100, 2]]),
+                rollout_logprobs=None,
+                teacher_targets={"teacher_indices": torch.tensor([[0, 0]])},
+                advantages=torch.zeros(1, 2),
+            ),
+            TrainSample(
+                seq_ctx=SequenceContext.from_input_ids((torch.tensor([[3, 4]]),), device="cpu"),
+                shifted_labels=torch.tensor([[3, 4]]),
+                rollout_logprobs=None,
+                teacher_targets={},
+                advantages=torch.zeros(1, 2),
+            ),
         ]
 
         with self.assertRaisesRegex(ValueError, "must be present on every sample"):
-            self._pack(worker, items, [[[0, 1]]], pack_loss_keys=["rollout_logprobs"])
+            _pack(worker, samples, [[[0, 1]]], pack_loss_keys=["teacher_indices"])
 
     def test_oversize_pack_raises(self):
         # pack 内真实 token 数超过 pack_max_length 时 fail fast（controller 侧 packer 同样拦截）。
@@ -605,16 +673,16 @@ class TestPackTrainItems(unittest.TestCase):
             labels=[-100] * 19 + [42],
             logprobs=[0.0] * 20,
         )
-        items = _convert(worker, [state], [1.0])
+        samples = _convert(worker, [state], [1.0])
 
         with self.assertRaises(AssertionError):
-            self._pack(worker, items, [[[0]]])
+            _pack(worker, samples, [[[0]]])
 
     def test_padding_seq_ctx_uses_3d_positions_when_configured(self):
         # use_3d_position_ids=True 时 padding 区 position_ids 为三轴 arange。
         worker = _make_worker()
 
-        step_batches = self._pack(worker, [], [[[]]], use_3d=True)
+        step_batches = _pack(worker, [], [[[]]], use_3d=True)
 
         position_ids = step_batches[0][0][0].position_ids
         self.assertEqual(tuple(position_ids.shape), (3, 1, worker.config.pack_max_length))
@@ -627,7 +695,7 @@ class TestPackTrainItems(unittest.TestCase):
         # has_routed_experts=True 时 padding 区补 dummy expert id，形状与真实 rollout_routed_experts 对齐。
         worker = _make_worker()
 
-        step_batches = self._pack(worker, [], [[[]]], has_routed_experts=True)
+        step_batches = _pack(worker, [], [[[]]], has_routed_experts=True)
 
         routed_experts = step_batches[0][0][0].rollout_routed_experts[0]
         self.assertEqual(tuple(routed_experts.shape), (worker.config.pack_max_length, 1, 1))
@@ -635,25 +703,26 @@ class TestPackTrainItems(unittest.TestCase):
         self.assertTrue(torch.all(routed_experts < worker.config.model_cfg.n_routed_experts))
 
     def test_required_loss_field_missing_from_every_real_sample_raises(self):
+        # 模板 teacher 键在全部真实样本上缺失同样 fail fast。
         worker = _make_worker()
-        items = _convert(worker, [_make_state()], [1.0])
-        with self.assertRaisesRegex(ValueError, "Required pack field rollout_logprobs"):
-            self._pack(worker, items, [[[0]]], pack_loss_keys=["rollout_logprobs"])
+        worker.config.distillation_config = _train_teacher_config()
+        samples = _convert(worker, [_make_state()], [1.0])
+
+        with self.assertRaisesRegex(ValueError, "Required pack field teacher_indices"):
+            _pack(worker, samples, [[[0]]], pack_loss_keys=["teacher_indices"])
 
     def test_sampled_teacher_padding_preserves_real_targets_and_empty_dp(self):
         worker = _make_worker(
             _rollout_distillation_config(DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"}))
         )
         state = _make_state(teacher_tokens=[20, 21, 22], teacher_logprobs=[-0.1, -0.2, -0.3])
-        items = _convert(worker, [state], [0.0])
-        real_length = items[0]["seq_ctx"].input_ids.shape[1]
+        samples = _convert(worker, [state], [0.0])
+        real_length = samples[0].seq_ctx.input_ids.shape[1]
         # Two DP ranks: one real sample and one scheduling-only empty pack.
-        from xtuner.v1.rl.trainer.pack import RLDataPacker
-
         plans, _ = RLDataPacker(16, 2, 1, 1).pack([real_length])
         for dp_rank, plan in enumerate(plans):
             with self.subTest(dp_rank=dp_rank):
-                seq, loss = self._pack(worker, items if dp_rank == 0 else [], plan)[0][0]
+                seq, loss = _pack(worker, samples if dp_rank == 0 else [], plan)[0][0]
                 kwargs = loss.loss_kwargs
                 self.assertEqual(tuple(kwargs.teacher_logprobs.shape), (1, 16))
                 self.assertEqual(kwargs.teacher_logprobs.device.type, "cpu")
@@ -662,7 +731,7 @@ class TestPackTrainItems(unittest.TestCase):
                 start = real_length if dp_rank == 0 else 0
                 if dp_rank == 0:
                     torch.testing.assert_close(
-                        kwargs.teacher_logprobs[:, :real_length], items[0]["loss_inputs"].get("teacher_logprobs")
+                        kwargs.teacher_logprobs[:, :real_length], samples[0].teacher_targets["teacher_logprobs"]
                     )
                 self.assertTrue(torch.all(kwargs.teacher_logprobs[:, start:] == 0))
                 self.assertTrue(torch.all(kwargs.shifted_labels[:, start:] == -100))
@@ -684,13 +753,14 @@ class TestPackTrainItems(unittest.TestCase):
             teacher_tokens=[[20, 30], [21, 31], [22, 32]],
             teacher_logprobs=[[-0.1, -0.2]] * 3,
         )
-        items = _convert(worker, [state], [0.0])
-        real_length = items[0]["seq_ctx"].input_ids.shape[1]
-        seq, loss = self._pack(worker, items, [[[0]]], pack_loss_keys=["rollout_logprobs"])[0][0]
+        samples = _convert(worker, [state], [0.0])
+        real_length = samples[0].seq_ctx.input_ids.shape[1]
+        seq, loss = _pack(worker, samples, [[[0]]], pack_loss_keys=["rollout_logprobs"])[0][0]
+        originals = _sample_fields(samples[0])
         for key in ("shifted_labels", "advantages", "rollout_logprobs", "teacher_logprobs", "target_token_ids"):
             with self.subTest(key=key):
                 packed = getattr(loss.loss_kwargs, key)
-                original = getattr(SimpleNamespace(**items[0]["loss_inputs"]), key)
+                original = originals[key]
                 self.assertEqual(packed.shape[1], seq.input_ids.shape[1])
                 self.assertEqual(packed.device.type, "cpu")
                 torch.testing.assert_close(packed[:, :real_length], original)
@@ -701,37 +771,35 @@ class TestPackTrainItems(unittest.TestCase):
         worker = _make_worker()
         loss_config = DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
         worker.config.loss_cfg = loss_config
-        seq = SequenceContext.from_input_ids((torch.tensor([[1, 2, 3]]),), device="cpu")
-        item = {
-            "seq_ctx": seq,
-            "loss_inputs": {
-                "shifted_labels": torch.tensor([[-100, 2, 3]]),
-                "advantages": torch.tensor([[0.0, 1.0, 1.0]]),
-                "teacher_indices": torch.tensor([[2, 2, 2]]),
-            },
-        }
-        _, packed = self._pack(worker, [item], [[[0]]], pack_loss_keys=["teacher_indices"])[0][0]
+        worker.config.distillation_config = _train_teacher_config()
+        sample = TrainSample(
+            seq_ctx=SequenceContext.from_input_ids((torch.tensor([[1, 2, 3]]),), device="cpu"),
+            shifted_labels=torch.tensor([[-100, 2, 3]]),
+            rollout_logprobs=None,
+            teacher_targets={"teacher_indices": torch.tensor([[2, 2, 2]])},
+            advantages=torch.tensor([[0.0, 1.0, 1.0]]),
+        )
+        _, packed = _pack(worker, [sample], [[[0]]], pack_loss_keys=["teacher_indices"])[0][0]
         torch.testing.assert_close(packed.loss_kwargs.teacher_indices[:, :3], torch.tensor([[2, 2, 2]]))
         self.assertTrue(torch.all(packed.loss_kwargs.teacher_indices[:, 3:] == -1))
         self.assertEqual(tuple(packed.loss_kwargs.teacher_indices.shape), (1, 16))
 
     def test_single_full_pack_materializes_single_ref_and_segment_refs(self):
+        # resolve_routed_experts 把 ref / ref-list 物化为 pack 级张量；segmented 保留 [1:] 语义。
         for segmented in (False, True):
             with self.subTest(segmented=segmented):
-                worker = _make_worker()
-                worker.config.model_cfg = SimpleNamespace(
-                    n_routed_experts=8, num_hidden_layers=1, num_experts_per_tok=1
+                worker = _make_worker(
+                    model_cfg=SimpleNamespace(n_routed_experts=8, num_hidden_layers=1, num_experts_per_tok=1)
                 )
-                worker.config.free_rollout_routed_experts_in_worker = False
                 ref = ray.ObjectRef(b"a" * 28)
                 payload = [ref] if segmented else ref
                 state = _make_state(prompt_ids=list(range(16)), response_ids=[20], routed_experts=payload)
-                items = _convert(worker, [state], [1.0])
-                seq, _ = self._pack(worker, items, [[[0]]], has_routed_experts=True)[0][0]
+                samples = _convert(worker, [state], [1.0])
+                seq, _ = _pack(worker, samples, [[[0]]], has_routed_experts=True)[0][0]
                 self.assertEqual(seq.rollout_routed_experts, [payload])
                 values = (np.arange(17 if segmented else 16) % 8).astype(np.int32).reshape(-1, 1)
                 with patch.object(ray, "get", return_value=values):
-                    worker._add_rollout_routed_experts(seq, seq.rollout_routed_experts)
+                    resolve_routed_experts(seq, model_cfg=worker.config.model_cfg, pack_max_length=16)
                 expected = values[1:] if segmented else values
                 np.testing.assert_array_equal(seq.rollout_routed_experts.numpy().reshape(-1, 1), expected)
 
@@ -748,7 +816,7 @@ class TestPackTrainItems(unittest.TestCase):
                 )
             )
         )
-        self.assertEqual(topk_worker._configured_teacher_loss_keys(), ["teacher_logprobs", "target_token_ids"])
+        self.assertEqual(topk_worker.actor._configured_teacher_loss_keys(), ["teacher_logprobs", "target_token_ids"])
 
         sampled_worker = _make_worker(
             _rollout_distillation_config(
@@ -759,18 +827,13 @@ class TestPackTrainItems(unittest.TestCase):
                 )
             )
         )
-        self.assertEqual(sampled_worker._configured_teacher_loss_keys(), ["teacher_logprobs"])
+        self.assertEqual(sampled_worker.actor._configured_teacher_loss_keys(), ["teacher_logprobs"])
 
-        train_teacher_config = SimpleNamespace(
-            rollout_teachers=[],
-            train_teachers=[object()],
-            loss_config=SimpleNamespace(uses_sampled_token_targets=True),
-        )
         train_teacher_worker = _make_worker()
-        train_teacher_worker.config.distillation_config = train_teacher_config
-        self.assertEqual(train_teacher_worker._configured_teacher_loss_keys(), ["teacher_indices"])
+        train_teacher_worker.config.distillation_config = _train_teacher_config()
+        self.assertEqual(train_teacher_worker.actor._configured_teacher_loss_keys(), ["teacher_indices"])
 
-        self.assertEqual(_make_worker()._configured_teacher_loss_keys(), [])
+        self.assertEqual(_make_worker().actor._configured_teacher_loss_keys(), [])
 
 
 if __name__ == "__main__":

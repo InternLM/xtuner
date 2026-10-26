@@ -12,6 +12,7 @@ from xtuner.v1.rl.distillation import DistillationTrainerAdapter
 from xtuner.v1.rl.utils import free_object_refs
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import get_logger
+from xtuner.v1.utils.profile import timer
 
 from .pack import DPRankPackIndices, RLDataPacker, TokenBatchProto
 from .worker import TrainBatchAttr, TrainingWorker, WorkerConfig, WorkerLogItem
@@ -550,6 +551,7 @@ class TrainingController:
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
     ) -> tuple[list[WorkerLogItem], dict[str, float]]:
+        timers: dict[str, float] = {}
         has_critic = self._has_critic
         if self._gae_reward_scope is not None and not has_critic:
             raise RuntimeError("GAE requires a configured critic role")
@@ -609,7 +611,8 @@ class TrainingController:
                     worker.critic_collect_values.remote(return_values=not segment_gae)  # type: ignore[attr-defined]
                     for worker in self.workers
                 ]
-                value_batches = ray.get(value_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+                with timer("critic_collect_values", timers):
+                    value_batches = ray.get(value_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
             # 2.5. Estimate advantages with the configured mode: group scalars without a
             # critic, worker-local segment GAE, or controller-side session GAE.
             sample_advantages, token_advantages, token_returns, advantage_stats = self._estimate_advantages(
@@ -641,7 +644,8 @@ class TrainingController:
                                 ),
                             )
                         )
-                critic_log_infos = ray.get(critic_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+                with timer("critic_fit", timers):
+                    critic_log_infos = ray.get(critic_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
             # 4. Actor fit. Each worker trains the policy on its samples'
             # advantages; the advantages are passed as actor_fit arguments and
             # staged into the worker's sample cache on arrival (fit() then
@@ -664,7 +668,8 @@ class TrainingController:
                         [torch.tensor(token_advantages[index], dtype=torch.float32) for index in indices]
                     )
                 handles.append(worker.actor_fit.remote(advantages=advantages))  # type: ignore[attr-defined]
-            log_infos = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+            with timer("actor_fit", timers):
+                log_infos = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         finally:
             # No role restore here: a fit failure aborts the whole run (the
             # trainer has no retry path), so nothing consumes the restored
@@ -700,6 +705,7 @@ class TrainingController:
             raw_rewards_count=raw_rewards_count,
         )
         data_info.update(self._critic_log_scalars(critic_log_infos))
+        data_info.update({f"time/{name}": value for name, value in timers.items()})
         return log_infos, data_info
 
     def offload(self, target: Literal["model", "optimizer", "all"] = "all"):

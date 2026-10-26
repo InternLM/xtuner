@@ -409,7 +409,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         roles = self._roles()
         if role is not None and role not in roles:
             raise KeyError(f"role is not registered: {role}")
-        if self._current_role is not None:
+        if self._current_role is not None and self._current_role != role:
             roles[self._current_role].offload()
         if role is not None:
             roles[role].onload()

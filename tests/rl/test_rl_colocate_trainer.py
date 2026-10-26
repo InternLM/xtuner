@@ -37,21 +37,36 @@ from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SerializedRayObj
 from xtuner.v1.train.rl_trainer import RLColocateTrainer, RLThroughputBenchmark
 
 
-class _FakeRolloutState:
+class _FakeRolloutState(RolloutState):
+    """Build on the real pydantic RolloutState so replay-buffer extraction
+    (model_fields) and trainer logging (task_name) see the production shape."""
+
     def __init__(self, uid: int):
-        self.id = uid
-        self.rollout_id = str(uid)
-        self.group_id = uid
-        self.session_id = uid
-        self.status = Status.INIT
-        self.finish_reason = None
-        self.seq_staleness = 0
-        self.prompt_ids = [10, 11]
-        self.response_ids = []
-        self.response = None
-        self.reward = None
-        self.extra_fields = {}
-        self.response_model_steps = []
+        super().__init__(
+            rollout_id=uid,
+            group_id=uid,
+            session_id=uid,
+            task_name="train_task",
+            status=Status.COMPLETED,
+            message=[{"role": "user", "content": "prompt"}],
+            prompt_ids=[10, 11],
+            response_ids=[1, 2, 3],
+            response_model_steps=[0, 0, 0],
+            reward={"score": 1.0},
+            extra_fields={
+                "train_prompt_length": 2,
+                "train_response_length": 3,
+                "supervised_tokens": 3,
+                "position_layout": "1d",
+                "has_rollout_logprobs": False,
+                "has_routed_experts": False,
+            },
+        )
+        # 直接构造的 fake（绕过 agent loop）也要能通过 _prepare_train_batch 的
+        # 结构校验：出厂即携带 canonicalize 后的完整训练字段。
+        self.input_ids = list(self.prompt_ids) + list(self.response_ids)
+        self.labels = [-100] * len(self.prompt_ids) + list(self.response_ids)
+        self.num_tokens = len(self.input_ids) - 1
 
 
 class _FakeSampler:
@@ -94,10 +109,8 @@ def _build_fake_agent_loop():
         model_step = kwargs.get("model_step", kwargs.get("train_step", 0))
         for state in rollout_states:
             state.status = Status.COMPLETED
-            state.response_ids = [1, 2, 3]
             state.response = "ok"
-            state.reward = {"score": 1.0}
-            state.response_model_steps = [model_step]
+            state.response_model_steps = [model_step] * len(state.response_ids)
         return rollout_states
 
     agent_loop.generate_group = generate_group
