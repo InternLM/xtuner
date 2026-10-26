@@ -190,6 +190,13 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         self.add_generation_prompt = add_generation_prompt
         self.enable_thinking = enable_thinking
         self.reasoning_effort = reasoning_effort
+        # 训练入口（本类与 text 侧的 Glm53ChatMessages.tokenize）暂不开放 clear_thinking=True：
+        # 需要该语义的数据应由用户侧拆成多条样本（每条只有结尾轮算 loss）。config → fn → render
+        # 的接线和 hash 覆盖保留，开放时无需再动 hash，当前先以断言守住取值。
+        assert clear_thinking is False, (
+            "Glm53VLTokenizeFunction only supports clear_thinking=False; prepare clear-thinking "
+            "data by splitting turns into separate samples instead."
+        )
         self.clear_thinking = clear_thinking
         self.system_message = system_message
         self.data_name = os.path.basename(anno_name)

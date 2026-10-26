@@ -731,6 +731,13 @@ class Glm53ChatMessages(BaseModel):
         clear_thinking: bool = False,
         **kwargs,
     ) -> Dict:
+        # 训练侧暂不感知 clear_thinking=True：历史轮数据应由用户侧拆成多条样本（每条只有结尾
+        # 轮算 loss）。实现（render/fast/slow）与测试保留，开放时只需删掉这句断言；VL 侧在
+        # Glm53VLTokenizeFunction 构造期有同样的守卫。
+        assert clear_thinking is False, (
+            "Glm53ChatMessages only supports clear_thinking=False; prepare clear-thinking data "
+            "by splitting turns into separate samples instead."
+        )
         if chat_template is not None and chat_template.default_system is not None:
             if self.messages[0]["role"] == "system":
                 self.messages[0]["content"] = chat_template.default_system

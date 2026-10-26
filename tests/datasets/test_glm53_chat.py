@@ -390,27 +390,32 @@ class TestGlm53Rendering:
     def test_clear_thinking_masks_whole_historical_assistant_turns(self, tokenizer):
         # clear_thinking=True 屏蔽最后一个 user 之前的整轮历史 assistant——无论该轮有没有
         # reasoning（旧实现只屏蔽带 reasoning 的轮次，无 reasoning 的历史轮照样监督，语义
-        # 自相矛盾）；最后一个 user 之后的轮次照常监督。
+        # 自相矛盾）；最后一个 user 之后的轮次照常监督。训练入口 Glm53ChatMessages.tokenize
+        # 暂不开放该参数（数据应由用户侧拆分），这里直接测 tokenize fn 层的实现。
         messages = [
             {"role": "user", "content": "First question"},
             {"role": "assistant", "content": "HISTORICAL_ANSWER"},
             {"role": "user", "content": "Second question"},
             {"role": "assistant", "content": "final answer", "reasoning_content": "actual reasoning"},
         ]
-        tokenized = Glm53ChatMessages(messages=messages).tokenize(tokenizer, clear_thinking=True)
+        fast_ids, fast_labels = glm53_tokenize_fn_fastspeed(tokenizer, messages, clear_thinking=True)
         slow_ids, slow_labels = glm53_tokenize_fn_slowspeed(tokenizer, messages, clear_thinking=True)
-        assert tokenized["input_ids"] == slow_ids
-        assert tokenized["labels"] == slow_labels
+        assert fast_ids == slow_ids
+        assert fast_labels == slow_labels
 
         user_id = tokenizer.convert_tokens_to_ids("<|user|>")
-        last_user = max(index for index, token in enumerate(tokenized["input_ids"]) if token == user_id)
-        assert all(label == -100 for index, label in enumerate(tokenized["labels"]) if index <= last_user)
-        assert any(label != -100 for label in tokenized["labels"][last_user:])
+        last_user = max(index for index, token in enumerate(fast_ids) if token == user_id)
+        assert all(label == -100 for index, label in enumerate(fast_labels) if index <= last_user)
+        assert any(label != -100 for label in fast_labels[last_user:])
 
         kept_ids, kept_labels = glm53_tokenize_fn_fastspeed(tokenizer, messages, clear_thinking=False)
-        assert (tokenized["input_ids"], tokenized["labels"]) != (kept_ids, kept_labels)
+        assert (fast_ids, fast_labels) != (kept_ids, kept_labels)
         assert kept_ids == slow_ids  # clear_thinking 只动 loss，不动输入序列
         assert any(label != -100 for label in kept_labels[:last_user])
+
+        # 训练入口守卫：clear_thinking=True 直接报 AssertionError，而不是静默生效。
+        with pytest.raises(AssertionError, match="clear_thinking"):
+            Glm53ChatMessages(messages=messages).tokenize(tokenizer, clear_thinking=True)
 
 
 class TestGlm53OfficialTemplateContract:
