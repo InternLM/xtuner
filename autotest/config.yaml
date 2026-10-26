@@ -547,7 +547,7 @@ case:
             resource:
                 num_nodes: 2
                 memory_per_task: 1200
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist
+                pip_package: pip install 'ray[default]==2.58.0';FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
@@ -597,7 +597,7 @@ case:
             resource:
                 num_nodes: 2
                 memory_per_task: 1200
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist
+                pip_package: pip install 'ray[default]==2.58.0';FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
@@ -643,7 +643,7 @@ case:
                 infer_backend: lmdeploy
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist
+                pip_package: pip install 'ray[default]==2.58.0';FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist
                 memory_per_task: 1200
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
@@ -692,7 +692,7 @@ case:
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 memory_per_task: 1200
-                pip_package: FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist
+                pip_package: pip install 'ray[default]==2.58.0';FLASH_MLA_DISABLE_SM100=1 pip install -v /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/flash-mla;pip install -e .[all]; pip install more-itertools pytest-xdist
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/GLM-5.2-30B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
@@ -2014,7 +2014,7 @@ case:
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 memory_per_task: 1200
-                pip_package: pip install sglang==0.5.10.post1 --timeout 600 --retries 5;pip install transformers==5.17.0 apache-tvm-ffi==0.1.9 nvidia-cudnn-cu12==9.15.1.9;pip uninstall -y nvidia-cutlass-dsl;rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl
+                pip_package: pip install 'ray[default]==2.58.0';pip install sglang==0.5.10.post1 --timeout 600 --retries 5;pip install transformers==5.17.0 apache-tvm-ffi==0.1.9 nvidia-cudnn-cu12==9.15.1.9;pip uninstall -y nvidia-cutlass-dsl;rm -rf /usr/local/lib/python3.12/dist-packages/nvidia_cutlass_dsl
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
