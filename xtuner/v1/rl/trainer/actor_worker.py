@@ -81,7 +81,7 @@ class ActorWorker(RoleWorker):
             )
 
         self._has_ref = False
-        if isinstance(worker_cfg.loss_cfg, BaseRLLossConfig) and worker_cfg.loss_cfg.use_kl_loss:
+        if worker_cfg.loss_cfg.use_kl_loss:
             self._has_ref = True
             if worker_cfg.ref_load_from is None:
                 worker_cfg.ref_load_from = worker_cfg.load_from
@@ -138,14 +138,7 @@ class ActorWorker(RoleWorker):
         # resident between the two stages.
         self._staged: dict[tuple[int, ...], dict[str, torch.Tensor | None]] = {}
 
-        self.loss_cfg: BaseRLLossConfig | None = (
-            worker_cfg.loss_cfg if isinstance(worker_cfg.loss_cfg, BaseRLLossConfig) else None
-        )
-
-    # ==================== lifecycle ====================
-    # ``onload`` / ``offload`` are inherited from ``RoleWorker``.
-
-    # ==================== construction helpers ====================
+        self.loss_cfg: BaseRLLossConfig | None = worker_cfg.loss_cfg
 
     def _build_engine(self, worker_cfg: WorkerConfig) -> TrainEngine:
         engine = TrainEngine(  # type: ignore[call-arg]
@@ -183,8 +176,6 @@ class ActorWorker(RoleWorker):
             self.logger.info(f"Sft Dataloader len: {len(self._sft_dataloader)}")
             self._sft_loss_cfg = worker_cfg.sft_loss_cfg or CELossConfig()
 
-    # ==================== profiling ====================
-
     def _maybe_profiling(self, global_train_step: int) -> AbstractContextManager[Any]:
         if global_train_step not in self._profile_step:
             return contextlib.nullcontext()
@@ -211,8 +202,6 @@ class ActorWorker(RoleWorker):
         present_grad_count = sum(parameter.grad is not None for parameter in self._mtp_trainable_parameters)
         return {"mtp_grad_parameter_coverage": present_grad_count / len(self._mtp_trainable_parameters)}
 
-    # ==================== role-level refs resolution ====================
-
     def _resolve_refs(self, seq_ctx: SequenceContext) -> None:
         resolve_mm_inputs(seq_ctx)
         resolve_routed_experts(
@@ -220,8 +209,6 @@ class ActorWorker(RoleWorker):
             model_cfg=self.config.model_cfg,
             pack_max_length=self.config.pack_max_length,
         )
-
-    # ==================== forward helpers ====================
 
     def _forward_logprobs(self, seq_ctx: SequenceContext, shifted_labels: torch.Tensor) -> torch.Tensor:
         loss_ctx = self.logprob_cfg.build(data={"shifted_labels": shifted_labels})
@@ -236,8 +223,6 @@ class ActorWorker(RoleWorker):
             assert loss_ctx is not None
             ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
         return ref_output["loss"]
-
-    # ==================== loss context ====================
 
     def _configured_teacher_loss_keys(self) -> list[str]:
         distillation_config = self.config.distillation_config
@@ -290,8 +275,6 @@ class ActorWorker(RoleWorker):
             for key in template_keys:
                 rows[key] = []
         return self._pack_loss_rows(samples, pack, rows)
-
-    # ==================== stage A: pre-forward passes ====================
 
     def _stage_old_logprobs(self, rollout_idx: int) -> tuple[WorkerLogItem, float]:
         """Stage-A pass 1: recompute old logprobs and rollout-level metrics.
@@ -445,10 +428,8 @@ class ActorWorker(RoleWorker):
             self.onload_model()
             self.onload_optimizer()
 
-    # ==================== step batching ====================
-
     def _build_step_input(self, items: list[_PackItem]) -> list[ModelItem]:
-        loss_cfg: BaseRLLossConfig = self.config.loss_cfg  # type: ignore[assignment]
+        loss_cfg = self.config.loss_cfg
         LossContext = loss_cfg.loss_ctx_cls
         batched_lm = LossContext.build_batches([item[1]["lm"] for item in items])  # type: ignore[arg-type,misc]
 
@@ -482,8 +463,6 @@ class ActorWorker(RoleWorker):
             engine_input.append(ModelItem(seq_ctx=item[0], loss_ctx=loss_ctx_map))
         return engine_input
 
-    # ==================== main entry ====================
-
     def pack_loss_ctx(
         self,
         pack: list[int],
@@ -501,7 +480,7 @@ class ActorWorker(RoleWorker):
         """
         samples, _plan, batch_attr = self._cached()
         loss_inputs = self._pack_loss_fields(samples, pack, batch_attr)
-        loss_cfg: BaseRLLossConfig = self.config.loss_cfg  # type: ignore[assignment]
+        loss_cfg = self.config.loss_cfg
         loss_ctx = loss_cfg.build(data=loss_inputs, device="cpu")
         assert loss_ctx is not None
         kwargs = loss_ctx.loss_kwargs
@@ -637,8 +616,6 @@ class ActorWorker(RoleWorker):
             }
         return worker_log_item
 
-    # ==================== SFT tail ====================
-
     def _fit_sft(self) -> TrainStepInfo:
         self.logger.info(f"Train SFT after {self._rollout_step} RL steps")
         assert self._sft_dataloader is not None, "SFT tail requires a configured dataloader"
@@ -751,8 +728,6 @@ class ActorWorker(RoleWorker):
         reduced_number = sum(_gathered_list)  # type: ignore[arg-type]
         return reduced_number
 
-    # ==================== engine upkeep ====================
-
     def _release_deferred_fsdp_all_gathers(self, log_tag: str) -> None:
         from xtuner.v1.utils.fsdp import release_deferred_fsdp_all_gathers
 
@@ -820,6 +795,3 @@ class ActorWorker(RoleWorker):
         dataloader_state = torch.load(sft_dataloader_path, map_location=DEVICE)
         sft_dataloader.load_state_dict(dataloader_state)
         self.logger.info(f"Resume sft dataloader from {sft_dataloader_path}")
-
-    # ==================== checkpoint ====================
-    # ``save`` / ``resume`` / ``save_hf`` are inherited from ``RoleWorker``.

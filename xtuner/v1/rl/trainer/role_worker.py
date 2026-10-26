@@ -511,6 +511,7 @@ class RoleWorker(ABC):
         """Profile matching steps when the role enables profiling; no-op
         default."""
         import contextlib
+
         return contextlib.nullcontext()
 
     def _extra_step_metrics(self) -> dict[str, float]:

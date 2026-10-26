@@ -93,18 +93,11 @@ class CriticWorker(RoleWorker):
         self.lr_scheduler = build_lr_scheduler(self.engine.optimizer, worker_cfg.lr_cfg, worker_cfg.scheduler_steps)
         self.loss_cfg = None  # CriticLossConfig has no finalize_metrics
 
-    # ==================== lifecycle ====================
-    # ``onload`` / ``offload`` are inherited from ``RoleWorker``.
-
-    # ==================== role-level refs resolution ====================
-
     def _resolve_refs(self, seq_ctx: SequenceContext) -> None:
         """Multimodal refs only: the critic routes experts on its own, so
         routed-experts refs are dropped instead of resolved."""
         resolve_mm_inputs(seq_ctx)
         seq_ctx.rollout_routed_experts = None
-
-    # ==================== algorithm-level stage: value collection ====================
 
     def forward_only(self, seq_ctx: SequenceContext) -> torch.Tensor:
         with torch.no_grad():
@@ -232,8 +225,6 @@ class CriticWorker(RoleWorker):
             "max": float(flat_advantages.max().item()),
         }
 
-    # ==================== loss context ====================
-
     def _build_step_input(self, items: list[_PackItem]) -> list[ModelItem]:
         batched = cast(
             list[CriticLossContext],
@@ -242,8 +233,6 @@ class CriticWorker(RoleWorker):
         return [
             ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx}) for (seq_ctx, _), loss_ctx in zip(items, batched)
         ]
-
-    # ==================== main entry ====================
 
     def pack_loss_ctx(self, pack: list[int], seq_ctx: SequenceContext) -> dict[str, BaseLossContext]:
         """Build the critic's packed loss context for one pack.
@@ -342,6 +331,3 @@ class CriticWorker(RoleWorker):
             for indices in partition_indices(order, self._optimizer_steps_per_pass):
                 updates.append([packs[index] for index in indices])
         return updates
-
-    # ==================== checkpoint ====================
-    # ``save`` / ``resume`` / ``save_hf`` are inherited from ``RoleWorker``.

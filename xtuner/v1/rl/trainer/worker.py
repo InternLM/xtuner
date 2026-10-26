@@ -30,7 +30,7 @@ from xtuner.v1.rl.distillation import (
     DistillationTrainerAdapter,
     TrainTeacherManagerConfig,
 )
-from xtuner.v1.rl.loss import BaseRLLossConfig, CriticLossConfig
+from xtuner.v1.rl.loss import BaseRLLossConfig
 from xtuner.v1.rl.utils import SingleAcceleratorWorker
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
@@ -145,8 +145,8 @@ class WorkerConfig(BaseModel):
     Args:
         model_cfg (TransformerConfig): Model architecture configuration.
         optim_cfg (OptimConfig): Optimizer configuration for training.
-        loss_cfg (BaseRLLossConfig | CriticLossConfig): Policy RL loss. Critic
-            value loss belongs on ``critic_cfg``, so the actor keeps the policy path.
+        loss_cfg (BaseRLLossConfig): Policy RL loss. Critic value loss belongs
+            on ``critic_cfg``.
         lr_cfg (LRConfig): Learning rate scheduler configuration.
         fsdp_cfg (FSDPConfig): Fully Sharded Data Parallel configuration.
         load_from (str | Path): Path to load the main model from.
@@ -199,7 +199,7 @@ class WorkerConfig(BaseModel):
     model_config = ConfigDict(title="Worker config", extra="forbid", arbitrary_types_allowed=True)
     model_cfg: TransformerConfig | BaseComposeConfig
     optim_cfg: OptimConfig
-    loss_cfg: BaseRLLossConfig | CriticLossConfig
+    loss_cfg: BaseRLLossConfig
     lr_cfg: LRConfig
     fsdp_cfg: FSDPConfig
     load_from: str | Path  # TODO: 把 actor 和 ref 配置分离

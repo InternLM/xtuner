@@ -666,11 +666,10 @@ class TrainingController:
                 handles.append(worker.actor_fit.remote(advantages=advantages))  # type: ignore[attr-defined]
             log_infos = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         finally:
-            if has_critic:
-                ray.get(
-                    [worker.switch_role.remote("actor") for worker in self.workers],  # type: ignore[attr-defined]
-                    timeout=TRAIN_RAY_GET_TIMEOUT,
-                )
+            # No role restore here: a fit failure aborts the whole run (the
+            # trainer has no retry path), so nothing consumes the restored
+            # residency — process exit reclaims the GPU. Restore (and re-protect
+            # it) only if a skip-step/retry policy is ever introduced.
             # Critic-stage failures skip actor fit, so release the worker-side cache here.
             try:
                 ray.get(
