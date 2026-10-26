@@ -69,6 +69,21 @@ class Dataloader(torch.utils.data.DataLoader, BaseDataloader):
         self._dp_mesh = dp_mesh
         self._init_total_samples = 0
         self._local_samples = 0
+        self._defer_consumption = False
+        self._epoch_committed_samples = 0
+        self._resume_epoch_exhausted = False
+
+    def enable_deferred_consumption(self) -> None:
+        """Count trained batches rather than batches issued to async lookahead."""
+        if self._local_samples:
+            raise RuntimeError("enable deferred consumption before reading batches")
+        self._defer_consumption = True
+
+    def commit_batch(self, sample_count: int) -> None:
+        if not self._defer_consumption or sample_count <= 0:
+            raise RuntimeError("commit requires deferred consumption and a positive batch size")
+        self._local_samples += sample_count
+        self._epoch_committed_samples += sample_count
 
     def load_state_dict(self, state_dict: dict) -> None:
         sampler: ParallelSampler | LengthGroupedSampler | PresetSampler = self.sampler  # type: ignore[assignment]
@@ -82,6 +97,10 @@ class Dataloader(torch.utils.data.DataLoader, BaseDataloader):
 
         self._init_total_samples = int(state_dict["total_consumed_samples"])
         self._local_samples = 0
+        self._epoch_committed_samples = 0
+        self._resume_epoch_exhausted = bool(
+            sampler_state.get("total_size", 0) > 0 and sampler_state.get("step") == sampler_state["total_size"]
+        )
 
         if hasattr(dataset, "load_state_dict"):
             dataset.load_state_dict(state_dict["dataset"])
@@ -100,6 +119,19 @@ class Dataloader(torch.utils.data.DataLoader, BaseDataloader):
             log_rank0.warning(f"Resuming from {type(sampler)} is risky.")
         else:
             dataloader_state["sampler"].update(sampler.get_state_dict(total_steps))
+            # At an exact epoch boundary modulo zero would replay the old epoch.
+            # Save its exhausted offset; resume drains it before the main thread
+            # advances the epoch. Keep the existing checkpoint schema.
+            sampler_state = dataloader_state["sampler"]
+            total_size = sampler_state.get("total_size", 0)
+            if (
+                self._defer_consumption
+                and (self._epoch_committed_samples or self._resume_epoch_exhausted)
+                and total_size > 0
+                and total_steps > 0
+                and total_steps % total_size == 0
+            ):
+                sampler_state["step"] = total_size
 
         if not hasattr(dataset, "load_state_dict") or not hasattr(dataset, "get_state_dict"):
             log_rank0.warning(f"Resuming from {type(dataset)} is risky.")
@@ -114,10 +146,13 @@ class Dataloader(torch.utils.data.DataLoader, BaseDataloader):
         # so recording inside sampler.__iter__ would count too many samples. Instead we
         # increment local consumed exactly once per batch that reaches the caller.
         for batch in super().__iter__():
-            self._local_samples += len(batch)
+            if not self._defer_consumption:
+                self._local_samples += len(batch)
             yield batch
 
     # Streaming dataloader may not have `set_epoch` and `__len__` method, so we add here.
     def set_epoch(self, epoch: int) -> None:
         assert hasattr(self.sampler, "set_epoch"), "Sampler must have `set_epoch` method"
         self.sampler.set_epoch(epoch)
+        self._epoch_committed_samples = 0
+        self._resume_epoch_exhausted = False

@@ -4,6 +4,7 @@ import torch
 from typing_extensions import TypedDict
 
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.datasets.lazy_media import pack_image_plans
 from xtuner.v1.utils import IGNORE_INDEX, get_logger
 from xtuner.v1.utils.pad import pad_to_max_length
 
@@ -274,6 +275,7 @@ def qwen3_vl_sft_collator(
         for data in instance:
             num_img_tokens.append(data.get("num_img_tokens", [0]))
 
+        media_plan = pack_image_plans(instance)
         pixel_values: list | torch.Tensor | None
         pixel_values = [i["pixel_values"] for i in instance if "pixel_values" in i]
         if pixel_values:
@@ -291,6 +293,7 @@ def qwen3_vl_sft_collator(
         if position_ids is not None:
             seq_ctx.position_ids = position_ids  # type: ignore
 
+        seq_ctx.media_plan = media_plan
         seq_ctx.pixel_values = pixel_values  # type: ignore
         seq_ctx.image_grid_thw = image_grid_thw
         seq_ctx.num_img_tokens = num_img_tokens
@@ -383,6 +386,8 @@ def glm53_vl_sft_collator(
 
         num_img_tokens: list[list[int]] = [data.get("num_img_tokens", [0]) for data in instance]
 
+        media_plan = pack_image_plans(instance, media_dtype=media_dtype)
+
         # Cast image/video patches to the transport dtype (default bf16) on the worker side,
         # before cat and the cross-process IPC: the vision tower's patch_embed casts patches to
         # its parameter dtype anyway, so fp32 media would only double the bytes crossing shm,
@@ -439,6 +444,7 @@ def glm53_vl_sft_collator(
         seq_ctx.video_grid_thw = video_grid_thw
         seq_ctx.mm_token_type_ids = mm_token_type_ids
         seq_ctx.num_img_tokens = num_img_tokens
+        seq_ctx.media_plan = media_plan  # type: ignore[assignment]
 
         ret.append(
             {

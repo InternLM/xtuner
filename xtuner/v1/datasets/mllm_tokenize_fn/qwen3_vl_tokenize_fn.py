@@ -23,6 +23,7 @@ from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP, HybridChatTemplate
 from xtuner.v1.utils import get_logger, log_rank0
 
 from ..data_item import CacheItem, QwenVL3DataItem
+from ..lazy_media import lazy_media_enabled, make_image_plan
 from ..utils import apply_exif_orientation, generate_random_int_from_dict
 from .base_mllm_tokenize_fn import (
     IMAGE_TOKEN_ALIAS,
@@ -309,6 +310,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         enable_thinking: bool | None = None,
     ):
         self.oss_loader = None
+        self._lazy_oss_cfg = oss_loader_cfg.model_dump() if oss_loader_cfg is not None else None
         self.debug = debug
         self.oss_time_log_thr = oss_time_log_thr
         self.enable_3d_rope = enable_3d_rope
@@ -567,22 +569,38 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         return {"num_tokens": len(input_ids), "num_img_tokens": (sum_media_grid_thw * self.merge_length).tolist()}
 
     def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> QwenVL3DataItem:
-        image_data_list = []
-        for image_file in self._image_path:
-            image_path_ = get_image_path(image_file, media_root)
-            if self.oss_loader is not None and "s3://" in image_path_:
-                img_str = self.oss_loader.client.get(image_path_)
-                buff = io.BytesIO(img_str)
-                image = Image.open(buff).convert("RGB")
-            else:
-                assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
-                image = load_image(image_path_)
-            image = apply_exif_orientation(image)
-            image_data_list.append(image)
+        plan = None
+        if lazy_media_enabled() and len(self._image_wh_list) == len(self._image_path):
+            try:
+                grids = [smart_get_thw(size, self.image_processor) for size in self._image_wh_list]
+                plan = make_image_plan(
+                    self.image_processor,
+                    [get_image_path(path, media_root) for path in self._image_path],
+                    grids,
+                    oss_loader_cfg=self._lazy_oss_cfg,
+                )
+            except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+                pass  # Preserve native eager handling when annotated geometry is unusable.
+        if plan is not None:
+            image_tensor = None
+            grid_thw = torch.tensor(grids, dtype=torch.long)
+        else:
+            image_data_list = []
+            for image_file in self._image_path:
+                image_path_ = get_image_path(image_file, media_root)
+                if self.oss_loader is not None and "s3://" in image_path_:
+                    img_str = self.oss_loader.client.get(image_path_)
+                    buff = io.BytesIO(img_str)
+                    image = Image.open(buff).convert("RGB")
+                else:
+                    assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
+                    image = load_image(image_path_)
+                image = apply_exif_orientation(image)
+                image_data_list.append(image)
 
-        visual_processed = self.image_processor.preprocess(image_data_list, return_tensors="pt")
-        image_tensor = visual_processed["pixel_values"]
-        grid_thw = visual_processed["image_grid_thw"]  # b,3
+            visual_processed = self.image_processor.preprocess(image_data_list, return_tensors="pt")
+            image_tensor = visual_processed["pixel_values"]
+            grid_thw = visual_processed["image_grid_thw"]  # b,3
         grid_thw_merged = [merged_thw.prod().item() // self.merge_length for merged_thw in grid_thw]  # type: ignore
 
         is_pretrain = False
@@ -650,6 +668,9 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             num_img_tokens=grid_thw.prod(dim=1).tolist(),
             num_imgs=[len(self._image_path)],
         )
+        if plan is not None:
+            ret.pop("pixel_values")
+            ret["media_plan"] = plan
         return ret
 
     def calc_frame_info(self, data_item):

@@ -55,6 +55,8 @@ class SequenceContext:
     pixel_values_videos: torch.FloatTensor | None
     video_grid_thw: torch.Tensor | None
     mm_token_type_ids: torch.Tensor | None  # 0=text, 1=image, 2=video; same layout as input_ids
+    # Whole-pack descriptors survive SP splitting; each model resolves them before vision.
+    media_plan: dict | None
 
     # moe routed_experts
     rollout_routed_experts: torch.Tensor | None
@@ -90,6 +92,7 @@ class SequenceContext:
         pixel_values_videos: torch.FloatTensor | None = None,
         video_grid_thw: torch.Tensor | None = None,
         mm_token_type_ids: torch.Tensor | None = None,
+        media_plan: dict | None = None,
         rollout_routed_experts: torch.Tensor | None = None,
         offload_rollout_routed_experts: bool = False,
         # SP shard metadata: private, accessed via properties below
@@ -131,6 +134,7 @@ class SequenceContext:
         self.pixel_values_videos = pixel_values_videos
         self.video_grid_thw = video_grid_thw
         self.mm_token_type_ids = mm_token_type_ids
+        self.media_plan = media_plan
         self.rollout_routed_experts = rollout_routed_experts
         self.offload_rollout_routed_experts = offload_rollout_routed_experts
         self._raw_input_ids = raw_input_ids
@@ -310,6 +314,7 @@ class SequenceContext:
                 pixel_values_videos=self.pixel_values_videos,
                 video_grid_thw=self.video_grid_thw,
                 mm_token_type_ids=self.mm_token_type_ids,
+                media_plan=self.media_plan,
                 rollout_routed_experts=self.rollout_routed_experts,
                 offload_rollout_routed_experts=self.offload_rollout_routed_experts,
                 raw_input_ids=cast(torch.LongTensor, pad_input_ids),
@@ -344,6 +349,9 @@ class SequenceContext:
         pixel_values_videos = []
         video_grid_thw = []
         mm_token_type_ids = []
+        from xtuner.v1.datasets.lazy_media import merge_image_plans
+
+        media_plans: list[dict] = []
 
         for seq_ctx in sequence_context_list:
             assert seq_ctx.sequence_parallel_mesh is None
@@ -377,6 +385,8 @@ class SequenceContext:
                 video_grid_thw.append(seq_ctx.video_grid_thw)
             if seq_ctx.mm_token_type_ids is not None:
                 mm_token_type_ids.append(seq_ctx.mm_token_type_ids)
+            if seq_ctx.media_plan is not None:
+                media_plans.append(seq_ctx.media_plan)
             if seq_ctx.rollout_routed_experts is not None:
                 rollout_routed_experts.append(seq_ctx.rollout_routed_experts)
             offload_rollout_routed_experts = offload_rollout_routed_experts or seq_ctx.offload_rollout_routed_experts
@@ -395,6 +405,8 @@ class SequenceContext:
         else:
             pixel_values_videos = None
 
+        if media_plans and pixel_values is not None:
+            raise ValueError("resolve mixed eager/lazy images before concatenating contexts")
         return cls(
             input_ids=torch.cat(packed_input_ids, dim=1) if len(packed_input_ids) > 0 else None,  # type: ignore
             cu_seq_lens_q=torch.cat(cu_seq_lens_q, dim=0),  # type: ignore
@@ -410,6 +422,7 @@ class SequenceContext:
             pixel_values_videos=pixel_values_videos,  # type: ignore
             video_grid_thw=torch.cat(video_grid_thw, dim=0) if video_grid_thw else None,  # type: ignore
             mm_token_type_ids=torch.cat(mm_token_type_ids, dim=-1) if mm_token_type_ids else None,  # type: ignore
+            media_plan=merge_image_plans(media_plans),
             position_ids=torch.cat(position_ids, dim=-1) if position_ids else None,  # type: ignore
             rollout_routed_experts=rollout_routed_experts if len(rollout_routed_experts) > 0 else None,  # type: ignore
             offload_rollout_routed_experts=offload_rollout_routed_experts,
@@ -585,6 +598,7 @@ class SequenceContext:
             pixel_values_videos=overrides.get("pixel_values_videos", self.pixel_values_videos),
             video_grid_thw=overrides.get("video_grid_thw", self.video_grid_thw),
             mm_token_type_ids=overrides.get("mm_token_type_ids", self.mm_token_type_ids),
+            media_plan=overrides.get("media_plan", self.media_plan),
             rollout_routed_experts=overrides.get("rollout_routed_experts", self.rollout_routed_experts),
             offload_rollout_routed_experts=overrides.get(
                 "offload_rollout_routed_experts", self.offload_rollout_routed_experts
