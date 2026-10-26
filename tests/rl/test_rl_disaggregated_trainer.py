@@ -541,12 +541,27 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer.train_controller = SimpleNamespace(resume=MagicMock(return_value="resume"))
         sleeping = {"weights", "kv_cache"}
         weights_received = False
+        weights_resident = True  # Empty-init allocates GPU storage without ready weights.
+
+        def offload():
+            nonlocal weights_resident
+            weights_resident = False
+            sleeping.update(("weights", "kv_cache"))
+            events.append("offload")
+
+        def wake_weights():
+            nonlocal weights_resident
+            self.assertFalse(weights_resident, "Release initial GPU allocations before waking weights")
+            self.assertFalse(weights_received, "Allocate weights before receiving the checkpoint")
+            weights_resident = True
+            sleeping.remove("weights")
+            events.append("weights_allocated")
 
         def receive_weights():
             nonlocal weights_received
+            self.assertNotIn("weights", sleeping, "NCCL transfer does not clear the engine's sleep tags")
             self.assertIn("kv_cache", sleeping, "Warmup must not run on uninitialized weights")
             weights_received = True
-            sleeping.discard("weights")
             events.append("update_weights")
 
         def wake_kvcache():
@@ -557,6 +572,8 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer.rollout_controller = SimpleNamespace(
             pause_generation=SimpleNamespace(remote=MagicMock(return_value="pause_generation")),
             continue_generation=SimpleNamespace(remote=MagicMock(return_value="continue_generation")),
+            offload=SimpleNamespace(remote=MagicMock(side_effect=offload)),
+            onload_weights=SimpleNamespace(remote=MagicMock(side_effect=wake_weights)),
             onload_kvcache=SimpleNamespace(remote=MagicMock(side_effect=wake_kvcache)),
         )
         events: list[str] = []
@@ -585,10 +602,10 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer.agent_loop_manager.resume.assert_awaited_once_with(Path(self.temp_dir.name))
         trainer.agent_loop_manager.continue_produce.assert_awaited_once_with(model_step=3)
         self.assertTrue(events[0].startswith("manager_resume:"))
-        self.assertEqual(events[1:], ["update_weights", "ready", "continue_produce:3"])
+        self.assertEqual(events[1:], ["offload", "weights_allocated", "update_weights", "ready", "continue_produce:3"])
 
     def test_resume_failure_does_not_resume_production(self):
-        for failure in ("weight_update", "onload_kvcache"):
+        for failure in ("offload", "onload_weights", "weight_update", "onload_kvcache"):
             with self.subTest(failure=failure):
                 trainer = self._make_trainer(_FakeManager([]))
                 trainer._cur_step = 3
