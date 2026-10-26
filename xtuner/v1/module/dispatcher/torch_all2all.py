@@ -107,7 +107,8 @@ def _dispatch(
     #  r1e0, r1e1, ..., r1ei-1,
     tokens_per_expert_group = tokens_per_expert_group.view(ep_size, -1)
 
-    # Get number experts each group
+    # Get number experts each group. These blocking CPU copies also complete
+    # histc's read of topk_ids, so it needs no extra comm-stream lifetime recording.
     input_splits = (
         tokens_per_expert.reshape(ep_size, num_experts_per_rank).to(device=torch.device("cpu")).sum(dim=1).tolist()
     )
@@ -148,9 +149,8 @@ class _AsyncDispatch(Function):
                 process_group,
             )
             hidden_states.record_stream(comm_stream)
-            topk_ids.record_stream(comm_stream)
+            # Keep ACT's existing implicit collective wait on the communication stream.
             out.record_stream(comm_stream)
-            tokens_per_expert.record_stream(comm_stream)
             forward_finished_event.record(comm_stream)
         _record_stream(out, compute_stream)
         tokens_per_expert.record_stream(compute_stream)
@@ -191,7 +191,6 @@ class _AsyncDispatch(Function):
             # NOTE: During backward, `grad_output` will be freed before dispatch backward finished if we do not record
             # the `grad_output` here.
             grad_output.record_stream(ctx.comm_stream)
-            out.record_stream(ctx.comm_stream)
 
             if ctx.backward_finished_event is not None:
                 ctx.backward_finished_event.record(ctx.comm_stream)
@@ -264,7 +263,6 @@ class _AsyncCombine(Function):
             # NOTE: During backward, `grad_output` will be freed before dispatch backward finished if we do not record
             # the `grad_output` here.
             grad_output.record_stream(ctx.comm_stream)
-            out.record_stream(ctx.comm_stream)
 
             if ctx.backward_finished_event is not None:
                 ctx.backward_finished_event.record(ctx.comm_stream)

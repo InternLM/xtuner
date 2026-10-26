@@ -45,6 +45,8 @@ class TestAsyncAll2AllStreamLifetime:
         compute_stream = torch.cuda.current_stream()
         comm_stream = torch.cuda.Stream()
         grad_output = torch.full((1 << 22,), 1.0, device="cuda", dtype=torch.bfloat16)
+        # Warm reduction allocations and complete the input producer before communication.
+        assert grad_output.sum().item() == grad_output.numel()
 
         def fake_get_world_size(group: Any = None) -> int:
             return 2
@@ -70,7 +72,15 @@ class TestAsyncAll2AllStreamLifetime:
         comm_done.record(comm_stream)
         compute_stream.wait_event(comm_done)
         output_ptr = output.data_ptr()
-        sums = [output.sum() for _ in range(2000)]
+        assert output.sum().item() == grad_output.numel()
+        # Reserve a free comm-stream block so the allocation below need not cudaMalloc
+        # (which could synchronize the device and finish the pending read).
+        with torch.cuda.stream(comm_stream):
+            spare = torch.empty_like(grad_output)
+        comm_stream.synchronize()
+        del spare
+        torch.cuda._sleep(100_000_000)
+        total = output.sum()
         compute_done = torch.cuda.Event()
         compute_done.record(compute_stream)
         del output
@@ -83,7 +93,7 @@ class TestAsyncAll2AllStreamLifetime:
         assert reused.data_ptr() != output_ptr
         compute_stream.synchronize()
         comm_stream.synchronize()
-        assert all(value.item() == grad_output.numel() for value in sums)
+        assert total.item() == grad_output.numel()
         torch.cuda.empty_cache()
 
     def test_combine_saved_activation_is_not_reused_during_backward(self, monkeypatch: pytest.MonkeyPatch) -> None:
