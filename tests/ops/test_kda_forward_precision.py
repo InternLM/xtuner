@@ -14,6 +14,7 @@ from fla.ops.kda import chunk_kda as fla_chunk_kda
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.index import prepare_chunk_indices
 
+from xtuner.v1.ops.fla_compat import fla_call
 from xtuner.v1.ops.kda.chunk_cumsum import chunk_cumsum
 from xtuner.v1.ops.kda.chunk_kda import chunk_kda
 
@@ -104,7 +105,9 @@ class TestKDAForwardPrecision:
             scale=scale,
             lower_bound=lower_bound,
         )[0]
-        native = fla_chunk_kda(
+        # FLA oracle 走 fla_call, 保证测试在 FLA 0.4.2 / 0.5.2 下都能运行。
+        native = fla_call(
+            fla_chunk_kda,
             *native_inputs,
             cu_seqlens=cu,
             safe_gate=safe_gate,

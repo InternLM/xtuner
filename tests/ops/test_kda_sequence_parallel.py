@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from fla.ops.kda import chunk_kda as fla_chunk_kda
 from torch.testing._internal.common_distributed import DistributedTestBase
 
+from xtuner.v1.ops.fla_compat import fla_call
 from xtuner.v1.ops.kda.causal_conv1d import causal_conv1d
 from xtuner.v1.ops.kda.sequence_parallel import sequence_causal_conv1d, sequence_chunk_kda
 from xtuner.v1.utils.test_utils import init_data_mesh
@@ -132,7 +133,9 @@ class TestKDASequenceOps(DistributedTestBase):
 
             compiled = dtype == torch.bfloat16 and layout == 1 and safe_gate and transpose
             runner = torch.compile(forward, fullgraph=True) if compiled else forward
-            expected = fla_chunk_kda(
+            # FLA oracle 走 fla_call, 保证测试在 FLA 0.4.2 / 0.5.2 下都能运行。
+            expected = fla_call(
+                fla_chunk_kda,
                 *full,
                 cu_seqlens=cu,
                 safe_gate=safe_gate,
