@@ -22,36 +22,49 @@ PackedDataIndices: TypeAlias = list[DPRankPackIndices]
 _BALANCE_DEFAULT_SEED = 42
 
 
-class TokenTensorBatch(NamedTuple):
-    """Intermediate type for passing a list of tensors across Ray.
+class TokenBatchProto(NamedTuple):
+    """Ragged per-sample 1D token rows packed as one flat tensor for Ray
+    transfer.
 
-    A list of 1D tensors is sent as one float32 tensor (``data``) plus one
-    length per sample (``lengths``). Tensors with more than one dimension are rejected.
+    ``data`` concatenates every sample's row (float32, CPU); ``lengths[i]``
+    gives sample i's row length. One tensor crosses Ray instead of a list of
+    tensors. Each row is token-level (one value per token), e.g. critic
+    values, token advantages, or GAE returns.
+
+    Example:
+        >>> rows = [torch.tensor([1.0, 2.0]), torch.tensor([3.0])]
+        >>> proto = TokenBatchProto.concat(rows)
+        >>> proto.data
+        tensor([1., 2., 3.])
+        >>> proto.lengths
+        tensor([2, 1], dtype=torch.int32)
+        >>> proto.chunk()
+        [tensor([1., 2.]), tensor([3.])]
     """
 
     data: torch.Tensor
     lengths: torch.Tensor
 
     @staticmethod
-    def cat_samples(samples: Sequence[torch.Tensor]) -> TokenTensorBatch:
-        """``list[torch.Tensor]`` -> ``TokenTensorBatch``.
+    def concat(rows: Sequence[torch.Tensor]) -> TokenBatchProto:
+        """``list[torch.Tensor]`` -> ``TokenBatchProto``.
 
         Each sample must be a 1D tensor.
         """
-        if not samples:
-            return TokenTensorBatch(torch.empty(0, dtype=torch.float32), torch.empty(0, dtype=torch.int32))
-        for index, sample in enumerate(samples):
-            if sample.ndim != 1:
+        if not rows:
+            return TokenBatchProto(torch.empty(0, dtype=torch.float32), torch.empty(0, dtype=torch.int32))
+        for index, row in enumerate(rows):
+            if row.ndim != 1:
                 raise ValueError(
-                    f"cat_samples requires a 1D tensor per sample, got shape {tuple(sample.shape)} at index {index}"
+                    f"concat requires a 1D tensor per sample, got shape {tuple(row.shape)} at index {index}"
                 )
-        flat = [sample.detach().reshape(-1).to(dtype=torch.float32, device="cpu").contiguous() for sample in samples]
-        lengths = torch.tensor([sample.numel() for sample in flat], dtype=torch.int32)
+        flat = [row.detach().reshape(-1).to(dtype=torch.float32, device="cpu").contiguous() for row in rows]
+        lengths = torch.tensor([row.numel() for row in flat], dtype=torch.int32)
         data = flat[0] if len(flat) == 1 else torch.cat(flat)
-        return TokenTensorBatch(data, lengths)
+        return TokenBatchProto(data, lengths)
 
-    def split_samples(self) -> list[torch.Tensor]:
-        """``TokenTensorBatch`` -> ``list[torch.Tensor]``.
+    def chunk(self) -> list[torch.Tensor]:
+        """``TokenBatchProto`` -> ``list[torch.Tensor]``.
 
         Split into one 1D tensor per sample.
         """

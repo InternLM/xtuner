@@ -189,6 +189,7 @@ train_worker_cfg = WorkerConfig(
     scheduler_steps=actor_scheduler_steps,
     pack_max_length=pack_max_length,
     critic_cfg=critic_cfg,
+    pack_strategy="lpt",
 )
 
 train_dataset = DatasetConfig(name=experimental_name, anno_path=data_path)

@@ -13,7 +13,7 @@ from xtuner.v1.rl.utils import free_object_refs
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import get_logger
 
-from .pack import DPRankPackIndices, RLDataPacker, TokenTensorBatch
+from .pack import DPRankPackIndices, RLDataPacker, TokenBatchProto
 from .worker import TrainBatchAttr, TrainingWorker, WorkerConfig, WorkerLogItem
 
 
@@ -110,37 +110,15 @@ class TrainingController:
         workers: list[TrainingWorker],
         advantage_estimator: AdvantageEstimator | None = None,
         distillation: DistillationTrainerAdapter | None = None,
+        has_critic: bool = False,
     ) -> None:
         self.workers = workers
         self.advantage_estimator = advantage_estimator
         self.distillation = distillation if distillation is not None else DistillationTrainerAdapter(None)
         self.task_adv_weight = self.distillation.task_adv_weight
         self.logger = get_logger()
-        self._roles: set[str] = set()
         self._gae_reward_scope = self._get_gae_reward_scope(advantage_estimator)
-
-    def attach_role(self, name: str, worker_cls: type, worker_cfg: Any) -> None:
-        """Attach one in-process role to every actor and remember its name.
-
-        The critic reuses the actor Ray handles. Weight sync stays on the actor engine.
-        """
-        if not name or name == "actor" or name in self._roles:
-            raise ValueError(f"duplicate or invalid worker group: {name}")
-        handles = [
-            worker.attach.remote(name, worker_cls, worker_cfg)  # type: ignore[attr-defined]
-            for worker in self.workers
-        ]
-        ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
-        self._roles.add(name)
-
-    def switch_role(self, role: str) -> None:
-        """Switch the active role inside every actor process."""
-        if role not in {"actor", "none"} and role not in self._roles:
-            if not self._roles:
-                raise KeyError(f"role is not available in actor-only stage: {role}")
-            raise KeyError(f"role is not registered: {role}")
-        handles = [worker.switch_role_modules.remote(role) for worker in self.workers]  # type: ignore[attr-defined]
-        ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        self._has_critic = has_critic
 
     @staticmethod
     def _get_gae_reward_scope(
@@ -463,7 +441,7 @@ class TrainingController:
         prepared: _PreparedBatch,
         rollout_items: list[RolloutState],
         pack_plan: _PackPlan,
-        value_batches: list[TokenTensorBatch] | None,
+        value_batches: list[TokenBatchProto] | None,
         data_replicate_size: int,
     ) -> tuple[list[float], list[list[float]] | None, list[list[float]] | None, dict[str, float] | None]:
         """Estimate advantages with the configured mode and return the stats.
@@ -473,7 +451,7 @@ class TrainingController:
                 pre-clustered reward groups consumed by the non-GAE path.
             rollout_items (list[RolloutState]): Flat states in training order.
             pack_plan (_PackPlan): Maps each DP rank's packed samples back to global indices.
-            value_batches (list[TokenTensorBatch] | None): Critic values gathered by
+            value_batches (list[TokenBatchProto] | None): Critic values gathered by
                 ``collect_values``. ``None`` when values stay worker-local (segment GAE)
                 or no critic is configured.
             data_replicate_size (int): Workers that share one DP rank.
@@ -509,9 +487,7 @@ class TrainingController:
             estimator = self.advantage_estimator
             assert isinstance(estimator, GAEEstimator)
             gae_handles = [
-                worker.call_attached.remote(  # type: ignore[attr-defined]
-                    "critic",
-                    "compute_segment_gae",
+                worker.critic_compute_segment_gae.remote(  # type: ignore[attr-defined]
                     gae_gamma=estimator.gae_gamma,
                     gae_lambda=estimator.gae_lambda,
                     normalize_actor_advantage=estimator.normalize_actor_advantage,
@@ -538,7 +514,7 @@ class TrainingController:
             assert isinstance(estimator, GAEEstimator)
             dense_values: list[list[float] | None] = [None] * len(rollout_items)
             for dp_rank, dispatch in pack_plan["dp_plans"].items():
-                local_values = [row.tolist() for row in value_batches[dp_rank * data_replicate_size].split_samples()]
+                local_values = [row.tolist() for row in value_batches[dp_rank * data_replicate_size].chunk()]
                 sample_indices = dispatch["global_indices"]
                 if len(local_values) != len(sample_indices):
                     raise ValueError(
@@ -574,9 +550,9 @@ class TrainingController:
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
     ) -> tuple[list[WorkerLogItem], dict[str, float]]:
-        has_critic = "critic" in self._roles
+        has_critic = self._has_critic
         if self._gae_reward_scope is not None and not has_critic:
-            raise RuntimeError("GAE requires a registered critic worker group")
+            raise RuntimeError("GAE requires a configured critic role")
         if has_critic and self._gae_reward_scope is None:
             raise RuntimeError("Critic training requires a GAE advantage estimator")
 
@@ -606,8 +582,8 @@ class TrainingController:
                 dp_rank: [ray.put([rollout_items[index] for index in dispatch["global_indices"]])]
                 for dp_rank, dispatch in pack_plan["dp_plans"].items()
             }
-            # 1. Each worker fetches its rank's rollout states and pack plan once. Later critic
-            # and actor calls read that cache instead of passing again.
+            # 1. Each worker fetches its rank's rollout states and pack plan once.
+            # Later critic and actor calls read that cache instead of passing again.
             load_handles = []
             for worker_idx, worker in enumerate(self.workers):
                 dp_rank = worker_idx // data_replicate_size
@@ -621,17 +597,16 @@ class TrainingController:
                 )
             ray.get(load_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
             critic_log_infos: list[WorkerLogItem] | None = None
-            value_batches: list[TokenTensorBatch | None] | None = None
+            value_batches: list[TokenBatchProto | None] | None = None
             # 2. Optional. Critic value forward. Segment GAE keeps values worker-local;
             # session GAE returns them to the controller for cross-sequence grouping.
             if has_critic:
-                self.switch_role("critic")
+                ray.get(
+                    [worker.switch_role.remote("critic") for worker in self.workers],  # type: ignore[attr-defined]
+                    timeout=TRAIN_RAY_GET_TIMEOUT,
+                )
                 value_handles = [
-                    worker.call_attached.remote(  # type: ignore[attr-defined]
-                        "critic",
-                        "collect_values",
-                        return_values=not segment_gae,
-                    )
+                    worker.critic_collect_values.remote(return_values=not segment_gae)  # type: ignore[attr-defined]
                     for worker in self.workers
                 ]
                 value_batches = ray.get(value_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
@@ -641,7 +616,7 @@ class TrainingController:
                 prepared,
                 rollout_items,
                 pack_plan,
-                cast(list[TokenTensorBatch], value_batches) if value_batches is not None else None,
+                cast(list[TokenBatchProto], value_batches) if value_batches is not None else None,
                 data_replicate_size,
             )
             # 3. Optional. Critic fit. Each worker trains the value head on its samples' token returns.
@@ -650,17 +625,15 @@ class TrainingController:
                 for worker_idx, worker in enumerate(self.workers):
                     if segment_gae:
                         critic_handles.append(
-                            worker.call_attached.remote("critic", "fit")  # type: ignore[attr-defined]
+                            worker.critic_fit.remote()  # type: ignore[attr-defined]
                         )
                     else:
                         assert token_returns is not None
                         dp_rank = worker_idx // data_replicate_size
                         local_indices = pack_plan["dp_plans"][dp_rank]["global_indices"]
                         critic_handles.append(
-                            worker.call_attached.remote(  # type: ignore[attr-defined]
-                                "critic",
-                                "fit",
-                                token_returns=TokenTensorBatch.cat_samples(
+                            worker.critic_fit.remote(  # type: ignore[attr-defined]
+                                token_returns=TokenBatchProto.concat(
                                     [
                                         torch.tensor(token_returns[index], dtype=torch.float32)
                                         for index in local_indices
@@ -669,26 +642,35 @@ class TrainingController:
                             )
                         )
                 critic_log_infos = ray.get(critic_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
-            # 4. Actor fit. Each worker trains the policy on its samples' advantages.
-            self.switch_role("actor")
+            # 4. Actor fit. Each worker trains the policy on its samples'
+            # advantages; the advantages are passed as actor_fit arguments and
+            # staged into the worker's sample cache on arrival (fit() then
+            # reads them from the cache).
+            ray.get(
+                [worker.switch_role.remote("actor") for worker in self.workers],  # type: ignore[attr-defined]
+                timeout=TRAIN_RAY_GET_TIMEOUT,
+            )
 
             for worker_idx, worker in enumerate(self.workers):
                 dp_rank = worker_idx // data_replicate_size
                 indices = pack_plan["dp_plans"][dp_rank]["global_indices"]
                 if segment_gae:
-                    handles.append(worker.fit.remote())  # type: ignore[attr-defined]
+                    handles.append(worker.actor_fit.remote())  # type: ignore[attr-defined]
                     continue
                 elif token_advantages is None:
-                    advantages: list[float] | TokenTensorBatch = [sample_advantages[index] for index in indices]
+                    advantages: list[float] | TokenBatchProto = [sample_advantages[index] for index in indices]
                 else:
-                    advantages = TokenTensorBatch.cat_samples(
+                    advantages = TokenBatchProto.concat(
                         [torch.tensor(token_advantages[index], dtype=torch.float32) for index in indices]
                     )
-                handles.append(worker.fit.remote(advantages=advantages))  # type: ignore[attr-defined]
+                handles.append(worker.actor_fit.remote(advantages=advantages))  # type: ignore[attr-defined]
             log_infos = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         finally:
             if has_critic:
-                self.switch_role("actor")
+                ray.get(
+                    [worker.switch_role.remote("actor") for worker in self.workers],  # type: ignore[attr-defined]
+                    timeout=TRAIN_RAY_GET_TIMEOUT,
+                )
             # Critic-stage failures skip actor fit, so release the worker-side cache here.
             try:
                 ray.get(
@@ -701,7 +683,10 @@ class TrainingController:
             for state in rollout_items:
                 pixel_values = state.mm_info.get("pixel_values") if state.mm_info is not None else None
                 if pixel_values is not None:
-                    free_pixel_value_refs.extend(pixel_values)
+                    if isinstance(pixel_values, ray.ObjectRef):
+                        free_pixel_value_refs.append(pixel_values)  # 单 ref：直接收集
+                    else:
+                        free_pixel_value_refs.extend(r for r in pixel_values if isinstance(r, ray.ObjectRef))
             if free_pixel_value_refs:
                 free_object_refs(free_pixel_value_refs)
         del rollout_items
