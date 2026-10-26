@@ -8,8 +8,8 @@ default_config:
             gpus_per_task: 16
             cpus_per_task: 256
             memory_per_task: 1920
-            image: ccr-deeplink/a3_cann9_0_fla_npu:transformers517_0.0.1-20261023T023705Z
-            pip_package: pip install -e . --no-deps; pip install more-itertools triton
+            image: ccr-hw/910c_cann910_pta291_fixzero:v1.0.0-20260826T012241Z
+            pip_package: pip install transformers==5.17.0;pip install -e . --no-deps; pip install more-itertools triton
             envs: 
                 - HF_HUB_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/models/hf_hub
     eval:
