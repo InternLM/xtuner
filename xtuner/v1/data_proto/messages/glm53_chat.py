@@ -495,6 +495,28 @@ def _render_tool_block(
     return text
 
 
+def _assistant_plan(
+    message: Mapping[str, Any],
+    index: int,
+    last_user_index: int,
+    clear_thinking: bool,
+) -> tuple[str, str | None, bool, bool]:
+    """单条 assistant 的判定式（监督与否、是否发射 reasoning），render 与 slowspeed 的唯一事实来源。
+
+    返回 ``(content, reasoning_content, supervised, render_reasoning)``。
+    """
+    content, reasoning_content = _assistant_content_and_reasoning(message, _media_placeholder=_MEDIA_PLACEHOLDER)
+    # slowspeed 的生成段仍逐段手写复刻 render 的发射逻辑——交叉校验的价值正在于生成段独立；
+    # 但判定式若两处各写一份，render 判错时 slowspeed 会以同样方式判错，fast == slow 对照失效
+    # 且无测试报警，所以判定式只允许存在这一份。clear_thinking 屏蔽"最后一个 user 之前"的整轮
+    # 历史 assistant（reasoning 与 content 一起），而不是只屏蔽带 reasoning 的轮次——无 reasoning
+    # 的历史 assistant 同样是历史输出，留下监督会让 clear_thinking 语义自相矛盾。
+    after_last_user = index > last_user_index
+    supervised = bool(message.get("loss", True)) and (not clear_thinking or after_last_user)
+    render_reasoning = reasoning_content is not None and (not clear_thinking or after_last_user)
+    return content, reasoning_content, supervised, render_reasoning
+
+
 def render_glm53_chat(
     messages: List[Dict[str, Any]],
     tools: Optional[List[Dict[str, Any]]] = None,
@@ -545,15 +567,9 @@ def render_glm53_chat(
             append("<|system|>", False)
             append(_visible_text(message.get("content", ""), _literal_spans, len(text)), False)
         elif role == "assistant":
-            # GLM-5.3 用占位符模式：assistant 媒体发 marker（glm52 默认降级为 <reminder>）。
-            content, reasoning_content = _assistant_content_and_reasoning(
-                message, _media_placeholder=_MEDIA_PLACEHOLDER
+            content, reasoning_content, loss, render_reasoning = _assistant_plan(
+                message, index, last_user_index, clear_thinking
             )
-            # clear_thinking 屏蔽"最后一个 user 之前"的整轮历史 assistant（reasoning 与 content
-            # 一起），而不是只屏蔽带 reasoning 的轮次——无 reasoning 的历史 assistant 同样是
-            # 历史输出，留下监督会让 clear_thinking 语义自相矛盾。
-            loss = bool(message.get("loss", True)) and (not clear_thinking or index > last_user_index)
-            render_reasoning = reasoning_content is not None and (not clear_thinking or index > last_user_index)
 
             append("<|assistant|>", False)
             if render_reasoning:
@@ -653,11 +669,13 @@ def glm53_tokenize_fn_slowspeed(
         (index for index, message in enumerate(messages) if message.get("role") == "user"), default=-1
     )
     for index, message in enumerate(messages):
-        if (
-            message.get("role") != "assistant"
-            or not message.get("loss", True)
-            or (clear_thinking and index < last_user_index)
-        ):
+        if message.get("role") != "assistant":
+            continue
+        # 判定式（监督与否、是否发射 reasoning）与 render 共用同一份实现，见 _assistant_plan。
+        content, reasoning_content, supervised, render_reasoning = _assistant_plan(
+            message, index, last_user_index, clear_thinking
+        )
+        if not supervised:
             continue
 
         prefix_spans: list[tuple[int, int]] = []
@@ -680,9 +698,7 @@ def glm53_tokenize_fn_slowspeed(
                 generated_spans.append((len(generated), len(generated) + len(value)))
             generated += value
 
-        # 与 render 层同一口径：assistant 媒体发占位符 marker（#2193）。
-        content, reasoning_content = _assistant_content_and_reasoning(message, _media_placeholder=_MEDIA_PLACEHOLDER)
-        render_reasoning = reasoning_content is not None and (not clear_thinking or index > last_user_index)
+        # ---- 生成段保持手写复刻（交叉校验的价值在这里，不与 render 共用）----
         if render_reasoning:
             assert reasoning_content is not None
             gen_append(reasoning_content, literal=True)
