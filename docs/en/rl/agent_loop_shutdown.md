@@ -26,6 +26,18 @@ The built-in sandbox loop rejects new runs during shutdown and joins active
 runners so their existing `finally` blocks can release their pools. It shares a
 single close task for repeated and concurrent calls.
 
+## Pausing for weight updates
+
+Loops whose model calls come from an external harness can also override
+`AgentLoop.prepare_pause()` and `AgentLoop.resume()`, both no-ops by default.
+Managers call `prepare_pause()` on every active loop before
+`pause_generation()`, and `resume()` after `continue_generation()`, in both the
+colocated and disaggregated managers. Use `prepare_pause()` to stop admitting new
+model calls and let accepted ones finish, so the abort that follows does not cut
+a request the harness is still waiting on. If `prepare_pause()` raises, the
+manager does not abort inference. Routers and Ray actors forward both hooks the
+same way as `close()`.
+
 ## Errors and cancellation
 
 Each owner gets a chance to close even if another owner fails. Cleanup failures

@@ -330,6 +330,16 @@ class AgentLoop(ABC):
         must tolerate repeated calls and bound external I/O. Loops without persistent resources need no override.
         """
 
+    async def prepare_pause(self) -> None:
+        """Drain external model requests before the manager aborts inference.
+
+        Loops whose model calls come from an external harness should stop admitting new calls here so the abort that
+        follows does not cut a request the harness still waits on. Loops without external clients need no override.
+        """
+
+    async def resume(self) -> None:
+        """Reopen external request admission after inference resumes."""
+
     async def pause(self) -> None:
         self._judger_pause_event.set()
         try:
@@ -381,6 +391,12 @@ class RouterAgentLoop:
 
     async def close(self) -> None:
         await close_agent_loops(list(self.workers))
+
+    async def prepare_pause(self) -> None:
+        await asyncio.gather(*(worker.prepare_pause.remote() for worker in self.workers))
+
+    async def resume(self) -> None:
+        await asyncio.gather(*(worker.resume.remote() for worker in self.workers))
 
     async def pause(self) -> None:
         await asyncio.gather(
@@ -443,6 +459,14 @@ class AgentLoopActor:
         await self.agent_loop.close()
 
     @ray_method
+    async def prepare_pause(self) -> None:
+        await self.agent_loop.prepare_pause()
+
+    @ray_method
+    async def resume(self) -> None:
+        await self.agent_loop.resume()
+
+    @ray_method
     async def pause(self) -> None:
         return await self.agent_loop.pause()
 
@@ -459,9 +483,9 @@ RayAgentLoopProxy: TypeAlias = ActorProxy[AgentLoopActor]
 AgentLoopSpec: TypeAlias = AgentLoop | RayAgentLoopProxy | RouterAgentLoop
 
 
-async def _close_agent_loop(agent_loop: AgentLoopSpec) -> None:
-    """Close a loop locally or on its owning Ray actor."""
-    method = getattr(agent_loop, "close", None)
+async def call_agent_loop_hook(agent_loop: AgentLoopSpec, name: str) -> None:
+    """Invoke an optional lifecycle hook locally or on its owning Ray actor."""
+    method = getattr(agent_loop, name, None)
     if method is not None:
         if isinstance(agent_loop, ray.actor.ActorHandle):
             await method.remote()
@@ -472,4 +496,6 @@ async def _close_agent_loop(agent_loop: AgentLoopSpec) -> None:
 async def close_agent_loops(loops: list[AgentLoopSpec]) -> None:
     """Close every owner even when another owner fails to release resources."""
     owners = {id(loop): loop for loop in loops}
-    await gather_cleanup((_close_agent_loop(loop) for loop in owners.values()), "Agent loop cleanup failed")
+    await gather_cleanup(
+        (call_agent_loop_hook(loop, "close") for loop in owners.values()), "Agent loop cleanup failed"
+    )

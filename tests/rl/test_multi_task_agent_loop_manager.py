@@ -193,6 +193,9 @@ def _fake_agent_loop():
     rollout_ctl.pause_generation.remote = AsyncMock()
     rollout_ctl.get_weight_update_targets.remote = AsyncMock(return_value=())
     agent_loop = MagicMock()
+    agent_loop.prepare_pause = AsyncMock()
+    agent_loop.resume = AsyncMock()
+    agent_loop.close = AsyncMock()
     agent_loop.rollout_ctl = rollout_ctl
     return agent_loop
 
@@ -667,3 +670,81 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(RuntimeError, "original produce failure"):
             await manager.produce_batch(batch_size=1, train_step=3, model_step=2)
+
+
+class TestEnvironmentLifecycleOrder(unittest.IsolatedAsyncioTestCase):
+    async def test_disagg_drains_requests_before_abort_and_resumes_after_controller(self):
+        events = []
+        loop = _fake_agent_loop()
+        loop.prepare_pause.side_effect = lambda: events.append("drain")
+        loop.resume.side_effect = lambda: events.append("resume")
+        ctl = _fake_rollout_controller()
+        ctl.pause_generation.remote.side_effect = lambda: events.append("abort")
+        ctl.continue_generation.remote.side_effect = lambda: events.append("continue")
+        strategy = _FakeProduceStrategy()
+        manager = DisaggAgentLoopManager(
+            [
+                _TaskRunner(
+                    task_name="t",
+                    agent_loop=loop,
+                    produce_strategy=strategy,
+                    sampler=_FakeSampler(),
+                    weight=1,
+                    order=0,
+                )
+            ],
+            _FakeReplayBuffer({}, {}),
+            ctl,
+        )
+        await manager.pause_produce()
+        assert events == ["drain", "abort"]
+        await manager.continue_produce(model_step=2)
+        assert events == ["drain", "abort", "continue", "resume"]
+        assert strategy.cleanup_model_steps == [0]
+
+    async def test_colocated_drains_requests_before_abort(self):
+        events = []
+        loop = _fake_agent_loop()
+        loop.prepare_pause.side_effect = lambda: events.append("drain")
+        loop.resume.side_effect = lambda: events.append("resume")
+        ctl = _fake_rollout_controller()
+        ctl.pause_generation.remote.side_effect = lambda: events.append("abort")
+        ctl.continue_generation.remote.side_effect = lambda: events.append("continue")
+        manager = AgentLoopManager(
+            [
+                _TaskRunner(
+                    task_name="t",
+                    agent_loop=loop,
+                    produce_strategy=_FakeProduceStrategy(),
+                    sampler=_FakeSampler(),
+                    weight=1,
+                    order=0,
+                )
+            ],
+            _FakeReplayBuffer({"t": [["sample"]]}, {}),
+            ctl,
+        )
+        await manager.produce_batch(batch_size=1, train_step=1, model_step=0)
+        assert events == ["continue", "resume", "drain", "abort"]
+
+    async def test_failed_drain_prevents_global_abort(self):
+        loop = _fake_agent_loop()
+        loop.prepare_pause.side_effect = RuntimeError("unacknowledged response")
+        ctl = _fake_rollout_controller()
+        manager = DisaggAgentLoopManager(
+            [
+                _TaskRunner(
+                    task_name="t",
+                    agent_loop=loop,
+                    produce_strategy=_FakeProduceStrategy(),
+                    sampler=_FakeSampler(),
+                    weight=1,
+                    order=0,
+                )
+            ],
+            _FakeReplayBuffer({}, {}),
+            ctl,
+        )
+        with self.assertRaisesRegex(RuntimeError, "unacknowledged"):
+            await manager.pause_produce()
+        ctl.pause_generation.remote.assert_not_awaited()
