@@ -5,10 +5,12 @@ TestGlm53Rendering
     test_enable_thinking_false_rejected         enable_thinking=False 被显式拒绝（jinja 忽略该参数）
     test_all_generation_eos_are_supervised_at_assistant_boundaries  停止 token 计入 loss
     test_media_placeholder_matches_jinja        媒体占位符与 jinja 一致
+    test_add_generation_prompt_after_trailing_assistant_emits_no_eos  推理前缀不为末尾 assistant 补训练 EOS
+    test_clear_thinking_masks_whole_historical_assistant_turns  clear_thinking 屏蔽整轮历史 assistant（含无 reasoning 的轮次）
 TestGlm53OfficialTemplateContract
     test_render_matches_official_jinja          逐字符对齐官方 jinja
     test_can_sort_fallback_keeps_message_order  排序前提被破坏时回退为消息顺序
-    test_mid_conversation_boundaries_use_their_actual_occurrence  对话中间无 EOS、边界 token loss 正确
+    test_mid_conversation_boundaries_use_their_actual_occurrence  对话中间无 EOS、边界 token loss 正确（含 fast/slow 一致）
     test_tool_results_are_never_supervised      tool 结果不计入 loss
 TestGlm53MediaMessages
     媒体拉平视图 glm53_media_messages：真实 role、tool_reference 形态（B/C1）跳过
@@ -22,6 +24,7 @@ from transformers import AutoTokenizer
 from xtuner.v1.data_proto.messages import Glm53ChatMessages
 from xtuner.v1.data_proto.messages.glm53_chat import (
     glm53_media_messages,
+    glm53_tokenize_fn_fastspeed,
     glm53_tokenize_fn_slowspeed,
     render_glm53_chat,
     sort_tool_messages,
@@ -368,6 +371,52 @@ class TestGlm53Rendering:
         assert "<|begin_of_video|><|video|><|end_of_video|>" in rendered
         assert "<|begin_of_audio|><|end_of_audio|>" in rendered
 
+    def test_add_generation_prompt_after_trailing_assistant_emits_no_eos(self, tokenizer):
+        # add_generation_prompt=True 渲染的是推理前缀：末条为 assistant 时，旧实现在其内容后
+        # 补训练 EOS，再把 <|assistant|><think> 追加到 EOS 之后，训练停止符落在推理前缀中间。
+        messages = [
+            {"role": "user", "content": "USER_INPUT"},
+            {"role": "assistant", "content": "ANS"},
+        ]
+        text, _ = render_glm53_chat(messages, add_generation_prompt=True)
+        assert "<|endoftext|>" not in text
+        assert text.endswith("<|assistant|><think>")
+
+        fast_ids, fast_labels = glm53_tokenize_fn_fastspeed(tokenizer, messages, add_generation_prompt=True)
+        slow_ids, slow_labels = glm53_tokenize_fn_slowspeed(tokenizer, messages, add_generation_prompt=True)
+        assert fast_ids == slow_ids
+        assert fast_labels == slow_labels
+
+    def test_clear_thinking_masks_whole_historical_assistant_turns(self, tokenizer):
+        # clear_thinking=True 屏蔽最后一个 user 之前的整轮历史 assistant——无论该轮有没有
+        # reasoning（旧实现只屏蔽带 reasoning 的轮次，无 reasoning 的历史轮照样监督，语义
+        # 自相矛盾）；最后一个 user 之后的轮次照常监督。训练入口 Glm53ChatMessages.tokenize
+        # 暂不开放该参数（数据应由用户侧拆分），这里直接测 tokenize fn 层的实现。
+        messages = [
+            {"role": "user", "content": "First question"},
+            {"role": "assistant", "content": "HISTORICAL_ANSWER"},
+            {"role": "user", "content": "Second question"},
+            {"role": "assistant", "content": "final answer", "reasoning_content": "actual reasoning"},
+        ]
+        fast_ids, fast_labels = glm53_tokenize_fn_fastspeed(tokenizer, messages, clear_thinking=True)
+        slow_ids, slow_labels = glm53_tokenize_fn_slowspeed(tokenizer, messages, clear_thinking=True)
+        assert fast_ids == slow_ids
+        assert fast_labels == slow_labels
+
+        user_id = tokenizer.convert_tokens_to_ids("<|user|>")
+        last_user = max(index for index, token in enumerate(fast_ids) if token == user_id)
+        assert all(label == -100 for index, label in enumerate(fast_labels) if index <= last_user)
+        assert any(label != -100 for label in fast_labels[last_user:])
+
+        kept_ids, kept_labels = glm53_tokenize_fn_fastspeed(tokenizer, messages, clear_thinking=False)
+        assert (fast_ids, fast_labels) != (kept_ids, kept_labels)
+        assert kept_ids == slow_ids  # clear_thinking 只动 loss，不动输入序列
+        assert any(label != -100 for label in kept_labels[:last_user])
+
+        # 训练入口守卫：clear_thinking=True 直接报 AssertionError，而不是静默生效。
+        with pytest.raises(AssertionError, match="clear_thinking"):
+            Glm53ChatMessages(messages=messages).tokenize(tokenizer, clear_thinking=True)
+
 
 class TestGlm53OfficialTemplateContract:
     @pytest.mark.parametrize("case_name", list(_CONTRACT_CASES))
@@ -449,6 +498,12 @@ class TestGlm53OfficialTemplateContract:
         assert tokenized["input_ids"].count(eos_id) == 1
         assert tokenized["input_ids"][-1] == eos_id
         assert tokenized["labels"][-1] == eos_id
+
+        # slowspeed 与 fast 在同一停止目标口径下逐 token 一致（assistant→system、连续
+        # assistant 边界曾因滑动窗口错位静默丢监督）。
+        slow_ids, slow_labels = glm53_tokenize_fn_slowspeed(tokenizer, messages)
+        assert tokenized["input_ids"] == slow_ids
+        assert tokenized["labels"] == slow_labels
 
         boundary_index = _token_index_after_context(tokenizer, official_text, "BOUNDARY_SENTINEL", boundary_token)
         boundary_id = tokenizer.convert_tokens_to_ids(boundary_token)

@@ -148,6 +148,7 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         add_generation_prompt: bool = False,
         enable_thinking: bool = True,
         reasoning_effort: Literal["low", "high", "max"] = "max",
+        clear_thinking: bool = False,
         tokenizer_hash: str | None = None,
         hash: str | None = None,
         debug: bool = False,
@@ -189,6 +190,14 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         self.add_generation_prompt = add_generation_prompt
         self.enable_thinking = enable_thinking
         self.reasoning_effort = reasoning_effort
+        # 训练入口（本类与 text 侧的 Glm53ChatMessages.tokenize）暂不开放 clear_thinking=True：
+        # 需要该语义的数据应由用户侧拆成多条样本（每条只有结尾轮算 loss）。config → fn → render
+        # 的接线和 hash 覆盖保留，开放时无需再动 hash，当前先以断言守住取值。
+        assert clear_thinking is False, (
+            "Glm53VLTokenizeFunction only supports clear_thinking=False; prepare clear-thinking "
+            "data by splitting turns into separate samples instead."
+        )
+        self.clear_thinking = clear_thinking
         self.system_message = system_message
         self.data_name = os.path.basename(anno_name)
 
@@ -197,13 +206,16 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         # missing entry means stale lengths survive a config change (packer budgets by old lengths
         # while runtime truncates by new ones). max_length is read from the local variable because
         # super().__init__ (which stores it as self.max_length) runs after this string is built.
+        # clear_thinking 必须在 hash 里：它把历史轮的 reasoning 文本从渲染中剥掉，num_tokens
+        # 随参数取值变化（实测 153 → 136 字符的对话级差异），不只是改 loss。
         _hash_str = (
             f"{self.image_processor.min_image_tokens}_{self.image_processor.max_image_tokens}_"
             f"{self.video_processor.fps}_{self.video_processor.max_frames}_{self.merge_unit}_"
             f"processor_path:{processor_path}_llm_pack_weight:{llm_pack_weight}_"
             f"visual_pack_weight:{visual_pack_weight}_max_length:{max_length}_"
             f"system_message:{system_message}_add_generation_prompt:{add_generation_prompt}_"
-            f"enable_thinking:{enable_thinking}_reasoning_effort:{reasoning_effort}"
+            f"enable_thinking:{enable_thinking}_reasoning_effort:{reasoning_effort}_"
+            f"clear_thinking:{clear_thinking}"
         )
 
         super().__init__(
@@ -241,6 +253,7 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             add_generation_prompt=self.add_generation_prompt,
             enable_thinking=self.enable_thinking,
             reasoning_effort=self.reasoning_effort,
+            clear_thinking=self.clear_thinking,
         )
 
     def _check_no_literal_visual_marker(self, data_item: dict) -> None:
@@ -576,6 +589,7 @@ class Glm53VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     add_generation_prompt: bool = False
     enable_thinking: bool = True
     reasoning_effort: Literal["low", "high", "max"] = "max"
+    clear_thinking: bool = False
     visual_pack_weight: float = 1.0
 
     def build(
@@ -597,6 +611,7 @@ class Glm53VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             add_generation_prompt=self.add_generation_prompt,
             enable_thinking=self.enable_thinking,
             reasoning_effort=self.reasoning_effort,
+            clear_thinking=self.clear_thinking,
             tokenizer_hash=tokenizer_hash,
             hash=self.hash,
             debug=self.debug,

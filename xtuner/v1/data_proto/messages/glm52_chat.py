@@ -223,8 +223,11 @@ def render_glm52_chat(
                 append(_render_tool_calls(message["tool_calls"], _literal_spans, len(text)), loss)
             previous_assistant_loss = loss
             next_role = messages[index + 1].get("role") if index + 1 < len(messages) else None
-            if next_role is None:
-                # 训练用 EOS 只追加在对话末尾；官方模板从不在对话中间输出 EOS。
+            if next_role is None and not add_generation_prompt:
+                # 训练用 EOS 只追加在对话末尾，且仅当渲染的就是训练样本本身；官方模板从不在
+                # 对话中间输出 EOS。add_generation_prompt=True 渲染的是推理前缀，末条即使是
+                # assistant 也不能在 <|assistant|><think> 之前补 EOS，否则训练停止符落在
+                # 推理前缀中间。
                 append(_END_OF_TEXT, loss)
         elif role == "tool":
             if index == 0 or messages[index - 1].get("role") != "tool":
@@ -408,6 +411,13 @@ def glm52_tokenize_fn_slowspeed(
         if next_role in _NEXT_ROLE_STOP_TOKENS:
             # 截断渲染以 endoftext 结尾；完整对话改用实际的下一角色停止 token。
             content_ids[-1] = tokenizer.convert_tokens_to_ids(_NEXT_ROLE_STOP_TOKENS[next_role])
+        elif next_role is None and add_generation_prompt:
+            # add_generation_prompt=True 时完整渲染以推理前缀结尾、不含训练 EOS；截断渲染补在
+            # 末尾的 EOS 在 total_ids 里不存在，去掉再对齐。
+            assert content_ids[-1] == tokenizer.convert_tokens_to_ids(_END_OF_TEXT)
+            content_ids = content_ids[:-1]
+            if not content_ids:
+                continue
 
         # 在完整 token 序列中做 token 级绝对对齐，避免字符 offset 对特殊 token 的边界解释差异。
         for start in range(curr_ptr, len(total_ids) - len(content_ids) + 1):

@@ -4,6 +4,8 @@ TestGlm53TokenizeCacheRuntimeParity
     test_glm53_tokenize_cache_runtime_image_parity  图像：cache 预测与 runtime 实算一致
     test_glm53_tokenize_cache_runtime_video_parity  视频：同上
     test_glm53_frame_folder_samples_the_processed_frames  帧文件夹按重采样后的帧取下标
+TestGlm53ClearThinking
+    test_clear_thinking_true_rejected    VL 链路暂不支持 clear_thinking：True 在构造期断言报错
 TestGlm53VisualPlaceholderAndTokenSemantics
     test_glm53_visual_placeholder_count             占位符数量等于 patch 数 / merge_unit
     test_glm53_num_img_tokens_is_per_vit_sequence   num_img_tokens 按 ViT 序列计数
@@ -185,6 +187,15 @@ class TestGlm53TokenizeCacheRuntimeParity:
 
         assert cache_ret["num_tokens"] == runtime_ret["num_tokens"] == len(runtime_ret["input_ids"])
         assert cache_ret["num_img_tokens"] == runtime_ret["num_img_tokens"]
+
+
+class TestGlm53ClearThinking:
+    def test_clear_thinking_true_rejected(self, ckpt_path, tokenizer):
+        # VL 训练链路暂不支持 clear_thinking=True（config → fn → render 的接线与 hash 覆盖已
+        # 就位，语义开放前以构造期断言守住取值）；render 层的 clear_thinking 语义由纯文本路径
+        # 的测试覆盖。
+        with pytest.raises(AssertionError, match="clear_thinking"):
+            Glm53VLTokenizeFnConfig(processor_path=ckpt_path, clear_thinking=True).build(tokenizer, anno_name="test")
 
 
 class TestGlm53OSSLoader:
@@ -891,7 +902,9 @@ class TestGlm53CacheInvalidation:
             "can change cache output (num_tokens), add it to _hash_str and _HASH_PARAMS; "
             "otherwise add it to _NON_HASH_PARAMS with a reason."
         )
-        assert set(_ALT_VALUES) == _HASH_PARAMS - {"processor_path"}
+        # clear_thinking 在 _hash_str 里但构造期断言只支持 False，无法构造 True 变体，
+        # 其 hash 覆盖由 _hash_str 的字段保证，不在 _ALT_VALUES 里实际变值。
+        assert set(_ALT_VALUES) == _HASH_PARAMS - {"processor_path", "clear_thinking"}
 
         for name, override in _ALT_VALUES.items():
             base = Glm53VLTokenizeFnConfig(processor_path=ckpt_path).build(tokenizer, anno_name="test")
@@ -914,6 +927,7 @@ _HASH_PARAMS = {
     "add_generation_prompt",
     "enable_thinking",
     "reasoning_effort",
+    "clear_thinking",
 }
 
 # 不影响 cache 输出的参数：

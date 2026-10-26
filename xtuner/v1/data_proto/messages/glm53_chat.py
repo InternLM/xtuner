@@ -41,11 +41,18 @@ in the official ``chat_template.jinja``:
    glm52's renderer. ``ValueError`` belongs to the data pipeline's dirty-data error set, so
    such samples are discarded through the dirty-sample channel instead of killing the cache
    worker.
-7. ``<|endoftext|>`` is appended only after the FINAL assistant message (the training stop
-   suffix). The official template never emits EOS mid-conversation, so assistant→system and
-   assistant→assistant boundaries get no extra token; only ``<|user|>``/``<|observation|>``
-   act as supervised stop targets.
-8. Tool-message shapes are classified by probing only ``content[0]`` (the official
+7. ``<|endoftext|>`` is appended only after the FINAL assistant message of a training render
+   (``add_generation_prompt=False``), as the training stop suffix. The official template never
+   emits EOS mid-conversation, so assistant→system and assistant→assistant boundaries get no
+   extra token; only ``<|user|>``/``<|observation|>`` act as supervised stop targets. With
+   ``add_generation_prompt=True`` the render is an inference prefix, so even a trailing
+   assistant gets no EOS -- emitting one would leave the training stop token in the middle of
+   the inference prefix.
+8. ``clear_thinking=True`` masks the WHOLE historical assistant turn (both ``reasoning_content``
+   and ``content``) before the last user message, not just turns that carry a reasoning block;
+   a reasoning-less historical assistant is still historical output, and supervising it would
+   contradict the flag's purpose.
+9. Tool-message shapes are classified by probing only ``content[0]`` (the official
    ``is_list_of_outputs`` and ``tool_reference`` checks do the same), so an aggregated list
    whose LATER entry lacks an ``output`` key raises ``KeyError`` and the sample is discarded
    through the dirty-data channel. The official template silently renders an empty
@@ -488,6 +495,28 @@ def _render_tool_block(
     return text
 
 
+def _assistant_plan(
+    message: Mapping[str, Any],
+    index: int,
+    last_user_index: int,
+    clear_thinking: bool,
+) -> tuple[str, str | None, bool, bool]:
+    """单条 assistant 的判定式（监督与否、是否发射 reasoning），render 与 slowspeed 的唯一事实来源。
+
+    返回 ``(content, reasoning_content, supervised, render_reasoning)``。
+    """
+    content, reasoning_content = _assistant_content_and_reasoning(message, _media_placeholder=_MEDIA_PLACEHOLDER)
+    # slowspeed 的生成段仍逐段手写复刻 render 的发射逻辑——交叉校验的价值正在于生成段独立；
+    # 但判定式若两处各写一份，render 判错时 slowspeed 会以同样方式判错，fast == slow 对照失效
+    # 且无测试报警，所以判定式只允许存在这一份。clear_thinking 屏蔽"最后一个 user 之前"的整轮
+    # 历史 assistant（reasoning 与 content 一起），而不是只屏蔽带 reasoning 的轮次——无 reasoning
+    # 的历史 assistant 同样是历史输出，留下监督会让 clear_thinking 语义自相矛盾。
+    after_last_user = index > last_user_index
+    supervised = bool(message.get("loss", True)) and (not clear_thinking or after_last_user)
+    render_reasoning = reasoning_content is not None and (not clear_thinking or after_last_user)
+    return content, reasoning_content, supervised, render_reasoning
+
+
 def render_glm53_chat(
     messages: List[Dict[str, Any]],
     tools: Optional[List[Dict[str, Any]]] = None,
@@ -497,7 +526,11 @@ def render_glm53_chat(
     clear_thinking: bool = False,
     _literal_spans: list[tuple[int, int]] | None = None,
 ) -> tuple[str, list[bool]]:
-    """渲染 GLM-5.3-Flash 对话；结构与 GLM-5.2 相同，媒体渲染为两段式 placeholder 标记。"""
+    """渲染 GLM-5.3-Flash 对话；结构与 GLM-5.2 相同，媒体渲染为两段式 placeholder 标记。
+
+    ``clear_thinking=True`` 时，最后一个 user 之前的整轮历史 assistant（reasoning 与 content
+    一起）不进 loss；``add_generation_prompt=True`` 时不为末尾 assistant 补训练 EOS。
+    """
     assert enable_thinking, (
         "GLM-5.3's official chat template ignores enable_thinking: the Reasoning Effort header "
         "and the generation-time <think> prefix are always emitted, so enable_thinking=False "
@@ -534,13 +567,9 @@ def render_glm53_chat(
             append("<|system|>", False)
             append(_visible_text(message.get("content", ""), _literal_spans, len(text)), False)
         elif role == "assistant":
-            # GLM-5.3 用占位符模式：assistant 媒体发 marker（glm52 默认降级为 <reminder>）。
-            content, reasoning_content = _assistant_content_and_reasoning(
-                message, _media_placeholder=_MEDIA_PLACEHOLDER
+            content, reasoning_content, loss, render_reasoning = _assistant_plan(
+                message, index, last_user_index, clear_thinking
             )
-            loss = bool(message.get("loss", True))
-            render_reasoning = reasoning_content is not None and (not clear_thinking or index > last_user_index)
-            loss = loss and (reasoning_content is None or render_reasoning)
 
             append("<|assistant|>", False)
             if render_reasoning:
@@ -557,8 +586,11 @@ def render_glm53_chat(
                 append(_render_tool_calls(message["tool_calls"], _literal_spans, len(text)), loss)
             previous_assistant_loss = loss
             next_role = messages[index + 1].get("role") if index + 1 < len(messages) else None
-            if next_role is None:
-                # 训练用 EOS 只追加在对话末尾；官方模板从不在对话中间输出 EOS。
+            if next_role is None and not add_generation_prompt:
+                # 训练用 EOS 只追加在对话末尾，且仅当渲染的就是训练样本本身；官方模板从不在
+                # 对话中间输出 EOS。add_generation_prompt=True 渲染的是推理前缀，末条即使是
+                # assistant 也不能在 <|assistant|><think> 之前补 EOS，否则训练停止符落在
+                # 推理前缀中间。
                 append(_END_OF_TEXT, loss)
         elif role == "tool":
             if index == 0 or messages[index - 1].get("role") != "tool":
@@ -609,7 +641,16 @@ def glm53_tokenize_fn_slowspeed(
     clear_thinking: bool = False,
     **kwargs,
 ) -> tuple[list[int], list[int]]:
-    """慢速 golden 参考实现，见 ``glm52_tokenize_fn_slowspeed`` 的 docstring；算法相同。"""
+    """慢速 golden 参考实现：与 ``glm53_tokenize_fn_fastspeed`` 相同的渲染，但逐条 assistant
+    独立重算标签，用精确前缀对齐校验而不是滑动窗口搜索。
+
+    每条受监督的 assistant：把 ``messages[:index]`` 渲染成推理前缀（以 ``<|assistant|><think>``
+    结尾），再逐段复刻渲染器为该 assistant 发射的文本（reasoning/``</think>``/content/
+    tool_calls）及其停止目标（user/tool 边界的交接 token，或对话末尾的训练 EOS）。前缀与生成段
+    拼接编码后必须与全文编码结果逐 token 一致，任何错位直接抛 ``ValueError``——旧实现的滑动
+    窗口会在错误位置静默标注或丢掉监督（assistant→system、连续 assistant 边界因此与 fast
+    不一致）。
+    """
     full_spans: list[tuple[int, int]] = []
     full_text, _ = render_glm53_chat(
         messages,
@@ -623,50 +664,70 @@ def glm53_tokenize_fn_slowspeed(
     total_ids, _ = _encode_glm_text(tokenizer, full_text, full_spans)
     labels = [IGNORE_INDEX] * len(total_ids)
 
-    curr_ptr = 0
+    # clear_thinking 的屏蔽口径与 render 层一致：最后一个 user 之前的 assistant 整轮跳过。
+    last_user_index = max(
+        (index for index, message in enumerate(messages) if message.get("role") == "user"), default=-1
+    )
     for index, message in enumerate(messages):
-        if message.get("role") != "assistant" or not message.get("loss", True):
+        if message.get("role") != "assistant":
+            continue
+        # 判定式（监督与否、是否发射 reasoning）与 render 共用同一份实现，见 _assistant_plan。
+        content, reasoning_content, supervised, render_reasoning = _assistant_plan(
+            message, index, last_user_index, clear_thinking
+        )
+        if not supervised:
             continue
 
         prefix_spans: list[tuple[int, int]] = []
         prefix_text, _ = render_glm53_chat(
             messages[:index],
-            tools=tools if index == 0 else None,
+            tools=tools,
             add_generation_prompt=True,
             enable_thinking=enable_thinking,
             reasoning_effort=reasoning_effort,
             clear_thinking=clear_thinking,
             _literal_spans=prefix_spans,
         )
-        message_spans: list[tuple[int, int]] = []
-        message_text, _ = render_glm53_chat(
-            [m.copy() for m in messages[: index + 1]],
-            tools=tools if index == 0 else None,
-            add_generation_prompt=False,
-            enable_thinking=enable_thinking,
-            reasoning_effort=reasoning_effort,
-            clear_thinking=clear_thinking,
-            _literal_spans=message_spans,
-        )
 
-        prefix_ids, _ = _encode_glm_text(tokenizer, prefix_text, prefix_spans)
-        message_ids, _ = _encode_glm_text(tokenizer, message_text, message_spans)
-        content_ids = message_ids[len(prefix_ids) :]
-        if not content_ids:
-            continue
+        generated = ""
+        generated_spans: list[tuple[int, int]] = []
 
+        def gen_append(value: str, *, literal: bool = False) -> None:
+            nonlocal generated
+            if literal:
+                generated_spans.append((len(generated), len(generated) + len(value)))
+            generated += value
+
+        # ---- 生成段保持手写复刻（交叉校验的价值在这里，不与 render 共用）----
+        if render_reasoning:
+            assert reasoning_content is not None
+            gen_append(reasoning_content, literal=True)
+            gen_append("</think>")
+        else:
+            gen_append("</think>")
+        if content.strip():
+            gen_append(content.strip(), literal=True)
+        if message.get("tool_calls"):
+            gen_append(_render_tool_calls(message["tool_calls"], generated_spans, len(generated)))
         next_role = messages[index + 1].get("role") if index + 1 < len(messages) else None
         if next_role in _NEXT_ROLE_STOP_TOKENS:
-            content_ids[-1] = tokenizer.convert_tokens_to_ids(_NEXT_ROLE_STOP_TOKENS[next_role])
+            gen_append(_NEXT_ROLE_STOP_TOKENS[next_role])
+        elif next_role is None and not add_generation_prompt:
+            gen_append(_END_OF_TEXT)
 
-        for start in range(curr_ptr, len(total_ids) - len(content_ids) + 1):
-            if total_ids[start : start + len(content_ids)] == content_ids:
-                labels[start : start + len(content_ids)] = content_ids
-                curr_ptr = start + len(content_ids)
-                break
-        else:
-            if index == len(messages) - 1:
-                raise ValueError("Could not align final assistant message in GLM-5.3-Flash chat template rendering.")
+        prefix_ids, _ = _encode_glm_text(tokenizer, prefix_text, prefix_spans)
+        combined_spans = [
+            *prefix_spans,
+            *[(start + len(prefix_text), end + len(prefix_text)) for start, end in generated_spans],
+        ]
+        combined_ids, _ = _encode_glm_text(tokenizer, prefix_text + generated, combined_spans)
+        start = len(prefix_ids)
+        content_ids = combined_ids[start:]
+        if not content_ids:
+            continue
+        if total_ids[:start] != prefix_ids or total_ids[start : start + len(content_ids)] != content_ids:
+            raise ValueError("Could not align assistant message in GLM-5.3-Flash chat template rendering.")
+        labels[start : start + len(content_ids)] = content_ids
 
     return total_ids, labels
 
@@ -686,6 +747,13 @@ class Glm53ChatMessages(BaseModel):
         clear_thinking: bool = False,
         **kwargs,
     ) -> Dict:
+        # 训练侧暂不感知 clear_thinking=True：历史轮数据应由用户侧拆成多条样本（每条只有结尾
+        # 轮算 loss）。实现（render/fast/slow）与测试保留，开放时只需删掉这句断言；VL 侧在
+        # Glm53VLTokenizeFunction 构造期有同样的守卫。
+        assert clear_thinking is False, (
+            "Glm53ChatMessages only supports clear_thinking=False; prepare clear-thinking data "
+            "by splitting turns into separate samples instead."
+        )
         if chat_template is not None and chat_template.default_system is not None:
             if self.messages[0]["role"] == "system":
                 self.messages[0]["content"] = chat_template.default_system

@@ -3,6 +3,7 @@
 TestGlm52OfficialTemplateContract
     test_render_matches_official_jinja          渲染逐字符对齐官方 jinja + 仅末尾 EOS
     test_mid_conversation_boundaries_use_their_actual_occurrence  对话中间无 EOS、边界 token loss 正确
+    test_add_generation_prompt_after_trailing_assistant_emits_no_eos  推理前缀末尾 assistant 不补训练 EOS
 """
 
 import os
@@ -11,7 +12,11 @@ import pytest
 
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.messages import Glm52ChatMessages
-from xtuner.v1.data_proto.messages.glm52_chat import render_glm52_chat
+from xtuner.v1.data_proto.messages.glm52_chat import (
+    glm52_tokenize_fn_fastspeed,
+    glm52_tokenize_fn_slowspeed,
+    render_glm52_chat,
+)
 
 
 GLM5_2_TINY_MOE_PATH = os.environ["GLM5_2_TINY_MOE_PATH"]
@@ -150,3 +155,19 @@ class TestGlm52OfficialTemplateContract:
             assert tokenized["labels"][boundary_index] == boundary_id
         else:
             assert tokenized["labels"][boundary_index] == -100
+
+    def test_add_generation_prompt_after_trailing_assistant_emits_no_eos(self, tokenizer):
+        # add_generation_prompt=True 渲染的是推理前缀：末条为 assistant 时，旧实现在其内容后
+        # 补训练 EOS，再把 <|assistant|><think> 追加到 EOS 之后，训练停止符落在推理前缀中间。
+        messages = [
+            {"role": "user", "content": "USER_INPUT"},
+            {"role": "assistant", "content": "ANS"},
+        ]
+        text, _ = render_glm52_chat(messages, add_generation_prompt=True, **GLM52_TEMPLATE_DEFAULTS)
+        assert "<|endoftext|>" not in text
+        assert text.endswith("<|assistant|><think>")
+
+        fast_ids, fast_labels = glm52_tokenize_fn_fastspeed(tokenizer, messages, add_generation_prompt=True)
+        slow_ids, slow_labels = glm52_tokenize_fn_slowspeed(tokenizer, messages, add_generation_prompt=True)
+        assert fast_ids == slow_ids
+        assert fast_labels == slow_labels
