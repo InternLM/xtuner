@@ -151,9 +151,9 @@ class MuonConfig(OptimConfig):
             num_total += n
             if name in trainable_names:
                 num_total_requires_grad += n
-                # we want to avoid using Muon for 1D-tensors, as well as embed_tokens and lm_head.
-                # effectively-1D tensors where one dimension accounts for all elements (e.g. shape [1, D]) should
-                # also be excluded, and hence the `p.numel() not in p.shape` condition.
+                # Muon only applies to 2D matrices; 3D tensors (e.g. depthwise conv1d) and 1D tensors use AdamW,
+                # matching Megatron and Automodel. Effectively-1D tensors where one dimension accounts for all
+                # elements (e.g. shape [1, D]) should also be excluded, hence the `p.numel() not in p.shape` condition.
                 is_muon_tensor = (
                     p.ndim == 2 and "embed_tokens" not in name and "lm_head" not in name and p.numel() not in p.shape
                 )
