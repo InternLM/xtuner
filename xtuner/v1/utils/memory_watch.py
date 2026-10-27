@@ -1,7 +1,7 @@
 """Opt-in process and cgroup memory traces during SFT.
 
-Set XTUNER_MEMORY_WATCH_ENABLED=1 for per-rank JSONL traces in work_dir/memory. Set XTUNER_MEMORY_WATCH_INTERVAL to the
-sampling interval in seconds (default: 1).
+Set XTUNER_MEMORY_WATCH_ENABLED=1 for per-rank and host-level JSONL traces in work_dir/memory. Set
+XTUNER_MEMORY_WATCH_INTERVAL to the sampling interval in seconds (default: 1).
 """
 
 from __future__ import annotations
@@ -15,12 +15,67 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, cast
+
+from typing_extensions import NotRequired, TypedDict
+
+from xtuner.v1.utils.enum_helper import StrEnum
 
 
 _NUMA_PAGE_TOKEN = re.compile(r"N(\d+)=(\d+)")
 _SAMPLE_INTERVAL_S = 1
+_SHUTDOWN_TIMEOUT_S = 2.0
 _NUMA_SAMPLE_INTERVAL_NS = 30_000_000_000
+
+
+class MemoryEvent(StrEnum):
+    START = "start"
+    PERIODIC = "periodic"
+    STOP = "stop"
+
+
+class MemoryRecord(TypedDict):
+    time_ns: int
+    monotonic_ns: int
+    event: str
+    host: str
+    pid: int
+    rank: str | None
+    local_rank: str | None
+
+
+class _RankSections(TypedDict, total=False):
+    pid_starttime_ticks: int
+    cgroup_membership: list[str]
+    identity_error: str
+    process: dict[str, int | str]
+    process_error: str
+    numa_maps: dict[str, Any]
+    numa_maps_error: str
+    smaps_rollup: dict[str, int]
+    smaps_rollup_error: str
+
+
+class RankMemoryRecord(MemoryRecord, _RankSections):
+    pass
+
+
+class _HostSections(TypedDict):
+    host_node_cpus: NotRequired[dict[str, str]]
+    host_node_cpus_error: NotRequired[str]
+    cgroup_mounts: NotRequired[list[str]]
+    cgroup_mounts_error: NotRequired[str]
+    cgroup: NotRequired[dict[str, Any]]
+    cgroup_error: NotRequired[str]
+    host_nodes: NotRequired[dict[str, dict[str, int]]]
+    host_nodes_error: NotRequired[str]
+    oom_kill_delta: NotRequired[int]
+
+
+class HostMemoryRecord(MemoryRecord, _HostSections):
+    pass
+
+
 _STATUS_KEYS = {
     "VmRSS",
     "VmHWM",
@@ -229,11 +284,11 @@ def _oom_kill_count(cgroup: dict[str, Any]) -> int | None:
 
 
 class _MemoryWatch:
-    """Own a rank's memory sampling thread and JSONL output.
+    """Own a rank's memory sampling thread and JSONL outputs.
 
     Args:
-        output (Path): Destination JSONL file, opened in append mode.
-        include_cgroup (bool): Include cgroup and host node metrics for this rank.
+        output (Path): Destination rank JSONL file, opened in append mode.
+        include_cgroup (bool): Write cgroup and host node metrics to a separate host JSONL file.
         interval_s (float): Finite positive interval between periodic samples.
         proc_self (Path): Process-local procfs directory.
         cgroup_root (Path): Root of the cgroup mounts.
@@ -259,24 +314,30 @@ class _MemoryWatch:
         self._cgroup_root = cgroup_root
         self._node_root = node_root
         self._cgroup = _cgroup_dir(cgroup_root, proc_self / "cgroup") if include_cgroup else None
+        self._host = os.uname().nodename
+        self._host_output = output.parent / f"host_{self._host}.jsonl"
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, name="xtuner-memory-watch", daemon=True)
         self._fd: int | None = None
+        self._host_fd: int | None = None
         self._previous_oom_kill: int | None = None
         self._previous_numa_sample_ns = 0
         self._sample_error_reported = False
 
     def __enter__(self) -> _MemoryWatch:
-        """Open the trace, record initial metrics, and start periodic sampling.
+        """Open the traces, record initial metrics, and start periodic
+        sampling.
 
         Returns:
             _MemoryWatch: The active monitor owned by this context.
         """
-        self._output.parent.mkdir(parents=True, exist_ok=True)
-        self._fd = os.open(self._output, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o644)
         try:
-            self._sample("start")
+            self._output.parent.mkdir(parents=True, exist_ok=True)
+            self._fd = os.open(self._output, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o644)
+            if self._include_cgroup:
+                self._host_fd = os.open(self._host_output, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o644)
+            self._sample(MemoryEvent.START)
             self._thread.start()
         except Exception:
             self._close()
@@ -284,7 +345,7 @@ class _MemoryWatch:
         return self
 
     def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
-        """Stop periodic writes, record final metrics, and close the trace.
+        """Stop periodic writes, record final metrics, and close the traces.
 
         Args:
             _exc_type (object): Exception type supplied by the context manager.
@@ -292,11 +353,14 @@ class _MemoryWatch:
             _tb (object): Traceback supplied by the context manager.
         """
         self._stop_event.set()
-        # Event.wait wakes immediately on set, regardless of the configured
-        # interval. The timeout only bounds an in-flight sample.
-        self._thread.join(timeout=_SAMPLE_INTERVAL_S + 1)
         try:
-            self._sample("stop")
+            # Event.wait wakes immediately on set, regardless of the configured
+            # interval. The timeout only bounds an in-flight sample.
+            self._thread.join(timeout=_SHUTDOWN_TIMEOUT_S)
+        except RuntimeError as exc:
+            self._report_sample_error(exc)
+        try:
+            self._sample(MemoryEvent.STOP)
         except Exception as exc:
             self._report_sample_error(exc)
         finally:
@@ -305,8 +369,13 @@ class _MemoryWatch:
     def _close(self) -> None:
         with self._lock:
             fd, self._fd = self._fd, None
-            if fd is not None:
-                os.close(fd)
+            host_fd, self._host_fd = self._host_fd, None
+        for output_fd in (fd, host_fd):
+            if output_fd is not None:
+                try:
+                    os.close(output_fd)
+                except OSError as exc:
+                    self._report_sample_error(exc)
 
     def _report_sample_error(self, exc: Exception) -> None:
         with self._lock:
@@ -318,98 +387,126 @@ class _MemoryWatch:
     def _run(self) -> None:
         while not self._stop_event.wait(self._interval_s):
             try:
-                self._sample("periodic")
+                self._sample(MemoryEvent.PERIODIC)
             except Exception as exc:
                 self._report_sample_error(exc)
                 return
 
-    def _sample(self, event: str) -> None:
-        now_ns = time.monotonic_ns()
+    def _base_record(self, event: MemoryEvent, now_ns: int) -> MemoryRecord:
+        return MemoryRecord(
+            time_ns=time.time_ns(),
+            monotonic_ns=now_ns,
+            event=event.value,
+            host=self._host,
+            pid=os.getpid(),
+            rank=os.environ.get("RANK"),
+            local_rank=os.environ.get("LOCAL_RANK"),
+        )
+
+    def _claim_numa_slot(self, event: MemoryEvent, now_ns: int) -> bool:
         with self._lock:
-            read_numa = event != "periodic" or now_ns - self._previous_numa_sample_ns >= _NUMA_SAMPLE_INTERVAL_NS
+            read_numa = (
+                event != MemoryEvent.PERIODIC or now_ns - self._previous_numa_sample_ns >= _NUMA_SAMPLE_INTERVAL_NS
+            )
             if read_numa:
                 self._previous_numa_sample_ns = now_ns
-        record: dict[str, Any] = {
-            "time_ns": time.time_ns(),
-            "monotonic_ns": now_ns,
-            "event": event,
-            "pid": os.getpid(),
-            "rank": os.environ.get("RANK"),
-            "local_rank": os.environ.get("LOCAL_RANK"),
-        }
-        if event == "start":
-            record["host"] = os.uname().nodename
+            return read_numa
+
+    def _read_process_sections(self, event: MemoryEvent, read_numa: bool) -> _RankSections:
+        sections = _RankSections()
+        if event == MemoryEvent.START:
             try:
                 # starttime is field 22 of /proc/self/stat, in clock ticks.
                 stat_fields = (self._proc_self / "stat").read_text().rsplit(")", 1)[1].split()
-                record["pid_starttime_ticks"] = int(stat_fields[19])
-                record["cgroup_membership"] = (self._proc_self / "cgroup").read_text().splitlines()
+                sections["pid_starttime_ticks"] = int(stat_fields[19])
+                sections["cgroup_membership"] = (self._proc_self / "cgroup").read_text().splitlines()
             except (OSError, ValueError, IndexError) as exc:
-                record["identity_error"] = str(exc)
-            try:
-                record["host_node_cpus"] = _read_node_cpulists(self._node_root)
-            except (OSError, ValueError) as exc:
-                record["host_node_cpus_error"] = str(exc)
-            if self._include_cgroup:
-                try:
-                    record["cgroup_mounts"] = [
-                        line
-                        for line in (self._proc_self / "mountinfo").read_text().splitlines()
-                        if " - cgroup " in line or " - cgroup2 " in line
-                    ]
-                except OSError as exc:
-                    record["cgroup_mounts_error"] = str(exc)
+                sections["identity_error"] = str(exc)
         try:
             # /proc/self addresses the thread-group leader, even when the
             # watcher's background thread takes this sample.
-            record["process"] = _read_status(self._proc_self / "status")
+            sections["process"] = _read_status(self._proc_self / "status")
         except (OSError, ValueError) as exc:
-            record["process_error"] = str(exc)
+            sections["process_error"] = str(exc)
         if read_numa:
             try:
-                record["numa_maps"] = _read_numa_maps(self._proc_self / "numa_maps")
+                sections["numa_maps"] = _read_numa_maps(self._proc_self / "numa_maps")
             except (OSError, ValueError) as exc:
-                record["numa_maps_error"] = str(exc)
+                sections["numa_maps_error"] = str(exc)
             try:
-                record["smaps_rollup"] = _read_smaps_rollup(self._proc_self / "smaps_rollup")
+                sections["smaps_rollup"] = _read_smaps_rollup(self._proc_self / "smaps_rollup")
             except (OSError, ValueError) as exc:
-                record["smaps_rollup_error"] = str(exc)
-        if self._include_cgroup:
+                sections["smaps_rollup_error"] = str(exc)
+        return sections
+
+    def _read_host_sections(self, event: MemoryEvent) -> _HostSections:
+        sections = _HostSections()
+        if event == MemoryEvent.START:
             try:
-                record["cgroup"] = _read_cgroup(
-                    self._cgroup, root=self._cgroup_root, membership=self._proc_self / "cgroup"
-                )
-                oom_kill = _oom_kill_count(record["cgroup"])
-                if oom_kill is not None:
-                    with self._lock:
-                        if self._previous_oom_kill is not None and oom_kill > self._previous_oom_kill:
-                            record["oom_kill_delta"] = oom_kill - self._previous_oom_kill
-                        self._previous_oom_kill = oom_kill
+                sections["host_node_cpus"] = _read_node_cpulists(self._node_root)
             except (OSError, ValueError) as exc:
-                record["cgroup_error"] = str(exc)
+                sections["host_node_cpus_error"] = str(exc)
             try:
-                record["host_nodes"] = _read_node_meminfo(self._node_root)
-            except (OSError, ValueError) as exc:
-                record["host_nodes_error"] = str(exc)
+                sections["cgroup_mounts"] = [
+                    line
+                    for line in (self._proc_self / "mountinfo").read_text().splitlines()
+                    if " - cgroup " in line or " - cgroup2 " in line
+                ]
+            except OSError as exc:
+                sections["cgroup_mounts_error"] = str(exc)
+        try:
+            cgroup = _read_cgroup(self._cgroup, root=self._cgroup_root, membership=self._proc_self / "cgroup")
+            sections["cgroup"] = cgroup
+            oom_kill = _oom_kill_count(cgroup)
+            if oom_kill is not None:
+                with self._lock:
+                    if self._previous_oom_kill is not None and oom_kill > self._previous_oom_kill:
+                        sections["oom_kill_delta"] = oom_kill - self._previous_oom_kill
+                    self._previous_oom_kill = oom_kill
+        except (OSError, ValueError) as exc:
+            sections["cgroup_error"] = str(exc)
+        try:
+            sections["host_nodes"] = _read_node_meminfo(self._node_root)
+        except (OSError, ValueError) as exc:
+            sections["host_nodes_error"] = str(exc)
+        return sections
+
+    def _write_record(self, record: MemoryRecord, event: MemoryEvent, *, host: bool = False) -> None:
         payload = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
         with self._lock:
-            if self._fd is not None and (event != "periodic" or not self._stop_event.is_set()):
-                os.write(self._fd, payload)
+            fd = self._host_fd if host else self._fd
+            if fd is not None and (event != MemoryEvent.PERIODIC or not self._stop_event.is_set()):
+                remaining = memoryview(payload)
+                while remaining:
+                    written = os.write(fd, remaining)
+                    if written == 0:
+                        raise OSError("Memory watch write returned zero bytes")
+                    remaining = remaining[written:]
+
+    def _sample(self, event: MemoryEvent) -> None:
+        now_ns = time.monotonic_ns()
+        rank_record = cast(RankMemoryRecord, self._base_record(event, now_ns))
+        rank_record.update(self._read_process_sections(event, self._claim_numa_slot(event, now_ns)))
+        self._write_record(rank_record, event)
+        if self._include_cgroup:
+            host_record = cast(HostMemoryRecord, self._base_record(event, now_ns))
+            host_record.update(self._read_host_sections(event))
+            self._write_record(host_record, event, host=True)
 
 
 @contextlib.contextmanager
-def monitor_rank_memory(work_dir: Path | str) -> Iterator[None]:
+def monitor_rank_memory(work_dir: Path | str | None) -> Iterator[None]:
     """Monitor rank memory during SFT when enabled through the environment.
 
-    Write start, periodic, and stop records to ``memory/rank_<rank>.jsonl``
-    under the work directory. Only local rank zero collects cgroup and host
-    node metrics. Set ``XTUNER_MEMORY_WATCH_ENABLED=1`` to enable monitoring
-    and ``XTUNER_MEMORY_WATCH_INTERVAL`` to a positive interval in seconds.
-    An invalid interval or an initialization failure logs a warning and lets
-    training continue without a trace.
+    Write process records to ``memory/rank_<rank>.jsonl`` under the work
+    directory. Only local rank zero writes cgroup and host node records to
+    ``memory/host_<hostname>.jsonl``. Set ``XTUNER_MEMORY_WATCH_ENABLED=1`` to
+    enable monitoring and ``XTUNER_MEMORY_WATCH_INTERVAL`` to a positive
+    interval in seconds. An invalid interval or an initialization failure logs
+    a warning and lets training continue without a trace.
 
     Args:
-        work_dir (Path | str): Training directory containing the memory traces.
+        work_dir (Path | str | None): Training directory containing the memory traces.
 
     Yields:
         None: Control to the training code while monitoring is active, or
@@ -418,25 +515,19 @@ def monitor_rank_memory(work_dir: Path | str) -> Iterator[None]:
     if os.environ.get("XTUNER_MEMORY_WATCH_ENABLED") != "1":
         yield
         return
-    watcher: _MemoryWatch | None = None
-    try:
-        output_dir = (Path(work_dir) / "memory").resolve()
-        rank = os.environ.get("RANK", "unknown")
-        local_rank = os.environ.get("LOCAL_RANK", "unknown")
-        candidate = _MemoryWatch(
-            output_dir / f"rank_{rank}.jsonl",
-            include_cgroup=local_rank == "0",
-            interval_s=float(os.environ.get("XTUNER_MEMORY_WATCH_INTERVAL", "1")),
-        )
-        candidate.__enter__()
-        watcher = candidate
-    except (OSError, ValueError, RuntimeError) as exc:
-        print(f"[XTuner memory watch] disabled: {type(exc).__name__}: {exc}", file=sys.stderr)
-    try:
+    with contextlib.ExitStack() as stack:
+        try:
+            if work_dir is None:
+                work_dir = Path.cwd() / "work_dir"
+            output_dir = (Path(work_dir) / "memory").resolve()
+            rank = os.environ.get("RANK", "unknown")
+            local_rank = os.environ.get("LOCAL_RANK", "unknown")
+            watcher = _MemoryWatch(
+                output_dir / f"rank_{rank}.jsonl",
+                include_cgroup=local_rank == "0",
+                interval_s=float(os.environ.get("XTUNER_MEMORY_WATCH_INTERVAL", _SAMPLE_INTERVAL_S)),
+            )
+            stack.enter_context(watcher)
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"[XTuner memory watch] disabled: {type(exc).__name__}: {exc}", file=sys.stderr)
         yield
-    finally:
-        if watcher is not None:
-            try:
-                watcher.__exit__(None, None, None)
-            except (OSError, RuntimeError) as exc:
-                print(f"[XTuner memory watch] shutdown failed: {type(exc).__name__}: {exc}", file=sys.stderr)

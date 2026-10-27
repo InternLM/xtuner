@@ -1,9 +1,13 @@
 import json
+import os
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
 from xtuner.v1.utils.memory_watch import (
+    _SHUTDOWN_TIMEOUT_S,
+    MemoryEvent,
     _cgroup_dir,
     _MemoryWatch,
     _read_cgroup,
@@ -44,10 +48,31 @@ def test_enabled_monitor_writes_start_and_stop(tmp_path, monkeypatch, local_rank
     records = _records(tmp_path / "memory" / f"rank_{local_rank}.jsonl")
     assert [record["event"] for record in records] == ["start", "stop"]
     assert all(record["rank"] == local_rank and "VmRSS" in record["process"] for record in records)
+    assert all(record["host"] == os.uname().nodename for record in records)
+    assert all("cgroup" not in record and "host_nodes" not in record for record in records)
+
+    host_output = tmp_path / "memory" / f"host_{os.uname().nodename}.jsonl"
     if local_rank == "0":
-        assert all("cgroup" in record and "host_nodes" in record for record in records)
+        host_records = _records(host_output)
+        assert [record["event"] for record in host_records] == ["start", "stop"]
+        assert all(record["host"] == os.uname().nodename for record in host_records)
+        assert all("cgroup" in record and "host_nodes" in record for record in host_records)
     else:
-        assert all("cgroup" not in record and "host_nodes" not in record for record in records)
+        assert not host_output.exists()
+
+
+def test_none_work_dir_falls_back_to_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XTUNER_MEMORY_WATCH_ENABLED", "1")
+    monkeypatch.setenv("XTUNER_MEMORY_WATCH_INTERVAL", "10")
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("LOCAL_RANK", "1")
+
+    with monitor_rank_memory(None):
+        pass
+
+    records = _records(tmp_path / "work_dir/memory/rank_0.jsonl")
+    assert [record["event"] for record in records] == ["start", "stop"]
 
 
 @pytest.mark.parametrize("interval", ["invalid", "0", "-1", "nan", "inf"])
@@ -115,6 +140,39 @@ def test_long_interval_still_joins_sampling_thread(tmp_path):
     assert [record["event"] for record in _records(tmp_path / "rank.jsonl")] == ["start", "stop"]
 
 
+def test_shutdown_timeout_does_not_depend_on_sampling_interval(tmp_path):
+    watcher = _MemoryWatch(tmp_path / "rank.jsonl", include_cgroup=False, interval_s=3600)
+    watcher._thread = Mock()
+
+    with watcher:
+        pass
+
+    watcher._thread.join.assert_called_once_with(timeout=_SHUTDOWN_TIMEOUT_S)
+
+
+def test_short_write_is_retried(tmp_path, monkeypatch):
+    output = tmp_path / "rank.jsonl"
+    watcher = _MemoryWatch(output, include_cgroup=False, interval_s=10)
+    real_write = os.write
+    short_write_done = False
+
+    def short_write_once(fd, payload):
+        nonlocal short_write_done
+        data = bytes(payload)
+        if not short_write_done:
+            short_write_done = True
+            midpoint = len(data) // 2
+            return real_write(fd, data[:midpoint])
+        return real_write(fd, data)
+
+    monkeypatch.setattr("xtuner.v1.utils.memory_watch.os.write", short_write_once)
+    with watcher:
+        watcher._sample(MemoryEvent.PERIODIC)
+
+    assert short_write_done
+    assert [record["event"] for record in _records(output)] == ["start", "periodic", "stop"]
+
+
 @pytest.mark.parametrize("version", [1, 2])
 def test_synthetic_sources_cover_record_and_cgroup_versions(tmp_path, version):
     proc_self = tmp_path / "proc/self"
@@ -173,25 +231,37 @@ def test_synthetic_sources_cover_record_and_cgroup_versions(tmp_path, version):
         node_root=node_root,
     )
     with watcher:
+        watcher._sample(MemoryEvent.PERIODIC)
         _write(events, "oom_kill 3\n")
 
-    start, stop = _records(output)
+    rank_records = _records(output)
+    host_records = _records(tmp_path / f"host_{os.uname().nodename}.jsonl")
+    assert [record["event"] for record in rank_records] == ["start", "periodic", "stop"]
+    assert [record["event"] for record in host_records] == ["start", "periodic", "stop"]
+    assert all(record["host"] == os.uname().nodename for record in rank_records + host_records)
+    assert all("cgroup" not in record and "host_nodes" not in record for record in rank_records)
+
+    start, periodic, stop = rank_records
+    host_start, _, host_stop = host_records
     assert start["pid_starttime_ticks"] == 456
     assert start["cgroup_membership"] == membership.splitlines()
-    assert start["host_node_cpus"] == {"node1": "2-3"}
     assert start["process"]["VmRSS"] == 12 * 1024
     assert start["process"]["Mems_allowed_list"] == "1"
     assert start["smaps_rollup"]["Pss"] == 10 * 1024
     assert start["numa_maps"]["resident_pages_by_node"] == {"N0": 1, "N1": 3}
     assert start["numa_maps"]["resident_bytes_by_node"]["N1"] == 2 * 4096 + 2 * 1024 * 1024
     assert start["numa_maps"]["policy_mappings"] == {"bind:1": 1, "default": 1}
-    assert start["host_nodes"]["node1"]["MemFree"] == 30 * 1024
-    assert start["cgroup"]["version"] == version
-    assert start["cgroup"]["memory.stat"] == {"anon": 200, "file": 100}
-    assert start["cgroup"]["memory.current" if version == 2 else "memory.usage_in_bytes"] == "4096"
-    assert start["cgroup"]["memory.numa_stat_unit"] == ("bytes" if version == 2 else "pages")
-    assert start["cgroup"]["memory.numa_stat"]["anon" if version == 2 else "total"]["N1"] == (
+    assert "numa_maps" not in periodic
+    assert "smaps_rollup" not in periodic
+
+    assert host_start["host_node_cpus"] == {"node1": "2-3"}
+    assert host_start["host_nodes"]["node1"]["MemFree"] == 30 * 1024
+    assert host_start["cgroup"]["version"] == version
+    assert host_start["cgroup"]["memory.stat"] == {"anon": 200, "file": 100}
+    assert host_start["cgroup"]["memory.current" if version == 2 else "memory.usage_in_bytes"] == "4096"
+    assert host_start["cgroup"]["memory.numa_stat_unit"] == ("bytes" if version == 2 else "pages")
+    assert host_start["cgroup"]["memory.numa_stat"]["anon" if version == 2 else "total"]["N1"] == (
         8192 if version == 2 else 3
     )
-    assert start["cgroup"]["cpuset.cpus.effective" if version == 2 else "cpuset.cpus"] == "2-3"
-    assert stop["oom_kill_delta"] == 1
+    assert host_start["cgroup"]["cpuset.cpus.effective" if version == 2 else "cpuset.cpus"] == "2-3"
+    assert host_stop["oom_kill_delta"] == 1
