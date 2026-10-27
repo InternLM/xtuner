@@ -78,10 +78,7 @@ from xtuner.v1.utils.internal_metrics import (
     InternalMetricsRecorder,
     flatten_internal_metrics_for_logs,
 )
-from xtuner.v1.utils.numa_affinity import (
-    format_id_list,
-    plan_numa_binding,
-)
+from xtuner.v1.utils.numa_affinity import try_bind_numa
 
 from .toy_tokenizer import UTF8ByteTokenizer
 
@@ -1529,49 +1526,7 @@ class Trainer:
         set_random_seed(seed)
 
     def _try_bind_numa(self):
-        local_rank = int(os.environ["LOCAL_RANK"])
-        numa_id = None
-        cpu_bound = False
-        initial_cpu_affinity: set[int]
-        try:
-            initial_cpu_affinity = set(os.sched_getaffinity(0))
-            plan = plan_numa_binding(initial_cpu_affinity)
-            if local_rank == 0:
-                log_plan = {
-                    rank: {
-                        "gpu_uuid": entry["gpu_uuid"],
-                        "numa_id": entry["numa_id"],
-                        "allowed_cpu_list": format_id_list(entry["cpu_ids"]),
-                    }
-                    for rank, entry in sorted(plan.items())
-                }
-                logger.info(f"Rank: {self.rank} NUMA CPU rank plan: {log_plan}")
-
-            from numa import memory
-
-            mems_allowed = plan[local_rank]["mems_allowed"]
-            numa_id = plan[local_rank]["numa_id"]
-            os.sched_setaffinity(0, plan[local_rank]["cpu_ids"])
-            cpu_bound = True
-            memory.set_membind_nodes(numa_id)
-        except Exception as exc:
-            if cpu_bound:
-                self._restore_cpu_affinity(initial_cpu_affinity)
-            logger.info(f"Rank: {self.rank} skip numa binding: {type(exc).__name__}: {exc}.")
-            return  # try_bind_numa should not raise exception
-        else:
-            logger.info(
-                f"Rank: {self.rank} success bind process to numa node: {numa_id}; "
-                f"requested_cpu_affinity={format_id_list(plan[local_rank]['cpu_ids'])}, "
-                f"memory_policy=bind:{numa_id}, Mems_allowed_list={format_id_list(mems_allowed)}."
-            )
-
-    def _restore_cpu_affinity(self, initial_cpu_affinity: set[int]) -> None:
-        """Restore initial CPU affinity and log any failure."""
-        try:
-            os.sched_setaffinity(0, initial_cpu_affinity)
-        except OSError as restore_exc:
-            logger.info(f"Rank: {self.rank} failed to restore CPU affinity: {restore_exc}.")
+        try_bind_numa(self.rank)
 
     def _init_dist(self, backend: str | None = None):
         if backend is None:
