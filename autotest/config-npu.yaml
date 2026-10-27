@@ -218,7 +218,7 @@ case:
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cic/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c_cann910_pta291_rl_s1_vllm:v0.5.0-20260917T114217Z
-                pip_package: unset ASCEND_WORK_PATH;pip install -e . --no-deps; pip install more-itertools triton
+                pip_package: unset ASCEND_WORK_PATH;pip install transformers==5.17.0;pip install -e . --no-deps; pip install more-itertools triton
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/gsm8k/train-mini.jsonl
