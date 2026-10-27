@@ -1,94 +1,161 @@
 ---
 name: align-automodel-xtuner-text
-description: Align text-only training accuracy between AutoModel (NVIDIA NeMo Automodel) and XTuner after onboarding a new model. Use when validating that both frameworks produce matching loss/grad-norm on the same model and data, attributing cross-framework loss or grad-norm discrepancies, or re-verifying a numerical fix. Covers alignment checklist, five-stage workflow (smoke → trend compare → localization → same-pack-stream pointwise check → gradient-level re-verify) and a pitfall list to read before running anything.
+description: Align text-only training accuracy between AutoModel (NVIDIA NeMo Automodel) and XTuner after model onboarding. Use to validate same-input loss and gradients, investigate cross-framework numerical discrepancies, or verify a fix. Read the pitfalls first, freeze effective inputs and training semantics, pass a first-step gate, then compare multi-step loss, grad norm, performance and memory. Includes symptom-based diagnostics with conditional examples, not model-specific acceptance thresholds. Not for inference or multimodal alignment.
 ---
 
 # Align AutoModel ↔ XTuner Text Training Accuracy
 
-Turn "both frameworks compute the same thing" into a falsifiable loop: same-setup comparison → layer-by-layer attribution → same-data pointwise check → gradient-level re-verification.
-Reuse the methodology and the pitfalls; do not reuse model-specific defaults, switches, or benefit numbers from previous models.
+Use this order: **freeze inputs → first-step checks → multi-step comparison**.
+Decompose the failing metric before proposing a cause. Reuse diagnostic methods, not another model's
+thresholds, kernel flags, or conclusions.
 
-## Step 0: read the pitfalls first (required, before doing anything)
+## Before starting
 
-Before writing any config or launching any run, read [references/pitfalls.md](references/pitfalls.md) (grouped P1–P5 by stage).
-The P1 (bring-up environment) and P2 (comparison setup) pitfalls decide whether the *first* round of experiments is even valid.
-Check experiment designs against [references/experiment-discipline.md](references/experiment-discipline.md); for instrumentation, decomposition and log parsing read [references/diagnostics.md](references/diagnostics.md).
+Read [pitfalls](references/pitfalls.md) in full before editing configs or launching experiments.
+P1–P5 are categories, not workflow stages. Use [experiment discipline](references/experiment-discipline.md)
+to plan runs and [diagnostics](references/diagnostics.md) when collecting evidence.
+Use [framework anchors](references/anchors.md) to locate the shared data, loss, gradient-norm and probe
+entry points before reading new model code.
+Confirm the authorized machines, data, run budget and output location; this skill grants no resource or data access.
+Before reserving GPUs or launching runs, post an **experiment card** and wait for the user's confirmation:
+objective, predeclared pass/fail criteria, smallest sufficient scale and horizons, prerequisites
+(code/data/machines), and estimated cost and duration.
 
-## Core principles
+## Preparation: freeze the comparison contract and actual inputs
 
-1. **Fully align what can be aligned**: weight directory, data, chat template, global batch size, step count, lr, optimizer semantics (fp32 master), EP degree, dispatcher, activation checkpointing.
-2. **Match what cannot be made bitwise-identical**: per-framework kernel paths (e.g. attention backends) — first prove equivalence inside one framework (endpoint-loss match between two backends), then let each side use its own.
-3. **Keep framework-native behavior**: things like packing algorithms cannot be aligned; keep each implementation and record the difference and its impact.
-4. **Do not force-align**: never change one side's normal path just to match the other; document instead.
+**Input:** both checkouts, checkpoints, configs, data entry points and the requested validation scope.
 
-Write every item into an ✅/🟡/❌ checklist (❌ must state the reason and expected impact — never leave a difference silently).
-Track three layers of truth per knob: **library default / config value / runtime-effective value**; verify the third from logs and source, not from the config file.
+1. Record source revisions and local patches; inspect actual model loading, data, loss, synchronization,
+   optimizer and scheduler paths. Resolve missing inputs or access with the user; do not invent paths.
+2. Build the checklist below. For each item, record **library default / configured / runtime-effective**
+   values, evidence and status: aligned, different-with-explanation, not applicable, or unverified.
+   Unverified semantics are not a pass. Match intended computations, not just option names.
+3. Freeze the order and assignment of actual inputs per logical update and microbatch. Prefer replaying
+   one side's consumed pack stream through a verified adapter; independently produced batches also work
+   if their effective contents match. Verify token IDs, labels, masks, document boundaries, positions and
+   attention context, including rank/shard mapping. Use tensor comparisons or canonical hashes, not just
+   the same seed, sample IDs or label counts. See diagnostics §1.
+4. Choose acceptance metrics, tolerances, short/long horizons and stopping rules **before the measured
+   comparison**. Use the target dtype/backend, trusted references and separate repeatability baselines
+   to justify bounds. There is no universal loss-delta or grad-norm threshold. Do not widen a failed bound
+   after observing results; record the failure and validate any revised criterion on a fresh comparison.
+5. Check dependencies and the smallest representative forward/backward path. Do not require a multi-update
+   smoke run before the first-step gate. A reduced model must exercise the relevant layer types; its
+   result does not validate omitted layers or the full topology.
 
-## Acceptance criteria (weakest → strongest; declare the level up front)
-
-| Level | Criterion | Typical magnitude |
-|---|---|---|
-| Forward parity | first-step loss Δ on identical input | ≤ 0.003 (same pack stream: 0.002) |
-| Gradient parity | first-step pre-clip grad-norm ratio | within 0.5% (typical replays: 0.04–0.15%) |
-| Short-horizon trajectory | per-step loss Δ over ~20 steps, same schedule | ≤ 0.003 (observed 0.0005–0.0022) |
-| Trend parity | 200+ steps: curve shape / transition windows | same windows, same shape |
-| Long-horizon statistics | spike counts, envelopes, statistics only | pointwise pairing diverges by design |
-
-Magnitudes are **typical observations from past replays, not hard thresholds**: replays across
-environment stacks (torch/triton/kernel versions) carry ~±0.2% noise. When a single-step ratio drifts
-slightly past the typical range, first check whether the loss trajectory still matches pointwise before
-calling it misalignment (observed case: one step's gn ratio 0.9985 while the 20-step loss deltas
-reproduced to the 4th decimal — stack noise, not divergence).
-
-**Loss parity ≠ gradient parity** (P3.1): a numerical-path verdict requires a gradient-level criterion; the first-step pre-clip grad norm is the most sensitive probe.
-
-## Five-stage workflow
-
-Proceed in order; each stage has its own gate, do not advance until it passes.
-
-### Stage 1: bring-up and setup freeze
-
-- Bring one side up on a reduced-layer/small model, then the other; both frameworks read the **same single weight directory** (including any MTP-stripped variant).
-- Freeze the environment: conda env, kernel commits, dependency builds and their **parameter signatures** (not version numbers, P1.4), `LD_LIBRARY_PATH`.
-- Fill the ✅/🟡/❌ checklist; pre-clear the recurring traps: fp32 master (P1.1), constant lr (P1.2), pinned kernel commits (P1.3).
-- Output: one ~20-step smoke log per side + the alignment checklist.
-
-### Stage 2: same-setup trend comparison
-
-- ~200 steps; extract four metrics per step: loss, grad_norm, s/step, peak memory.
-- Align backend stacks before comparing memory/throughput (P2.3), otherwise conclusions are artifacts.
-- Classify every gap as: accounting difference / implementation fingerprint / real bug — then enter Stage 3.
-
-### Stage 3: discrepancy localization (decompose first, hypothesize second)
-
-- **Per-parameter-group grad-norm decomposition before any guessing**: whichever group dominates the squared difference identifies the path to inspect.
-- Single-variable A/B to eliminate switchable items (backends, EP, pack length, precision stack); one variable per arm.
-- Discrimination matrix: one entry script, same data, flip exactly one suspect variable (see references/diagnostics.md).
-- Record excluded candidates and retracted hypotheses — they prevent repeated work later.
-
-### Stage 4: same pack stream, pointwise verdict
-
-- Dump the pack sequence one side actually consumed (keys/shapes/label totals/SHA), write an adapter, feed the other side.
-- **Prevent double shift** (P4.1): pre-shifted labels must bypass the native collator; verify loss normalization equivalence (P4.2).
-- CPU full-pass check: per-step `num_label_tokens` equal to the source log → offline pack order = production batch order; then a ~10-step GPU smoke.
-- After this stage, first-step loss Δ is pure kernel-level numeric difference; per-step Δ no longer contains data-organization noise.
-
-### Stage 5: gradient-level re-verify
-
-- First-step pre-clip grad norm, per-parameter decomposition, with the self-check "sum of group squares == total norm square".
-- Fix acceptance triple: single-step ratio back in range; first-few-step ratios in range; ~20-step per-step loss Δ under a same warmup schedule.
-- Step numbering and lr logging differ by one phase across frameworks (P2.4); align in code, not in figure captions.
-
-## Reporting
-
-- Conclusion first; every gap carries attribution and an evidence chain (list of exclusions); open items labeled as open.
-- Tabulate failed attempts (change → failure point → progress → attribution).
-- Figure names carry the setup (pack length, step count, arm names); after in-code step alignment, do not explain numbering in the figure.
-
-## Resources
-
-| What you are about to do | Read |
+| Contract area | Verify on both sides |
 |---|---|
-| Pitfall list (required before starting) | [references/pitfalls.md](references/pitfalls.md) |
-| Rules for designing/executing comparison experiments | [references/experiment-discipline.md](references/experiment-discipline.md) |
-| Instrumentation, decomposition, pack-stream tooling, log parsing | [references/diagnostics.md](references/diagnostics.md) |
+| Model and state | Checkpoint identity and loaded tensors, architecture/layer types, buffers, frozen/tied parameters, auxiliary heads/losses, optimizer state if resuming |
+| Data and objective | Tokenizer/template, ordered effective batches, label shift/masking, boundaries/positions, loss terms and weights, global normalization |
+| Update semantics | Global batch and accumulation, sync/unscale/clip order, optimizer groups and master/state precision, actual applied lr per update, skipped updates |
+| Numerics and execution | Parameter/compute/accumulation/reduction dtypes, quantization/scales, kernels/builds, parallel mesh, checkpointing/offload, training mode and RNG behavior |
+
+**Output / gate:** a recorded contract, CPU-verified input manifest, consumer-side probe plan, and
+predeclared acceptance criteria. Device-only fields remain pending until the first-step probe checks them;
+unresolved input or loss semantics block a parity verdict, not the diagnostic probe needed to resolve them.
+If equivalence cannot be established, stop the numerical-parity path. A separately labeled native-pipeline
+benchmark may still be useful, but is not pointwise accuracy evidence.
+
+## Stage 1: compare the first training step
+
+**Input:** the prepared contract and the same initial state on both sides.
+
+- Run this gate **first in the target production configuration**, with its parallelism, kernels,
+  checkpointing and offload enabled; acceptance always comes from that configuration. Only when it fails,
+  localize with a reduced baseline: single rank, no EP/SP, no compile, no offload, then re-enable one
+  feature at a time and repeat the gate. A discrepancy already present in the reduced baseline points away
+  from the parallel stack; one that appears only after a feature is enabled points at that feature. A
+  passing reduced run is a localization result, never the parity verdict.
+- Run one logical update's complete forward/backward and gradient accumulation. Measure loss and gradients
+  **before any optimizer update**, after required synchronization and loss-scaler unscaling, before clipping.
+  “First step” denotes this computation, not a particular printed `step=0` or `Step=1`.
+- Complete pending consumer-side input/context checks before judging parity. Compare finite loss values
+  and loss components under the same normalization. Require finite gradients/norms, and compare global
+  pre-clip grad norms using the same unique parameter population and distributed accounting.
+- Treat loss and total norm as screens, not proofs of gradient equality. For a gradient-parity claim,
+  also compare mapped gradient tensors (elementwise error, relative L2, cosine as appropriate); state
+  coverage if only selected tensors fit the budget. A norm-only result must be labeled norm-only.
+- Keep stochastic behavior equivalent where possible; equal seeds alone do not guarantee equal dropout
+  masks or RNG consumption across frameworks. If this prevents a pointwise verdict, report the limitation
+  and design a controlled probe rather than silently changing the production configuration.
+
+**Output / gate:** a first-step metric table, tensor coverage and pass/fail/unverified against the declared
+bounds. On failure, use the routing table below and re-run this gate after the fix. Do not launch a long
+alignment run to hide an unresolved first-step discrepancy; retain failed logs as diagnostic evidence.
+
+## Stage 2: compare multi-step training
+
+**Input:** a passed first-step gate at the declared evidence level.
+
+1. **Short-horizon update check:** run a predeclared short pair (for example, about 20 updates) from the
+   same initial state and input sequence. Compare per-update loss and pre-clip grad norm, actual applied lr,
+   and selected gradients/parameter updates where required. This catches optimizer, clipping, scheduler,
+   accumulation and state differences that an update-free first step cannot expose.
+2. **Long-horizon comparison:** only after the short check passes, run the agreed horizon (for example,
+   a few hundred updates). Collect **loss, grad norm, performance and memory**. Keep pointwise comparisons
+   where the input/update contract supports them; add predeclared statistics such as spike counts and
+   envelopes. Long trajectories do not have to diverge. Do not dismiss a new gap as “chaos” without checking
+   inputs, lr, states and repeatability, or replace a failed pointwise criterion with statistics after the fact.
+3. **Performance accounting:** distinguish a controlled matched-stack comparison from a native-stack
+   benchmark. Record backend/topology/checkpointing/offload differences in the latter; do not attribute
+   the whole gap to the framework alone. Separate startup/compilation from steady-state timing and declare
+   the token denominator, memory unit, allocated/reserved/device metric, and measured window.
+
+**Output / gate:** aligned per-update records and plots, criterion results, explained differences and open
+items. A short-run pass is not long-run validation; a native-pipeline trend match is not numerical parity.
+If the requested scope ends at the short check, stop there and state that limit.
+
+## Diagnose differences: decompose first, hypothesize second
+
+This table chooses the **next observation**, not a root cause. Confirm an example's applicability in the
+current implementation before testing it; no listed example is required for every model.
+
+| Symptom | First decomposition/check | Conditional example and confirmation |
+|---|---|---|
+| First-step loss differs | Recheck effective inputs and loss terms; locate the earliest mismatch in embeddings → layer outputs → logits → loss | A replay adapter may shift labels twice: compare labels at the loss input |
+| Loss is close, grad norm differs | Audit norm/scaling/sync accounting; decompose gradients by mapped parameter group, then inspect backward boundaries | If fused CE is used, test hidden-state-gradient accumulation against a reference; a matching head norm alone does not prove this cause |
+| Norms match but gradient/update checks fail | Compare gradient elements/directions and mapped parameter updates | Equal magnitudes can hide sign, layout or parameter-mapping errors |
+| First step passes, later steps drift or loss stalls | Find the earliest differing update: inputs, applied lr, clipping, optimizer state and weight deltas | Check total-step-dependent warmup or low-precision update rounding only if that path is present |
+| Spikes differ or cannot be reproduced | Align input/update windows, decompose loss/gradient contributors, check repeats within budget | A parameter group dominating a spike is a propagation location, not necessarily its cause; no observed spike means “not reproduced in this scope” |
+| Performance or memory differs | Split timing by compute/communication/optimizer/data/recompute; memory by state/activations/workspace/allocator | Compare backend and cache state before using traces to isolate a bottleneck; grad-norm decomposition is not a performance diagnosis |
+
+Test a specific hypothesis with one-variable A/B comparisons at the earliest discrepant boundary.
+Document supporting and contradicting evidence, exclusions and retracted hypotheses. See diagnostics
+for input replay, gradient accounting, controlled experiments and worked examples.
+
+## Reusable helpers
+
+- `scripts/compare_step_metrics.py` pairs per-update metrics from two text logs or JSONL trackers into
+  `<prefix>.csv` and `<prefix>.json` (diff = A − B), reporting unmatched updates and duplicates. Supply
+  regexes/keys and offsets derived from source; the script never shifts curves until they overlap.
+  `--atol/--rtol` encode the predeclared criterion and set the exit code; without them it reports
+  differences only. `--plot` is optional and requires matplotlib. Run it from the repository root, and
+  validate each regex against real log lines first.
+- Self-test with synthetic logs, no training run needed:
+  `python .claude/skills/align-automodel-xtuner-text/scripts/test_compare_step_metrics.py`.
+- Deliver the result with [the report template](references/report-template.md).
+
+## Report
+
+Lead with the verdict level actually reached; never let a first-step screen be retold as full alignment.
+
+| Verdict | What was demonstrated |
+|---|---|
+| First-step, norm-only | Same-input first-step loss and global pre-clip grad norm within declared bounds; gradient vectors not compared |
+| First-step, tensor-level | The above plus mapped gradient tensors, with their coverage stated |
+| Short horizon | The above plus the declared short update pair (loss, grad norm, applied lr, updates as required) |
+| Long horizon | The above plus the agreed long run, with pointwise criteria and/or predeclared statistics |
+| Native-stack benchmark only | Performance/memory or trend comparison without same-input parity; answers a different question, not a higher level |
+
+Then include this checklist, marking anything not done as **not verified** instead of omitting it:
+
+- Contract with default/configured/runtime-effective values, plus the items still unresolved.
+- Actual input evidence: tensor or canonical-hash comparison and its coverage, not counts alone.
+- First-step table: loss and components, global pre-clip grad norm, declared bounds, pass/fail/unverified.
+- Gradient evidence type (norm-only or mapped tensors) and tensor coverage.
+- Horizons actually run, per-update records and plots, with units, timing windows and rank aggregation.
+- Source and run identities, an attempt ledger (change → observation → next decision), failures and open items.
+
+Save per-step data and line plots with setup-specific names; derive step/lr mappings from source in the
+parser, not by shifting curves until they overlap. Keep restricted data and private run details out of
+public reports and this reusable skill.
