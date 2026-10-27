@@ -39,33 +39,48 @@ Require these values from the request or existing environment; ask for missing v
 - `XTUNER_TEST_PYTHON`: Python interpreter for tests.
 
 Do not infer personal or cluster paths. If selected tests need shared assets, also require the
-appropriate `CI_SHARE_MODEL` and `CI_SHARE_DATA` values.
+appropriate `CI_SHARE_MODEL` and `CI_SHARE_DATA` values. The user-provided `LMDEPLOY_DIR` is
+authoritative; never replace it with a path from another script.
+
+Do not source `ci/scripts/CI_ENV.sh` directly because it runs package installation and other
+commands. Create a temporary script containing only its environment-variable exports, excluding
+its `PYTHONPATH` assignment:
 
 ```bash
 cd "$XTUNER_DIR"
 export PATH="$(dirname "$XTUNER_TEST_PYTHON"):$PATH"
 export PYTHONNOUSERSITE=1
-export PYTHONPATH="$XTUNER_DIR:$LMDEPLOY_DIR:${PYTHONPATH:-}"
 export XTUNER_MAX_CONCURRENCY="${XTUNER_MAX_CONCURRENCY:-1024}"
 export UVICORN_LOG_LEVEL="${UVICORN_LOG_LEVEL:-INFO}"
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
-export LM_DEPLOY="$LMDEPLOY_DIR"
-source "$XTUNER_DIR/ci/scripts/CI_ENV.sh"
-```
 
-Setting `PATH` first makes `CI_ENV.sh` use the requested Python and pip. The script installs
-project dependencies and may modify that environment. Verify both repositories, the interpreter,
-and required assets; report any missing prerequisite instead of claiming tests ran.
-
-Keep pytest state separate for each worktree:
-
-```bash
 REPO_ID="$(realpath "$XTUNER_DIR" | sha256sum | cut -d' ' -f1)"
 STATE_DIR="/tmp/xtuner-unit-test/$REPO_ID"
 CACHE_DIR="$STATE_DIR/pytest-cache"
 FAILURES_FILE="$STATE_DIR/last_failed.json"
+ENV_SCRIPT="$STATE_DIR/ci-env.sh"
 mkdir -p "$CACHE_DIR"
+
+"$XTUNER_TEST_PYTHON" - "$XTUNER_DIR/ci/scripts/CI_ENV.sh" "$ENV_SCRIPT" <<'PY'
+from pathlib import Path
+import sys
+
+source, destination = sys.argv[1:]
+lines = []
+for line in Path(source).read_text().splitlines(keepends=True):
+    if line.startswith("export ") and not line.startswith("export PYTHONPATH="):
+        if "$(" in line or "`" in line:
+            raise ValueError("Refusing to copy an executable environment assignment")
+        lines.append(line)
+Path(destination).write_text("".join(lines))
+PY
+
+source "$ENV_SCRIPT"
+export PYTHONPATH="$XTUNER_DIR:$LMDEPLOY_DIR:${PYTHONPATH:-}"
 ```
+
+The temporary script must not run `CI_ENV.sh`, `pip`, `proxy_off`, version checks, or any other
+non-export command. Verify both repositories, the interpreter, and required assets; report any
+missing prerequisite instead of claiming tests ran.
 
 A nonempty valid `FAILURES_FILE` is a JSON object keyed by failed pytest nodeids. If it is absent,
 empty, or malformed, there is no reusable failure set.
