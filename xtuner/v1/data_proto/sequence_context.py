@@ -391,7 +391,8 @@ class SequenceContext:
                 if local_mm_token_type_ids is None:
                     if seq_ctx.pixel_values is not None or seq_ctx.pixel_values_videos is not None:
                         raise ValueError("Cannot pack a visual sequence without mm_token_type_ids")
-                    # Text and padding occupy sequence positions too; preserve their offsets.
+                    # 纯文本和 padding 也占 token 位置，按该段完整长度补 0（文本模态）。
+                    # 保留这些位置，才能让拼接后的模态标记与 input_ids/inputs_embeds 同长、同序。
                     local_mm_token_type_ids = mm_reference.new_zeros(token_shape)
                 elif local_mm_token_type_ids.shape != token_shape:
                     raise ValueError(
