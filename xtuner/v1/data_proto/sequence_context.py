@@ -344,6 +344,8 @@ class SequenceContext:
         pixel_values_videos = []
         video_grid_thw = []
         mm_token_type_ids = []
+        # 提前找到首个非空模态标记张量：pack 开头也可能是纯文本或 padding。
+        # 后续补零沿用它的 dtype/device；若整个 pack 都没有模态标记，则保持原行为。
         mm_reference = next(
             (ctx.mm_token_type_ids for ctx in sequence_context_list if ctx.mm_token_type_ids is not None), None
         )
