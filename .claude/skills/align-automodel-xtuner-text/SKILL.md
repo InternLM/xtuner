@@ -123,6 +123,18 @@ Test a specific hypothesis with one-variable A/B comparisons at the earliest dis
 Document supporting and contradicting evidence, exclusions and retracted hypotheses. See diagnostics
 for input replay, gradient accounting, controlled experiments and worked examples.
 
+## Reusable helpers
+
+- `scripts/compare_step_metrics.py` pairs per-update metrics from two text logs or JSONL trackers into
+  `<prefix>.csv` and `<prefix>.json` (diff = A − B), reporting unmatched updates and duplicates. Supply
+  regexes/keys and offsets derived from source; the script never shifts curves until they overlap.
+  `--atol/--rtol` encode the predeclared criterion and set the exit code; without them it reports
+  differences only. `--plot` is optional and requires matplotlib. Run it from the repository root, and
+  validate each regex against real log lines first.
+- Self-test with synthetic logs, no training run needed:
+  `python .claude/skills/align-automodel-xtuner-text/scripts/test_compare_step_metrics.py`.
+- Deliver the result with [the report template](references/report-template.md).
+
 ## Report
 
 Lead with the verdict level actually reached; never let a first-step screen be retold as full alignment.
