@@ -5,9 +5,9 @@ Drives liger-ascend's triton kernels directly (no runtime patching of
 liger_kernel). The stock ascend plain CE kernel miscomputes ``loss_1d`` in
 multi-rank training while its matmul is correct, so the forward here computes
 the loss with torch ``F.cross_entropy`` on the matmul logits and never runs
-the stock CE kernel. The backward uses the stock no-weight kernel with
+the stock CE kernel. The backward uses an in-package no-weight kernel with
 ``lse = loss_1d + logits[target]`` (``HAS_LSE=False``), keeping liger's fused
-backward (no full grad-logits materialisation).
+backward without an intermediate low-precision store before target subtraction.
 
 Supports the plain CE surface ``ce_loss.py`` uses: reduction ``'sum'``/
 ``'none'``, ``ignore_index`` and ``accum_dtype=torch.float32``. Other extras
@@ -42,14 +42,15 @@ def _ascend_ops() -> SimpleNamespace:
     """liger-ascend kernels/helpers by direct import (no module patching)."""
     from liger_kernel.ops.backends._ascend.ops.cross_entropy import (
         _make_ce_stats_buffer,
-        liger_cross_entropy_backward_kernel_no_weight,
     )
     from liger_kernel.ops.backends._ascend.ops.fused_linear_cross_entropy import get_optimal_block_size
     from liger_kernel.ops.utils import amp_custom_bwd, amp_custom_fwd, get_npu_core_count
 
+    from .npu_ce import cross_entropy_backward_kernel_no_weight
+
     return SimpleNamespace(
         make_ce_stats_buffer=_make_ce_stats_buffer,
-        bwd_kernel_no_weight=liger_cross_entropy_backward_kernel_no_weight,
+        bwd_kernel_no_weight=cross_entropy_backward_kernel_no_weight,
         get_optimal_block_size=get_optimal_block_size,
         get_npu_core_count=get_npu_core_count,
         amp_custom_fwd=amp_custom_fwd,
