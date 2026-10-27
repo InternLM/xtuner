@@ -1,6 +1,8 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 import torch
+from torch.distributed.tensor import DTensor
 from torch.optim.adam import adam as torch_adam
 
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
@@ -60,6 +62,65 @@ class SwapAdamW(AdamW):
         """Keep the canonical optimizer state on the host."""
         return False
 
+    @torch.no_grad()
+    def load_state_dict(self, state_dict: Mapping[str, Any]) -> None:
+        """Load into the preallocated pinned host buffers in place.
+
+        Follows the Optimizer.load_state_dict protocol (pre/post hooks, id map, in-place group update) but never
+        delegates to torch.optim.AdamW: the official loader replaces state/group objects and casts moments to the
+        parameter device, which would drop pin_memory and the aliases held by the swap maps. copy_ converts floating-
+        point dtypes instead. An empty state explicitly resets history (the engine's args-only load).
+        """
+        state_dict = dict(state_dict)
+        for pre_hook in self._optimizer_load_state_dict_pre_hooks.values():
+            result = pre_hook(self, state_dict)
+            if result is not None:
+                state_dict = result
+
+        saved_groups = state_dict["param_groups"]
+        if len(saved_groups) != len(self.param_groups):
+            raise ValueError(
+                "loaded state dict contains a parameter group that doesn't match the size of optimizer's group"
+            )
+
+        id_map = {
+            old_id: param
+            for saved_group, group in zip(saved_groups, self.param_groups)
+            for old_id, param in zip(saved_group["params"], group["params"])
+        }
+        saved_state = state_dict["state"]
+        if saved_state and set(saved_state) != set(id_map):
+            raise ValueError("loaded state dict contains a parameter state that doesn't match any parameter")
+
+        for param_id, param in id_map.items():
+            target_state = self.state[param]
+            # amsgrad=False keeps None placeholders for max_exp_avg_sq; they are not
+            # part of the state contract, so ignore None entries on both sides.
+            expected_keys = {key for key, value in target_state.items() if value is not None}
+            if saved_state:
+                source_state = saved_state[param_id]
+                if {key for key, value in source_state.items() if value is not None} != expected_keys:
+                    raise ValueError(
+                        f"loaded state dict has incompatible optimizer state keys for parameter {param_id}: "
+                        f"got {sorted(source_state)}, expected {sorted(expected_keys)}"
+                    )
+                for key in expected_keys:
+                    target = self._to_local_tensor(target_state[key])
+                    source = self._to_local_tensor(source_state[key])
+                    assert isinstance(source, torch.Tensor)
+                    target.copy_(source)
+            else:
+                for key in expected_keys:
+                    self._to_local_tensor(target_state[key]).zero_()
+
+        for group, saved_group in zip(self.param_groups, saved_groups):
+            # In-place update keeps the group objects referenced by _param_to_group_map.
+            group.update({key: value for key, value in saved_group.items() if key != "params"})
+            # Fall back to AdamW semantics when the checkpoint predates this key.
+            group["decoupled_weight_decay"] = bool(saved_group.get("decoupled_weight_decay", True))
+        for post_hook in self._optimizer_load_state_dict_post_hooks.values():
+            post_hook(self)
+
     @staticmethod
     def _to_local_tensor(tensor: torch.Tensor) -> torch.Tensor:
         if hasattr(tensor, "to_local"):
@@ -92,10 +153,18 @@ class SwapAdamW(AdamW):
                         cpu_state_dtensor[key] = None
                         cpu_state[key] = None
                     else:
-                        cpu_tensor = torch.zeros_like(local_param, memory_format=torch.preserve_format)
-                        cpu_tensor = cpu_tensor.to(device="cpu", non_blocking=True)
-                        cpu_tensor = cpu_tensor.pin_memory()
-                        cpu_state_dtensor[key] = cpu_tensor
+                        # Preserve global metadata so DCP saves every rank's shard.
+                        if isinstance(param, DTensor):
+                            state_tensor = torch.empty_like(param, device="cpu", pin_memory=True)
+                            assert isinstance(state_tensor, DTensor)
+                            cpu_tensor = state_tensor.to_local()
+                            cpu_tensor.zero_()
+                            cpu_state_dtensor[key] = state_tensor
+                        else:
+                            cpu_tensor = torch.zeros_like(
+                                local_param, device="cpu", memory_format=torch.preserve_format
+                            ).pin_memory()
+                            cpu_state_dtensor[key] = cpu_tensor
                         cpu_state[key] = cpu_tensor
 
                 # Keep per-parameter step semantics consistent with torch.optim.AdamW.
