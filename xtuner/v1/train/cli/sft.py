@@ -17,6 +17,7 @@ from cyclopts.group import Group  # noqa: E402
 from xtuner.v1.train.arguments import TrainingArguments  # noqa: E402
 from xtuner.v1.train.trainer import Trainer  # noqa: E402
 from xtuner.v1.utils import Config  # noqa: E402
+from xtuner.v1.utils.memory_watch import monitor_rank_memory  # noqa: E402
 from xtuner.v1.utils.misc import monkey_patch_hf_modules_cache  # noqa: E402
 
 
@@ -44,8 +45,9 @@ def main(
             raise ValueError("Must specify either `config` or `arguments`.")
         trainer_cfg = Config.fromfile(config)["trainer"]
 
-    trainer = Trainer.from_config(trainer_cfg)
-    trainer.fit()
+    with monitor_rank_memory(trainer_cfg.work_dir):
+        trainer = Trainer.from_config(trainer_cfg)
+        trainer.fit()
 
     # fit() ends with a global barrier; on abnormal exit this is skipped and the shared
     # cache keeps its last consistent state.
