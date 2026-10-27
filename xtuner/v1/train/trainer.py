@@ -1530,11 +1530,20 @@ class Trainer:
 
     def _data_iter(self):
         # 共用一份取数循环：持有 DataLoader 的 rank 执行原 next/跨 epoch 逻辑，follower 等广播。
+        # 控制流伪代码 / Fetch-control pseudocode (not extra work each step):
+        #   leader: seed_draw = will_create_underlying_iterator; batch = original_fetch()
+        #   all ranks: batch, epoch, seed_draw = broadcast_batch(...)
+        #   follower: if seed_draw: draw_one_cpu_int64_and_discard()
+        # seed_draw 只传“是否发生一次抽取”，不传 seed 数值，也不创建 follower worker。
+        # Transmit a draw event, not a seed value; followers do not create data workers.
         # One fetching loop shared by leaders and followers (R2): ranks owning a DataLoader
         # run the original next/StopIteration/set_epoch sequence; followers contribute
         # data=None and receive the leader's complete batch from the per-step broadcast.
         def _iterator_seed_draw() -> bool:
             # 只在真正新建底层 iterator 时抽 base_seed；persistent workers 跨 epoch 复用时不重抽。
+            # 首次创建要抽；非 persistent 每个 epoch 重建要抽；重启后新建仍按同一规则判断。
+            # Draw on first creation and each non-persistent rebuild, including a fresh
+            # iterator after process restart; persistent-worker reuse does not redraw.
             # A main-process base_seed is consumed only when a fresh iterator is really
             # created: persistent workers keep _iterator alive across epochs (no redraw),
             # otherwise every iter() rebuilds one and draws again.
@@ -1571,6 +1580,15 @@ class Trainer:
                     seed_draw=seed_draw,
                 )
                 if self._dataloader is None and seed_draw:
+                    # BASE 未传独立 loader generator，创建底层 iterator 会从默认 CPU RNG
+                    # 抽一次 int64 base_seed。follower 不创建 iterator，故“空转”同一次抽取，
+                    # 结果直接丢弃，使本 rank 的 CPU RNG 保持原推进方式；不是重设 seed，
+                    # 也不是每步抽取，更不是恢复全部 RNG 状态或强制各 rank 的 RNG 相同。
+                    # BASE uses the default CPU RNG (no dedicated loader generator) to draw
+                    # one int64 base_seed per new underlying iterator. Followers skip that
+                    # creation, so perform the same draw and discard its value. This preserves
+                    # each rank's RNG progression; it does not reseed, draw on every step,
+                    # restore all RNG states, or force different ranks to share a state.
                     torch.empty((), dtype=torch.int64).random_()
             yield data
             # 当前数据路径仅在 iterator 创建事件补抽；普通取下一批不重复补抽。
