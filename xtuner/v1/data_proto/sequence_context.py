@@ -381,23 +381,23 @@ class SequenceContext:
             if seq_ctx.video_grid_thw is not None:
                 video_grid_thw.append(seq_ctx.video_grid_thw)
             if mm_reference is not None:
-                token_types = seq_ctx.mm_token_type_ids
+                local_mm_token_type_ids = seq_ctx.mm_token_type_ids
                 if seq_ctx.input_ids is not None:
                     token_shape = seq_ctx.input_ids.shape
                 elif seq_ctx.inputs_embeds is not None:
                     token_shape = seq_ctx.inputs_embeds.shape[:2]
                 else:
                     raise ValueError("Packing modality IDs requires input_ids or inputs_embeds for every sequence")
-                if token_types is None:
+                if local_mm_token_type_ids is None:
                     if seq_ctx.pixel_values is not None or seq_ctx.pixel_values_videos is not None:
                         raise ValueError("Cannot pack a visual sequence without mm_token_type_ids")
                     # Text and padding occupy sequence positions too; preserve their offsets.
-                    token_types = mm_reference.new_zeros(token_shape)
-                elif token_types.shape != token_shape:
+                    local_mm_token_type_ids = mm_reference.new_zeros(token_shape)
+                elif local_mm_token_type_ids.shape != token_shape:
                     raise ValueError(
-                        f"mm_token_type_ids shape {token_types.shape} does not match token shape {token_shape}"
+                        f"mm_token_type_ids shape {local_mm_token_type_ids.shape} does not match token shape {token_shape}"
                     )
-                mm_token_type_ids.append(token_types)
+                mm_token_type_ids.append(local_mm_token_type_ids)
             if seq_ctx.rollout_routed_experts is not None:
                 rollout_routed_experts.append(seq_ctx.rollout_routed_experts)
             offload_rollout_routed_experts = offload_rollout_routed_experts or seq_ctx.offload_rollout_routed_experts
