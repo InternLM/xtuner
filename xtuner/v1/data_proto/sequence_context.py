@@ -344,6 +344,9 @@ class SequenceContext:
         pixel_values_videos = []
         video_grid_thw = []
         mm_token_type_ids = []
+        mm_reference = next(
+            (ctx.mm_token_type_ids for ctx in sequence_context_list if ctx.mm_token_type_ids is not None), None
+        )
 
         for seq_ctx in sequence_context_list:
             assert seq_ctx.sequence_parallel_mesh is None
@@ -375,8 +378,24 @@ class SequenceContext:
                 pixel_values_videos.append(seq_ctx.pixel_values_videos)
             if seq_ctx.video_grid_thw is not None:
                 video_grid_thw.append(seq_ctx.video_grid_thw)
-            if seq_ctx.mm_token_type_ids is not None:
-                mm_token_type_ids.append(seq_ctx.mm_token_type_ids)
+            if mm_reference is not None:
+                token_types = seq_ctx.mm_token_type_ids
+                if seq_ctx.input_ids is not None:
+                    token_shape = seq_ctx.input_ids.shape
+                elif seq_ctx.inputs_embeds is not None:
+                    token_shape = seq_ctx.inputs_embeds.shape[:2]
+                else:
+                    raise ValueError("Packing modality IDs requires input_ids or inputs_embeds for every sequence")
+                if token_types is None:
+                    if seq_ctx.pixel_values is not None or seq_ctx.pixel_values_videos is not None:
+                        raise ValueError("Cannot pack a visual sequence without mm_token_type_ids")
+                    # Text and padding occupy sequence positions too; preserve their offsets.
+                    token_types = mm_reference.new_zeros(token_shape)
+                elif token_types.shape != token_shape:
+                    raise ValueError(
+                        f"mm_token_type_ids shape {token_types.shape} does not match token shape {token_shape}"
+                    )
+                mm_token_type_ids.append(token_types)
             if seq_ctx.rollout_routed_experts is not None:
                 rollout_routed_experts.append(seq_ctx.rollout_routed_experts)
             offload_rollout_routed_experts = offload_rollout_routed_experts or seq_ctx.offload_rollout_routed_experts
