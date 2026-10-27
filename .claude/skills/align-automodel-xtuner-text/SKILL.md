@@ -14,7 +14,12 @@ thresholds, kernel flags, or conclusions.
 Read [pitfalls](references/pitfalls.md) in full before editing configs or launching experiments.
 P1–P5 are categories, not workflow stages. Use [experiment discipline](references/experiment-discipline.md)
 to plan runs and [diagnostics](references/diagnostics.md) when collecting evidence.
+Use [framework anchors](references/anchors.md) to locate the shared data, loss, gradient-norm and probe
+entry points before reading new model code.
 Confirm the authorized machines, data, run budget and output location; this skill grants no resource or data access.
+Before reserving GPUs or launching runs, post an **experiment card** and wait for the user's confirmation:
+objective, predeclared pass/fail criteria, smallest sufficient scale and horizons, prerequisites
+(code/data/machines), and estimated cost and duration.
 
 ## Preparation: freeze the comparison contract and actual inputs
 
@@ -55,6 +60,12 @@ benchmark may still be useful, but is not pointwise accuracy evidence.
 
 **Input:** the prepared contract and the same initial state on both sides.
 
+- Run this gate **first in the target production configuration**, with its parallelism, kernels,
+  checkpointing and offload enabled; acceptance always comes from that configuration. Only when it fails,
+  localize with a reduced baseline: single rank, no EP/SP, no compile, no offload, then re-enable one
+  feature at a time and repeat the gate. A discrepancy already present in the reduced baseline points away
+  from the parallel stack; one that appears only after a feature is enabled points at that feature. A
+  passing reduced run is a localization result, never the parity verdict.
 - Run one logical update's complete forward/backward and gradient accumulation. Measure loss and gradients
   **before any optimizer update**, after required synchronization and loss-scaler unscaling, before clipping.
   “First step” denotes this computation, not a particular printed `step=0` or `Step=1`.
@@ -114,9 +125,25 @@ for input replay, gradient accounting, controlled experiments and worked example
 
 ## Report
 
-Lead with the result and its scope: first-step screen, gradient coverage, short trajectory, long horizon,
-and/or native-stack benchmark. Include the contract, actual input evidence, declared vs observed metrics,
-source/run identities and limitations. Tabulate attempts as change → observation → next decision.
+Lead with the verdict level actually reached; never let a first-step screen be retold as full alignment.
+
+| Verdict | What was demonstrated |
+|---|---|
+| First-step, norm-only | Same-input first-step loss and global pre-clip grad norm within declared bounds; gradient vectors not compared |
+| First-step, tensor-level | The above plus mapped gradient tensors, with their coverage stated |
+| Short horizon | The above plus the declared short update pair (loss, grad norm, applied lr, updates as required) |
+| Long horizon | The above plus the agreed long run, with pointwise criteria and/or predeclared statistics |
+| Native-stack benchmark only | Performance/memory or trend comparison without same-input parity; answers a different question, not a higher level |
+
+Then include this checklist, marking anything not done as **not verified** instead of omitting it:
+
+- Contract with default/configured/runtime-effective values, plus the items still unresolved.
+- Actual input evidence: tensor or canonical-hash comparison and its coverage, not counts alone.
+- First-step table: loss and components, global pre-clip grad norm, declared bounds, pass/fail/unverified.
+- Gradient evidence type (norm-only or mapped tensors) and tensor coverage.
+- Horizons actually run, per-update records and plots, with units, timing windows and rank aggregation.
+- Source and run identities, an attempt ledger (change → observation → next decision), failures and open items.
+
 Save per-step data and line plots with setup-specific names; derive step/lr mappings from source in the
 parser, not by shifting curves until they overlap. Keep restricted data and private run details out of
 public reports and this reusable skill.
