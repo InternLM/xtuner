@@ -94,7 +94,7 @@ all = [
   "parametrize",
   "mathruler",
   "pylatexenc",
-  "flash-linear-attention==0.4.2"
+  "flash-linear-attention==0.5.2"
 ]
 
 [tool.mypy]
