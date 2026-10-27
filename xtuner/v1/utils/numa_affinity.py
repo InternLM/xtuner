@@ -32,9 +32,10 @@ class NumaTopology(TypedDict):
 def try_bind_numa(rank: int) -> None:
     """Plan and apply this rank's NUMA binding without raising exceptions.
 
-    Each rank independently checks host logical CPU counts against all GPUs
-    discovered in driver procfs, then intersects its target CPUs with its own
-    affinity. Discovery or binding failures only skip the current rank.
+    Each rank independently checks its allowed CPU count on every GPU node
+    against all GPUs discovered in driver procfs. Discovery or binding failures
+    only skip the current rank; ranks with identical CPU permissions make the
+    same capacity decision.
 
     Args:
         rank (int): Global training rank used in log messages.
@@ -47,15 +48,17 @@ def try_bind_numa(rank: int) -> None:
         if get_device() != "cuda":
             raise ValueError("current device is not cuda")
 
-        topology = _get_numa_topology()
-        # Require hardware capacity for at least one logical CPU per GPU before restricting ranks
-        # to GPU-local nodes. This does not reserve CPUs; rank-specific permissions are checked below.
-        for node, gpu_count in Counter(topology["gpu_nodes"].values()).items():
-            cpu_count = len(topology["node_cpus"].get(node, set()))
-            if cpu_count < gpu_count:
-                raise ValueError(f"NUMA node {node} has {cpu_count} logical CPUs for {gpu_count} GPUs")
-
         initial_cpu_affinity = set(os.sched_getaffinity(0))
+        topology = _get_numa_topology()
+        # Count CPUs within this rank's initial affinity on every GPU node, not just its own node.
+        # Example: with 8 discovered GPUs split 4/4 across nodes 0/1, CPU permissions of 3/44
+        # make even a node-1 rank skip because node 0 has only 3 CPUs for 4 GPUs; 4/44 passes.
+        # All ranks make the same capacity decision only when they have identical CPU permissions.
+        for node, gpu_count in Counter(topology["gpu_nodes"].values()).items():
+            cpu_count = len(topology["node_cpus"].get(node, set()) & initial_cpu_affinity)
+            if cpu_count < gpu_count:
+                raise ValueError(f"NUMA node {node} has {cpu_count} available CPUs for {gpu_count} GPUs")
+
         binding = _get_rank_numa_plan(initial_cpu_affinity, topology)
 
         from numa import memory

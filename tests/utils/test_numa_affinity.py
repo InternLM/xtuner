@@ -7,9 +7,8 @@ TestNumaBindingDiscovery
     test_skips_unavailable_driver_information
     test_skips_incomplete_other_gpu_information
 TestNumaCapacity
-    test_checks_capacity_on_every_gpu_node
+    test_checks_available_cpu_capacity_on_every_gpu_node
     test_allows_equal_cpu_gpu_counts_and_uneven_layout
-    test_counts_hardware_cpus_instead_of_rank_affinity
 TestNumaBindingApplication
     test_memory_failure_restores_initial_cpu_affinity
     test_cpu_failure_does_not_bind_memory
@@ -169,20 +168,32 @@ class TestNumaBindingDiscovery:
 
 
 class TestNumaCapacity:
-    """按每个NUMA节点的硬件CPU与全部发现GPU判断容量。"""
+    """按每个GPU节点与当前rank权限交集内的CPU数量判断容量。"""
 
-    @pytest.mark.parametrize("node0_cpus", [set(), {0}])
-    def test_checks_capacity_on_every_gpu_node(self, numa_environment, node0_cpus):
-        # 验证其他GPU节点CPU为零或不足时，即使当前节点足够也跳过绑定。
+    @pytest.mark.parametrize("device_index", [0, 4], ids=["node0-rank", "node1-rank"])
+    @pytest.mark.parametrize(("node0_count", "node1_count"), [(3, 44), (2, 64), (1, 44), (0, 44), (4, 44)])
+    def test_checks_available_cpu_capacity_on_every_gpu_node(
+        self, numa_environment, device_index, node0_count, node1_count
+    ):
+        # 验证硬件CPU充足但权限内CPU不足时，两节点rank均跳过；4/44的相等边界可绑定。
+        allowed_cpus = set(range(node0_count)) | set(range(1000, 1000 + node1_count))
+        gpu_nodes = {f"GPU-{index}": (f"0000:{0x50 + index:02x}:00.0", index // 4) for index in range(8)}
         context = numa_environment(
-            cpus_by_node={0: node0_cpus, 1: {100, 101, 102}},
-            gpus={"GPU-A": ("0000:ab:00.0", 0), "GPU-B": ("0000:cd:00.0", 0), "GPU-C": ("0000:ef:00.0", 1)},
-            selected_uuid="GPU-C",
-            allowed_cpus={100, 101},
+            cpus_by_node={0: set(range(96)), 1: set(range(1000, 1096))},
+            gpus=gpu_nodes,
+            selected_uuid=f"GPU-{device_index}",
+            allowed_cpus=allowed_cpus,
+            device_index=device_index,
         )
-        affinity.try_bind_numa(0)
-        context.set_affinity.assert_not_called()
-        context.membind.assert_not_called()
+        affinity.try_bind_numa(device_index)
+        if node0_count < 4:
+            context.set_affinity.assert_not_called()
+            context.membind.assert_not_called()
+        else:
+            node = device_index // 4
+            expected_cpus = set(range(4)) if node == 0 else set(range(1000, 1044))
+            context.set_affinity.assert_called_once_with(0, expected_cpus)
+            context.membind.assert_called_once_with(node)
 
     def test_allows_equal_cpu_gpu_counts_and_uneven_layout(self, numa_environment):
         # 验证CPU/GPU数相等和不均匀布局可绑定，且没有GPU的空节点不参与门禁。
@@ -193,13 +204,6 @@ class TestNumaCapacity:
         )
         affinity.try_bind_numa(0)
         context.set_affinity.assert_called_once_with(0, {0, 1})
-        context.membind.assert_called_once_with(0)
-
-    def test_counts_hardware_cpus_instead_of_rank_affinity(self, numa_environment):
-        # 验证两张GPU有两个硬件CPU时，当前rank仅允许一个CPU仍可绑定。
-        context = numa_environment(gpus={"GPU-A": ("0000:ab:00.0", 0), "GPU-B": ("0000:cd:00.0", 0)}, allowed_cpus={0})
-        affinity.try_bind_numa(0)
-        context.set_affinity.assert_called_once_with(0, {0})
         context.membind.assert_called_once_with(0)
 
 
