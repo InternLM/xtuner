@@ -147,10 +147,12 @@ class TestSwapAdamWEngineResume(DeterministicDDPTestCase):
             opt_state = engine.optimizer.state_dict()["state"]
             opt_state2 = engine2.optimizer.state_dict()["state"]
             assert len(opt_state) == len(opt_state2) != 0
+            # state_dict() 的参数 id 跨所有 group 全局连续编号,须用全局递增编号重建映射
             id_map = {
                 old_id: param
-                for group in engine2.optimizer.param_groups
-                for old_id, param in zip(range(len(group["params"])), group["params"])
+                for old_id, param in enumerate(
+                    p for group in engine2.optimizer.param_groups for p in group["params"]
+                )
             }
             for param_id, cur_state in opt_state.items():
                 cur_state2 = opt_state2[param_id]
