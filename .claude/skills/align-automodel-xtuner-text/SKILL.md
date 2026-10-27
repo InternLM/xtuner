@@ -28,11 +28,17 @@ Track three layers of truth per knob: **library default / config value / runtime
 
 | Level | Criterion | Typical magnitude |
 |---|---|---|
-| Forward parity | first-step loss Δ on identical input | ≤ 0.003 |
-| Gradient parity | first-step pre-clip grad-norm ratio | 0.999–1.004× |
-| Short-horizon trajectory | per-step loss Δ over ~20 steps, same schedule | ≤ 0.003 |
+| Forward parity | first-step loss Δ on identical input | ≤ 0.003 (same pack stream: 0.002) |
+| Gradient parity | first-step pre-clip grad-norm ratio | within 0.5% (typical replays: 0.04–0.15%) |
+| Short-horizon trajectory | per-step loss Δ over ~20 steps, same schedule | ≤ 0.003 (observed 0.0005–0.0022) |
 | Trend parity | 200+ steps: curve shape / transition windows | same windows, same shape |
 | Long-horizon statistics | spike counts, envelopes, statistics only | pointwise pairing diverges by design |
+
+Magnitudes are **typical observations from past replays, not hard thresholds**: replays across
+environment stacks (torch/triton/kernel versions) carry ~±0.2% noise. When a single-step ratio drifts
+slightly past the typical range, first check whether the loss trajectory still matches pointwise before
+calling it misalignment (observed case: one step's gn ratio 0.9985 while the 20-step loss deltas
+reproduced to the 4th decimal — stack noise, not divergence).
 
 **Loss parity ≠ gradient parity** (P3.1): a numerical-path verdict requires a gradient-level criterion; the first-step pre-clip grad norm is the most sensitive probe.
 
