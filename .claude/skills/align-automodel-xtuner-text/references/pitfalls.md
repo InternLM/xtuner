@@ -18,6 +18,10 @@ Use constant + identical warmup for every comparison run.
 **P1.3 Pin kernels/dependencies by commit, not by package name**:
 - A fused-attention kernel repo may need a specific commit (e.g. a commit that adds a required argument
   like `indexer_topk`); HEAD may lack it → unexpected-keyword errors.
+- When verifying "commit X provides argument Y", read the call site to find the function your code
+  **actually invokes**, then check that signature — sibling entry points in the same package expose
+  different arguments (one forward function had `indexer_topk` while the cache-path variant did not);
+  checking the wrong symbol yields a false "argument missing".
 - Compiling CUDA extensions often needs matching CCCL include paths (`CPLUS_INCLUDE_PATH=$CUDA_HOME/include/cccl`).
 - Multi-package stacks (e.g. transformer-engine) need all components pinned; a missing meta-package fails
   only at the sanity check.
@@ -27,7 +31,12 @@ Use constant + identical warmup for every comparison run.
 **P1.4 Same version number ≠ same parameter signature**: a PyPI release and a github-main build can both
 report the same version while one lacks a keyword argument (observed with a cross-entropy library whose
 `accum_e_fp32` existed only in one build). For any numerics-affecting package, verify support with
-`inspect.signature`, never with the version string.
+`inspect.signature`, never with the version string. **Symbols also drift or collide inside a package**
+(observed after an upgrade): a submodule can share a name with a function (`cce.cce` is a module), and
+the call site's import path can differ from the impl module's name (top-level `linear_cross_entropy`
+vs submodule `cce_linear_cross_entropy`). Correct procedure: read the import line at the call site,
+**import exactly that symbol, then inspect it** — do not guess names (both a guessed function name and
+a guessed submodule path failed in practice).
 
 **P1.5 Soft-imported dependencies explode only at runtime** (try/except import prints a warning; the MoE
 backend reaches the op and fails). A smoke test must cover the target backend path, not just `import`.
@@ -152,8 +161,11 @@ chunking are self-consistent at the longer pack.
 
 **P5.1 ※ Long runs need setsid; never nohup**: when the ssh session drops, SIGTERM kills the whole process
 group and nohup does not stop it (verified by a killed multi-hour run). `tee` truncates old logs — archive
-before restart. One training per machine/pod at a time. When stdout goes to /dev/null, judge completion by
-"N/N step lines + process exited". Note log timezones (often UTC).
+before restart. **Before reusing a historical run script, check whether its log path is hardcoded** (a
+pinned tee target): parameterize it (e.g. a `LOGTAG` env var) or copy the script with a new tee target —
+a new run always writes a new log name and never touches the old files. One training per machine/pod at a
+time. When stdout goes to /dev/null, judge completion by "N/N step lines + process exited". Note log
+timezones (often UTC).
 
 **P5.2 Log parsing**: tqdm progress bars glue many logical steps into one physical line with `\r` — run
 `tr "\r" "\n"` first; a line-start `^` anchor then matches only every ~10th step (bogus dt); derive
