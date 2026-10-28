@@ -63,6 +63,9 @@ class MultimodalInfo(TypedDict):
     pixel_values: NotRequired[np.ndarray | RayObjectRef | None]
     image_grid_thw: NotRequired[np.ndarray | None]
     num_img_tokens: NotRequired[list[int]]
+    pixel_values_videos: NotRequired[np.ndarray | RayObjectRef | None]
+    video_grid_thw: NotRequired[np.ndarray | None]
+    mm_token_type_ids: NotRequired[np.ndarray | None]
 
 
 class RolloutFunctionCall(BaseModel):

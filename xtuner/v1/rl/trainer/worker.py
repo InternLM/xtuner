@@ -54,6 +54,7 @@ from xtuner.v1.rl.loss import (
 )
 from xtuner.v1.rl.model_utils import build_frozen_model
 from xtuner.v1.rl.utils import SingleAcceleratorWorker
+from xtuner.v1.rl.utils.multimodal import resolve_multimodal_inputs
 from xtuner.v1.rl.weight_update import WeightUpdater
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
@@ -678,18 +679,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             # update seq_ctx
             seq_ctx = data["seq_ctx"]
             teacher_indices = data.get("teacher_indices")
-            pixel_values = seq_ctx.pixel_values
-            if pixel_values is not None:
-                if not isinstance(pixel_values, np.ndarray):
-                    assert isinstance(pixel_values, list), (
-                        f"pixel_values should be list of tensor, got {type(pixel_values)}"
-                    )
-                    pixel_values = ray.get(list(pixel_values))
-                    pixel_values = [torch.as_tensor(pixel_value) for pixel_value in pixel_values]
-                    pixel_values = torch.cat(pixel_values, dim=0)
-                    seq_ctx.pixel_values = pixel_values
-                else:
-                    raise NotImplementedError("The case where pixel_values is a numpy array is not implemented yet.")
+            resolve_multimodal_inputs(seq_ctx)
 
             rollout_routed_experts = seq_ctx.rollout_routed_experts
             if rollout_routed_experts is not None:
