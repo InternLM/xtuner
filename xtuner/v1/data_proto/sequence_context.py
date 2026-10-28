@@ -29,6 +29,8 @@ class SequenceContext:
             Maximum sequence length for key state.
     """
 
+    TEXT_MODALITY_ID = 0
+
     input_ids: torch.LongTensor | None  # shape (1, seq_len)
     cu_seq_lens_q: torch.IntTensor
     cu_seq_lens_k: torch.IntTensor
@@ -344,6 +346,11 @@ class SequenceContext:
         pixel_values_videos = []
         video_grid_thw = []
         mm_token_type_ids = []
+        # 提前找到首个非空模态标记张量：pack 开头也可能是纯文本或 padding。
+        # 后续补零沿用它的 dtype/device；若整个 pack 都没有模态标记，则保持原行为。
+        mm_reference = next(
+            (ctx.mm_token_type_ids for ctx in sequence_context_list if ctx.mm_token_type_ids is not None), None
+        )
 
         for seq_ctx in sequence_context_list:
             assert seq_ctx.sequence_parallel_mesh is None
@@ -375,8 +382,8 @@ class SequenceContext:
                 pixel_values_videos.append(seq_ctx.pixel_values_videos)
             if seq_ctx.video_grid_thw is not None:
                 video_grid_thw.append(seq_ctx.video_grid_thw)
-            if seq_ctx.mm_token_type_ids is not None:
-                mm_token_type_ids.append(seq_ctx.mm_token_type_ids)
+            if mm_reference is not None:
+                mm_token_type_ids.append(cls._pack_mm_token_type_ids(seq_ctx, mm_reference))
             if seq_ctx.rollout_routed_experts is not None:
                 rollout_routed_experts.append(seq_ctx.rollout_routed_experts)
             offload_rollout_routed_experts = offload_rollout_routed_experts or seq_ctx.offload_rollout_routed_experts
@@ -698,3 +705,25 @@ class SequenceContext:
             "rollout_routed_experts": self.rollout_routed_experts,
             "offload_rollout_routed_experts": self.offload_rollout_routed_experts,
         }
+
+    @classmethod
+    def _pack_mm_token_type_ids(cls, seq_ctx: "SequenceContext", mm_reference: torch.Tensor) -> torch.Tensor:
+        if seq_ctx.input_ids is not None:
+            token_shape = seq_ctx.input_ids.shape
+        elif seq_ctx.inputs_embeds is not None:
+            token_shape = seq_ctx.inputs_embeds.shape[:-1]
+        else:
+            raise ValueError("Packing modality IDs requires input_ids or inputs_embeds for every sequence")
+
+        local_mm_token_type_ids = seq_ctx.mm_token_type_ids
+        if local_mm_token_type_ids is None:
+            if seq_ctx.pixel_values is not None or seq_ctx.pixel_values_videos is not None:
+                raise ValueError("Cannot pack a visual sequence without mm_token_type_ids")
+            # 纯文本和 padding 也占 token 位置，按该段完整长度补文本模态标记。
+            # 保留这些位置，才能让拼接后的模态标记与 input_ids/inputs_embeds 同长、同序。
+            return mm_reference.new_full(token_shape, cls.TEXT_MODALITY_ID)
+        if local_mm_token_type_ids.shape != token_shape:
+            raise ValueError(
+                f"mm_token_type_ids shape {local_mm_token_type_ids.shape} does not match token shape {token_shape}"
+            )
+        return local_mm_token_type_ids
