@@ -31,6 +31,11 @@ from .tilelang import validate_sparse_mla_inputs
 logger = get_logger()
 _deterministic_backward_warned = False
 
+try:
+    from .deterministic_bwd import ordered_segment_reduce_
+except ImportError:  # triton unavailable: fall back to deterministic index_add_
+    ordered_segment_reduce_ = None
+
 
 def flash_mla_cudnn_sparse_mla(
     q: torch.Tensor,
@@ -105,15 +110,22 @@ def _deterministic_sparse_mla_backward(
     softmax_lse: Tensor,
     scaling: float,
     chunk_size: int = 128,
+    reduce_chunk_queries: int = 2048,
+    contrib_dtype: torch.dtype = torch.bfloat16,
 ) -> tuple[Tensor, Tensor]:
     """Ordered FP32 reference backward selected by ``XTUNER_DETERMINISTIC``.
 
     cuDNN's sparse-attention backward accumulates dKV with unordered atomics, so repeated
     runs diverge bitwise even under ``torch.use_deterministic_algorithms`` (dq is stable,
     dkv is not). This fallback recomputes per-query contributions in a fixed chunk order
-    and accumulates dKV through ``index_add_``, which PyTorch routes to a deterministic
-    implementation in deterministic mode. It is slower than the cuDNN kernel and only runs
-    when ``XTUNER_DETERMINISTIC=true``.
+    and accumulates dKV with a sort + ordered Triton segmented reduction (see
+    ``deterministic_bwd.py``): contributions are staged per ``reduce_chunk_queries``
+    queries, sorted by kv index, and each kv's segment is summed serially in sorted order
+    into an FP32 accumulator. The accumulation order is fully fixed, so results are
+    bitwise repeatable; PyTorch's deterministic ``index_add_`` path (internal sort + serial
+    reduction, ~64GB workspace at the DSA shape) is only kept as a fallback when triton is
+    unavailable or the head dim is not a power of two. It is slower than the cuDNN kernel
+    and only runs when ``XTUNER_DETERMINISTIC=true``.
 
     Args:
         q (Tensor): Queries ``[total_q, num_heads, head_dim]`` (bf16).
@@ -124,7 +136,14 @@ def _deterministic_sparse_mla_backward(
         indices (Tensor): Top-k key indices ``[total_q, 1, topk]``, -1 padded.
         softmax_lse (Tensor): Natural-log LSE of the scaled scores ``[total_q, num_heads]``.
         scaling (float): Score scale applied before the softmax.
-        chunk_size (int): Queries per chunk; bounds the gathered-KV temporaries.
+        chunk_size (int): Queries per einsum chunk; bounds the gathered-KV temporaries.
+        reduce_chunk_queries (int): Queries per staged reduction; the contribution buffer
+            holds ``reduce_chunk_queries * topk`` rows. Must be a multiple of
+            ``chunk_size``. Flush boundaries are fixed given the shapes, so chunk partials
+            accumulate into the FP32 dKV accumulator in a fixed order.
+        contrib_dtype (Tensor): Storage dtype of staged contribution rows. ``torch.bfloat16``
+            halves the staging buffer at bf16 rounding of each row (accumulation itself
+            stays FP32); ``torch.float32`` keeps full precision.
 
     Returns:
         tuple[Tensor, Tensor]: ``dq`` like ``q`` and ``dkv`` like ``kv``.
@@ -135,6 +154,13 @@ def _deterministic_sparse_mla_backward(
     idx = indices[:, 0].to(torch.int64)
     valid = idx != -1
     safe_idx = idx.clamp_min(0)
+    topk = idx.shape[1]
+
+    use_triton_reduce = ordered_segment_reduce_ is not None and head_dim & (head_dim - 1) == 0
+    if use_triton_reduce:
+        assert reduce_chunk_queries % chunk_size == 0
+        contrib_buf = torch.empty(reduce_chunk_queries * topk, head_dim, dtype=contrib_dtype, device=q.device)
+        stage_base = 0  # first query index currently staged in contrib_buf
 
     dq = torch.empty_like(q)
     dkv_accum = torch.zeros(kv_flat.shape, dtype=torch.float32, device=q.device)
@@ -157,9 +183,21 @@ def _deterministic_sparse_mla_backward(
         dq[start:end] = (torch.einsum("chk,ckd->chd", dscores, kv_sel) * scaling).to(q.dtype)
         dkv_part = torch.einsum("chk,chd->ckd", dscores, q_c) * scaling
         dkv_part[..., :value_dim] += torch.einsum("chk,chd->ckd", probs, go_c)
-        # Invalid slots carry zero contribution (probs == 0), so scattering them into
-        # row 0 via the clamped index adds exact zeros.
-        dkv_accum.index_add_(0, sel.reshape(-1), dkv_part.reshape(-1, head_dim))
+        if use_triton_reduce:
+            contrib_buf[(start - stage_base) * topk : (end - stage_base) * topk] = dkv_part.reshape(-1, head_dim)
+            if end - stage_base == reduce_chunk_queries or end == total_q:
+                # Pass unclamped indices: -1 padding rows are exact zeros (probs == 0)
+                # and the reducer skips them instead of dumping them into one segment.
+                ordered_segment_reduce_(
+                    dkv_accum,
+                    contrib_buf[: (end - stage_base) * topk],
+                    idx[stage_base:end].reshape(-1),
+                )
+                stage_base = end
+        else:
+            # Invalid slots carry zero contribution (probs == 0), so scattering them into
+            # row 0 via the clamped index adds exact zeros.
+            dkv_accum.index_add_(0, sel.reshape(-1), dkv_part.reshape(-1, head_dim))
     return dq, dkv_accum.to(kv.dtype).unsqueeze(1)
 
 
