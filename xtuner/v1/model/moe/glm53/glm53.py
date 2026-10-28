@@ -31,7 +31,7 @@ import torch.nn as nn
 from pydantic import Field, computed_field
 from typing_extensions import Self, override
 
-from xtuner.v1.model.base import DEFAULT_FLOAT8_CFG, HFSaveCfg, TorchCompileOption
+from xtuner.v1.model.base import DEFAULT_FLOAT8_CFG, TorchCompileOption
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoE, MoEConfig
 from xtuner.v1.module.decoder_layer.mhc import MHCConfig
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig
@@ -347,34 +347,9 @@ class Glm53TextMoEConfig(MoEConfig):
     mhc: MHCConfig = MHCConfig(hc_mult=4, hc_eps=1e-6, hc_sinkhorn_iters=20)
     router_projection_block_size: int = Field(default=0, ge=0)
 
-    # `fully_shard` upcasts every trainable parameter to an fp32 master and then casts it to
-    # `MixedPrecisionPolicy.param_dtype` for the forward all-gather, so declaring a parameter
-    # `dtype=torch.float32` does not keep it in fp32 *compute*. This pattern list is the only
-    # lever that does: `BaseModel._fully_shard` hands the matches to
-    # `fully_shard(ignored_params=...)`, leaving them replicated and untouched by the policy
-    # (and `_get_save_dtype` then writes them back out as fp32). Needed because
-    # `hc_split_sinkhorn`'s 20 iterations and KDA's `fused_kda_gate` are bf16-unstable.
-    # Convolution masters must also stay fp32 so their gradients are not rounded before
-    # replicated-parameter reduction; the convolution forward still uses the activation dtype.
-    # This shared policy also exports convolution tensors as fp32. BF16 inference loads
-    # round them to the same values used by the convolution forward during training.
-    #
-    # `hc_*_fn` is deliberately absent: `hc_pre` already casts it to the activation dtype, and
-    # ignored parameters are replicated rather than sharded, so pinning a
-    # [mix, hc_mult * hidden_size] matrix on 45 x 2 sites would cost real memory for nothing.
-    #
-    # Gradients of ignored (replicated) parameters are all-reduced by
-    # `MoE.scale_and_reduce_grad`, which `TrainEngine.clip_grad_norm` calls before the grad
-    # norm -- PyTorch does not sync them, since `to_local()`/`full_tensor()` label the local
-    # gradient `Replicate` without communicating.
-    hf_save_cfg: HFSaveCfg = HFSaveCfg(
-        fp32_keys_pattern=[
-            r"model\.language_model\.layers\.\d+\.hc_(attn|ffn)_(base|scale)",
-            r"model\.language_model\.layers\.\d+\.self_attn\.A_log",
-            r"model\.language_model\.layers\.\d+\.self_attn\.dt_bias",
-            r"model\.language_model\.layers\.\d+\.self_attn\.[qkv]_conv1d\.(weight|bias)",
-        ],
-    )
+    # FP32 compute for the bf16-unstable pieces (mHC's Sinkhorn iterations, KDA's `fused_kda_gate` and
+    # convolution masters) is declared where the tensors live: `_register_hc_params` in
+    # `glm53/decoder_layer.py` and `KimiDeltaAttention.fp32_param_names`.
 
     @computed_field
     def num_key_value_heads(self) -> int:
