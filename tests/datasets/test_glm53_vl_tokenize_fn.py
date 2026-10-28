@@ -4,6 +4,8 @@ TestGlm53TokenizeCacheRuntimeParity
     test_glm53_tokenize_cache_runtime_image_parity  图像：cache 预测与 runtime 实算一致
     test_glm53_tokenize_cache_runtime_video_parity  视频：同上
     test_glm53_frame_folder_samples_the_processed_frames  帧文件夹按重采样后的帧取下标
+TestGlm53ClearThinking
+    test_clear_thinking_true_rejected    VL 链路暂不支持 clear_thinking：True 在构造期断言报错
 TestGlm53VisualPlaceholderAndTokenSemantics
     test_glm53_visual_placeholder_count             占位符数量等于 patch 数 / merge_unit
     test_glm53_num_img_tokens_is_per_vit_sequence   num_img_tokens 按 ViT 序列计数
@@ -21,7 +23,8 @@ TestGlm53MixedMediaAndTruncation
 TestGlm53MediaRoleContract
     test_media_is_collected_from_all_roles           system/assistant/tool 角色的图片也会被收集
     test_media_collection_preserves_input_order     媒体按原始消息顺序收集，与 HF 一致
-    test_tool_media_block_is_sorted_before_collection  逆序多媒体回归：tool 块先按 tool_calls 预排再收集
+    test_tool_media_block_is_sorted_before_collection  逆序多媒体回归：收集视图内部按 tool_calls 顺序排序
+    test_nested_tool_output_media_is_collected_in_tool_calls_order  嵌套 tool 输出媒体按 tool_calls 顺序收集（#2184 移植）
     test_string_content_parts_are_tolerated         content 列表混排纯字符串不崩溃
 TestGlm53DirtyDataDoesNotHalt
     test_bad_image_wh_is_discarded                  image_wh 形状非法：cache 丢弃、runtime 抛错
@@ -40,6 +43,7 @@ TestGlm53CacheInvalidation
     test_glm53_hash_covers_every_init_parameter  逐参数 hash 失效 + __init__ 参数分类完备性
 """
 
+import base64
 import copy
 import inspect
 import os
@@ -183,6 +187,15 @@ class TestGlm53TokenizeCacheRuntimeParity:
 
         assert cache_ret["num_tokens"] == runtime_ret["num_tokens"] == len(runtime_ret["input_ids"])
         assert cache_ret["num_img_tokens"] == runtime_ret["num_img_tokens"]
+
+
+class TestGlm53ClearThinking:
+    def test_clear_thinking_true_rejected(self, ckpt_path, tokenizer):
+        # VL 训练链路暂不支持 clear_thinking=True（config → fn → render 的接线与 hash 覆盖已
+        # 就位，语义开放前以构造期断言守住取值）；render 层的 clear_thinking 语义由纯文本路径
+        # 的测试覆盖。
+        with pytest.raises(AssertionError, match="clear_thinking"):
+            Glm53VLTokenizeFnConfig(processor_path=ckpt_path, clear_thinking=True).build(tokenizer, anno_name="test")
 
 
 class TestGlm53OSSLoader:
@@ -415,10 +428,8 @@ class TestGlm53MixedMediaAndTruncation:
     ) -> None:
         # 图文+视频混合样本是未支持边界：cache 阶段 log warning 并按损坏样本丢弃（num_tokens=0，
         # 打包前过滤），runtime 仍抛出、由上游数据集换成无 loss 占位样本——两种状态都不中断训练，
-        # 且都必须发生在加载任何媒体之前。
-        # Glm53VLTokenizeFunction 覆写 __call__ 仅为 tool 块预排序（sort_tool_messages，不触碰
-        # 媒体加载）；混合样本仍在基类 __call__ 的收集阶段被拒绝，下面的 load 断言保证拒绝
-        # 发生在任何媒体加载之前。
+        # 且都必须发生在加载任何媒体之前。混合样本在基类 __call__ 的收集阶段被拒绝，下面的
+        # load 断言保证拒绝发生在任何媒体加载之前。
         load = Mock(side_effect=AssertionError("Mixed samples must be discarded before loading media"))
         monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn.load_image", load)
         logger_mock = Mock()
@@ -511,9 +522,10 @@ class TestGlm53MediaRoleContract:
         assert image_paths == ["system.jpg", "user.jpg", "assistant.jpg", "tool-b.jpg", "tool-a.jpg"]
 
     def test_tool_media_block_is_sorted_before_collection(self, tokenize_fn: Glm53VLTokenizeFunction) -> None:
-        # 逆序多媒体回归：tool_calls=[a,b]、tool 消息按 b, a 输入时，__call__ 先按 tool_calls
-        # 顺序预排消息（sort_tool_messages），媒体收集顺序随之变为 [a 的图, b 的图]，与渲染
-        # 文本中的 marker 顺序一致（渲染按同一 can_sort 规则排序，对齐官方 jinja 与推理侧）。
+        # 逆序多媒体回归：tool_calls=[a,b]、tool 消息按 b, a 输入时，收集视图
+        # glm53_media_messages 内部按 tool_calls 顺序排序（sort_tool_messages，与渲染器
+        # _render_tool_block 的 can_sort 重排同一规则），媒体收集顺序随之变为 [a 的图, b 的图]，
+        # 与渲染文本中的 marker 顺序一致（对齐官方 jinja 与推理侧）。
         def image(url: str) -> dict:
             return {"type": "image", "image": {"url": url, "image_wh": [448, 448]}}
 
@@ -545,6 +557,48 @@ class TestGlm53MediaRoleContract:
         tokenize_fn.state = "cache"
         tokenize_fn(item)
         assert tokenize_fn._image_path == ["tool-a.jpg", "tool-b.jpg"]
+
+    def test_nested_tool_output_media_is_collected_in_tool_calls_order(
+        self, tokenize_fn: Glm53VLTokenizeFunction
+    ) -> None:
+        # 结构化 tool 输出（聚合 {"id": ..., "output": [...]} 条目）里嵌套的媒体：渲染层会为它们
+        # 发射 placeholder marker（与官方 jinja 一致），收集层必须递归进 output、按渲染 marker
+        # 顺序（tool_calls 顺序）提取 payload——否则 marker 已渲染却没有对应 payload，样本只能
+        # 被计数校验当脏数据丢弃（#2192 评审意见；收集实现移植自 #2184 的 glm53_media_messages）。
+        def image(url: str) -> dict:
+            return {"type": "image", "image": {"url": url, "image_wh": [448, 448]}}
+
+        item = {
+            "messages": [
+                {"role": "user", "content": "q"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"function": {"arguments": {}, "name": "a"}, "id": "a", "type": "function"},
+                        {"function": {"arguments": {}, "name": "b"}, "id": "b", "type": "function"},
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": [
+                        {"id": "b", "output": [{"type": "text", "text": "RESULT_B"}, image("nested-b.jpg")]},
+                        {"id": "a", "output": [{"type": "text", "text": "RESULT_A"}, image("nested-a.jpg")]},
+                    ],
+                },
+                {"role": "assistant", "content": "done"},
+            ]
+        }
+
+        image_paths, video_paths, extra = tokenize_fn._collect_media(item)
+        assert image_paths == ["nested-a.jpg", "nested-b.jpg"]
+        assert video_paths == []
+        assert extra["image_wh"] == [[448, 448], [448, 448]]
+
+        # 端到端：cache 路径不再因 "渲染出 marker、却没有 payload" 把该形态误丢弃。
+        tokenize_fn.state = "cache"
+        assert tokenize_fn(item)["num_tokens"] > 0
+        assert tokenize_fn._image_path == ["nested-a.jpg", "nested-b.jpg"]
 
     def test_string_content_parts_are_tolerated(self, tokenize_fn: Glm53VLTokenizeFunction) -> None:
         # content 列表允许纯字符串与 text 字典混排（官方 jinja 按文本原样渲染）；media collector
@@ -848,7 +902,9 @@ class TestGlm53CacheInvalidation:
             "can change cache output (num_tokens), add it to _hash_str and _HASH_PARAMS; "
             "otherwise add it to _NON_HASH_PARAMS with a reason."
         )
-        assert set(_ALT_VALUES) == _HASH_PARAMS - {"processor_path"}
+        # clear_thinking 在 _hash_str 里但构造期断言只支持 False，无法构造 True 变体，
+        # 其 hash 覆盖由 _hash_str 的字段保证，不在 _ALT_VALUES 里实际变值。
+        assert set(_ALT_VALUES) == _HASH_PARAMS - {"processor_path", "clear_thinking"}
 
         for name, override in _ALT_VALUES.items():
             base = Glm53VLTokenizeFnConfig(processor_path=ckpt_path).build(tokenizer, anno_name="test")
@@ -871,6 +927,7 @@ _HASH_PARAMS = {
     "add_generation_prompt",
     "enable_thinking",
     "reasoning_effort",
+    "clear_thinking",
 }
 
 # 不影响 cache 输出的参数：
@@ -972,3 +1029,174 @@ def test_images_processed_incrementally_match_batched(tokenize_fn, tmp_path, mon
     assert actual["num_imgs"] == [3]
     for key in ("pixel_values", "image_grid_thw"):
         assert torch.equal(actual[key], expected[key]), key
+
+
+class TestGlm53Base64Images:
+    """Same bytes/messages via local, simulated OSS and inline image sources."""
+
+    @staticmethod
+    def _assert_equal(left, right):
+        assert left.keys() == right.keys()
+        for key in left:
+            if isinstance(left[key], torch.Tensor):
+                assert torch.equal(left[key], right[key]), key
+            else:
+                assert left[key] == right[key], key
+
+    @pytest.mark.parametrize(
+        "case", ["user_single", "user_multi", "tool_single", "tool_multi", "both", "reversed_tools"]
+    )
+    def test_source_parity(self, tokenize_fn, tmp_path, monkeypatch, case):
+        module = "xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn"
+        paths, uris, source_bytes = [], [], {}
+        for index, (size, color) in enumerate([((56, 84), (220, 10, 30)), ((112, 56), (10, 80, 240))]):
+            path = tmp_path / f"image{index}.png"
+            Image.new("RGB", size, color).save(path)
+            raw = path.read_bytes()
+            paths.append(str(path))
+            uris.append("data:image/png;base64," + base64.b64encode(raw).decode("ascii"))
+            source_bytes[f"s3://test/image{index}.png"] = raw
+
+        def image(index):
+            return {"type": "image", "image": {"url": paths[index], "image_wh": [[56, 84], [112, 56]][index]}}
+
+        def call(name):
+            return {"type": "function", "id": name, "function": {"name": name, "arguments": {}}}
+
+        def tool(name, content):
+            return {"role": "tool", "tool_call_id": name, "name": name, "content": content}
+
+        text = {"type": "text", "text": "between images"}
+        messages = [{"role": "user", "content": "Describe the images."}]
+        expected_order = [0]
+        if case.startswith("user") or case == "both":
+            messages[0]["content"] = [image(0)]
+        if case == "user_multi":
+            messages[0]["content"] += [text, image(1)]
+            expected_order = [0, 1]
+        if case.startswith("tool") or case in ("both", "reversed_tools"):
+            names = ["a", "b"] if case == "reversed_tools" else ["a"]
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "Inspect images.",
+                    "loss": False,
+                    "tool_calls": [call(name) for name in names],
+                }
+            )
+            if case == "reversed_tools":
+                messages += [tool("b", [image(1)]), tool("a", [image(0)])]
+                expected_order = [0, 1]
+            elif case == "both":
+                messages.append(tool("a", [text, image(1)]))
+                expected_order = [0, 1]
+            else:
+                content = [image(0)]
+                if case == "tool_multi":
+                    content += [text, image(1)]
+                    expected_order = [0, 1]
+                messages.append(tool("a", content))
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "The images have different colors.",
+                "reasoning_content": "Compare visible content.",
+                "loss": True,
+            }
+        )
+        local = {"messages": messages}
+        embedded, remote = copy.deepcopy(local), copy.deepcopy(local)
+        for item, replacements in [(embedded, uris), (remote, [f"image{i}.png" for i in range(2)])]:
+            for message in item["messages"]:
+                if isinstance(message.get("content"), list):
+                    for part in message["content"]:
+                        if part.get("type") == "image":
+                            part["image"]["url"] = replacements[paths.index(part["image"]["url"])]
+
+        before = copy.deepcopy(embedded)
+        tokenize_fn.state = "cache"
+        with monkeypatch.context() as patch:
+            no_decode = Mock(side_effect=AssertionError("cache must not decode images"))
+            patch.setattr(f"{module}.load_image_data_uri", no_decode)
+            local_cache, embedded_cache = tokenize_fn(local), tokenize_fn(embedded)
+            self._assert_equal(local_cache, embedded_cache)
+            no_decode.assert_not_called()
+        tokenize_fn.state = "runtime"
+        local_output = tokenize_fn(local)
+        tokenize_fn.oss_loader = Mock()
+        client = tokenize_fn.oss_loader.client
+        client.get.side_effect = source_bytes.__getitem__
+        remote_output = tokenize_fn(remote, media_root="s3://test/")
+        assert [c.args[0] for c in client.get.call_args_list] == [f"s3://test/image{i}.png" for i in expected_order]
+        client.get.reset_mock()
+        with monkeypatch.context() as patch:
+            path_loader = Mock(side_effect=AssertionError("embedded image must bypass media_root/path loader"))
+            patch.setattr(f"{module}.get_image_path", path_loader)
+            embedded_output = tokenize_fn(embedded, media_root="s3://test/")
+            path_loader.assert_not_called()
+        client.get.assert_not_called()
+        self._assert_equal(local_output, remote_output)
+        self._assert_equal(local_output, embedded_output)
+        assert tokenize_fn._image_path == [uris[i] for i in expected_order]
+        assert embedded == before
+        assert embedded_cache["num_tokens"] == embedded_output["num_tokens"]
+        assert embedded_cache["num_img_tokens"] == embedded_output["num_img_tokens"]
+        assert any(label != -100 for label in embedded_output["labels"])
+
+    @pytest.mark.parametrize("value", ["data:image/png;base64,@@@", "data:image/png;base64,YQ=="])
+    def test_invalid_uri_does_not_try_path_or_oss(self, tokenize_fn, monkeypatch, value):
+        path_loader = Mock(side_effect=AssertionError("unexpected path access"))
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn.get_image_path", path_loader)
+        tokenize_fn.oss_loader = Mock()
+        tokenize_fn.state = "runtime"
+        with pytest.raises(ValueError, match="Invalid image data URI"):
+            tokenize_fn(_image_item(value), media_root="s3://test/")
+        path_loader.assert_not_called()
+        tokenize_fn.oss_loader.client.get.assert_not_called()
+
+    @pytest.mark.parametrize("value", ["aGVsbG8=", " data:image/png;base64,YQ==", "DATA:image/png;base64,YQ=="])
+    def test_non_data_prefix_uses_reference_loader(self, tokenize_fn, image_fixture, monkeypatch, value):
+        loader = Mock(side_effect=lambda path: Image.open(image_fixture).convert("RGB"))
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn.load_image", loader)
+        tokenize_fn.state = "runtime"
+        tokenize_fn(_image_item(value), media_root="/reference-root")
+        loader.assert_called_once_with(f"/reference-root/{value}")
+
+    def test_image_and_pure_text_pack_parity(self, tokenize_fn, image_fixture):
+        from xtuner.v1.datasets.collator import glm53_vl_sft_collator
+
+        local = _image_item(image_fixture)
+        uri = "data:image/png;base64," + base64.b64encode(Path(image_fixture).read_bytes()).decode("ascii")
+        embedded = _image_item(uri)
+        text = {"messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi"}]}
+        tokenize_fn.state = "runtime"
+        text_output = tokenize_fn(text)
+        local_output, embedded_output = tokenize_fn(local), tokenize_fn(embedded)
+        packs = []
+        for image_output in (local_output, embedded_output):
+            pack = glm53_vl_sft_collator(
+                [[copy.deepcopy(text_output), image_output, copy.deepcopy(text_output)]],
+                pack_max_length=2 * text_output["num_tokens"] + image_output["num_tokens"] + 16,
+                padding_token_idx=0,
+                image_token_id=tokenize_fn.processor.image_token_id,
+                merge_unit=tokenize_fn.merge_unit,
+            )[0]
+            packs.append(pack)
+        assert torch.equal(packs[0]["shifted_labels"], packs[1]["shifted_labels"])
+        for field in (
+            "input_ids",
+            "cu_seq_lens_q",
+            "cu_seq_lens_k",
+            "pixel_values",
+            "image_grid_thw",
+            "mm_token_type_ids",
+            "num_img_tokens",
+            "num_padding",
+        ):
+            expected, actual = (getattr(pack["seq_ctx"], field) for pack in packs)
+            if isinstance(expected, torch.Tensor):
+                assert torch.equal(expected, actual), field
+            else:
+                assert expected == actual, field
+        assert packs[0]["seq_ctx"].pixel_values.dtype == torch.bfloat16

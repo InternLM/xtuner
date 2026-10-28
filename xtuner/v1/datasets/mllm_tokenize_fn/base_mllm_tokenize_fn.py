@@ -239,9 +239,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         # 公开接口按“采集媒体 → 拒绝不支持的组合 → cache 或 runtime → 返回”线性展开：状态判断
         # 只出现一次，cache 的异常出口（try 包住三种计算）与 runtime 的内存整理各自只出现一次。
         try:
-            self._image_path, self._video_path, extra_info = collect_image_video_paths_and_extra(
-                item["messages"], allow_all_roles=self.allow_all_roles
-            )
+            self._image_path, self._video_path, extra_info = self._collect_media(item)
             self._image_wh_list = extra_info["image_wh"]
             self._video_wh_list = extra_info["video_wh"]
             self._video_extra_info_list = extra_info["video_extra_info"]
@@ -279,6 +277,9 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
                 trim_memory()
             self._trim_memory_counter += 1
         return ret
+
+    def _collect_media(self, item: dict):
+        return collect_image_video_paths_and_extra(item["messages"], allow_all_roles=self.allow_all_roles)
 
     def hash(self) -> str:
         if self._hash is None:

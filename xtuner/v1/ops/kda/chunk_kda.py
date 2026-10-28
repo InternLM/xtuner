@@ -4,14 +4,14 @@
 """Compile-friendly ``chunk_kda``.
 
 FLA's public ``fla.ops.kda.chunk_kda`` is decorated ``@torch.compiler.disable``, and its forward
-derives the chunk table with ``prepare_chunk_indices``, which calls ``.tolist()`` on
-``cu_seqlens`` -- dynamo traces that as ``aten._local_scalar_dense`` and inductor refuses to lower
-it. Calling it from a compiled region therefore forces a graph break at every KDA layer.
+derives the chunk table with ``prepare_chunk_indices``. Without CPU offsets, that function calls
+``.tolist()`` on GPU ``cu_seqlens`` -- dynamo traces it as ``aten._local_scalar_dense`` and
+inductor refuses to lower it.
 
 This module takes the route ``xtuner/v1/ops/gated_deltanet`` already took for GatedDeltaNet: call
 FLA's forward stages/``chunk_kda_bwd`` behind ``torch.library.custom_op``. Dynamo treats a
-custom op as an opaque node and traces straight through it, so the chunk-table preparation (and
-its host sync) stays outside the graph without breaking it.
+custom op as an opaque node, while preserved CPU offsets avoid a GPU readback when preparing the
+chunk table.
 
 Only the call shape GLM-5.3-Flash uses is supported -- no ``initial_state``/``output_final_state``
 (the gate is computed outside the kernel by ``fused_kda_gate``, so ``use_gate_in_kernel`` is never
@@ -36,19 +36,24 @@ LIBRARY_NAME = "xtuner_kda"
 _CHUNK_SIZE = 64
 
 
-def _chunk_indices(cu_seqlens: torch.Tensor | None) -> torch.Tensor | None:
-    # Inside a custom op, so the `.tolist()` host sync this performs is invisible to dynamo.
+def _chunk_indices(cu_seqlens: torch.Tensor | None, cu_seqlens_cpu: torch.Tensor | None) -> torch.Tensor | None:
+    # The CPU source avoids a GPU readback; the custom op still hides the
+    # data-dependent chunk-table shape from Dynamo.
     # Recomputed in backward rather than carried across the op boundary: its length depends on the
     # packed document lengths, and returning a data-dependent shape would reintroduce exactly the
     # dynamic-shape problem this module exists to avoid.
-    return prepare_chunk_indices(cu_seqlens, _CHUNK_SIZE) if cu_seqlens is not None else None
+    return (
+        prepare_chunk_indices(cu_seqlens, _CHUNK_SIZE, cu_seqlens_cpu=cu_seqlens_cpu)
+        if cu_seqlens is not None
+        else None
+    )
 
 
 @torch.library.custom_op(
     f"{LIBRARY_NAME}::chunk_kda_fwd",
     mutates_args=(),
     schema="(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, float scale, Tensor? cu_seqlens, "
-    "bool safe_gate, float? lower_bound, bool transpose_state_layout) "
+    "Tensor? cu_seqlens_cpu, bool safe_gate, float? lower_bound, bool transpose_state_layout) "
     "-> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)",
 )
 def chunk_kda_fwd(
@@ -59,6 +64,7 @@ def chunk_kda_fwd(
     beta: torch.Tensor,
     scale: float,
     cu_seqlens: torch.Tensor | None,
+    cu_seqlens_cpu: torch.Tensor | None,
     safe_gate: bool,
     lower_bound: float | None,
     transpose_state_layout: bool,
@@ -69,7 +75,7 @@ def chunk_kda_fwd(
     # `ChunkKDAFunction`, which does it outside the kernel and keeps `rstd` for the backward.
     q_l2, q_rstd = l2norm_fwd(q)
     k_l2, k_rstd = l2norm_fwd(k)
-    chunk_indices = _chunk_indices(cu_seqlens)
+    chunk_indices = _chunk_indices(cu_seqlens, cu_seqlens_cpu)
     g_cumsum = chunk_cumsum(g, cu_seqlens, chunk_indices, RCP_LN2)
     # Reuse FLA's forward stages with the fixed-layout prefix. The public FLA
     # forward computes its own autotuned prefix and cannot accept one externally.
@@ -124,6 +130,7 @@ def _chunk_kda_fwd_fake(
     beta: torch.Tensor,
     scale: float,
     cu_seqlens: torch.Tensor | None,
+    cu_seqlens_cpu: torch.Tensor | None,
     safe_gate: bool,
     lower_bound: float | None,
     transpose_state_layout: bool,
@@ -148,7 +155,8 @@ def _chunk_kda_fwd_fake(
     f"{LIBRARY_NAME}::chunk_kda_bwd",
     mutates_args=(),
     schema="(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, Tensor Aqk, Tensor Akk, Tensor do, "
-    "float scale, Tensor? cu_seqlens, bool safe_gate, float? lower_bound, bool transpose_state_layout) "
+    "float scale, Tensor? cu_seqlens, Tensor? cu_seqlens_cpu, bool safe_gate, float? lower_bound, "
+    "bool transpose_state_layout) "
     "-> (Tensor, Tensor, Tensor, Tensor, Tensor)",
 )
 def chunk_kda_bwd(
@@ -162,6 +170,7 @@ def chunk_kda_bwd(
     do: torch.Tensor,
     scale: float,
     cu_seqlens: torch.Tensor | None,
+    cu_seqlens_cpu: torch.Tensor | None,
     safe_gate: bool,
     lower_bound: float | None,
     transpose_state_layout: bool,
@@ -179,7 +188,7 @@ def chunk_kda_bwd(
         do=do,
         dht=None,
         cu_seqlens=cu_seqlens,
-        chunk_indices=_chunk_indices(cu_seqlens),
+        chunk_indices=_chunk_indices(cu_seqlens, cu_seqlens_cpu),
         chunk_size=_CHUNK_SIZE,
         safe_gate=safe_gate,
         lower_bound=lower_bound,
@@ -200,6 +209,7 @@ def _chunk_kda_bwd_fake(
     do: torch.Tensor,
     scale: float,
     cu_seqlens: torch.Tensor | None,
+    cu_seqlens_cpu: torch.Tensor | None,
     safe_gate: bool,
     lower_bound: float | None,
     transpose_state_layout: bool,
@@ -226,17 +236,18 @@ class ChunkKDAFunction(torch.autograd.Function):
         beta: torch.Tensor,
         scale: float,
         cu_seqlens: torch.Tensor | None,
+        cu_seqlens_cpu: torch.Tensor | None,
         safe_gate: bool,
         lower_bound: float | None,
         transpose_state_layout: bool,
     ):
         o, g_cumsum, Aqk, Akk, q_l2, q_rstd, k_l2, k_rstd = torch.ops.xtuner_kda.chunk_kda_fwd(
-            q, k, v, g, beta, scale, cu_seqlens, safe_gate, lower_bound, transpose_state_layout
+            q, k, v, g, beta, scale, cu_seqlens, cu_seqlens_cpu, safe_gate, lower_bound, transpose_state_layout
         )
         # Only the L2-normed q/k are kept, exactly as FLA's `ChunkKDAFunction` does: it rebinds
         # `q`/`k` to the normed tensors before saving, and its backward feeds those same normed
         # tensors to both the kernel and `l2norm_bwd`.
-        ctx.save_for_backward(q_l2, q_rstd, k_l2, k_rstd, v, g_cumsum, beta, Aqk, Akk, cu_seqlens)
+        ctx.save_for_backward(q_l2, q_rstd, k_l2, k_rstd, v, g_cumsum, beta, Aqk, Akk, cu_seqlens, cu_seqlens_cpu)
         ctx.scale = scale
         ctx.safe_gate = safe_gate
         ctx.lower_bound = lower_bound
@@ -247,7 +258,7 @@ class ChunkKDAFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, do: torch.Tensor, dht: torch.Tensor | None):
-        q_l2, q_rstd, k_l2, k_rstd, v, g_cumsum, beta, Aqk, Akk, cu_seqlens = ctx.saved_tensors
+        q_l2, q_rstd, k_l2, k_rstd, v, g_cumsum, beta, Aqk, Akk, cu_seqlens, cu_seqlens_cpu = ctx.saved_tensors
         # The kernel consumed the L2-normed q/k, so its gradients are w.r.t. those; `l2norm_bwd`
         # maps them back onto the original projections.
         dq, dk, dv, db, dg = torch.ops.xtuner_kda.chunk_kda_bwd(
@@ -261,13 +272,14 @@ class ChunkKDAFunction(torch.autograd.Function):
             do,
             ctx.scale,
             cu_seqlens,
+            cu_seqlens_cpu,
             ctx.safe_gate,
             ctx.lower_bound,
             ctx.transpose_state_layout,
         )
         dq = l2norm_bwd(q_l2, q_rstd, dq)
         dk = l2norm_bwd(k_l2, k_rstd, dk)
-        return dq.to(q_l2), dk.to(k_l2), dv.to(v), dg, db.to(beta), None, None, None, None, None
+        return dq.to(q_l2), dk.to(k_l2), dv.to(v), dg, db.to(beta), None, None, None, None, None, None
 
 
 def chunk_kda(
@@ -278,6 +290,7 @@ def chunk_kda(
     beta: torch.Tensor,
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
+    cu_seqlens_cpu: torch.Tensor | None = None,
     safe_gate: bool = False,
     lower_bound: float | None = None,
     transpose_state_layout: bool = False,
@@ -298,6 +311,7 @@ def chunk_kda(
         beta (torch.Tensor): Betas of shape ``[B, T, H]``.
         scale (float | None): Attention scale; defaults to ``K ** -0.5``.
         cu_seqlens (torch.Tensor | None): Packed-sequence offsets, as in the varlen attention API.
+        cu_seqlens_cpu (torch.Tensor | None): Matching CPU offsets for FLA's chunk table.
         safe_gate (bool): Use FLA's numerically safe intra-chunk computation for bounded gates.
         lower_bound (float | None): Forwarded to FLA backward for API compatibility. Gate activation
             is precomputed by the caller; this argument does not clamp ``g``.
@@ -327,4 +341,6 @@ def chunk_kda(
         )
     if scale is None:
         scale = q.shape[-1] ** -0.5
-    return ChunkKDAFunction.apply(q, k, v, g, beta, scale, cu_seqlens, safe_gate, lower_bound, transpose_state_layout)
+    return ChunkKDAFunction.apply(
+        q, k, v, g, beta, scale, cu_seqlens, cu_seqlens_cpu, safe_gate, lower_bound, transpose_state_layout
+    )

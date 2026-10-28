@@ -200,16 +200,33 @@ def test_content_never_infers_reasoning_from_think_literals(tokenizer, chat, rea
         assert (ids, labels) == slow(tokenizer, [message], clear_thinking=clear)
 
 
-def test_think_literals_in_history_stay_supervised_when_clearing_reasoning(tokenizer, chat):
-    _, fast, slow = chat
+def test_think_literals_in_history_when_clearing_reasoning(tokenizer, chat):
+    render, fast, slow = chat
     messages = [
         {"role": "user", "content": "question"},
         {"role": "assistant", "content": "正文 </think> 保留"},
         {"role": "user", "content": "continue"},
         {"role": "assistant", "content": "answer", "reasoning_content": "actual reasoning"},
     ]
-    assert fast(tokenizer, messages, clear_thinking=True) == fast(tokenizer, messages, clear_thinking=False)
+    # 两种 clear_thinking 取值下 fast 与 slow 的标签都必须一致。
     assert fast(tokenizer, messages, clear_thinking=True) == slow(tokenizer, messages, clear_thinking=True)
+    assert fast(tokenizer, messages, clear_thinking=False) == slow(tokenizer, messages, clear_thinking=False)
+
+    ids_cleared, labels_cleared = fast(tokenizer, messages, clear_thinking=True)
+    ids_kept, labels_kept = fast(tokenizer, messages, clear_thinking=False)
+    if render is glm52_chat.render_glm52_chat:
+        # glm52 语义：clear_thinking 只屏蔽带 reasoning 的历史轮，无 reasoning 的历史 content 照样监督。
+        assert (ids_cleared, labels_cleared) == (ids_kept, labels_kept)
+        return
+    # glm53 语义：clear_thinking 屏蔽最后一个 user 之前的整轮历史 assistant（含无 reasoning 的
+    # 轮次，其 content 里的字面 </think> 拼写一并不再监督）；最后一轮照常监督。
+    assert (ids_cleared, labels_cleared) != (ids_kept, labels_kept)
+    assistant_id = tokenizer.convert_tokens_to_ids("<|assistant|>")
+    user_id = tokenizer.convert_tokens_to_ids("<|user|>")
+    first_assistant = ids_cleared.index(assistant_id)
+    boundary_user = ids_cleared.index(user_id, first_assistant)
+    assert all(label == -100 for label in labels_cleared[first_assistant:boundary_user])
+    assert any(label != -100 for label in labels_cleared[boundary_user:])
 
 
 @pytest.mark.parametrize("suffix", ["<|", "<", "</", "</think", "<|assistant", "<|observation"])
