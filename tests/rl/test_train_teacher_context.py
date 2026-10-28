@@ -1,5 +1,7 @@
 """Teacher reconstruction must preserve the composed model's visual input contract."""
 
+from unittest.mock import Mock
+
 import pytest
 import torch
 
@@ -59,9 +61,56 @@ class TestTrainTeacherContext:
         assert teacher.input_ids is student.input_ids
         assert teacher.cu_seq_lens_q is student.cu_seq_lens_q
         assert teacher.cu_seq_lens_k is student.cu_seq_lens_k
+        assert teacher.cu_seq_lens_q_cpu is student.cu_seq_lens_q_cpu
         assert teacher.num_padding == 1
         assert teacher.inputs_embeds is None
         assert teacher.deepstack_visual_embeds is None
         assert teacher.visual_pos_masks is None
         assert teacher.rollout_routed_experts is None
         assert not teacher.offload_rollout_routed_experts
+
+    @pytest.mark.parametrize("is_composed", [False, True])
+    def test_teacher_preserves_cpu_offsets_after_device_transfer(self, is_composed: bool) -> None:
+        student = SequenceContext.from_input_ids((torch.arange(6).view(1, -1),), device="cpu")
+        offsets_cpu = student.cu_seq_lens_q_cpu
+        # Meta exercises the constructor's non-CPU branch without launching CUDA.
+        # Keep explicit 2D positions so reconstruction does not read any meta scalars.
+        student.to("meta")
+        assert student.cu_seq_lens_q.device.type == "meta"
+        assert student.cu_seq_lens_q_cpu is offsets_cpu
+
+        teacher = TrainTeacherManager.construct_teacher_seq_ctx(student, is_composed=is_composed)
+
+        assert teacher.cu_seq_lens_q is student.cu_seq_lens_q
+        assert teacher.cu_seq_lens_k is student.cu_seq_lens_k
+        assert teacher.cu_seq_lens_q_cpu is offsets_cpu
+        assert teacher.cu_seq_lens_q_cpu.device.type == "cpu"
+        assert teacher.position_ids is student.position_ids
+        assert teacher.input_ids is student.input_ids
+
+    def test_composed_teacher_preserves_shard_reconstruction_metadata(self) -> None:
+        raw_ids = torch.arange(12).view(1, -1)
+        raw_embeds = torch.ones(1, 12, 4)
+        mesh = Mock()
+        mesh.get_local_rank.return_value = 1
+        student = SequenceContext.from_input_ids((raw_ids,), device="cpu").copy(
+            input_ids=raw_ids[:, 6:],
+            position_ids=torch.arange(6, 12).view(1, -1),
+            sequence_parallel_mesh=mesh,
+            raw_input_ids=raw_ids,
+            raw_inputs_embeds=raw_embeds,
+            shard_start=6,
+            shard_size=6,
+            mm_token_type_ids=torch.tensor([[0, 1, 0, 0, 0, 0]]),
+        )
+
+        teacher = TrainTeacherManager.construct_teacher_seq_ctx(student, is_composed=True)
+
+        assert teacher.sequence_parallel_mesh is mesh
+        assert teacher.sp_rank == 1
+        assert teacher._raw_input_ids is raw_ids
+        assert teacher._raw_inputs_embeds is None
+        assert teacher._shard_start == 6
+        assert teacher._shard_size == 6
+        assert teacher.mm_token_type_ids is student.mm_token_type_ids
+        assert student._raw_inputs_embeds is raw_embeds
