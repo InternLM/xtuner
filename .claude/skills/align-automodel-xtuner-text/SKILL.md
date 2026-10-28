@@ -65,6 +65,10 @@ evidence (checkpoint, consumed inputs, schedule and effective config); separate 
 **Output / gate:** a recorded contract, CPU-verified input manifest, consumer-side probe plan, and
 predeclared acceptance criteria. Device-only fields remain pending until the first-step probe checks them;
 unresolved input or loss semantics block a parity verdict, not the diagnostic probe needed to resolve them.
+Objective-level configuration differences (loss terms, auxiliary weights, regularization) are not a
+comparable state: adjudicate which side matches the model's intent using a third-party authority — the
+reference implementation, checkpoint metadata, or the model definition — and align both sides to it.
+"Known different" may explain a gap; it never justifies comparing across it.
 If equivalence cannot be established, stop the numerical-parity path. A separately labeled native-pipeline
 benchmark may still be useful, but is not pointwise accuracy evidence.
 

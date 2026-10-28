@@ -31,6 +31,9 @@ conditional failure modes and [diagnostics](diagnostics.md) for measurement meth
   when changing total steps. Never change one side's warmup just to align plots.
 - Use one-variable contrasts for causal diagnosis. Larger environment/code changes are useful for screening
   but cannot identify one kernel or flag as the cause. Hold non-tested state fixed and check interactions.
+- Close every decomposed factor. A boundary probe that splits a discrepancy into N factors owes N
+  single-variable confirmations; fixing the dominant factor and watching the headline metric shrink does
+  not retire the remaining factors, which resurface later at greater cost.
 - For stochastic paths, inspect RNG usage and establish repeatability where needed. Do not attribute a
   discrepancy to non-determinism from a single pair, or assume matching seeds yield matching dropout masks.
 - Keep pointwise checks for a supported common-input/update contract. Add long-horizon statistics under

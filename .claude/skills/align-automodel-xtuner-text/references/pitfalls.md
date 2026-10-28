@@ -46,6 +46,13 @@ semantics; do not toggle a structural option just because its name resembles an 
 per-document lengths, selected-token coverage and executed kernels. A long pack alone does not imply long
 documents or sparse execution. Do not generalize one implementation's top-k threshold or KV layout.
 
+**P1.10 Constructor defaults hide submodule drift.** Two configs can compare equal while built submodules
+run different effective hyperparameters — for example a norm left on its class-default eps instead of the
+checkpoint's value, with the printed model repr carrying the evidence. Config dumps do not contain
+submodule state; `named_modules()` runtime values do. When forward loss differs with equal inputs, sweep
+every norm/activation submodule's runtime eps and dtype on both sides against the checkpoint config
+before blaming kernels.
+
 ## P2 Comparison contract
 
 **P2.1 Missing effective values.** Track model/data/update/numerics items as default, configured and

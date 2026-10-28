@@ -51,6 +51,13 @@ Audit how each engine realizes it through microbatch accumulation, loss scaling 
 If the target objective uses sample weights or auxiliary terms, derive those terms separately; do not
 force token mean on a different intended objective.
 
+When forward loss differs with verified-equal inputs, reconcile **runtime submodule hyperparameters**
+before hunting kernels: dump both sides' norm/activation modules' effective values (eps, momentum,
+dtype) via `named_modules()` and check each against the checkpoint config. Constructor defaults are
+the classic trap — top-level configs can compare equal while a submodule silently runs a class
+default instead of the config value. Config dumps do not contain submodule state; only the built
+module does.
+
 **Toy example:** one microbatch has two valid tokens with loss sum 4, another has six with sum 18.
 The global token mean is `(4+18)/(2+6) = 2.75`, not `(4/2 + 18/6)/2 = 2.5`.
 Under plain DDP averaging over D ranks, summing local loss contributions divided by the global token count
@@ -122,6 +129,14 @@ If code and environment are both suspects, use this design only when needed and 
 An environment effect localizes to a bundle, not a specific dependency. Narrow further to one package,
 flag or operation; compare its forward/backward outputs and repeat the first-step and short-horizon gates
 when proposing a fix. Record null results and competing explanations; do not declare a cause from one scalar.
+
+A zero-GPU discriminator for "amplified forward noise vs structural backward difference": reuse
+already-saved gradient snapshots and compare two runs of **one framework** that differ by the smallest
+available forward perturbation (for example a compilation toggle). If that same-side perturbation
+reproduces the cross-framework gradient divergence, the gap is forward-noise amplification; if the
+same-side cosine stays near 1 while the cross-framework one collapses, the backward paths differ
+structurally (kernels, library versions), and elementwise parity requires a matched stack rather than
+more precision toggles.
 
 ## 5. Decompose performance and memory separately
 
