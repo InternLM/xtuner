@@ -64,7 +64,12 @@ from tokenizers import Tokenizer
 
 from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizerBase
 from transformers.video_utils import VideoMetadata
-from xtuner.v1.data_proto.messages.glm53_chat import _tokenize_with_loss_mask, render_glm53_chat
+from xtuner.v1.data_proto.messages.glm53_chat import (
+    _tokenize_with_loss_mask,
+    glm53_tokenize_fn_fastspeed,
+    glm53_tokenize_fn_slowspeed,
+    render_glm53_chat,
+)
 from xtuner.v1.datasets.mllm_tokenize_fn import Glm53VLTokenizeFnConfig, Glm53VLTokenizeFunction
 from xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn import collect_image_video_paths_and_extra
 from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import _expand_marker
@@ -483,6 +488,68 @@ class TestGlm53MixedMediaAndTruncation:
 
 
 class TestGlm53MediaRoleContract:
+    @pytest.mark.parametrize("media", ["image", "video"])
+    @pytest.mark.parametrize("literal", [None, "<|image|>", "<|video|>", "</think>"])
+    def test_assistant_media_cache_runtime_preserves_literals_and_labels(
+        self, tokenize_fn, tokenizer, image_fixture, video_fixture, media, literal
+    ):
+        item = _image_item(image_fixture) if media == "image" else _video_item(video_fixture.rstrip("/") + "/")
+        part = item["messages"][0]["content"][0]
+        prefix = " \n" if literal is None else f" \n前文 {literal} 中间 "
+        suffix = " \t " if literal is None else f" 后文 {literal} 收尾 \t "
+        item["messages"][0]["content"] = "please respond"
+        item["messages"][1]["content"] = [
+            {"type": "text", "text": prefix},
+            part,
+            {"type": "text", "text": suffix},
+        ]
+
+        spans = []
+        rendered, mask = render_glm53_chat(item["messages"], _literal_spans=spans)
+        assert (rendered, mask) == render_glm53_chat(item["messages"])
+        assert glm53_tokenize_fn_fastspeed(tokenizer, item["messages"]) == glm53_tokenize_fn_slowspeed(
+            tokenizer, item["messages"]
+        )
+        assert all(0 <= start < end <= len(rendered) for start, end in spans)
+        for marker in (f"<|begin_of_{media}|>", f"<|{media}|>", f"<|end_of_{media}|>"):
+            start = rendered.index(f"<|begin_of_{media}|>")
+            start = rendered.index(marker, start)
+            assert not any(left < start + len(marker) and right > start for left, right in spans)
+
+        tokenize_fn.state = "cache"
+        cached = tokenize_fn(item)
+        tokenize_fn.state = "runtime"
+        runtime = tokenize_fn(item)
+        ids, labels = runtime["input_ids"], runtime["labels"]
+        assert cached["num_tokens"] == runtime["num_tokens"] == len(ids) > 0
+        assert cached["num_img_tokens"] == runtime["num_img_tokens"]
+        image_id = tokenize_fn.processor.image_token_id
+        expected_visual = sum(runtime["num_img_tokens"]) // tokenize_fn.merge_unit
+        types = runtime["mm_token_type_ids"][0]
+        assert ids.count(image_id) == int(types.ne(0).sum()) == expected_visual > 0
+        for index, token_id in enumerate(ids):
+            assert types[index] == ({"image": 1, "video": 2}[media] if token_id == image_id else 0)
+            if types[index] != 0:
+                assert labels[index] == -100
+        for marker in (f"<|begin_of_{media}|>", f"<|end_of_{media}|>"):
+            token_id = tokenizer.convert_tokens_to_ids(marker)
+            assert ids.count(token_id) == 1
+            assert labels[ids.index(token_id)] == token_id
+        assert ids[-1] == labels[-1] == tokenizer.eos_token_id
+
+        # Check trimmed text on both sides against independent contextual base BPE.
+        serialized = json.loads(tokenizer.backend_tokenizer.to_str())
+        serialized["added_tokens"] = []
+        base = Tokenizer.from_str(json.dumps(serialized))
+        expected_prefix = base.encode(prefix.lstrip(), add_special_tokens=False).ids
+        start = ids.index(tokenizer.convert_tokens_to_ids("</think>")) + 1
+        assert ids[start : start + len(expected_prefix)] == expected_prefix
+        assert labels[start : start + len(expected_prefix)] == expected_prefix
+        expected_suffix = base.encode(suffix.rstrip(), add_special_tokens=False).ids
+        if expected_suffix:
+            assert ids[-len(expected_suffix) - 1 : -1] == expected_suffix
+            assert labels[-len(expected_suffix) - 1 : -1] == expected_suffix
+
     @pytest.mark.parametrize("role", ["system", "assistant", "tool"])
     def test_media_is_collected_from_all_roles(self, tokenize_fn: Glm53VLTokenizeFunction, role: str) -> None:
         image = {"type": "image", "image": {"url": "unused.jpg", "image_wh": [448, 448]}}
@@ -874,6 +941,37 @@ class TestGlm53DirtyDataDoesNotHalt:
 
 
 class TestGlm53LiteralTokens:
+    @pytest.mark.parametrize("media", ["image", "video"])
+    @pytest.mark.parametrize("literal_only", [False, True])
+    def test_marker_payload_mismatch_has_sample_context(
+        self, tokenize_fn, image_fixture, video_fixture, media, literal_only, monkeypatch
+    ):
+        item = _image_item(image_fixture) if media == "image" else _video_item(video_fixture.rstrip("/") + "/")
+        item["id"] = "marker-mismatch-42"
+        marker = f"<|{media}|>"
+
+        def render_without_real_marker(data_item, literal_spans=None):
+            text = marker if literal_only else "no media marker"
+            if literal_only and literal_spans is not None:
+                literal_spans.append((0, len(text)))
+            return text, [False] * len(text)
+
+        monkeypatch.setattr(tokenize_fn, "_render_base", render_without_real_marker)
+        logger_mock = Mock()
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn.logger", logger_mock)
+        tokenize_fn.state = "cache"
+        assert tokenize_fn(item)["num_tokens"] == 0
+        cache_message = logger_mock.warning.call_args[0][0]
+        tokenize_fn.state = "runtime"
+        with pytest.raises(RuntimeError) as exc:
+            tokenize_fn(item)
+        for message in (cache_message, str(exc.value)):
+            assert "marker/payload mismatch" in message
+            assert marker in message
+            assert "expansion 1/1" in message
+            assert tokenize_fn.data_name in message
+            assert item["id"] in message
+
     @pytest.mark.parametrize("marker", ["<|image|>", "<|video|>"])
     def test_expansion_skips_literals_and_shifts_spans(self, marker):
         literal = "中文 " + marker
@@ -898,8 +996,10 @@ class TestGlm53LiteralTokens:
             assert expanded[start:end] == literal
             assert all(expanded_mask[start:end])
         assert sum(expanded_mask) == len(literal) * 3
-        with pytest.raises(ValueError):
+        with pytest.raises(RuntimeError, match="marker/payload mismatch"):
             _expand_marker(marker, [True] * len(marker), marker, ["patches"], [(0, len(marker))])
+        with pytest.raises(RuntimeError, match="expansion 2/2"):
+            _expand_marker(marker, [True] * len(marker), marker, ["first", "second"])
 
     @pytest.mark.parametrize("media", ["pure_text", "image", "video"])
     @pytest.mark.parametrize("added_index", range(36))

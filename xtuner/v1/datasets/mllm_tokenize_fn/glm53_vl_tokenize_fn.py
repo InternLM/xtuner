@@ -115,6 +115,9 @@ def _expand_marker(
     marker: str,
     expansions: list[str],
     literal_spans: list[tuple[int, int]] | None = None,
+    *,
+    data_name: str | None = None,
+    data_id: Any = None,
 ) -> tuple[str, list[bool]]:
     """Expand template markers without loss, skipping literals and updating
     their character spans in place."""
@@ -123,14 +126,19 @@ def _expand_marker(
     replacements: list[tuple[int, int]] = []
     spans = literal_spans if literal_spans is not None else []
     cursor = span_index = 0
-    for expansion in expansions:
-        idx = text.index(marker, cursor)
-        while True:
+    for expansion_index, expansion in enumerate(expansions, start=1):
+        idx = text.find(marker, cursor)
+        while idx >= 0:
             while span_index < len(spans) and spans[span_index][1] <= idx:
                 span_index += 1
             if span_index == len(spans) or spans[span_index][0] >= idx + len(marker):
                 break
-            idx = text.index(marker, idx + len(marker))
+            idx = text.find(marker, idx + len(marker))
+        if idx < 0:
+            raise RuntimeError(
+                f"Media marker/payload mismatch: no non-literal {marker!r} remains for "
+                f"expansion {expansion_index}/{len(expansions)}, data_name: {data_name!r}, data_id: {data_id!r}."
+            )
         text_parts.append(text[cursor:idx])
         mask_parts.append(loss_mask[cursor:idx])
         text_parts.append(expansion)
@@ -269,7 +277,9 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             glm53_media_messages(item["messages"]), allow_all_roles=self.allow_all_roles
         )
 
-    def _render_base(self, data_item: dict, literal_spans=None) -> tuple[str, list[bool]]:
+    def _render_base(
+        self, data_item: dict, literal_spans: list[tuple[int, int]] | None = None
+    ) -> tuple[str, list[bool]]:
         messages = list(data_item["messages"])
         if self.system_message is not None and (not messages or messages[0].get("role") != "system"):
             messages = [{"role": "system", "content": self.system_message}, *messages]
@@ -284,7 +294,7 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         )
 
     def _finalize(
-        self, text: str, loss_mask: list[bool], literal_spans=None
+        self, text: str, loss_mask: list[bool], literal_spans: list[tuple[int, int]] | None = None
     ) -> tuple[list[int], list[int], list[int]]:
         input_ids, labels = _tokenize_with_loss_mask(self.tokenizer, text, loss_mask, literal_spans)
         mm_token_type_ids = self.processor.create_mm_token_type_ids([input_ids])[0]
@@ -312,7 +322,15 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         text, loss_mask = self._render_base(data_item, literal_spans)
         image_inputs = {"image_grid_thw": torch.tensor(grids)}
         expansions = [self.processor.replace_image_token(image_inputs, i) for i in range(len(grids))]
-        text, loss_mask = _expand_marker(text, loss_mask, _IMAGE_MARKER, expansions, literal_spans)
+        text, loss_mask = _expand_marker(
+            text,
+            loss_mask,
+            _IMAGE_MARKER,
+            expansions,
+            literal_spans,
+            data_name=self.data_name,
+            data_id=data_item.get("id"),
+        )
         input_ids, labels = _tokenize_with_loss_mask(self.tokenizer, text, loss_mask, literal_spans)
         input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
         num_img_tokens = [grid_h * grid_w for _, grid_h, grid_w in grids]
@@ -354,7 +372,15 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         text, loss_mask = self._render_base(data_item, literal_spans)
         image_inputs = {"image_grid_thw": image_grid_thw}
         expansions = [self.processor.replace_image_token(image_inputs, i) for i in range(image_grid_thw.shape[0])]
-        text, loss_mask = _expand_marker(text, loss_mask, _IMAGE_MARKER, expansions, literal_spans)
+        text, loss_mask = _expand_marker(
+            text,
+            loss_mask,
+            _IMAGE_MARKER,
+            expansions,
+            literal_spans,
+            data_name=self.data_name,
+            data_id=data_item.get("id"),
+        )
         input_ids, labels, mm_token_type_ids = self._finalize(text, loss_mask, literal_spans)
 
         num_img_tokens = (image_grid_thw[:, 1] * image_grid_thw[:, 2]).tolist()
@@ -441,7 +467,15 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         text, loss_mask = self._render_base(data_item, literal_spans)
         video_inputs = {"video_grid_thw": torch.tensor(grids), "video_metadata": metadata_list}
         expansions = [self.processor.replace_video_token(video_inputs, i) for i in range(len(grids))]
-        text, loss_mask = _expand_marker(text, loss_mask, _VIDEO_MARKER, expansions, literal_spans)
+        text, loss_mask = _expand_marker(
+            text,
+            loss_mask,
+            _VIDEO_MARKER,
+            expansions,
+            literal_spans,
+            data_name=self.data_name,
+            data_id=data_item.get("id"),
+        )
         input_ids, labels = _tokenize_with_loss_mask(self.tokenizer, text, loss_mask, literal_spans)
         input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
 
@@ -484,7 +518,15 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         text, loss_mask = self._render_base(data_item, literal_spans)
         video_inputs = {"video_grid_thw": video_grid_thw, "video_metadata": metadata_list}
         expansions = [self.processor.replace_video_token(video_inputs, i) for i in range(video_grid_thw.shape[0])]
-        text, loss_mask = _expand_marker(text, loss_mask, _VIDEO_MARKER, expansions, literal_spans)
+        text, loss_mask = _expand_marker(
+            text,
+            loss_mask,
+            _VIDEO_MARKER,
+            expansions,
+            literal_spans,
+            data_name=self.data_name,
+            data_id=data_item.get("id"),
+        )
         input_ids, labels, mm_token_type_ids = self._finalize(text, loss_mask, literal_spans)
 
         num_img_tokens: list[int] = []
