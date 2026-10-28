@@ -16,6 +16,10 @@ conditional failure modes and [diagnostics](diagnostics.md) for measurement meth
   criterion on a fresh pair; never relabel an observed failure as a pass because loss happens to look close.
 - State evidence limits: equal loss does not prove equal gradients; equal norms do not prove equal vectors;
   selected tensor checks do not cover the whole model; a short run does not validate a long horizon.
+- Converge on symptoms, not on a fix list: localization is closed when every observed symptom has a single
+  cause confirmed by a one-variable A/B and the residual is quantified or attributed. A known upstream fix
+  list is a post-hoc coverage check, never the convergence target — do not run experiments just to match it.
+  Fixes for conditions the current scope never triggers stay "not reproduced in this scope".
 
 ## 2. Keep comparisons interpretable
 
