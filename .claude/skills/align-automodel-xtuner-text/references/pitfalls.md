@@ -16,10 +16,10 @@ Compare applied lr sequences and warmup. Constant lr can simplify an initial dia
 mandatory when another schedule is correctly matched or required to reproduce the target workload.
 
 **P1.3 Dependency/build mismatch.** Record commits or reproducible build identifiers and loaded library
-paths, not just package names. Snapshots deployed without `.git` (tar/rsync copies) have no revision to
-log; fall back to the commit hash embedded in the deployment path plus hashes of the critical files you
-verified. For missing symbols or CUDA build failures, check the actual call site,
-framework version requirements, CUDA/compiler compatibility and library resolution before changing the environment.
+paths; without `.git`, verify a build manifest or archive provenance and content hashes, treating a hash in
+a directory name only as a claimed revision and critical-file checks only as that coverage (otherwise mark
+identity unverified). For missing symbols or CUDA build failures, check the actual call site, framework
+requirements, CUDA/compiler compatibility and library resolution before changing the environment.
 
 **P1.4 Wrong function inspected.** A package version or sibling function can conceal a missing argument.
 Copy the actual call-site import and inspect that callable and its implementation; use a minimal execution
@@ -139,12 +139,12 @@ membership and gradient weighting. Even then kernel shapes/reduction order may c
 first-step/short checks for the changed pair; reuse an old control only with a documented matching contract.
 Do not assume repacking is numerically neutral.
 
-**P4.6 Replay adapters and configs are pinned to a code version.** Collator/sequence-context fields and
-optimizer/attention config fields get added, renamed or defaulted differently across snapshots of the same
-framework; a nested `hasattr` guard does not protect a sibling field assigned inside its block. Minimum
-re-validation on a new checkout: adapter import, pack-order smoke, **and executing the actual config file**
-(e.g. `Config.fromfile`). An import-plus-order smoke can pass while a config `setattr` still crashes on a
-missing field, or silently targets different semantics.
+**P4.6 Replay adapters and configs are pinned to a code version.** After changing model or checkout,
+revalidate adapter import, effective pack contents/order and the trusted actual config in the target
+environment (e.g. `Config.fromfile`, after checking execution side effects); field presence does not prove
+unchanged defaults or semantics, and one field's `hasattr` does not protect another field.
+Successful loading is only a preflight check: do not silently skip required fields, and still verify
+effective values, consumer-side context and the first-step gate.
 
 ## P5 Execution and evidence
 

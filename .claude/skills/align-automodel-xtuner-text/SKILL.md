@@ -20,8 +20,18 @@ Confirm the authorized machines, data, run budget and output location; this skil
 Before reserving GPUs or launching runs, post an **experiment card** and wait for the user's confirmation:
 objective, predeclared pass/fail criteria, smallest sufficient scale and horizons, prerequisites
 (code/data/machines), and estimated cost and duration. If the card reuses an earlier run as a comparison
-baseline instead of launching a fresh arm, state the reused arm's identity and the contract-match evidence
-(same checkpoint, same pack stream, same schedule and effective config).
+baseline instead of launching a fresh arm, state its source/environment/state identities and contract-match
+evidence (checkpoint, consumed inputs, schedule and effective config); separate intentional experimental variables.
+
+### When changing model or checkout
+
+- Re-trace the active recipe, model registration/loading and any model-specific loss or gradient overrides;
+  anchors are search starting points, not guaranteed APIs across models or revisions.
+- Mark mechanisms as applicable or not applicable: for example EP/router terms for MoE, packed/sparse context,
+  tied weights, auxiliary heads, quantization and stochastic paths. Cover each active layer/path in probes;
+  do not prescribe a previous model's kernels, CE flags, optimizer, single-rank setup or tolerances.
+- Revalidate the actual config and replay adapter on that checkout, then consumer-side inputs and the
+  first-step gate. Reuse methods and proven artifacts, not another model's pass verdict or input-equivalence claim.
 
 ## Preparation: freeze the comparison contract and actual inputs
 
@@ -58,16 +68,34 @@ unresolved input or loss semantics block a parity verdict, not the diagnostic pr
 If equivalence cannot be established, stop the numerical-parity path. A separately labeled native-pipeline
 benchmark may still be useful, but is not pointwise accuracy evidence.
 
+### Cache slow preprocessing for repeated runs
+
+- Locate the slow stage (reading, template/mask construction, tokenization or packing) in the active data
+  path; do not assume custom/local datasets use the HF Hub path's parallelism or caching. Where supported,
+  materialize deterministic preprocessing outputs once on authorized storage and reload them for later runs;
+  verify the current checkout's cache interface rather than copying another model's flags.
+- Bind cache identity to source data contents/order, tokenizer and template revisions, processing code/config,
+  and relevant truncation, label/mask and packing settings. Check metadata and all expected shards before reuse;
+  rebuild or revalidate affected outputs when these inputs change, and reject incomplete caches.
+- Verify that reloading actually skips the cached work and preserves effective tensors against uncached
+  processing, recording coverage; a cache-hit message alone is insufficient. Preserve epoch/shuffle, stochastic
+  processing and rank assignment semantics—cache before those operations unless intentionally freezing a
+  verified replay stream—and retain the cross-framework input checks above.
+- Record cold preprocessing, cached reload, any remaining packing, model loading/compilation and steady-state
+  training times separately. A preprocessing cache hit is neither a compiler-cache hit nor proof that the
+  entire training startup is fast; retain the original cold-start cost in performance reports.
+
 ## Stage 1: compare the first training step
 
 **Input:** the prepared contract and the same initial state on both sides.
 
-- Run this gate **first in the target production configuration**, with its parallelism, kernels,
-  checkpointing and offload enabled; acceptance always comes from that configuration. Only when it fails,
-  localize with a reduced baseline: single rank, no EP/SP, no compile, no offload, then re-enable one
-  feature at a time and repeat the gate. A discrepancy already present in the reduced baseline points away
-  from the parallel stack; one that appears only after a feature is enabled points at that feature. A
-  passing reduced run is a localization result, never the parity verdict.
+- Run this gate **first in the target production configuration**, retaining its configured parallelism,
+  kernels, checkpointing and offload; acceptance belongs to that configuration. If it fails or cannot run
+  within authorized resources, use a feasible reduced probe that preserves the suspect path, and record
+  the missing production validation; single rank or disabling offload is not mandatory. Change one factor
+  at a time: a mismatch without a feature shows it is not required to reproduce that mismatch, not that
+  the feature is defect-free; a mismatch appearing with it may involve interactions. A reduced pass is
+  diagnostic evidence, never the production parity verdict.
 - Run one logical update's complete forward/backward and gradient accumulation. Measure loss and gradients
   **before any optimizer update**, after required synchronization and loss-scaler unscaling, before clipping.
   “First step” denotes this computation, not a particular printed `step=0` or `Step=1`.
@@ -127,30 +155,37 @@ for input replay, gradient accounting, controlled experiments and worked example
 
 ## Reusable helpers
 
-- `scripts/compare_step_metrics.py` pairs per-update metrics from two text logs or JSONL trackers into
-  `<prefix>.csv` and `<prefix>.json` (diff = A − B), reporting unmatched updates and duplicates. The CSV
-  columns are `update, a_<metric>, b_<metric>, diff_<metric>` per metric; the JSON stores per-metric
-  statistics and criterion results under `metrics`. Supply
-  regexes/keys and offsets derived from source; the script never shifts curves until they overlap.
-  `--atol/--rtol` encode the predeclared criterion and set the exit code; without them it reports
-  differences only. `--plot` is optional and requires matplotlib. Run it from the repository root, and
-  validate each regex against real log lines first.
-- Self-test with synthetic logs, no training run needed:
-  `python .claude/skills/align-automodel-xtuner-text/scripts/test_compare_step_metrics.py`.
+- `scripts/compare_step_metrics.py` pairs text logs or JSONL into `<prefix>.csv` and `<prefix>.json`
+  (diff = A − B). CSV columns are `update` and `a_<metric>, b_<metric>, diff_<metric>` per requested metric;
+  JSON stores metric statistics and criterion results under `metrics`. Validate regexes/keys on real lines
+  and derive offsets from source; the tool does not infer training semantics or shift curves to fit.
+- **Threshold checks now require `--expected-updates START:END`**, an inclusive logical-update window
+  after offsets (for example `1:20` for an already-declared 20-update check). Both sides must cover it;
+  records outside it are excluded and counted. Use the predeclared `--atol` and/or `--rtol`, including
+  explicit zero; run metrics separately if their bounds differ. Old threshold commands must add the window.
+- In criterion mode, missing requested metrics are input errors; descriptive mode instead reports missing
+  values with blank CSV cells and null statistics where no pairs exist, without a `passed` verdict.
+  Non-finite requested values in the selected window and incomplete declared windows always error.
+  Duplicate steps (including outside the window) default to error; `--on-duplicate first|last` is an explicit,
+  reported choice after checking rank/restart boundaries. Exit `1` means a criterion failed, `2` an input/
+  execution error; descriptive exit `0` is not a pass. A scalar criterion pass is not a training-parity verdict.
+- `--plot` is optional and requires matplotlib; run from the repository root. Self-test without training:
+  `python3 .claude/skills/align-automodel-xtuner-text/scripts/test_compare_step_metrics.py`.
 - Deliver the result with [the report template](references/report-template.md).
 
 ## Report
 
-Lead with the verdict level actually reached; never let a first-step screen be retold as full alignment.
+Report **horizon, evidence coverage and outcome separately**; never let more steps imply stronger gradient evidence.
 
-| Verdict | What was demonstrated |
+| Dimension | What to state |
 |---|---|
-| First-step, norm-only | Same-input first-step loss and global pre-clip grad norm within declared bounds; gradient vectors not compared |
-| First-step, tensor-level | The above plus mapped gradient tensors, with their coverage stated |
-| Short horizon | The above plus the declared short update pair (loss, grad norm, applied lr, updates as required) |
-| Long horizon | The above plus the agreed long run, with pointwise criteria and/or predeclared statistics |
-| Native-stack benchmark only | Performance/memory or trend comparison without same-input parity; answers a different question, not a higher level |
+| Horizon and outcome | First step / N short updates / N long updates; pass, fail or not verified against each declared criterion |
+| Gradient coverage | Norm-only, or mapped tensors with the checked population and coverage; selected tensors do not cover the whole model |
+| Update coverage | Actual per-group lr, clipping, selected parameter/state deltas where checked; loss/norm trajectories alone do not prove update equality |
+| Benchmark scope | Controlled matched stack or native-stack performance/memory; neither is a higher parity level |
 
+For example: “20-update checks passed, norm-only; gradient vectors and long horizon not verified.”
+A failed first-step gate remains failed even if later diagnostic updates were collected.
 Then include this checklist, marking anything not done as **not verified** instead of omitting it:
 
 - Contract with default/configured/runtime-effective values, plus the items still unresolved.
