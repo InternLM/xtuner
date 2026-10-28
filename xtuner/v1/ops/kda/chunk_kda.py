@@ -95,7 +95,7 @@ def chunk_kda_fwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        **fla_state_layout_kwargs(chunk_gated_delta_rule_fwd_h, transpose_state_layout, hv=v.shape[-2], h=q.shape[-2]),
+        **fla_state_layout_kwargs(chunk_gated_delta_rule_fwd_h, transpose_state_layout),
     )
     o = chunk_gla_fwd_o_gk(
         q=q_l2,
@@ -107,7 +107,7 @@ def chunk_kda_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         chunk_size=_CHUNK_SIZE,
-        **fla_state_layout_kwargs(chunk_gla_fwd_o_gk, transpose_state_layout, hv=v_new.shape[-2], h=q_l2.shape[-2]),
+        **fla_state_layout_kwargs(chunk_gla_fwd_o_gk, transpose_state_layout),
     )
     # Backward recomputes w/u/qg/kg/v_new/h from this exact prefix; only these
     # five tensors have to cross the op boundary.
@@ -182,7 +182,7 @@ def chunk_kda_bwd(
         chunk_size=_CHUNK_SIZE,
         safe_gate=safe_gate,
         lower_bound=lower_bound,
-        **fla_state_layout_kwargs(_fla_chunk_kda_bwd, transpose_state_layout, hv=do.shape[-2], h=q.shape[-2]),
+        **fla_state_layout_kwargs(_fla_chunk_kda_bwd, transpose_state_layout),
     )[:5]
     return dq, dk, dv, db, dg
 

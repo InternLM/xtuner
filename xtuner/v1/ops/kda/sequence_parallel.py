@@ -186,7 +186,7 @@ def sequence_chunk_fwd(
         chunk_indices=indices,
         safe_gate=safe_gate,
         cp_context=context,
-        **fla_state_layout_kwargs(chunk_kda_fwd, transpose_state_layout, hv=v.shape[-2], h=q_l2.shape[-2]),
+        **fla_state_layout_kwargs(chunk_kda_fwd, transpose_state_layout),
     )
     o, _, g_prefix, Aqk, Akk, *_, initial_state = result
     return o, g_prefix, Aqk, Akk, q_l2, q_rstd, k_l2, k_rstd, initial_state

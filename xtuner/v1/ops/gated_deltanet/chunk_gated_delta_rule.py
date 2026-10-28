@@ -16,7 +16,7 @@ from fla.ops.gated_delta_rule.chunk import (
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
-from ..fla_compat import fla_call
+from ..fla_compat import fla_state_layout_kwargs
 
 
 @torch.library.custom_op(
@@ -45,11 +45,9 @@ def chunk_gated_delta_rule_fwd(
         chunk_indices = prepare_chunk_indices(cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu)
     # XTuner does not use FLA context parallelism; keep the custom op schema compile-friendly.
     cp_context = None
-    # fla_call adapts the 0.4.2 kwarg convention to the installed FLA version
-    # (0.5.2 renames `transpose_state_layout` to `state_v_first`). FLA 0.5.2
-    # additionally returns `g_input` as a 6th output, which XTuner ignores.
-    fwd_outputs = fla_call(
-        origin_chunk_gated_delta_rule_fwd,
+    # FLA 0.5.2 renamed `transpose_state_layout` to `state_v_first` and additionally returns
+    # `g_input` as a 6th output, which XTuner ignores.
+    fwd_outputs = origin_chunk_gated_delta_rule_fwd(
         q=q,
         k=k,
         v=v,
@@ -61,7 +59,7 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         cp_context=cp_context,
         chunk_indices=chunk_indices,
-        transpose_state_layout=transpose_state_layout,
+        **fla_state_layout_kwargs(origin_chunk_gated_delta_rule_fwd, transpose_state_layout),
     )
     g, o, A, final_state, initial_state = fwd_outputs[:5]
     # initial_state is None in current XTuner implementation,
@@ -154,8 +152,7 @@ def chunk_gated_delta_rule_bwd(
     cp_context = None
     # FLA 0.5.2 additionally returns `dA_log` / `ddt_bias` gradients, which
     # XTuner does not consume (it never passes A_log/dt_bias).
-    bwd_outputs = fla_call(
-        origin_chunk_gated_delta_rule_bwd,
+    bwd_outputs = origin_chunk_gated_delta_rule_bwd(
         q=q,
         k=k,
         v=v,
@@ -169,7 +166,7 @@ def chunk_gated_delta_rule_bwd(
         cu_seqlens=cu_seqlens,
         cp_context=cp_context,
         chunk_indices=chunk_indices,
-        transpose_state_layout=transpose_state_layout,
+        **fla_state_layout_kwargs(origin_chunk_gated_delta_rule_bwd, transpose_state_layout),
     )
     dq, dk, dv, db, dg, dh0 = bwd_outputs[:6]
     return dq, dk, dv, db, dg, dh0
