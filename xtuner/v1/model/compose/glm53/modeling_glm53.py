@@ -98,6 +98,13 @@ class Glm53ForConditionalGeneration(BaseComposeModel):
         global order before each modality takes its slice. Every count check compares *global*
         totals, so a corrupted sample is caught identically with and without SP.
         """
+        # 在 SP gather 前检查本 rank 的 token / 模态标记分片，避免落入底层布尔索引异常。
+        if mm_token_type_ids.shape != inputs_embeds.shape[:-1]:
+            raise ValueError(
+                f"mm_token_type_ids shape {tuple(mm_token_type_ids.shape)} != token shape "
+                f"{tuple(inputs_embeds.shape[:-1])}; pack lost modality alignment "
+                "(see SequenceContext.cat / split)"
+            )
         sp_size = sequence_parallel_mesh.size() if sequence_parallel_mesh is not None else 1
         if sp_size > 1:
             assert sequence_parallel_mesh is not None
