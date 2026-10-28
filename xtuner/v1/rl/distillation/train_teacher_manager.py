@@ -241,34 +241,28 @@ class TrainTeacherManager:
             # SequenceContext regenerates standard 2D packed positions when position_ids is None.
             position_ids = None
 
-        return SequenceContext(
-            input_ids=seq_ctx.input_ids,
-            cu_seq_lens_q=seq_ctx.cu_seq_lens_q,
-            cu_seq_lens_k=seq_ctx.cu_seq_lens_k,
-            max_length_q=seq_ctx.max_length_q,
-            max_length_k=seq_ctx.max_length_k,
-            num_padding=seq_ctx.num_padding,
-            sequence_parallel_mesh=seq_ctx.sequence_parallel_mesh,
-            block_table=seq_ctx.block_table,
-            device=seq_ctx.device,
+        # 复用公共复制契约，保留视觉输入、CPU offsets 和 SP 元数据，只清除 teacher 不该继承的状态。
+        drop_visual = (
+            {}
+            if is_composed
+            else {
+                "pixel_values": None,
+                "image_grid_thw": None,
+                "pixel_values_videos": None,
+                "video_grid_thw": None,
+                "mm_token_type_ids": None,
+                "num_img_tokens": None,
+            }
+        )
+        return seq_ctx.copy(
             position_ids=position_ids,
-            image_grid_thw=seq_ctx.image_grid_thw if is_composed else None,
-            # Always let the Teacher recompute vision features from pixel_values.
             deepstack_visual_embeds=None,
             visual_pos_masks=None,
-            pixel_values=seq_ctx.pixel_values if is_composed else None,
-            # 模态位置和视频字段随视觉输入一起保留；纯文本 teacher 仍丢弃这些字段。
-            pixel_values_videos=seq_ctx.pixel_values_videos if is_composed else None,
-            video_grid_thw=seq_ctx.video_grid_thw if is_composed else None,
-            mm_token_type_ids=seq_ctx.mm_token_type_ids if is_composed else None,
             inputs_embeds=None,
-            num_img_tokens=seq_ctx.num_img_tokens if is_composed else None,
             rollout_routed_experts=None,
             offload_rollout_routed_experts=False,
-            raw_input_ids=seq_ctx._raw_input_ids,
             raw_inputs_embeds=None,
-            shard_start=seq_ctx._shard_start,
-            shard_size=seq_ctx._shard_size,
+            **drop_visual,
         )
 
     def _compute_topk_targets(
