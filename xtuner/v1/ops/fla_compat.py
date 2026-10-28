@@ -14,7 +14,8 @@ from typing import Any
 
 
 try:
-    from fla.utils import USE_CUDA_GRAPH
+    # Redundant alias marks this as a re-export for ``sequence_parallel_bwd``.
+    from fla.utils import USE_CUDA_GRAPH as USE_CUDA_GRAPH
 except ImportError:  # FLA 0.5.2 removed the global USE_CUDA_GRAPH switch.
     USE_CUDA_GRAPH = False
 
@@ -79,9 +80,13 @@ def fla_state_layout_kwargs(func: Callable, transpose_state_layout: bool, *, hv:
         return {"state_v_first": transpose_state_layout}
 
     # FLA 0.5.2 Triton kernels use uppercase constexpr names and model GVA with
-    # a separate value-head count.
+    # a separate value-head count. Some of them still take the query-head count as
+    # ``H`` (``merge_fwd_bwd_kernel`` is the exception and only takes ``HV``).
     if "STATE_V_FIRST" in parameters:
-        return {"HV": hv, "STATE_V_FIRST": transpose_state_layout}
+        state_kwargs: dict[str, bool | int] = {"HV": hv, "STATE_V_FIRST": transpose_state_layout}
+        if "H" in parameters:
+            state_kwargs["H"] = h
+        return state_kwargs
 
     # FLA 0.4.2 Triton kernels use the old uppercase constexpr ``TRANSPOSE_STATE``
     # and take the query-head count as ``H``.
@@ -145,15 +150,19 @@ def fla_call_kwargs(func: Callable, **kwargs: Any) -> dict[str, Any]:
     return resolved
 
 
-def fla_call(func: Callable, **kwargs: Any) -> Any:
+def fla_call(func: Callable, *args: Any, **kwargs: Any) -> Any:
     """Invoke an FLA callable with 0.4.2-convention kwargs adapted to the
     install.
 
+    Positional arguments are forwarded unchanged; only keyword arguments are
+    translated.
+
     Args:
         func (Callable): FLA Python wrapper or Triton kernel to call.
+        *args (Any): Positional arguments forwarded to ``func`` as-is.
         **kwargs (Any): Keyword arguments in the FLA 0.4.2 calling convention.
 
     Returns:
         Any: The return value of ``func``.
     """
-    return func(**fla_call_kwargs(func, **kwargs))
+    return func(*args, **fla_call_kwargs(func, **kwargs))
