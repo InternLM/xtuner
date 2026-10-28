@@ -257,6 +257,10 @@ class TrainTeacherManager:
             deepstack_visual_embeds=None,
             visual_pos_masks=None,
             pixel_values=seq_ctx.pixel_values if is_composed else None,
+            # 模态位置和视频字段随视觉输入一起保留；纯文本 teacher 仍丢弃这些字段。
+            pixel_values_videos=seq_ctx.pixel_values_videos if is_composed else None,
+            video_grid_thw=seq_ctx.video_grid_thw if is_composed else None,
+            mm_token_type_ids=seq_ctx.mm_token_type_ids if is_composed else None,
             inputs_embeds=None,
             num_img_tokens=seq_ctx.num_img_tokens if is_composed else None,
             rollout_routed_experts=None,
