@@ -298,7 +298,12 @@ class BaseComposeModel(BaseModel):
         return self.language_model.post_micro_batch_forward(batch_outputs)
 
     def scale_and_reduce_grad(self):
+        # Every sub-model plus the compose root's own declarations: before this, only the language
+        # model was forwarded, so a pinned vision/projector parameter had no owner to reduce it.
         self.language_model.scale_and_reduce_grad()
+        self.vision_tower.scale_and_reduce_grad()
+        self.multi_modal_projector.scale_and_reduce_grad()
+        super().scale_and_reduce_grad()
 
     @override
     def build_loss_ctx_batch(  # type: ignore[override]

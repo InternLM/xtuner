@@ -3,9 +3,6 @@ from typing import Literal
 
 from pydantic import Field, computed_field
 
-from xtuner.v1.model.base import (
-    HFSaveCfg,
-)
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
 from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig
 from xtuner.v1.module.rope import RopeParametersConfig
@@ -115,12 +112,6 @@ class Qwen3_5_VLTextMoESplit(MoE):
 class Qwen3_5_VLTextMoESplitConfig(MoEConfig):
     with_shared_expert_gate: bool = True
     rms_norm_type: Literal["default", "zero_centered"] = "zero_centered"
-    hf_save_cfg: HFSaveCfg = HFSaveCfg(
-        fp32_keys_pattern=[
-            r"model(?:\.language_model)?\.layers\.\d+\.linear_attn\.norm\.weight",
-            r"model(?:\.language_model)?\.layers\.\d+\.linear_attn\.A_log",
-        ],
-    )
 
     @computed_field
     def layers_type(self) -> list[Literal["full_attention", "linear_attention"]]:

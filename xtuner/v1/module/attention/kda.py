@@ -69,10 +69,10 @@ def _all_to_all_out(x, scatter_dim, gather_dim, mesh):
 def _gate_param(param: torch.Tensor) -> torch.Tensor:
     """Unshard a forget-gate parameter and pin it to fp32 for the kernel.
 
-    `Glm53TextMoEConfig.hf_save_cfg.fp32_keys_pattern` normally keeps `A_log`/`dt_bias` out of
-    FSDP's mixed-precision cast, but a config that forgets to (or a plain bf16 module built
-    outside FSDP) would otherwise feed bf16 into `fused_kda_gate`, where the exponentiated decay
-    is precision-sensitive. `GatedDeltaNet` casts for the same reason.
+    `KimiDeltaAttention.fp32_param_names` normally keeps `A_log`/`dt_bias` out of FSDP's
+    mixed-precision cast, but a module built outside FSDP would otherwise feed bf16 into
+    `fused_kda_gate`, where the exponentiated decay is precision-sensitive. `GatedDeltaNet`
+    casts for the same reason.
     """
     return materialize_full(param).float()
 
@@ -281,6 +281,11 @@ class KimiDeltaAttention(nn.Module):
         self.f_b_proj = build_linear(head_dim, projection_size, bias=False, float8_cfg=gate_float8_cfg)
         self.A_log = nn.Parameter(torch.empty(num_heads, dtype=torch.float32))
         self.dt_bias = nn.Parameter(torch.empty(projection_size, dtype=torch.float32))
+        # Keep the forget gate and the convolution masters in fp32 *compute*: `fused_kda_gate`'s
+        # exponentiated decay is bf16-unstable, and fp32 convolution masters keep their gradients from
+        # being rounded before the replicated-parameter reduction. The convolution forward still runs in
+        # the activation dtype. Read by `BaseModel.precision`; see `PrecisionPolicy`.
+        self.fp32_param_names = ("A_log", "dt_bias", "q_conv1d.weight", "k_conv1d.weight", "v_conv1d.weight")
         if not self.A_log.is_meta:
             self._init_forget_gate_params()
         self.b_proj = build_linear(hidden_size, num_heads, bias=False, float8_cfg=float8_cfg)

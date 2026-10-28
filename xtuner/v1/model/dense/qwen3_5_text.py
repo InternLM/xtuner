@@ -3,7 +3,7 @@ from typing import Literal
 
 from pydantic import Field, computed_field
 
-from xtuner.v1.model.base import HFSaveCfg, TransformerConfig
+from xtuner.v1.model.base import TransformerConfig
 from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig
 from xtuner.v1.module.rope import RopeParametersConfig
 
@@ -40,14 +40,6 @@ class Qwen3_5_VLTextDenseConfig(TransformerConfig):
     # The dense text tower emits the standalone ``model.<...>`` layout; this remaps it
     # to the VLM's ``model.language_model.<...>`` namespace on both load and save.
     hf_key_mapping: dict[str, str] | None = {r"^model\.": "model.language_model."}
-    # Qwen3.5 keeps the GatedDeltaNet gated-RMSNorm weight and the per-head decay
-    # parameter ``A_log`` in fp32; the rest of the model runs in bf16.
-    hf_save_cfg: HFSaveCfg = HFSaveCfg(
-        fp32_keys_pattern=[
-            r"model\.language_model\.layers\.\d+\.linear_attn\.norm\.weight",
-            r"model\.language_model\.layers\.\d+\.linear_attn\.A_log",
-        ],
-    )
 
     @computed_field
     def layers_type(self) -> list[Literal["full_attention", "linear_attention"]]:

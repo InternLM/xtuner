@@ -13,7 +13,6 @@ from pydantic import ConfigDict
 from torch import nn
 from torch.distributed._functional_collectives import all_reduce
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-from torch.distributed.distributed_c10d import ReduceOp
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
@@ -47,6 +46,7 @@ from xtuner.v1.model.base import (
     ModelOutputs,
     TorchCompileOption,
     TransformerConfig,
+    reduce_replicated_grads,
 )
 from xtuner.v1.model.utils import (
     ModelForwardExtraLogInfo,
@@ -270,8 +270,6 @@ class MoE(BaseModel):
         self._configure_model_specific_layers()
         # Per-dispatch grouped-GEMM row counts of the current train step; None outside one.
         self._ep_recv_tokens: list[int] | None = None
-
-        self.fp32_layers = [self.rotary_emb]
 
         # TODO(@yehaochen): 把这两行移除 _maybe_compile_layers 要把 compile 相关的 setting 放到 fsdp_config 之外
         # _init_load_spec 放到 post init 里
@@ -1399,9 +1397,7 @@ class MoE(BaseModel):
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
         if self.fsdp_config.fp32_lm_head:
-            lm_head_mp_policy = MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32)
-        else:
-            lm_head_mp_policy = self.mp_policy
+            self.precision.pin_unit(self.lm_head)
         self._init_device_mesh(fsdp_config)
 
         if self.config.float8_cfg is not None:
@@ -1489,7 +1485,7 @@ class MoE(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=lm_head_mp_policy,
+            mp_policy=mp_policy,
             reshard_after_forward=False,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.lm_head,
@@ -1555,58 +1551,23 @@ class MoE(BaseModel):
 
     @torch.no_grad  # type: ignore
     def scale_and_reduce_grad(self):
-        # Bucket gradients that need a cross-rank reduction by their target process
-        # group. Each bucket is reduced with a single coalesced NCCL all_reduce
-        # instead of one launch per parameter, which used to dominate latency for
-        # models with many small replicated tensors.
-        grads_by_group: dict[dist.ProcessGroup, list[torch.Tensor]] = {}
+        # Deliberately not calling `super()`: the selection below already covers every pinned FP32
+        # parameter (they are DTensors with a Replicate dimension), and reducing them twice would
+        # square the mean.
+        expert_parallel_size = (self.ep_mesh.size() if self.ep_mesh is not None else 1) * self.config.expert_tp_size
 
-        for name, param in self.trainable_parameters():
-            if param.grad is None:
-                continue
+        def jobs():
+            for name, param in self.trainable_parameters():
+                if param.grad is None:
+                    continue
+                # 中文注释：expert 参数会在 EP 和 expert TP 维度上看到全量 token 梯度和，
+                # 需要按参与该 expert 计算的 rank 数平均，才能对齐普通 DP/FSDP baseline。
+                if expert_parallel_size > 1 and ".experts" in name:
+                    param.grad.div_(expert_parallel_size)  # type: ignore
+                    continue
+                yield name, param
 
-            expert_parallel_size = (
-                self.ep_mesh.size() if self.ep_mesh is not None else 1
-            ) * self.config.expert_tp_size
-            # 中文注释：expert 参数会在 EP 和 expert TP 维度上看到全量 token 梯度和，
-            # 需要按参与该 expert 计算的 rank 数平均，才能对齐普通 DP/FSDP baseline。
-            if expert_parallel_size > 1 and ".experts" in name:
-                param.grad.div_(expert_parallel_size)  # type: ignore
-                continue
-
-            if not isinstance(param, DTensor):
-                continue
-
-            replicate_dim_names = tuple(
-                param.device_mesh.mesh_dim_names[i] for i, p in enumerate(param.placements) if isinstance(p, Replicate)
-            )
-            if not replicate_dim_names:
-                continue
-
-            # `DeviceMesh.get_group()` only supports a single mesh dimension,
-            # so calling it directly on a multi-dim sub-mesh raises RuntimeError.
-            # `_flatten()` collapses all Replicate dims into a 1D mesh whose
-            # process group covers every rank across those dimensions, allowing
-            # a single all_reduce regardless of how many Replicate dims exist.
-            if len(replicate_dim_names) > 1:
-                flat_mesh = param.device_mesh[replicate_dim_names]._flatten()
-            else:
-                # In the case that only one replicate dim, in pt2.8 _flatten is worked due to a bug.
-                # in pt2.9.1 this bug is fixed and _flatten will raise error when the mesh is already 1D,
-                # which means replicate_dim_names represents an existing single mesh dimension
-                # so we directly get the submesh without flatten in this case.
-                flat_mesh = param.device_mesh[replicate_dim_names[0]]
-
-            grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
-            # Pre-scale locally so the SUM all_reduce below yields the mean across replicas.
-            grad.div_(flat_mesh.size())  # type: ignore
-            grads_by_group.setdefault(flat_mesh.get_group(), []).append(grad)  # type: ignore
-
-        # One coalesced all_reduce per process group covers all replicated grads.
-        for group, grads in grads_by_group.items():
-            with dist._coalescing_manager(group=group):
-                for grad in grads:
-                    dist.all_reduce(grad, ReduceOp.SUM, group=group)
+        reduce_replicated_grads(jobs())
 
     def cal_grad_norm(self, grads: list[DTensor], dtype=torch.float32):
         # Keep the established reduction order (and therefore FP8 training
