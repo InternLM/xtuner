@@ -125,9 +125,11 @@ class TrainingController:
     def _get_gae_reward_scope(
         estimator: AdvantageEstimator | None,
     ) -> Literal["segment", "session"] | None:
-        from xtuner.v1.rl.advantage.gae import GAEEstimator
+        from xtuner.v1.rl.advantage.gae import DecoupledGAEEstimator, GAEEstimator
 
-        return estimator.reward_scope if isinstance(estimator, GAEEstimator) else None
+        if isinstance(estimator, (GAEEstimator, DecoupledGAEEstimator)):
+            return estimator.reward_scope
+        return None
 
     def _cluster_group_rewards(
         self, group: list[RolloutState]
@@ -483,15 +485,13 @@ class TrainingController:
             # Segment GAE stays worker-local: values were cached by ``collect_values`` and
             # each worker computes per-segment targets in place. Only replica-0 workers
             # contribute to the global normalization statistics returned here.
-            from xtuner.v1.rl.advantage.gae import GAEEstimator
+            from xtuner.v1.rl.advantage.gae import DecoupledGAEEstimator, GAEEstimator
 
             estimator = self.advantage_estimator
-            assert isinstance(estimator, GAEEstimator)
+            assert isinstance(estimator, (GAEEstimator, DecoupledGAEEstimator))
             gae_handles = [
                 worker.critic_compute_segment_gae.remote(  # type: ignore[attr-defined]
-                    gae_gamma=estimator.gae_gamma,
-                    gae_lambda=estimator.gae_lambda,
-                    normalize_actor_advantage=estimator.normalize_actor_advantage,
+                    estimator=estimator,
                     contribute_to_global_stats=worker_idx % data_replicate_size == 0,
                 )
                 for worker_idx, worker in enumerate(self.workers)
@@ -526,7 +526,7 @@ class TrainingController:
                     dense_values[global_index] = local_values[local_index]
             if any(sample_values is None for sample_values in dense_values):
                 raise RuntimeError("Critic values do not cover every training sample")
-            token_advantages, token_returns = estimator.compute_gae(
+            token_advantages, token_returns = estimator.compute_session_gae(
                 rollout_items,
                 cast(list[list[float]], dense_values),
             )

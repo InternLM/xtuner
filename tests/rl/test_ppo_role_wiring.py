@@ -66,7 +66,7 @@ def _state(**overrides) -> RolloutState:
 
 
 class TestGAEAdvantageEstimation(unittest.TestCase):
-    """GAE 优势/回报估计的数值语义（public: GAEEstimator.compute_gae / action_gae）。"""
+    """GAE 优势/回报估计的数值语义（public: GAEEstimator.compute_segment_gae / compute_session_gae）。"""
 
     def test_gae_places_outcome_reward_on_the_last_supervised_token(self):
         # 行为：结局 reward 只落在最后一个被监督的 token 上
@@ -76,22 +76,26 @@ class TestGAEAdvantageEstimation(unittest.TestCase):
             normalize_actor_advantage=False,
         ).build()
         self.assertIsInstance(estimator, GAEEstimator)
-        advantages, returns = estimator.compute_gae(
-            [_state(labels=[0, -100, 1, 1], reward={"score": 1.0})],
-            [[0.0, 0.0, 0.0]],
+        advantages, returns = estimator.compute_segment_gae(
+            torch.tensor([0.0, 0.0, 0.0]),
+            torch.tensor([1.0]),
+            torch.tensor([False, True, True]),
+            torch.tensor([0, 3]),
         )
-        self.assertEqual(advantages, [[0.0, 1.0, 1.0]])
-        self.assertEqual(returns, [[0.0, 1.0, 1.0]])
+        self.assertEqual(advantages.tolist(), [0.0, 1.0, 1.0])
+        self.assertEqual(returns.tolist(), [0.0, 1.0, 1.0])
 
     def test_gae_uses_one_discount_for_advantage_and_return(self):
         # 行为：advantage 与 return 使用同一套折扣参数
         estimator = GAEAdvantageConfig(gae_lambda=0.0, normalize_actor_advantage=False).build()
-        advantages, returns = estimator.compute_gae(
-            [_state(labels=[0, 1, 2], reward={"score": 1.0})],
-            [[0.0, 0.0]],
+        advantages, returns = estimator.compute_segment_gae(
+            torch.tensor([0.0, 0.0]),
+            torch.tensor([1.0]),
+            torch.tensor([True, True]),
+            torch.tensor([0, 2]),
         )
-        self.assertEqual(advantages, [[0.0, 1.0]])
-        self.assertEqual(returns, [[0.0, 1.0]])
+        self.assertEqual(advantages.tolist(), [0.0, 1.0])
+        self.assertEqual(returns.tolist(), [0.0, 1.0])
 
     def test_gae_resets_at_trajectory_boundaries_and_skips_observations(self):
         # 行为：GAE 在轨迹边界重置且跳过观测位
@@ -134,7 +138,7 @@ class TestGAEAdvantageEstimation(unittest.TestCase):
                 extra_fields={"agent_trace_segment_index": 1},
             ),
         ]
-        advantages, returns = estimator.compute_gae(
+        advantages, returns = estimator.compute_session_gae(
             states,
             [[0.0, 0.0], [0.0, 0.0]],
         )
@@ -148,7 +152,7 @@ class TestGAEAdvantageEstimation(unittest.TestCase):
             _state(rollout_id=1, group_id=0, reward={"score": 1.0}),
             _state(rollout_id=2, group_id=0, reward={"score": 3.0}),
         ]
-        advantages, returns = estimator.compute_gae(
+        advantages, returns = estimator.compute_session_gae(
             states,
             [[0.0, 0.0], [0.0, 0.0]],
         )
@@ -300,9 +304,7 @@ class TestWorkerSegmentGAE(unittest.TestCase):
         critic.host = host
 
         stats = critic.compute_segment_gae(
-            gae_gamma=1.0,
-            gae_lambda=1.0,
-            normalize_actor_advantage=False,
+            estimator=GAEEstimator(gae_gamma=1.0, gae_lambda=1.0, normalize_actor_advantage=False),
             contribute_to_global_stats=True,
         )
 
@@ -311,6 +313,32 @@ class TestWorkerSegmentGAE(unittest.TestCase):
         self.assertEqual(sample.advantages[0, 0].item(), 0.0)
         self.assertEqual(stats["count"], 2.0)
         self.assertEqual(sample.advantages[:, 1:].sum().item(), stats["sum"])
+
+    def test_compute_segment_gae_normalizes_with_global_moments(self):
+        # 行为：归一化数学收敛在 estimator.normalize_with_moments，worker 只累矩
+        labels = torch.tensor([[[-100, 2, 3]]]).reshape(1, 3)
+        values = torch.tensor([[[0.2, 0.1, 0.3]]]).reshape(1, 3)
+        sample = TrainSample(
+            seq_ctx=MagicMock(),
+            shifted_labels=labels,
+            rollout_logprobs=None,
+            teacher_targets={},
+            reward_score=1.0,
+            values=values,
+        )
+        host = SimpleNamespace(get_cached_batch=lambda: ([sample], [], {}))
+        critic = CriticWorker.__new__(CriticWorker)
+        critic.host = host
+
+        stats = critic.compute_segment_gae(
+            estimator=GAEEstimator(gae_gamma=1.0, gae_lambda=1.0, normalize_actor_advantage=True),
+            contribute_to_global_stats=True,
+        )
+
+        # gamma=lambda=1: kept advantages 为 [0.9, 0.7]（reward 落在最后一个 token）
+        for actual, expected in zip(sample.advantages[0].tolist(), [0.0, 1.0, -1.0]):
+            self.assertAlmostEqual(actual, expected, places=5)
+        self.assertAlmostEqual(stats["sum"], 0.0, places=5)
 
     def test_compute_segment_gae_non_contributing_replica_returns_no_stats(self):
         # 行为：非贡献副本本地照常产出 advantage 但不返回全局统计
@@ -327,9 +355,7 @@ class TestWorkerSegmentGAE(unittest.TestCase):
         critic.host = host
 
         stats = critic.compute_segment_gae(
-            gae_gamma=1.0,
-            gae_lambda=1.0,
-            normalize_actor_advantage=False,
+            estimator=GAEEstimator(gae_gamma=1.0, gae_lambda=1.0, normalize_actor_advantage=False),
             contribute_to_global_stats=False,
         )
 
@@ -352,9 +378,7 @@ class TestWorkerSegmentGAE(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "requires a reward score"):
             critic.compute_segment_gae(
-                gae_gamma=1.0,
-                gae_lambda=1.0,
-                normalize_actor_advantage=False,
+                estimator=GAEEstimator(gae_gamma=1.0, gae_lambda=1.0, normalize_actor_advantage=False),
                 contribute_to_global_stats=True,
             )
 
@@ -455,7 +479,7 @@ class TestSessionGAEDispatch(unittest.TestCase):
         self.assertEqual([len(row) for row in token_advantages], [2, 1, 2, 3])
         self.assertEqual([len(row) for row in token_returns], [2, 1, 2, 3])
         # The scattered mapping matches running the estimator directly on dense values.
-        expected_advantages, expected_returns = self._controller().advantage_estimator.compute_gae(
+        expected_advantages, expected_returns = self._controller().advantage_estimator.compute_session_gae(
             rollout_items, dense_values
         )
         self.assertEqual(token_advantages, expected_advantages)

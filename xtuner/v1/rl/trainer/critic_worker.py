@@ -14,7 +14,7 @@ from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.loss.utils import sp_split
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig
-from xtuner.v1.rl.advantage.gae import compute_ppo_targets
+from xtuner.v1.rl.advantage.gae import DecoupledGAEEstimator, GAEEstimator, normalize_with_moments
 from xtuner.v1.rl.loss import CriticLossConfig, CriticLossContext
 from xtuner.v1.utils import get_device
 
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from xtuner.v1.data_proto.sequence_context import SequenceContext
     from xtuner.v1.loss import BaseLossContext
 
-    from .worker import TrainingWorker, WorkerLogItem
+    from .worker import TrainingWorker, TrainSample, WorkerLogItem
 
 DEVICE = get_device()
 
@@ -148,16 +148,16 @@ class CriticWorker(RoleWorker):
     def compute_segment_gae(
         self,
         *,
-        gae_gamma: float,
-        gae_lambda: float,
-        normalize_actor_advantage: bool,
+        estimator: GAEEstimator | DecoupledGAEEstimator,
         contribute_to_global_stats: bool,
     ) -> dict[str, float]:
         """Compute independent segment GAE targets in this worker.
 
-        ``contribute_to_global_stats`` is true for one worker per data replica. Replica-zero
-        moments preserve the controller's previous global-normalization statistics while all
-        replicas can consume their locally cached values for actor/critic updates.
+        ``estimator`` supplies the discount parameters (coupled or decoupled) through
+        ``compute_segment_gae``. ``contribute_to_global_stats`` is true for one worker
+        per data replica. Replica-zero moments preserve the controller's previous
+        global-normalization statistics while all replicas can consume their locally
+        cached values for actor/critic updates.
         """
         samples = self._cached()[0]
         if any(sample.values is None for sample in samples):
@@ -171,13 +171,11 @@ class CriticWorker(RoleWorker):
                 raise ValueError("Segment GAE requires a reward score for every sample")
             values = sample.values.detach().float().reshape(-1)
             action_mask = sample.shifted_labels.reshape(-1).ne(-100)
-            advantages, returns = compute_ppo_targets(
+            advantages, returns = estimator.compute_segment_gae(
                 values,
                 torch.tensor([reward_score], dtype=torch.float32),
                 action_mask,
                 torch.tensor([0, values.numel()], dtype=torch.int32),
-                gae_gamma=gae_gamma,
-                gae_lambda=gae_lambda,
             )
             sample.advantages = advantages.reshape(1, -1)
             sample.returns = returns.reshape(1, -1)
@@ -187,24 +185,25 @@ class CriticWorker(RoleWorker):
                 moments[1] += valid_advantages.double().square().sum()
                 moments[2] += valid_advantages.numel()
 
-        if normalize_actor_advantage:
+        if estimator.normalize_actor_advantage:
+            # The worker only accumulates moments and all-reduces them across replicas;
+            # the normalization math itself lives in the estimator.
             if dist.is_available() and dist.is_initialized():
                 dist.all_reduce(moments, op=dist.ReduceOp.SUM)
             moments = moments.cpu()
-            count = float(moments[2].item())
-            if count > 0:
-                mean = moments[0] / moments[2]
-                variance = torch.clamp(moments[1] / moments[2] - mean.square(), min=0.0)
-                scale = (variance.sqrt() + 1e-8).float()
-                mean_value = mean.float()
-                for sample in samples:
-                    if sample.advantages is not None:
-                        mask = sample.shifted_labels.ne(-100)
-                        sample.advantages = torch.where(
-                            mask,
-                            (sample.advantages.float() - mean_value) / scale,
-                            torch.zeros_like(sample.advantages.float()),
-                        )
+            staged: list[tuple[TrainSample, torch.Tensor, torch.Tensor]] = []
+            for sample in samples:
+                sample_advantages = sample.advantages
+                if sample_advantages is None:
+                    continue
+                staged.append((sample, sample_advantages, sample.shifted_labels.ne(-100)))
+            normalized = normalize_with_moments(
+                [sample_advantages for _, sample_advantages, _ in staged],
+                [mask for _, _, mask in staged],
+                moments,
+            )
+            for (sample, _, _), normalized_advantages in zip(staged, normalized):
+                sample.advantages = normalized_advantages
 
         if not contribute_to_global_stats:
             return {}
