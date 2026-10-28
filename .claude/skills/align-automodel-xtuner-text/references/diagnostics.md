@@ -73,6 +73,9 @@ batches explicitly and preserve collective participation.
 - For each disjoint group j, compute `S_j = sum(g_i²)` in a declared diagnostic accumulation dtype.
   Check `sum(S_j) = ||g||₂²` against an independently verified total to expected arithmetic precision.
   If the framework's logged metric differs, investigate population/timing/dtype before blaming a kernel.
+  The same identity validates cross-framework shard reassembly: auto-calibrate per-placement reduction
+  factors until per-parameter global squares reconstruct each framework's official norm². This catches
+  duplicate-replica summation and wrong shard factors before any elementwise comparison is trusted.
 - Rank groups by their signed contributions `S_j(A) - S_j(B)` to the difference of squared total norms.
   Also compare gradient vectors: these contributions can cancel, and are **not** `||g_A - g_B||₂²`.
   Measure max absolute error, relative L2 and/or cosine under the declared bounds. Near zero norms, use
@@ -80,6 +83,22 @@ batches explicitly and preserve collective participation.
 
 **Toy counterexample:** `g_A=(3,4)` and `g_B=(-3,4)` both have norm 5, but their difference has norm 6
 and cosine is `7/25`. Matching total or head norms cannot certify matching gradients.
+
+**Locate the first divergent backward boundary before blaming a kernel.** When scalar loss matches but
+gradient direction differs, register read-only tensor hooks on each layer's output and compare the
+gradient flowing into every layer. The first boundary whose incoming cosine collapses is where the
+discrepancy is injected; it then typically amplifies moving upstream, so shallow-layer disagreement
+alone does not locate the source. Bisect inside the first divergent layer with component-output hooks
+(attention, MoE/experts, residual mixing), and let new boundary evidence overturn an earlier
+attribution. Practical guards, all framework-generic:
+- Hook the tensor that leaves the checkpoint/compile boundary; reentrant recomputation re-runs module
+  forward hooks, so idempotent collection is required.
+- Compiled regions reject `register_hook`; hook at the compile boundary, or disable compilation for
+  that diagnostic arm and state the changed execution scope in the report.
+- Skip tensors that do not require grad, and tolerate hooks firing with `None` gradients.
+- Keep payloads light: per-boundary statistics plus a single-rank sample, not full materialized tensors.
+- Output structures are model-specific (dicts, tuples, custom outputs): resolve which tensor carries
+  the boundary per model; do not hard-code another model's key names.
 
 If loss is close but upstream gradients differ, inspect backward boundaries starting at the loss input.
 For a fused CE candidate, hold hidden states, classifier weights, targets and upstream loss scaling fixed;
