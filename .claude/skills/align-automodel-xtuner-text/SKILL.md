@@ -129,8 +129,8 @@ for input replay, gradient accounting, controlled experiments and worked example
 
 - `scripts/compare_step_metrics.py` pairs per-update metrics from two text logs or JSONL trackers into
   `<prefix>.csv` and `<prefix>.json` (diff = A − B), reporting unmatched updates and duplicates. The CSV
-  columns are `update, a_<metric>, b_<metric>, diff_<metric>` per metric; the JSON nests the same values
-  under `metrics`. Supply
+  columns are `update, a_<metric>, b_<metric>, diff_<metric>` per metric; the JSON stores per-metric
+  statistics and criterion results under `metrics`. Supply
   regexes/keys and offsets derived from source; the script never shifts curves until they overlap.
   `--atol/--rtol` encode the predeclared criterion and set the exit code; without them it reports
   differences only. `--plot` is optional and requires matplotlib. Run it from the repository root, and
