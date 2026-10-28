@@ -19,7 +19,9 @@ entry points before reading new model code.
 Confirm the authorized machines, data, run budget and output location; this skill grants no resource or data access.
 Before reserving GPUs or launching runs, post an **experiment card** and wait for the user's confirmation:
 objective, predeclared pass/fail criteria, smallest sufficient scale and horizons, prerequisites
-(code/data/machines), and estimated cost and duration.
+(code/data/machines), and estimated cost and duration. If the card reuses an earlier run as a comparison
+baseline instead of launching a fresh arm, state the reused arm's identity and the contract-match evidence
+(same checkpoint, same pack stream, same schedule and effective config).
 
 ## Preparation: freeze the comparison contract and actual inputs
 
@@ -126,7 +128,9 @@ for input replay, gradient accounting, controlled experiments and worked example
 ## Reusable helpers
 
 - `scripts/compare_step_metrics.py` pairs per-update metrics from two text logs or JSONL trackers into
-  `<prefix>.csv` and `<prefix>.json` (diff = A − B), reporting unmatched updates and duplicates. Supply
+  `<prefix>.csv` and `<prefix>.json` (diff = A − B), reporting unmatched updates and duplicates. The CSV
+  columns are `update, a_<metric>, b_<metric>, diff_<metric>` per metric; the JSON nests the same values
+  under `metrics`. Supply
   regexes/keys and offsets derived from source; the script never shifts curves until they overlap.
   `--atol/--rtol` encode the predeclared criterion and set the exit code; without them it reports
   differences only. `--plot` is optional and requires matplotlib. Run it from the repository root, and

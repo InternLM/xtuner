@@ -16,7 +16,9 @@ Compare applied lr sequences and warmup. Constant lr can simplify an initial dia
 mandatory when another schedule is correctly matched or required to reproduce the target workload.
 
 **P1.3 Dependency/build mismatch.** Record commits or reproducible build identifiers and loaded library
-paths, not just package names. For missing symbols or CUDA build failures, check the actual call site,
+paths, not just package names. Snapshots deployed without `.git` (tar/rsync copies) have no revision to
+log; fall back to the commit hash embedded in the deployment path plus hashes of the critical files you
+verified. For missing symbols or CUDA build failures, check the actual call site,
 framework version requirements, CUDA/compiler compatibility and library resolution before changing the environment.
 
 **P1.4 Wrong function inspected.** A package version or sibling function can conceal a missing argument.
@@ -48,7 +50,9 @@ documents or sparse execution. Do not generalize one implementation's top-k thre
 
 **P2.1 Missing effective values.** Track model/data/update/numerics items as default, configured and
 runtime-effective values, with evidence. Include auxiliary losses, frozen/tied parameters and quantization
-state where present. A config-only assumption is unverified.
+state where present. Optimizer parameter-group defaults are version-sensitive (per-group lr fields,
+flatten lr-ratio special cases); diff the constructed param groups across checkouts instead of trusting
+that one config name resolves identically. A config-only assumption is unverified.
 
 **P2.2 Warmup can depend on the horizon.** Changing total steps may change warmup or decay, making later
 updates incomparable. For shared-prefix comparisons, preserve the intended applied schedule on both sides.
@@ -126,13 +130,21 @@ labels and context, and cross-check the consumer entry point. Label-count equali
 order. For tensors created on device, add a first-step consumer probe; unresolved fields block a parity verdict.
 
 **P4.4 Record replay identity.** Record schema, shapes/dtypes, canonical hashes, document/sample order,
-logical-update/microbatch/rank assignment and allowed artifact paths. A file hash identifies that file,
+logical-update/microbatch/rank assignment and allowed artifact paths, plus the step/lr-phase mapping
+between the dump's step numbering and each pipeline's logs (see P2.4). A file hash identifies that file,
 not the tensors a different pipeline eventually consumes. Respect data permissions; no unauthorized copying.
 
 **P4.5 Repacking needs revalidation.** Preserve document boundaries, masking, positions, per-update token
 membership and gradient weighting. Even then kernel shapes/reduction order may change. Re-run input and
 first-step/short checks for the changed pair; reuse an old control only with a documented matching contract.
 Do not assume repacking is numerically neutral.
+
+**P4.6 Replay adapters and configs are pinned to a code version.** Collator/sequence-context fields and
+optimizer/attention config fields get added, renamed or defaulted differently across snapshots of the same
+framework; a nested `hasattr` guard does not protect a sibling field assigned inside its block. Minimum
+re-validation on a new checkout: adapter import, pack-order smoke, **and executing the actual config file**
+(e.g. `Config.fromfile`). An import-plus-order smoke can pass while a config `setattr` still crashes on a
+missing field, or silently targets different semantics.
 
 ## P5 Execution and evidence
 
