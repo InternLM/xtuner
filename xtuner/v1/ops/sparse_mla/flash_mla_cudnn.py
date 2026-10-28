@@ -20,10 +20,16 @@ with cuDNN's backward custom op from ``cudnn_dsa.py``.
 import torch
 from torch import Tensor
 
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
+
 from .cudnn_dsa import _cudnn_dsa_sparse_mla_backward_op, ensure_cudnn_dsa_runtime_available
 from .flash_mla import _FLASH_MLA_HEAD_ALIGNMENT, ensure_flash_mla_runtime_available
 from .protocol import SparseMLAOutputs
 from .tilelang import validate_sparse_mla_inputs
+
+
+logger = get_logger()
+_deterministic_backward_warned = False
 
 
 def flash_mla_cudnn_sparse_mla(
@@ -90,17 +96,97 @@ def _setup_flash_mla_cudnn_context(ctx, inputs, output) -> None:
     ctx.save_for_backward(q, kv, indices, raw_output, softmax_lse)
 
 
+def _deterministic_sparse_mla_backward(
+    q: Tensor,
+    kv: Tensor,
+    raw_output: Tensor,
+    grad_output: Tensor,
+    indices: Tensor,
+    softmax_lse: Tensor,
+    scaling: float,
+    chunk_size: int = 128,
+) -> tuple[Tensor, Tensor]:
+    """Ordered FP32 reference backward selected by ``XTUNER_DETERMINISTIC``.
+
+    cuDNN's sparse-attention backward accumulates dKV with unordered atomics, so repeated
+    runs diverge bitwise even under ``torch.use_deterministic_algorithms`` (dq is stable,
+    dkv is not). This fallback recomputes per-query contributions in a fixed chunk order
+    and accumulates dKV through ``index_add_``, which PyTorch routes to a deterministic
+    implementation in deterministic mode. It is slower than the cuDNN kernel and only runs
+    when ``XTUNER_DETERMINISTIC=true``.
+
+    Args:
+        q (Tensor): Queries ``[total_q, num_heads, head_dim]`` (bf16).
+        kv (Tensor): Absorbed latents ``[total_kv, 1, head_dim]`` (bf16); K and V share the
+            tensor, with V occupying the leading ``value_dim`` columns.
+        raw_output (Tensor): Saved forward output ``[total_q, num_heads, value_dim]``.
+        grad_output (Tensor): Output cotangent, same shape as ``raw_output``.
+        indices (Tensor): Top-k key indices ``[total_q, 1, topk]``, -1 padded.
+        softmax_lse (Tensor): Natural-log LSE of the scaled scores ``[total_q, num_heads]``.
+        scaling (float): Score scale applied before the softmax.
+        chunk_size (int): Queries per chunk; bounds the gathered-KV temporaries.
+
+    Returns:
+        tuple[Tensor, Tensor]: ``dq`` like ``q`` and ``dkv`` like ``kv``.
+    """
+    total_q, _, head_dim = q.shape
+    value_dim = raw_output.shape[-1]
+    kv_flat = kv[:, 0]
+    idx = indices[:, 0].to(torch.int64)
+    valid = idx != -1
+    safe_idx = idx.clamp_min(0)
+
+    dq = torch.empty_like(q)
+    dkv_accum = torch.zeros(kv_flat.shape, dtype=torch.float32, device=q.device)
+    for start in range(0, total_q, chunk_size):
+        end = min(start + chunk_size, total_q)
+        sel = safe_idx[start:end]  # [C, topk]
+        kv_sel = kv_flat[sel].float()  # [C, topk, head_dim]
+        q_c = q[start:end].float()
+        go_c = grad_output[start:end].float()
+        out_c = raw_output[start:end].float()
+        lse_c = softmax_lse[start:end]
+
+        scores = torch.einsum("chd,ckd->chk", q_c, kv_sel) * scaling  # [C, heads, topk]
+        scores = scores.masked_fill(~valid[start:end, None], float("-inf"))
+        probs = torch.exp(scores - lse_c[..., None])  # invalid slots -> exactly 0
+        # rowsum(dprobs * probs) == rowsum(dO * O) because O = probs @ V.
+        row_d = (go_c * out_c).sum(-1)
+        dprobs = torch.einsum("chd,ckd->chk", go_c, kv_sel[..., :value_dim])
+        dscores = probs * (dprobs - row_d[..., None])
+        dq[start:end] = (torch.einsum("chk,ckd->chd", dscores, kv_sel) * scaling).to(q.dtype)
+        dkv_part = torch.einsum("chk,chd->ckd", dscores, q_c) * scaling
+        dkv_part[..., :value_dim] += torch.einsum("chk,chd->ckd", probs, go_c)
+        # Invalid slots carry zero contribution (probs == 0), so scattering them into
+        # row 0 via the clamped index adds exact zeros.
+        dkv_accum.index_add_(0, sel.reshape(-1), dkv_part.reshape(-1, head_dim))
+    return dq, dkv_accum.to(kv.dtype).unsqueeze(1)
+
+
 def _flash_mla_cudnn_backward(ctx, grad_output: Tensor, grad_lse: Tensor, grad_lse_log2: Tensor):
+    global _deterministic_backward_warned
     q, kv, indices, raw_output, softmax_lse = ctx.saved_tensors
-    dq, dkv = _cudnn_dsa_sparse_mla_backward_op(
-        q,
-        kv,
-        raw_output,
-        grad_output.contiguous(),
-        indices,
-        softmax_lse,
-        ctx.scaling,
-    )
+    if XTUNER_DETERMINISTIC:
+        if not _deterministic_backward_warned:
+            logger.warning(
+                "XTUNER_DETERMINISTIC=true: using the ordered FP32 reference backward for the "
+                "flash_mla_cudnn SparseMLA op because cuDNN's sparse backward accumulates dKV "
+                "with unordered atomics. Expect slower DSA-layer backward."
+            )
+            _deterministic_backward_warned = True
+        dq, dkv = _deterministic_sparse_mla_backward(
+            q, kv, raw_output, grad_output.contiguous(), indices, softmax_lse, ctx.scaling
+        )
+    else:
+        dq, dkv = _cudnn_dsa_sparse_mla_backward_op(
+            q,
+            kv,
+            raw_output,
+            grad_output.contiguous(),
+            indices,
+            softmax_lse,
+            ctx.scaling,
+        )
     return dq, dkv, None, None, None
 
 
