@@ -113,6 +113,12 @@ benchmark may still be useful, but is not pointwise accuracy evidence.
 bounds. On failure, use the routing table below and re-run this gate after the fix. Do not launch a long
 alignment run to hide an unresolved first-step discrepancy; retain failed logs as diagnostic evidence.
 
+**A failed gate blocks the next stage, not the investigation.** Proactively decompose the failed metric,
+collect the next observation already covered by the authorized card, and post the next experiment card as
+soon as more GPU time is needed; continue source, artifact and CPU-bound analysis while waiting. Pause only
+for an explicit user stop or a concrete access/resource/information blocker, and when pausing state the
+next executable check. Do not wait for the user to supply a cause, a fix or a reference PR.
+
 ## Stage 2: compare multi-step training
 
 **Input:** a passed first-step gate at the declared evidence level.
@@ -152,6 +158,10 @@ current implementation before testing it; no listed example is required for ever
 Test a specific hypothesis with one-variable A/B comparisons at the earliest discrepant boundary.
 Document supporting and contradicting evidence, exclusions and retracted hypotheses. See diagnostics
 for input replay, gradient accounting, controlled experiments and worked examples.
+Label the provenance of every claimed cause: **found independently** (located from your own observation
+before any external answer was seen) or **verified after a known fix/PR/answer**. The second confirms the
+defect but is weaker evidence that this skill guided the discovery; never relabel later verification as an
+independent find, and never count it as a blind-test pass.
 
 ## Reusable helpers
 
@@ -194,6 +204,8 @@ Then include this checklist, marking anything not done as **not verified** inste
 - Gradient evidence type (norm-only or mapped tensors) and tensor coverage.
 - Horizons actually run, per-update records and plots, with units, timing windows and rank aggregation.
 - Source and run identities, an attempt ledger (change → observation → next decision), failures and open items.
+- Cause provenance per open item and claimed cause: found independently vs verified after a known fix; a
+  blind-test report states plainly whether independent localization succeeded.
 
 Save per-step data and line plots with setup-specific names; derive step/lr mappings from source in the
 parser, not by shifting curves until they overlap. Keep restricted data and private run details out of

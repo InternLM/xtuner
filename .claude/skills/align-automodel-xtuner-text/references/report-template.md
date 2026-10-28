@@ -62,3 +62,5 @@ Fill every section. Write **not verified** where something was not measured; do 
 - Source revisions, local patches, environments, run/log paths for every arm.
 - Failed criteria kept as failures; any revised criterion and the fresh pair validating it.
 - Open items, retracted hypotheses, and what a reviewer should check next.
+- Cause provenance for each claimed cause: found independently vs verified after seeing a known fix/PR;
+  state whether independent localization succeeded before any external answer appeared.
