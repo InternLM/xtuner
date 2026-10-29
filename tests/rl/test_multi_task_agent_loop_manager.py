@@ -721,7 +721,24 @@ class TestEnvironmentLifecycleOrder(unittest.IsolatedAsyncioTestCase):
                     order=0,
                 )
             ],
-            _FakeReplayBuffer({"t": [["sample"]]}, {}),
+            _FakeReplayBuffer(
+                {
+                    "t": [
+                        [
+                            RolloutState(
+                                message=[],
+                                status=Status.COMPLETED,
+                                input_ids=[1, 2],
+                                labels=[-100, 2],
+                                prompt_ids=[1],
+                                response_ids=[2],
+                                response_model_steps=[0],
+                            )
+                        ]
+                    ]
+                },
+                {},
+            ),
             ctl,
         )
         await manager.produce_batch(batch_size=1, train_step=1, model_step=0)

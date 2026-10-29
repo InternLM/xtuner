@@ -110,7 +110,7 @@ class TestLoopShutdown(unittest.IsolatedAsyncioTestCase):
                 started.set()
                 await asyncio.Event().wait()
 
-        pool = sandbox_fixtures.pool(Provider(events), sandbox_fixtures.spec())
+        pool = sandbox_fixtures.pool(Provider(events), sandbox_fixtures.spec(user="test"))
         runner = Runner(pool=pool, infer=SandboxStage(pre=[Block()]), validate=Judger("score", SandboxStage()))
         item = AgentRolloutItem(
             id="shutdown", data_source="test", instruction="task.md", task_root=Path("/tmp"), uid=1, pipeline=runner

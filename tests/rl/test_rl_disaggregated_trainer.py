@@ -246,8 +246,10 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
                 manager = Manager([ProduceBatchResult(rollout_states=[[sample]])])
                 trainer = self._make_trainer(manager)
                 trainer._sync_weights_and_save = AsyncMock()
-                if fail_training:
-                    trainer._train_one_batch = MagicMock(side_effect=training_error)
+                trainer._train_one_batch = MagicMock(
+                    return_value={"data_info": {}, "workers_log_item": []},
+                    side_effect=training_error if fail_training else None,
+                )
                 expected_error = training_error if fail_training else producer_error
                 with self.assertRaises(type(expected_error)) as caught:
                     self._run_fit(trainer)
