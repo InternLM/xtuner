@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 
 import torch
 
@@ -40,6 +42,31 @@ def build_lr_scheduler(
         raise ValueError(f"Unsupported lr type: {lr_cfg.lr_type}")
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
+
+
+def save_lr_scheduler(scheduler: torch.optim.lr_scheduler.LRScheduler | None, path: Path) -> None:
+    if scheduler is None:
+        return
+    if torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
+        return
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "lr_scheduler.json").write_text(json.dumps(scheduler.state_dict()) + "\n")
+
+
+def resume_lr_scheduler(
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None, path: Path, *, load_scheduler: bool
+) -> None:
+    if scheduler is None:
+        return
+    if load_scheduler:
+        checkpoint = path / "lr_scheduler.json"
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"Missing {checkpoint}; set load_scheduler=False to restart the LR schedule")
+        scheduler.load_state_dict(json.loads(checkpoint.read_text()))
+    # Optimizer arguments may be restored independently of the scheduler.
+    # Use the restored (or explicitly restarted) schedule's LR in either case.
+    for group, lr in zip(scheduler.optimizer.param_groups, scheduler.get_last_lr(), strict=True):
+        group["lr"] = lr
 
 
 def optimizer_step_succeeds(engine: TrainEngine, grad_norm: torch.Tensor) -> bool:

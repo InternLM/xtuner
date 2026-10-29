@@ -22,7 +22,7 @@ from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import get_device, get_torch_device_module
 
 from .pack import DPRankPackIndices
-from .schedule import optimizer_step_succeeds
+from .schedule import optimizer_step_succeeds, resume_lr_scheduler, save_lr_scheduler
 
 
 DEVICE = get_device()
@@ -292,6 +292,7 @@ class RoleWorker(ABC):
         """Save a DCP checkpoint under ``path`` (the host already appended the
         role dir)."""
         self.engine.save_dcp(weights_dir=path, save_optimizer=not no_save_optimizer)
+        save_lr_scheduler(self.lr_scheduler, path)
 
     def resume(self, path: Path, cfg: LoadCheckpointConfig) -> None:
         """Restore from the DCP checkpoint under ``path``."""
@@ -302,6 +303,7 @@ class RoleWorker(ABC):
             load_states=cfg.load_optimizer_states,
             load_args=cfg.load_optimizer_args,
         )
+        resume_lr_scheduler(self.lr_scheduler, path, load_scheduler=cfg.load_scheduler)
 
     def save_hf(self, hf_dir: Path, save_dtype: torch.dtype) -> None:
         """Save the role model in Hugging Face format under ``hf_dir``."""
