@@ -322,6 +322,23 @@ class AgentLoop(ABC):
         finally:
             await cancel_and_drain([pause_task])
 
+    async def close(self) -> None:
+        """Release loop-owned resources during framework shutdown.
+
+        Resource-owning loops should stop admission, drain active work and close their clients here. Implementations
+        must tolerate repeated calls and bound external I/O. Loops without persistent resources need no override.
+        """
+
+    async def prepare_pause(self) -> None:
+        """Drain external model requests before the manager aborts inference.
+
+        Loops whose model calls come from an external harness should stop admitting new calls here so the abort that
+        follows does not cut a request the harness still waits on. Loops without external clients need no override.
+        """
+
+    async def resume(self) -> None:
+        """Reopen external request admission after inference resumes."""
+
     async def pause(self) -> None:
         self._judger_pause_event.set()
         try:
@@ -370,6 +387,15 @@ class RouterAgentLoop:
 
     def get_worker_status(self) -> dict[str, int]:
         return {str(worker): load for worker, load in self._worker_loads.items()}
+
+    async def close(self) -> None:
+        await close_agent_loops(list(self.workers))
+
+    async def prepare_pause(self) -> None:
+        await asyncio.gather(*(worker.prepare_pause.remote() for worker in self.workers))
+
+    async def resume(self) -> None:
+        await asyncio.gather(*(worker.resume.remote() for worker in self.workers))
 
     async def pause(self) -> None:
         await asyncio.gather(
@@ -428,6 +454,18 @@ class AgentLoopActor:
         return self.agent_loop.rollout_ctl
 
     @ray_method
+    async def close(self) -> None:
+        await self.agent_loop.close()
+
+    @ray_method
+    async def prepare_pause(self) -> None:
+        await self.agent_loop.prepare_pause()
+
+    @ray_method
+    async def resume(self) -> None:
+        await self.agent_loop.resume()
+
+    @ray_method
     async def pause(self) -> None:
         return await self.agent_loop.pause()
 
@@ -442,3 +480,20 @@ RayAgentLoop = cast(
 )
 RayAgentLoopProxy: TypeAlias = ActorProxy[AgentLoopActor]
 AgentLoopSpec: TypeAlias = AgentLoop | RayAgentLoopProxy | RouterAgentLoop
+
+
+async def call_agent_loop_hook(agent_loop: AgentLoopSpec, name: str) -> None:
+    """Invoke a lifecycle hook locally or on its owning Ray actor."""
+    method = getattr(agent_loop, name)
+    if isinstance(agent_loop, ray.actor.ActorHandle):
+        await method.remote()
+    else:
+        await method()
+
+
+async def close_agent_loops(loops: list[AgentLoopSpec]) -> None:
+    """Close every loop, then raise the first failure."""
+    results = await asyncio.gather(*(call_agent_loop_hook(loop, "close") for loop in loops), return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result

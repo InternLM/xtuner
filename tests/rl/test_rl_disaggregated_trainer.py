@@ -40,6 +40,9 @@ from xtuner.v1.train.rl_trainer import RLDisaggregatedTrainer, _validate_sync_in
 
 
 class _FakeManager:
+    async def close(self):
+        self.calls.append("close")
+
     def __init__(self, get_batch_results):
         self._results = list(get_batch_results)
         self._status = AgentLoopManagerStatus.NORMAL
@@ -129,7 +132,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         )
         Path(trainer.exp_dir).mkdir(parents=True, exist_ok=True)
         trainer.agent_loop_manager = agent_loop_manager
-        trainer.eval_agent_loop_manager = SimpleNamespace(produce_batch=AsyncMock())
+        trainer.eval_agent_loop_manager = SimpleNamespace(produce_batch=AsyncMock(), close=AsyncMock())
         trainer.evaluator = MagicMock(eval_batch_size=1, run=MagicMock(return_value={"acc": 1.0}))
         trainer._exp_tracker = MagicMock()
         trainer._prepare_train_data = MagicMock(
@@ -218,6 +221,39 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             self.assertEqual(json.load(f), {"cur_step": 1})
         self.assertIn(("continue_produce", 1), manager.calls)
         self.assertEqual(trainer._cur_step, 1)
+
+    def test_shutdown_joins_blocked_producer_before_closing_loops(self):
+        for fail_training in (False, True):
+            with self.subTest(fail_training=fail_training):
+                started = asyncio.Event()
+                training_error = ValueError("training failed")
+
+                class Manager(_FakeManager):
+                    async def produce_loop(self, batch_size):
+                        started.set()
+                        try:
+                            await asyncio.Event().wait()
+                        finally:
+                            self.calls.append("producer_drained")
+
+                    async def get_batch(self, batch_size, train_step):
+                        await started.wait()
+                        return await super().get_batch(batch_size, train_step)
+
+                sample = SimpleNamespace(group_id=1, rollout_id=1, session_id=None)
+                manager = Manager([ProduceBatchResult(rollout_states=[[sample]])])
+                trainer = self._make_trainer(manager)
+                trainer._sync_weights_and_save = AsyncMock()
+                trainer._train_one_batch = MagicMock(
+                    return_value={"data_info": {}, "workers_log_item": []},
+                    side_effect=training_error if fail_training else None,
+                )
+                if fail_training:
+                    with self.assertRaises(ValueError):
+                        self._run_fit(trainer)
+                else:
+                    self._run_fit(trainer)
+                self.assertLess(manager.calls.index("producer_drained"), manager.calls.index("close"))
 
     def test_fit_retries_same_step_after_empty_expired_skip(self):
         # 验证空 expired batch 只同步上一版模型，不推进 train_step，并重试同一步。

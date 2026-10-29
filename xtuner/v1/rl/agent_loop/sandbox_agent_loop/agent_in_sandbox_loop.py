@@ -227,6 +227,8 @@ class AgentInSandboxLoop(AgentLoop):
         self.max_concurrent_samples = max_concurrent_samples
         self._sample_semaphore = asyncio.Semaphore(max_concurrent_samples) if max_concurrent_samples else None
         self.mode = mode
+        self._active_runs: set[asyncio.Task] = set()
+        self._closing = False
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         async def generate_one(state: RolloutState) -> list[RolloutState]:
@@ -276,10 +278,26 @@ class AgentInSandboxLoop(AgentLoop):
             return [rollout_state]
 
     async def _run_item(self, item: AgentRolloutItem) -> AgentRolloutItem:
+        if self._closing:
+            raise RuntimeError("agent loop is closing")
         runner = _resolve_runner(item.pipeline, str(item.uid))
         if runner is None:
             raise ValueError("AgentRolloutItem.pipeline is required.")
-        return await runner.run(item)
+        task = asyncio.current_task()
+        assert task is not None
+        self._active_runs.add(task)
+        try:
+            return await runner.run(item)
+        finally:
+            self._active_runs.discard(task)
+
+    async def close(self) -> None:
+        """Stop new runs and wait for active runners to execute their
+        cleanup."""
+        self._closing = True
+        for task in self._active_runs:
+            task.cancel()
+        await asyncio.gather(*self._active_runs, return_exceptions=True)
 
     async def _build_rollout_states(self, rollout_state: RolloutState, item: AgentRolloutItem) -> list[RolloutState]:
         if self.mode == "eval":

@@ -88,6 +88,9 @@ def _ray_get_none_ref():
 def _build_fake_agent_loop():
     rollout_ctl = _build_fake_rollout_controller()
     agent_loop = MagicMock()
+    agent_loop.prepare_pause = AsyncMock()
+    agent_loop.resume = AsyncMock()
+    agent_loop.close = AsyncMock()
     agent_loop.rollout_ctl = rollout_ctl
 
     async def generate_group(rollout_states, **kwargs):
@@ -133,7 +136,10 @@ class TestRLColocateTrainer(unittest.TestCase):
         )
         Path(trainer.exp_dir).mkdir(parents=True, exist_ok=True)
         trainer.agent_loop_manager = agent_loop_manager
+        if isinstance(agent_loop_manager, (SimpleNamespace, MagicMock)):
+            agent_loop_manager.close = AsyncMock()
         trainer.eval_agent_loop_manager = MagicMock()
+        trainer.eval_agent_loop_manager.close = AsyncMock()
         trainer.evaluator = MagicMock(eval_batch_size=1)
         trainer.tokenizer = MagicMock()
         trainer._exp_tracker = MagicMock()
