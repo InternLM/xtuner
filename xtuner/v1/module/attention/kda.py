@@ -552,10 +552,22 @@ class KimiDeltaAttention(nn.Module):
         cu_seqlens_cpu: torch.Tensor | None,
     ) -> torch.Tensor:
         """Gather the full sequence for a channel shard, then run the same conv
-        entry as non-SP."""
-        x = x_local.transpose(1, 2)
-        x = all_to_all_fn(x, scatter_dim=1, gather_dim=2, mesh=sp_mesh)
-        x = x.transpose(1, 2).contiguous()
+        entry as non-SP.
+
+        Args:
+            conv (KDAShortConvolution): Convolution applied to the local channel shard.
+            x_local (torch.Tensor): Local activations [1, local_tokens, channels].
+            all_to_all_fn: Per-call-site Ulysses redistribution wrapper.
+            sp_mesh: Sequence-parallel mesh with contiguous token shards.
+            sp_rank (int): Rank within the sequence-parallel mesh.
+            sp_size (int): Number of sequence-parallel ranks.
+            cu_seqlens (torch.Tensor | None): Global packed document boundaries [documents + 1].
+            cu_seqlens_cpu (torch.Tensor | None): CPU copy of the same global boundaries.
+
+        Returns:
+            torch.Tensor: Convolution output [1, global_tokens, channels / sp_size].
+        """
+        x = all_to_all_fn(x_local, scatter_dim=2, gather_dim=1, mesh=sp_mesh)
 
         weight, bias = conv.materialize_weight_bias()
         weight = weight.chunk(sp_size, dim=0)[sp_rank]
