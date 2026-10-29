@@ -66,9 +66,11 @@ evidence (checkpoint, consumed inputs, schedule and effective config); separate 
 predeclared acceptance criteria. Device-only fields remain pending until the first-step probe checks them;
 unresolved input or loss semantics block a parity verdict, not the diagnostic probe needed to resolve them.
 Objective-level configuration differences (loss terms, auxiliary weights, regularization) are not a
-comparable state: adjudicate which side matches the model's intent using a third-party authority — the
-reference implementation, checkpoint metadata, or the model definition — and align both sides to it.
-"Known different" may explain a gap; it never justifies comparing across it.
+valid numerical-parity state: adjudicate which side matches the model's intent using a third-party
+authority — the reference implementation, checkpoint metadata, or the model definition — and align both
+sides to it. "Known different" may explain a gap; it never justifies a parity verdict across it.
+Intentionally varying the objective is legitimate only as a separately labeled diagnostic contrast that
+measures that term's effect.
 If equivalence cannot be established, stop the numerical-parity path. A separately labeled native-pipeline
 benchmark may still be useful, but is not pointwise accuracy evidence.
 
@@ -119,9 +121,11 @@ alignment run to hide an unresolved first-step discrepancy; retain failed logs a
 
 **A failed gate blocks the next stage, not the investigation.** Proactively decompose the failed metric,
 collect the next observation already covered by the authorized card, and post the next experiment card as
-soon as more GPU time is needed; continue source, artifact and CPU-bound analysis while waiting. Pause only
-for an explicit user stop or a concrete access/resource/information blocker, and when pausing state the
-next executable check. Do not wait for the user to supply a cause, a fix or a reference PR.
+soon as more GPU time is needed; continue source, artifact and CPU-bound analysis while waiting. Keep
+running the most informative check within the authorized scope, budget and declared stopping rules; you
+may pause when a declared stop condition is reached, when no remaining check would change a decision, or
+when a consequential choice needs the user — and when pausing, state the next executable check. Do not
+wait for the user to supply a cause, a fix or a reference PR.
 
 ## Stage 2: compare multi-step training
 
@@ -154,8 +158,7 @@ current implementation before testing it; no listed example is required for ever
 |---|---|---|
 | First-step loss differs | Recheck effective inputs and loss terms; locate the earliest mismatch in embeddings → layer outputs → logits → loss | A replay adapter may shift labels twice: compare labels at the loss input |
 | Loss is close, grad norm differs | Audit norm/scaling/sync accounting; decompose gradients by mapped parameter group, then inspect backward boundaries | If fused CE is used, test hidden-state-gradient accumulation against a reference; a matching head norm alone does not prove this cause |
-| Magnitudes match but gradient direction differs | Compare cosines, not only norms, then find the first divergent backward boundary by hooking each layer's output | Bisect inside that layer with component-output hooks; magnitudes can stay close while direction has already collapsed |
-| Norms match but gradient/update checks fail | Compare gradient elements/directions and mapped parameter updates | Equal magnitudes can hide sign, layout or parameter-mapping errors |
+| Norms match but gradients/updates fail element checks | Compare gradient cosines and elements; hook each layer's output to find the first divergent backward boundary | Bisect inside that layer, descending to operator inputs (e.g. integer selection tensors); norms can stay close while direction has collapsed |
 | First step passes, later steps drift or loss stalls | Find the earliest differing update: inputs, applied lr, clipping, optimizer state and weight deltas | Check total-step-dependent warmup or low-precision update rounding only if that path is present |
 | Spikes differ or cannot be reproduced | Align input/update windows, decompose loss/gradient contributors, check repeats within budget | A parameter group dominating a spike is a propagation location, not necessarily its cause; no observed spike means “not reproduced in this scope” |
 | Performance or memory differs | Split timing by compute/communication/optimizer/data/recompute; memory by state/activations/workspace/allocator | Compare backend and cache state before using traces to isolate a bottleneck; grad-norm decomposition is not a performance diagnosis |
@@ -164,9 +167,11 @@ Test a specific hypothesis with one-variable A/B comparisons at the earliest dis
 Document supporting and contradicting evidence, exclusions and retracted hypotheses. See diagnostics
 for input replay, gradient accounting, controlled experiments and worked examples.
 Label the provenance of every claimed cause: **found independently** (located from your own observation
-before any external answer was seen) or **verified after a known fix/PR/answer**. The second confirms the
-defect but is weaker evidence that this skill guided the discovery; never relabel later verification as an
-independent find, and never count it as a blind-test pass.
+before any external answer was seen), **externally informed** (a hint, fix PR or answer preceded or
+guided the localization), **mixed**, or **unknown** (source and timing cannot be established; use N/A
+for open items with no candidate cause yet). Later verification confirms a defect but is weaker evidence
+that this skill guided the discovery; never relabel it as an independent find, and never count it as a
+blind-test pass.
 
 ## Reusable helpers
 

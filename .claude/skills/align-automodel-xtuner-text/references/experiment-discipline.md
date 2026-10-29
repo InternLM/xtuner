@@ -16,13 +16,16 @@ conditional failure modes and [diagnostics](diagnostics.md) for measurement meth
   criterion on a fresh pair; never relabel an observed failure as a pass because loss happens to look close.
 - State evidence limits: equal loss does not prove equal gradients; equal norms do not prove equal vectors;
   selected tensor checks do not cover the whole model; a short run does not validate a long horizon.
-- Converge on symptoms, not on a fix list: localization is closed when every observed symptom has a single
-  cause confirmed by a one-variable A/B and the residual is quantified or attributed. A known upstream fix
-  list is a post-hoc coverage check, never the convergence target — do not run experiments just to match it.
-  Fixes for conditions the current scope never triggers stay "not reproduced in this scope".
-- Before concluding a residual is structural or environment-level, exhaust the inheritable fix list and your
-  own decomposed factors; an exclusion argument whose premise new data has invalidated must be re-run, not
-  carried forward silently.
+- Converge on symptoms, not on a fix list: localization is closed when every observed symptom's material
+  contributing factors and relevant interactions have controlled evidence (single-variable where factors
+  are independent, interaction contrasts where they are not) and the residual meets the predeclared
+  criteria or is explicitly kept open. A known upstream fix list is a post-hoc coverage check, never the
+  convergence target — do not run experiments just to match it. Fixes for conditions the current scope
+  never triggers stay "not reproduced in this scope".
+- Before concluding a residual is structural or environment-level, check every known fix that applies to
+  the current scope and every material factor you decomposed; record why any unchecked item was skipped,
+  and do not claim structural causes while applicable fixes or factors remain untested. An exclusion
+  argument whose premise new data has invalidated must be re-run, not carried forward silently.
 
 ## 2. Keep comparisons interpretable
 
@@ -34,9 +37,10 @@ conditional failure modes and [diagnostics](diagnostics.md) for measurement meth
   when changing total steps. Never change one side's warmup just to align plots.
 - Use one-variable contrasts for causal diagnosis. Larger environment/code changes are useful for screening
   but cannot identify one kernel or flag as the cause. Hold non-tested state fixed and check interactions.
-- Close every decomposed factor. A boundary probe that splits a discrepancy into N factors owes N
-  single-variable confirmations; fixing the dominant factor and watching the headline metric shrink does
-  not retire the remaining factors, which resurface later at greater cost.
+- Close every decomposed factor: each material factor a probe splits out must be confirmed, ruled out,
+  or explicitly recorded as open — choose single-variable or interaction contrasts to match how the
+  factors actually combine. Fixing the dominant factor and watching the headline metric shrink does not
+  retire the rest.
 - For stochastic paths, inspect RNG usage and establish repeatability where needed. Do not attribute a
   discrepancy to non-determinism from a single pair, or assume matching seeds yield matching dropout masks.
 - Keep pointwise checks for a supported common-input/update contract. Add long-horizon statistics under
