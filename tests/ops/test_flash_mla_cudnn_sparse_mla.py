@@ -121,10 +121,10 @@ class TestDeterministicSparseMLABackward:
 
     @pytest.fixture
     def deterministic_mode(self, monkeypatch):
-        from xtuner.v1.ops.sparse_mla import flash_mla_cudnn
+        from xtuner.v1.ops.sparse_mla import cudnn_dsa
 
         # 反向分支在调用时读模块级常量，monkeypatch 即可覆盖 import 期绑定。
-        monkeypatch.setattr(flash_mla_cudnn, "XTUNER_DETERMINISTIC", True)
+        monkeypatch.setattr(cudnn_dsa, "XTUNER_DETERMINISTIC", True)
         previous = torch.are_deterministic_algorithms_enabled()
         torch.use_deterministic_algorithms(True, warn_only=True)
         yield

@@ -20,55 +20,10 @@ with cuDNN's backward custom op from ``cudnn_dsa.py``.
 import torch
 from torch import Tensor
 
-from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
-
 from .cudnn_dsa import _cudnn_dsa_sparse_mla_backward_op, ensure_cudnn_dsa_runtime_available
 from .flash_mla import _FLASH_MLA_HEAD_ALIGNMENT, ensure_flash_mla_runtime_available
 from .protocol import SparseMLAOutputs
 from .tilelang import validate_sparse_mla_inputs
-
-
-logger = get_logger()
-_deterministic_backward_warned = False
-
-try:
-    from .cudnn_dsa_det import flash_attn_bwd_sm90_multilaunch as _det_cudnn_bwd_multilaunch
-except ImportError:  # CuTe-DSL fork unavailable: fall back to the reference backward
-    _det_cudnn_bwd_multilaunch = None
-
-
-def _fork_deterministic_sparse_mla_backward(
-    q: Tensor,
-    kv: Tensor,
-    raw_output: Tensor,
-    grad_output: Tensor,
-    indices: Tensor,
-    softmax_lse: Tensor,
-    scaling: float,
-    chunk: int = 128,
-) -> tuple[Tensor, Tensor]:
-    """Deterministic cuDNN-fork backward: split slices + ordered reduction.
-
-    Same kernel as the stock cuDNN backward, but each CTA writes its own
-    dkv-accumulator slice instead of racing atomics on a shared one, and the
-    slices are reduced in a fixed order afterwards (see ``cudnn_dsa_det.py``).
-    Bitwise repeatable across runs at ~2x the stock kernel cost.
-    """
-    from .cudnn_dsa import _compact_cudnn_topk_indices
-
-    ids, lengths = _compact_cudnn_topk_indices(indices[:, 0])
-    dq, dkv = _det_cudnn_bwd_multilaunch(
-        q.contiguous(),
-        kv[:, 0].contiguous(),
-        raw_output.contiguous(),
-        grad_output.contiguous(),
-        softmax_lse.contiguous(),
-        ids,
-        lengths,
-        softmax_scale=scaling,
-        chunk=chunk,
-    )
-    return dq, dkv.unsqueeze(1)
 
 
 def flash_mla_cudnn_sparse_mla(
@@ -136,34 +91,16 @@ def _setup_flash_mla_cudnn_context(ctx, inputs, output) -> None:
 
 
 def _flash_mla_cudnn_backward(ctx, grad_output: Tensor, grad_lse: Tensor, grad_lse_log2: Tensor):
-    global _deterministic_backward_warned
     q, kv, indices, raw_output, softmax_lse = ctx.saved_tensors
-    if XTUNER_DETERMINISTIC:
-        if not _deterministic_backward_warned:
-            logger.warning(
-                "XTUNER_DETERMINISTIC=true: using a deterministic backward for the flash_mla_cudnn "
-                "SparseMLA op because cuDNN's sparse backward accumulates dKV with unordered "
-                "atomics. Expect slower DSA-layer backward."
-            )
-            _deterministic_backward_warned = True
-        if _det_cudnn_bwd_multilaunch is None:
-            raise RuntimeError(
-                "XTUNER_DETERMINISTIC=true requires the split-slice deterministic cuDNN backward "
-                "(cudnn_dsa_det.py), which needs an SM90 GPU and the cudnn CuTe-DSL runtime."
-            )
-        dq, dkv = _fork_deterministic_sparse_mla_backward(
-            q, kv, raw_output, grad_output.contiguous(), indices, softmax_lse, ctx.scaling
-        )
-    else:
-        dq, dkv = _cudnn_dsa_sparse_mla_backward_op(
-            q,
-            kv,
-            raw_output,
-            grad_output.contiguous(),
-            indices,
-            softmax_lse,
-            ctx.scaling,
-        )
+    dq, dkv = _cudnn_dsa_sparse_mla_backward_op(
+        q,
+        kv,
+        raw_output,
+        grad_output.contiguous(),
+        indices,
+        softmax_lse,
+        ctx.scaling,
+    )
     return dq, dkv, None, None, None
 
 

@@ -3,6 +3,8 @@
 import torch
 from torch import Tensor
 
+from xtuner.v1.utils import XTUNER_DETERMINISTIC
+
 from .protocol import SparseMLAOutputs
 from .tilelang import validate_sparse_mla_inputs
 
@@ -99,8 +101,6 @@ def _cudnn_dsa_sparse_mla_backward_op(
     softmax_lse: Tensor,
     scaling: float,
 ) -> tuple[Tensor, Tensor]:
-    from cudnn.deepseek_sparse_attention.sparse_attention_backward import sparse_attention_backward_wrapper
-
     if kv.shape[1] != 1 or indices.shape[1] != 1:
         raise RuntimeError("cuDNN DSA SparseMLA backward currently supports kv_group=1 only.")
 
@@ -108,6 +108,29 @@ def _cudnn_dsa_sparse_mla_backward_op(
     # valid pools or between pools and the appended tail, so compact first.
     # Forward keeps its original order; backward retains every valid duplicate.
     topk_idxs, topk_length = _compact_cudnn_topk_indices(indices[:, 0, :])
+
+    if XTUNER_DETERMINISTIC:
+        # Deterministic mode: same cuDNN kernel, but each CTA writes its own FP32
+        # dkv slice instead of racing atomics on a shared buffer; slices are reduced
+        # in fixed order afterwards (see cudnn_dsa_det.py). Bitwise repeatable at
+        # ~1.6x the stock cost. Covers every backend that routes through this op
+        # (flash_mla_cudnn and cudnn_dsa).
+        from .cudnn_dsa_det import flash_attn_bwd_sm90_multilaunch
+
+        dq, dkv = flash_attn_bwd_sm90_multilaunch(
+            q.contiguous(),
+            kv[:, 0, :].contiguous(),
+            raw_output.contiguous(),
+            grad_output.contiguous(),
+            softmax_lse.contiguous(),
+            topk_idxs,
+            topk_length,
+            softmax_scale=scaling,
+        )
+        return dq, dkv.unsqueeze(1)
+
+    from cudnn.deepseek_sparse_attention.sparse_attention_backward import sparse_attention_backward_wrapper
+
     attn_sink = torch.full((q.shape[1],), float("-inf"), dtype=torch.float32, device=q.device)
 
     outputs = sparse_attention_backward_wrapper(
