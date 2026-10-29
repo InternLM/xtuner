@@ -2,11 +2,16 @@
 
 Three paths behind one dispatcher (``causal_conv1d``):
 
-* fused -- the fla_npu AscendC causal_conv1d via the torch extension
-  ``torch.ops.npu.npu_causal_conv1d{,_bwd}`` (one fused varlen kernel per
-  direction; masks document boundaries natively via query_start_loc). A
-  one-shot probe engages the path; any failure pins the dispatcher to the
-  unmasked/four-tap fallback.
+* fused -- the fla_npu AscendC causal_conv1d, one fused varlen kernel per
+  direction (masks document boundaries natively via query_start_loc). Two
+  backends drive the same embedded-OPP kernels: "stable" calls the decoupled
+  runtime's prefill adapter host-metadata path (``npu_causal_conv1d_fn`` with
+  ``query_start_loc_cpu``; 26.10+ packaging, bitwise-identical probe-verified;
+  falls back to the deprecated raw ``npu_causal_conv1d`` entry on wheels
+  without the adapter), "legacy" calls the torch.ops.npu dispatcher names and
+  splits the backward per document (26.6 packaging). A one-shot numeric probe
+  engages the path; any failure pins the dispatcher to the unmasked/four-tap
+  fallback.
 * unmasked (``XTUNER_NPU_CONV=1``) -- run the conv unmasked and subtract the
   cross-document contributions at the affected rows, with per-tap
   host mirrors so the backward skips the readbacks.
@@ -14,6 +19,10 @@ Three paths behind one dispatcher (``causal_conv1d``):
 
 Selected by ``get_causal_conv1d_fn`` when XTUNER_NPU_CONV=1 (the
 default); otherwise XTuner's own causal_conv1d_fn stays in place.
+
+``XTUNER_NPU_GDN_API`` does not select the conv backend (it only governs
+the chunk GDN op resolution in chunk_gated_delta_rule_npu); the conv
+backend is detected automatically and printed once at resolve time.
 """
 
 import os
@@ -24,6 +33,11 @@ from torch.distributed.tensor import DTensor
 
 
 _CONV_UNMASKED = bool(int(os.environ.get("XTUNER_NPU_CONV", "1")))
+_DEBUG_CONV_CALLS = [0]
+
+
+def _strict_kernels() -> bool:
+    return os.environ.get("XTUNER_NPU_STRICT_KERNELS", "0") == "1"
 
 
 def local(t):
@@ -33,14 +47,11 @@ def local(t):
 class _ConvCorrections:
     """Per-pack document-boundary correction indices for the unmasked conv.
 
-    Keyed by the CALLER's original seq_idx tensor (identity + width): in the
-    real pipeline SequenceContext.to() pins cu_seq_lens_q on CPU, so
-    gen_seq_idx builds a CPU tensor once per SequenceContext and every GDN
-    layer hands that same object to causal_conv1d (no device copy -- the
-    cache derives everything from the host tensor).  Keying by a per-call
-    device copy would miss on every layer; keying by the stable source hits
-    once per pack.  The entry pins the source tensor, so a data_ptr match is
-    the same values.
+    Keyed by the CALLER's original seq_idx tensor (identity + width): in the real pipeline SequenceContext.to() pins
+    cu_seq_lens_q on CPU, so gen_seq_idx builds a CPU tensor once per SequenceContext and every GDN layer hands that
+    same object to causal_conv1d (no device copy -- the cache derives everything from the host tensor).  Keying by a
+    per-call device copy would miss on every layer; keying by the stable source hits once per pack.  The entry pins the
+    source tensor, so a data_ptr match is the same values.
     """
 
     def __init__(self, max_entries=4):
@@ -146,10 +157,9 @@ _unmasked_logged = [False, False]
 class _CausalConv1dUnmasked(torch.autograd.Function):
     """Depthwise causal conv run unmasked, cross-document terms subtracted.
 
-    The masked four-tap costs a full-tensor mask multiply and a pad per tap;
-    convolving across document boundaries and subtracting exactly the
-    cross-document contributions at the affected rows reaches the same result
-    with fewer full-tensor passes and no pads.
+    The masked four-tap costs a full-tensor mask multiply and a pad per tap; convolving across document boundaries and
+    subtracting exactly the cross-document contributions at the affected rows reaches the same result with fewer full-
+    tensor passes and no pads.
     """
 
     @staticmethod
@@ -219,7 +229,8 @@ class _CausalConv1dUnmasked(torch.autograd.Function):
 
 
 class _ConvHostBounds:
-    """Per-pack document boundaries [0, s1, ..., T] for the AscendC varlen conv.
+    """Per-pack document boundaries [0, s1, ..., T] for the AscendC varlen
+    conv.
 
     Same keying discipline as _ConvCorrections: the CALLER's original seq_idx
     tensor (identity, pinned by the entry) is the stable key -- in the real
@@ -249,47 +260,91 @@ class _ConvHostBounds:
 _conv_host_bounds = _ConvHostBounds()
 
 # ---------------------------------------------------------------------------
-# fla_npu AscendC causal_conv1d via the fla_npu torch extension:
-# torch.ops.npu.npu_causal_conv1d{,_bwd}, registered by the wheel's
-# custom_aclnn_extension_lib .so and loaded lazily through the gated_deltanet
-# AscendC loader (npu.load_ascendc_ops) -- the same torch_npu-managed loader
-# the AscendC GDN ops use. Launches are async on torch's current NPU stream;
-# fwd passes a zero bias and per-sequence zero initial state, bwd runs in
-# NTD layout. A one-shot probe (below) engages the path; any failure pins
-# the dispatcher to the unmasked/four-tap fallback.
+# fla_npu AscendC causal_conv1d, resolved once per process to one of two
+# backends for the SAME embedded-OPP kernels:
+#   * "stable" -- fla_npu.ops.ascendc.npu_causal_conv1d{,_bwd}, the decoupled
+#     runtime's raw host-metadata entries (the 26.10 wheel packaging drops the
+#     PyTorch dispatcher .so, so torch.ops.npu.* cannot register there; the
+#     stable entries drive the identical aclnn kernels). Detected via
+#     fla_npu.load_legacy_torch_ops: 26.6-era wheels lack it and bind the
+#     ascendc names to torch.ops forward shells instead, so a successful
+#     ascendc import alone proves nothing. Verified numerically on
+#     26.10.0+main.dev47d7c97: fwd/dx/dw bf16 few-ulp vs an autograd reference.
+#   * "legacy" -- torch.ops.npu.npu_causal_conv1d{,_bwd} via load_ascendc_ops()
+#     (26.6 wheels register on import). Multi-doc bwd dw corruption was
+#     observed on one 26.6 build under the pre-host-list call form; with the
+#     current host-list NTD ABI two 26.6.0 builds probe correct, but backward
+#     still splits per document on this backend as the shock absorber.
+# Launches are async on torch's current NPU stream; fwd passes a zero bias and
+# per-sequence zero initial state, bwd runs in NTD layout. A one-shot NUMERIC
+# probe (below) engages the path; any failure (missing backend, wrong output)
+# pins the dispatcher to the unmasked/four-tap fallback.
 #
 # Env: CANN's set_env.sh must be sourced before import fla_npu; the package
 # itself sets ASCEND_CUSTOM_OPP_PATH and loads its opapi libs at import time.
 # ---------------------------------------------------------------------------
 
 _OPS_ENSURED = [False]
+_CONV_BACKEND = {"name": None, "fwd": None, "bwd": None}
 
 
 def _ensure_conv_ops():
-    """Load the fla_npu torch extension exactly once (GDN's loader path).
+    """Resolve the causal-conv backend exactly once.
 
-    Registration goes through `import fla_npu` (load_ascendc_ops): the
-    package's __init__ prepares the embedded OPP and torch.ops.load_library()es
-    its own custom_aclnn_extension_lib -- the same .so the AscendC GDN ops
-    use, so by the time a conv runs during training this is usually already
-    done (idempotent).
+    The decoupled runtime is detected by ``fla_npu.load_legacy_torch_ops``:
+    wheels that ship it (26.10+) expose genuine raw host-metadata entries on
+    ``fla_npu.ops.ascendc`` ("stable"). Older wheels (26.6) bind those names
+    to torch.ops.npu forward shells (verified: their __doc__ reads
+    "Call torch.ops.npu.npu_causal_conv1d."), so importing them succeeds
+    while meaning something else; on those we register the legacy torch.ops
+    dispatcher names and split the backward per document.
     """
     if not _OPS_ENSURED[0]:
-        from .chunk_gated_delta_rule_npu import load_ascendc_ops
+        try:
+            import fla_npu
 
-        load_ascendc_ops()
-        assert hasattr(torch.ops.npu, "npu_causal_conv1d") and hasattr(torch.ops.npu, "npu_causal_conv1d_bwd"), (
-            "fla_npu extension missing npu_causal_conv1d{,_bwd}"
-        )
+            decoupled = getattr(fla_npu, "load_legacy_torch_ops", None) is not None
+        except ImportError:
+            decoupled = False
+        if decoupled:
+            try:
+                # 26.10+ packaging: the prefill adapter's host-metadata path
+                # (query_start_loc_cpu) replaces the deprecated raw
+                # npu_causal_conv1d compat entry (FutureWarning, removal
+                # 2027/02); bitwise-identical on the dev wheel.
+                from fla_npu.ops.ascendc import npu_causal_conv1d_fn as fwd, npu_causal_conv1d_bwd as bwd
+
+                _CONV_BACKEND.update(name="stable", fwd=fwd, bwd=bwd, host_list=True)
+            except ImportError:
+                from fla_npu.ops.ascendc import npu_causal_conv1d as fwd, npu_causal_conv1d_bwd as bwd
+
+                _CONV_BACKEND.update(name="stable", fwd=fwd, bwd=bwd, host_list=False)
+        else:
+            from .chunk_gated_delta_rule_npu import load_ascendc_ops
+
+            load_ascendc_ops()
+            assert hasattr(torch.ops.npu, "npu_causal_conv1d") and hasattr(torch.ops.npu, "npu_causal_conv1d_bwd"), (
+                "fla_npu extension missing npu_causal_conv1d{,_bwd}"
+            )
+            _CONV_BACKEND.update(name="legacy")
         _OPS_ENSURED[0] = True
+        print(f"[causal_conv1d] conv backend resolved: {_CONV_BACKEND['name']}", flush=True)
+        if os.environ.get("XTUNER_NPU_GDN_API"):
+            print(
+                "[causal_conv1d] note: XTUNER_NPU_GDN_API no longer selects the conv backend; "
+                "it only governs the chunk GDN op resolution",
+                flush=True,
+            )
 
 
 def _conv_fwd_aclnn(x2d, weight_kc, cu, activation_mode=0):
-    """AscendC causal conv forward. x2d [T, C] bf16, weight_kc [K, C] bf16
+    """AscendC causal conv forward.
+
+    x2d [T, C] bf16, weight_kc [K, C] bf16
     (the transposed, conv-native layout), cu = host list of per-sequence
     token starts + total ([0, s1, s2, ..., T]). Returns pre-activation
-    [T, C] bf16. Async launch on the current stream via the fla_npu torch
-    extension (torch_npu-managed opapi loading).
+    [T, C] bf16. Async launch on the current stream (stable: the raw
+    host-metadata entry; legacy: torch.ops dispatch).
     """
     _ensure_conv_ops()
     x2d = x2d.contiguous()
@@ -297,10 +352,45 @@ def _conv_fwd_aclnn(x2d, weight_kc, cu, activation_mode=0):
     C = x2d.shape[-1]
     K = weight_kc.shape[0]
     n_seq = len(cu) - 1
+    if os.environ.get("XTUNER_NCP_DEBUG_CAUSAL", "0") == "1" and _DEBUG_CONV_CALLS[0] < 4:
+        call_index = _DEBUG_CONV_CALLS[0]
+        _DEBUG_CONV_CALLS[0] += 1
+        print(
+            f"[causal_conv_debug] call={call_index} "
+            f"x={tuple(x2d.shape)} weight={tuple(weight_kc.shape)} states={n_seq}x{K}x{C} "
+            f"qsl_len={len(cu)} qsl_first={cu[:4]} qsl_last={cu[-4:]} "
+            f"x_dtype={x2d.dtype} weight_dtype={weight_kc.dtype}",
+            flush=True,
+        )
     bias = torch.zeros(C, dtype=x2d.dtype, device=x2d.device)
     # Zero initial history per sequence; tiling accepts [N, K, C] zeros (the
     # kernel only reads the last K-1 columns as pre-sequence context).
     states = torch.zeros(n_seq, K, C, dtype=x2d.dtype, device=x2d.device)
+    if _CONV_BACKEND["name"] == "stable":
+        if _CONV_BACKEND.get("host_list"):
+            # Prefill adapter's host-metadata path: host-list query_start_loc_cpu,
+            # string activation. Bitwise-identical to the deprecated raw
+            # npu_causal_conv1d entry on the 26.10 dev wheel (probe: both
+            # activation modes + doc-boundary identity). The adapter's
+            # device-metadata path stays excluded (miscomputes on this wheel).
+            return _CONV_BACKEND["fwd"](
+                x2d,
+                weight_kc,
+                bias,
+                conv_states=states,
+                query_start_loc_cpu=list(cu),
+                activation="none" if activation_mode == 0 else "silu",
+            )
+        # Older packaging without the fn adapter: the deprecated raw
+        # host-metadata entry (no FutureWarning on those wheels).
+        return _CONV_BACKEND["fwd"](
+            x=x2d,
+            weight=weight_kc,
+            bias=bias,
+            conv_states=states,
+            query_start_loc=list(cu),
+            activation_mode=activation_mode,
+        )
     return torch.ops.npu.npu_causal_conv1d(
         x2d,
         weight_kc,
@@ -312,12 +402,13 @@ def _conv_fwd_aclnn(x2d, weight_kc, cu, activation_mode=0):
 
 
 def _conv_bwd_aclnn(x2d, y3d, weight_kc, dy3d, cu, activation=1):
-    """AscendC causal conv backward (NTD layout). x2d [T, C] bf16, y3d/dy3d
-    [1, T, C] bf16 (y = saved pre-activation when activation=1: the op
-    applies silu_backward internally; y3d may be None with activation=0),
-    weight_kc [K, C], cu as in _conv_fwd_aclnn. Returns (dx [T, C],
-    dw [K, C]) -- dw in the conv-native layout; transpose(0, 1) for the
-    [C, K] torch layout.
+    """AscendC causal conv backward (NTD layout).
+
+    x2d [T, C] bf16, y3d/dy3d [1, T, C] bf16 (y = saved pre-activation
+    when activation=1: the op applies silu_backward internally; y3d may be
+    None with activation=0), weight_kc [K, C], cu as in _conv_fwd_aclnn.
+    Returns (dx [T, C], dw [K, C]) -- dw in the conv-native layout;
+    transpose(0, 1) for the [C, K] torch layout.
     """
     _ensure_conv_ops()
     x2d = x2d.contiguous()
@@ -325,6 +416,19 @@ def _conv_bwd_aclnn(x2d, y3d, weight_kc, dy3d, cu, activation=1):
     dy3d = dy3d.contiguous()
     if y3d is not None:
         y3d = y3d.contiguous()
+    if _CONV_BACKEND["name"] == "stable":
+        out = _CONV_BACKEND["bwd"](
+            x=x2d,
+            y=y3d,
+            weight=weight_kc,
+            dy=dy3d,
+            initial_state=None,
+            dht=None,
+            query_start_loc=list(cu),
+            activation=activation,
+            input_layout="NTD",
+        )
+        return out[0], out[1]
     dx, dw, _db, _dh0 = torch.ops.npu.npu_causal_conv1d_bwd(
         x2d,
         y3d,
@@ -343,27 +447,94 @@ _fused_state = {"probed": False, "ok": False}
 def _fused_conv_available(device):
     """Lazy one-shot probe of the torch.ops fused conv path.
 
-    Loads the fla_npu extension on first use; any failure (extension
-    absent, tiling rejection) marks the fused path off for the process
-    lifetime and the dispatcher falls back to unmasked/four-tap.
+    Loads the fla_npu extension on first use; any failure (extension absent, tiling rejection) marks the fused path off
+    for the process lifetime and the dispatcher falls back to unmasked/four-tap.
     """
     if not _fused_state["probed"]:
         _fused_state["probed"] = True
         try:
-            x = torch.randn(64, 128, dtype=torch.bfloat16, device=device)
-            w = torch.randn(4, 128, dtype=torch.bfloat16, device=device)
-            y = _conv_fwd_aclnn(x, w, [0, 64])
-            # Exercise the backward too (the raw-gradient, no-y route): the
-            # op exists but the bwd tiling can in principle reject where fwd
-            # passed; better to learn it here than mid-training.
-            dx, dw = _conv_bwd_aclnn(x, None, w, y.unsqueeze(0), [0, 64], activation=0)
+            T, C, K = 64, 128, 4
+
+            def conv_ref(xr, wr, length):
+                # fp32 depthwise causal conv reference, bf16-independent.
+                return F.conv1d(
+                    xr.float().unsqueeze(0).transpose(1, 2),
+                    wr.float().transpose(0, 1).unsqueeze(1),
+                    None,
+                    padding=K - 1,
+                    groups=C,
+                )[..., :length].squeeze(0).transpose(0, 1)
+
+            x = torch.randn(T, C, dtype=torch.bfloat16, device=device) * 0.5
+            w = torch.randn(K, C, dtype=torch.bfloat16, device=device) * 0.5
+            y = _conv_fwd_aclnn(x, w, [0, T])
+            # NUMERIC forward gate: a finite-but-wrong kernel (the 26.10
+            # npu_causal_conv1d_fn decode adapter computed garbage) must be
+            # rejected here, not at loss time.
+            ref = conv_ref(x, w, T)
+            fwd_err = (y.float() - ref).abs().max().item()
+            assert fwd_err < 0.15, f"conv fwd mismatch vs reference (max_err={fwd_err:.5f})"
+            # Exercise the backward too (the raw-gradient, no-y route) and gate
+            # it numerically through an autograd reference.
+            dx, dw = _conv_bwd_aclnn(x, None, w, y.unsqueeze(0), [0, T], activation=0)
             torch.npu.synchronize()
-            assert y.shape == (64, 128) and torch.isfinite(y.float()).all()
             assert dx.shape == x.shape and torch.isfinite(dx.float()).all()
             assert dw.shape == w.shape and torch.isfinite(dw.float()).all()
+            # enable_grad: the probe usually fires during model build under
+            # no_grad, where even requires_grad inputs build no graph.
+            with torch.enable_grad():
+                xr = x.detach().clone().requires_grad_(True)
+                wr = w.detach().clone().requires_grad_(True)
+                yr = conv_ref(xr, wr, T)
+                (yr * y.detach().float()).sum().backward()
+            dx_err = (dx.float() - xr.grad.float()).abs().max().item()
+            dw_err = (dw.float() - wr.grad.float()).abs().max().item()
+            assert dx_err < 0.15 and dw_err < 0.15, f"conv bwd mismatch (dx_err={dx_err:.5f}, dw_err={dw_err:.5f})"
+            # Training route: activation=1 with the saved pre-activation -- the
+            # op applies silu_backward internally, a branch the raw-gradient
+            # route above never executes. Gate it through the same reference.
+            with torch.enable_grad():
+                xs = x.detach().clone().requires_grad_(True)
+                ws = w.detach().clone().requires_grad_(True)
+                gs = (torch.randn(T, C, dtype=torch.float32, device=device) * 0.5).to(torch.bfloat16)
+                F.silu(conv_ref(xs, ws, T)).backward(gradient=gs.float())
+            dx_s, dw_s = _conv_bwd_aclnn(x, y.unsqueeze(0), w, gs.unsqueeze(0), [0, T], activation=1)
+            torch.npu.synchronize()
+            dxs_err = (dx_s.float() - xs.grad.float()).abs().max().item()
+            dws_err = (dw_s.float() - ws.grad.float()).abs().max().item()
+            assert dxs_err < 0.15 and dws_err < 0.15, (
+                f"conv bwd silu-route mismatch (dx_err={dxs_err:.5f}, dw_err={dws_err:.5f})"
+            )
+            # Multi-doc backward gate: single-doc calls never execute the
+            # kernel's multi-doc dw reduction -- the axis one 26.6 build
+            # corrupted historically. Two docs at T>=256 cover it (each doc is
+            # a zero-context conv, so the reference splits per document).
+            T2, half = 512, 256
+            cu2 = [0, half, T2]
+            x2 = torch.randn(T2, C, dtype=torch.bfloat16, device=device) * 0.5
+            y2 = _conv_fwd_aclnn(x2, w, cu2)
+            with torch.enable_grad():
+                x2r = x2.detach().clone().requires_grad_(True)
+                w2r = w.detach().clone().requires_grad_(True)
+                g2 = (torch.randn(T2, C, dtype=torch.float32, device=device) * 0.5).to(torch.bfloat16)
+                ref2 = torch.cat([conv_ref(x2r[:half], w2r, half), conv_ref(x2r[half:], w2r, half)])
+                (ref2 * g2.float()).sum().backward()
+            dx2, dw2 = _conv_bwd_aclnn(x2, None, w, g2.unsqueeze(0), cu2, activation=0)
+            torch.npu.synchronize()
+            dx2_err = (dx2.float() - x2r.grad.float()).abs().max().item()
+            dw2_err = (dw2.float() - w2r.grad.float()).abs().max().item()
+            assert dx2_err < 0.15 and dw2_err < 0.15, (
+                f"conv multi-doc bwd mismatch (dx_err={dx2_err:.5f}, dw_err={dw2_err:.5f})"
+            )
             _fused_state["ok"] = True
-            print("[causal_conv1d] conv fused engaged: fla_npu AscendC causal_conv1d (torch.ops)", flush=True)
+            print(
+                f"[causal_conv1d] conv fused engaged: fla_npu AscendC causal_conv1d "
+                f"({_CONV_BACKEND['name']} backend, fwd_err={fwd_err:.5f})",
+                flush=True,
+            )
         except Exception as exc:
+            if _strict_kernels():
+                raise RuntimeError(f"strict NCP kernel mode rejected causal-conv fallback: {exc}") from exc
             print(
                 f"[causal_conv1d] conv fused unavailable ({exc}); unmasked/tap fallback",
                 flush=True,
@@ -375,15 +546,20 @@ class _CausalConv1dFused(torch.autograd.Function):
     """fla_npu AscendC causal_conv1d: one fused varlen op per direction.
 
     The AscendC kernel masks document boundaries natively via query_start_loc
-    (per-sequence zero history), so the unmasked correction machinery disappears.
-    silu runs inside the Function like the fla reference: backward hands the
-    saved pre-activation to the bwd op with activation=1 and the op applies
-    silu_backward internally.
+    (per-sequence zero history), so the unmasked correction machinery disappears
+    on the forward. silu runs inside the Function like the fla reference:
+    backward hands the saved pre-activation to the bwd op with activation=1 and
+    the op applies silu_backward internally. On the stable backend the bwd is a
+    single varlen call (multi-doc dw verified on 26.10); the legacy 26.6
+    backend splits per document (multi-doc dw corruption observed on one 26.6
+    build; the split stays as the shock absorber for any wheel whose multi-doc
+    reduction regresses).
     """
 
     @staticmethod
     def forward(ctx, x, weight, bounds, activation):
-        op_weight = weight.transpose(-1, -2).contiguous()
+        ctx.weight_dtype = weight.dtype
+        op_weight = weight.to(x.dtype).transpose(-1, -2).contiguous()
         op_x = x.reshape(-1, x.shape[-1]).contiguous()
         pre = _conv_fwd_aclnn(op_x, op_weight, bounds)
         ctx.save_for_backward(op_x, op_weight, pre)
@@ -400,15 +576,42 @@ class _CausalConv1dFused(torch.autograd.Function):
         # NTD dy carries a head-split leading dim ([N, T, Dh]); [1, T, C] is
         # the identity split for a channel-independent depthwise conv.
         op_dy = dy.reshape(1, -1, dy.shape[-1]).contiguous()
-        dx, dw = _conv_bwd_aclnn(
-            op_x,
-            pre.unsqueeze(0) if ctx.activation in ("silu", "swish") else None,
-            op_weight,
-            op_dy,
-            ctx.bounds,
-            activation=1 if ctx.activation in ("silu", "swish") else 0,
-        )
-        return dx.reshape(ctx.x_shape), dw.transpose(0, 1).contiguous(), None, None
+        act_bwd = 1 if ctx.activation in ("silu", "swish") else 0
+        y3d = pre.unsqueeze(0) if act_bwd == 1 else None
+        bounds = ctx.bounds
+        if _CONV_BACKEND["name"] == "legacy" and len(bounds) > 2:
+            # Multi-doc bwd dw corruption was observed on one 26.6 build (under
+            # the pre-host-list call form; two 26.6.0 builds probe correct with
+            # the current ABI). Splitting the bwd per document keeps every call
+            # single-doc (verified correct up to T=4096) at one extra launch
+            # per extra document -- still far below the ~40-pass unmasked
+            # decomposition this fused path replaces.
+            dx_parts = []
+            dw_sum = None
+            for n in range(len(bounds) - 1):
+                lo, hi = bounds[n], bounds[n + 1]
+                dx_n, dw_n = _conv_bwd_aclnn(
+                    op_x[lo:hi],
+                    y3d[:, lo:hi] if y3d is not None else None,
+                    op_weight,
+                    op_dy[:, lo:hi],
+                    [0, hi - lo],
+                    activation=act_bwd,
+                )
+                dx_parts.append(dx_n)
+                dw_sum = dw_n if dw_sum is None else dw_sum + dw_n
+            dx = torch.cat(dx_parts, dim=0)
+            dw = dw_sum
+        else:
+            dx, dw = _conv_bwd_aclnn(
+                op_x,
+                y3d,
+                op_weight,
+                op_dy,
+                bounds,
+                activation=act_bwd,
+            )
+        return dx.reshape(ctx.x_shape), dw.transpose(0, 1).contiguous().to(ctx.weight_dtype), None, None
 
 
 def causal_conv1d(x, weight, bias=None, activation="silu", seq_idx=None):
@@ -438,6 +641,11 @@ def causal_conv1d(x, weight, bias=None, activation="silu", seq_idx=None):
             else:
                 bounds = _conv_host_bounds.get(seq_idx, seq_idx)
             return _CausalConv1dFused.apply(x, weight, bounds, activation)
+    if _CONV_UNMASKED and _strict_kernels():
+        raise RuntimeError(
+            "strict NCP kernel mode requires fused causal_conv1d with no bias, "
+            f"width<=4 and batch=1, got bias={bias is not None}, width={width}, batch={x.shape[0]}"
+        )
     if _CONV_UNMASKED and bias is None and width <= 8:
         if seq_idx is None:
             return _CausalConv1dUnmasked.apply(x, weight, (), activation)

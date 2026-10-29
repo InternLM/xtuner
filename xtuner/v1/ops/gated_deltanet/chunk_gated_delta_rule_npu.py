@@ -31,8 +31,31 @@ _l2norm_fused = None
 _l2norm_checked = False
 
 
+def _kernel_api() -> str:
+    mode = os.environ.get("XTUNER_NPU_GDN_API", "legacy").strip().lower()
+    if mode not in {"legacy", "stable"}:
+        raise ValueError(f"unsupported XTUNER_NPU_GDN_API={mode!r}")
+    return mode
+
+
+def _strict_kernels() -> bool:
+    return os.environ.get("XTUNER_NPU_STRICT_KERNELS", "0") == "1"
+
+
+_LOGGED: set[str] = set()
+
+
+def _log_once(message: str) -> None:
+    # Every GDN layer re-enters the resolution path, so a plain print here
+    # repeats the same line per layer per rank; keep the first occurrence only.
+    if message not in _LOGGED:
+        _LOGGED.add(message)
+        print(message, flush=True)
+
+
 def _fused_l2norm():
-    """Resolve the fla_npu triton l2norm once; None keeps the inline fallback."""
+    """Resolve the fla_npu triton l2norm once; None keeps the inline
+    fallback."""
     global _l2norm_fused, _l2norm_checked
     if not _l2norm_checked:
         _l2norm_checked = True
@@ -41,7 +64,7 @@ def _fused_l2norm():
 
             _l2norm_fused = l2norm
         except Exception as exc:
-            print(f"[l2norm] fla_npu l2norm unavailable ({exc!r}); inline fallback", flush=True)
+            _log_once(f"[l2norm] fla_npu l2norm unavailable ({exc!r}); inline fallback")
             _l2norm_fused = None
     return _l2norm_fused
 
@@ -49,16 +72,13 @@ def _fused_l2norm():
 def warm_l2norm():
     """Resolve the l2norm path at wiring time and log which one is live.
 
-    The lazy resolver caches its first result forever, so a transient
-    fla_npu import failure would silently pin the inline fallback for
-    every later step. Calling this once from the GDN getter surfaces that
-    at startup instead.
+    The lazy resolver caches its first result forever, so a transient fla_npu import failure would silently pin the
+    inline fallback for every later step. Calling this once from the GDN getter surfaces that at startup instead.
     """
     fused = _fused_l2norm()
-    print(
-        f"[l2norm] {'fla_npu triton' if fused is not None else 'inline fallback'}",
-        flush=True,
-    )
+    if fused is None and _strict_kernels():
+        raise RuntimeError("strict NCP kernel mode requires fla_npu Triton l2norm")
+    _log_once(f"[l2norm] {'fla_npu triton' if fused is not None else 'inline fallback'}")
     return fused
 
 
@@ -75,6 +95,12 @@ _ASCENDC_OPS = (
 
 
 def _op(name):
+    if _kernel_api() == "stable":
+        from fla_npu.ops import ascendc  # type: ignore[import-untyped]
+
+        if not hasattr(ascendc, name):
+            raise RuntimeError(f"fla_npu.ops.ascendc.{name} is not available")
+        return getattr(ascendc, name)
     try:
         return getattr(torch.ops.npu, name)
     except (AttributeError, RuntimeError) as exc:
@@ -88,7 +114,22 @@ def load_ascendc_ops():
     # torch_npu global-scope pinning and the extension load itself. _op only
     # resolves (and fails loudly if a schema is missing); repeat calls are
     # cheap module-cache hits.
-    import fla_npu  # type: ignore[import-untyped]  # noqa: F401 -- the import itself performs the load
+    import fla_npu  # type: ignore[import-untyped]  # noqa: F401 -- the import initializes the embedded OPP
+
+    # fla_npu >= 26.10 gates the legacy torch.ops.npu.* registrations behind an
+    # explicit call; 26.6 (the version this module was written against)
+    # registered them on import. Best effort only: the 26.10 wheel in the
+    # benchmark overlay ships no embedded legacy extension, so the loader
+    # raises FileNotFoundError there -- and this loader is shared with the
+    # stable-API path, where the registrations are not needed at all. A
+    # legacy-API caller (causal-conv torch.ops) fails its own loud
+    # hasattr/assert with the real cause instead of this generic one.
+    legacy_loader = getattr(fla_npu, "load_legacy_torch_ops", None)
+    if legacy_loader is not None:
+        try:
+            legacy_loader()
+        except Exception as exc:  # noqa: BLE001 -- documented above; keep loading via the stable API
+            _log_once(f"[gdn_ascendc] legacy torch.ops registration skipped ({exc})")
 
     for name in _ASCENDC_OPS:
         _op(name)
@@ -724,18 +765,18 @@ def chunk_gated_delta_rule(
 def ascendc_chunk_gated_delta_rule_fn():
     """Resolve the AscendC GDN callable, or None to keep the Triton fallback.
 
-    Loading is the import itself -- fla_npu's wheel __init__ prepares the
-    embedded OPP, pins the torch_npu libraries into the global symbol scope
-    and torch.ops.load_library()es its AscendC extension. Any load failure
-    (wheel absent, schema missing) returns None so the dispatcher keeps
-    XTuner's Triton pipeline.
+    Loading is the import itself -- fla_npu's wheel __init__ prepares the embedded OPP, pins the torch_npu libraries
+    into the global symbol scope and torch.ops.load_library()es its AscendC extension. Any load failure (wheel absent,
+    schema missing) returns None so the dispatcher keeps XTuner's Triton pipeline.
     """
     try:
         load_ascendc_ops()
         warm_l2norm()
-        print("[gdn_ascendc] GDN kernel: fla_npu AscendC", flush=True)
+        _log_once("[gdn_ascendc] GDN kernel: fla_npu AscendC")
     except Exception as exc:
-        print(f"[gdn_ascendc] GDN kernel: fla_npu AscendC unavailable ({exc}); Triton fallback", flush=True)
+        if _strict_kernels():
+            raise RuntimeError(f"strict NCP kernel mode rejected GDN fallback: {exc}") from exc
+        _log_once(f"[gdn_ascendc] GDN kernel: fla_npu AscendC unavailable ({exc}); Triton fallback")
         return None
 
     def delta(q, k, v, **kwargs):
