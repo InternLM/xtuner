@@ -2,15 +2,15 @@ import copy
 from pathlib import Path
 from typing import Iterator, Optional, cast
 
+import ray
 import torch
 from pydantic import BaseModel, ConfigDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import MM_PIXEL_FIELDS, RolloutState, Status
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.dataloader import Dataloader
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
-from xtuner.v1.rl.utils.multimodal import put_multimodal_info
 from xtuner.v1.utils import XTUNER_DETERMINISTIC
 from xtuner.v1.utils.logger import get_logger
 
@@ -63,7 +63,11 @@ class SamplerConfig(BaseModel):
 # but it will cause a deadlock problem, so it is temporarily placed here.
 # The best solution should be to start the dataloader using spawn.
 def put_to_ray(data: RolloutState) -> RolloutState:
-    put_multimodal_info(data.mm_info)
+    if hasattr(data, "mm_info") and data.mm_info is not None:
+        for name in MM_PIXEL_FIELDS:
+            value = data.mm_info.get(name, None)
+            if value is not None and not isinstance(value, ray.ObjectRef):
+                data.mm_info[name] = ray.put(value)
     return data
 
 

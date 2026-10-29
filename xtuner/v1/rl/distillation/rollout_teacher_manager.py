@@ -11,7 +11,7 @@ import httpx
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, TeacherTargets, get_group_status
 from xtuner.v1.rl.utils import create_task
-from xtuner.v1.rl.utils.multimodal import validate_image_only_rollout
+from xtuner.v1.rl.utils.misc import validate_image_only_rollout
 from xtuner.v1.utils import get_logger
 
 from .config import RolloutTeacherConfig, RolloutTeacherScorerConfig, TeacherTargetConfig
