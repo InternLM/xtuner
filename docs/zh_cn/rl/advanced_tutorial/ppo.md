@@ -120,3 +120,13 @@ class CriticLossConfig(BaseLossConfig):
 ```
 
 有 `old_values` 时，value 相对旧 value 的变化被夹到 `[-cliprange_value, cliprange_value]`。每个 token 取未裁剪平方误差和裁剪后平方误差中较大的一个，再乘 `0.5`。没有 `old_values` 时退化为未裁剪的均方误差。`labels == -100` 的位置权重为 0，其余权重按全局可训练 token 数归一。
+
+## Routed experts 生命周期
+
+RolloutState、TraceStore 与训练批次缓存持有可共享的 Ray ObjectRef。
+reset/discard、session 结束和 `release_train_batch()` 只丢弃各自的引用，
+最后一个持有者结束后由 Ray 回收数据；读取与 partial rollout 拼接不会强制释放输入。
+训练按 pack 读取数据，actor 的 old/ref/teacher/train 各遍复用同一份引用。
+
+vLLM 的 HTTP routed-experts 字段需传数组数据（也支持现有 base64/pickle 数组格式），
+不接受通过 HTTP 序列化的 Ray ObjectRef：带外传输的引用无法使用上述生命周期。

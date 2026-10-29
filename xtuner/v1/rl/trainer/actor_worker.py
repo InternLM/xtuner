@@ -37,7 +37,6 @@ from .pack import DPRankPackIndices
 from .role_worker import (
     RoleWorker,
     _PackItem,
-    free_rollout_routed_expert_refs,
     resolve_mm_inputs,
     resolve_routed_experts,
 )
@@ -562,13 +561,7 @@ class ActorWorker(RoleWorker):
         try:
             return self._fit_stages(samples, plan, batch_attr, rollout_idx)
         finally:
-            # The actor is the batch's last consumer: release the shared
-            # routed-experts refs exactly once, on every exit path. Each stage
-            # re-resolves from the pristine cache, so freeing earlier would
-            # poison the later passes.
             self._staged = {}
-            if self.config.free_rollout_routed_experts_in_worker:
-                free_rollout_routed_expert_refs(samples, sp_mesh=self.host.sp_mesh)
 
     def _fit_stages(
         self,

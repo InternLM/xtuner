@@ -219,7 +219,6 @@ class WorkerConfig(BaseModel):
     profile_step: list[int] | int | None = None  # 1-based global RL train_step ids to profile.
     profile_time: bool = True
     profile_memory: bool = False
-    free_rollout_routed_experts_in_worker: bool = True  # 默认不需要用户配置
     offload_rollout_routed_experts: bool = False
     train_teacher_manager_config: TrainTeacherManagerConfig | None = None
 
