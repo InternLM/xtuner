@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import random
 import re
 import time
 from dataclasses import asdict, dataclass
@@ -9,7 +8,6 @@ from pathlib import Path
 from shutil import rmtree
 from typing import Any, List, cast
 
-import numpy as np
 import ray
 import torch
 from mmengine.dist import get_rank
@@ -19,8 +17,7 @@ from typing_extensions import Literal, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1._writer import get_writer
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.data_proto.sequence_context import SequenceContext
+from xtuner.v1.data_proto.rl_data import RolloutState, is_valid_for_training
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop_manager import (
@@ -67,13 +64,6 @@ PG_READY_TIMEOUT = 30
 RL_TRAINER_RAY_GET_TIMEOUT = 3600
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
-
-
-def _to_cpu_tensor(value: np.ndarray | None, *, dtype: torch.dtype | None = None) -> torch.Tensor | None:
-    if value is None:
-        return None
-    assert isinstance(value, np.ndarray), f"Expected np.ndarray, got {type(value)}"
-    return torch.as_tensor(value, dtype=dtype, device="cpu")
 
 
 def _agent_loop_manager_requires_rollout_proxy(
@@ -273,101 +263,6 @@ class RLThroughputBenchmark:
 
     def to_scalars(self) -> dict[str, float]:
         return {f"throughput/{key}": value for key, value in asdict(self).items()}
-
-
-def get_train_seq_ctx(
-    input_ids: torch.LongTensor,
-    position_ids: np.ndarray | None = None,
-    multimodal_train_info: dict | None = None,
-    len_response_ids: int = 0,
-):
-    seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
-    position_ids = _to_cpu_tensor(position_ids, dtype=torch.long)
-    if position_ids is not None and len(position_ids.shape) == 3:
-        # Match get_rope_index_3: response text continues from a single global
-        # max(T, H, W), not per-axis maxima. Per-axis max diverges when the
-        # prompt ends on image tokens (T≈0 while H/W are large).
-        max_value = position_ids.amax()
-        response_position_ids = (
-            (
-                torch.arange(
-                    1,
-                    len_response_ids + 1,
-                    device=position_ids.device,
-                    dtype=position_ids.dtype,
-                )
-                + max_value
-            )
-            .view(1, 1, -1)
-            .expand(3, 1, -1)
-        )
-        position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
-        seq_ctx.position_ids = position_ids  # type: ignore[assignment]
-        assert position_ids.size(-1) == input_ids.size(-1)
-
-    if multimodal_train_info:
-        seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
-        seq_ctx.image_grid_thw = _to_cpu_tensor(multimodal_train_info.get("image_grid_thw"), dtype=torch.long)
-        num_img_tokens = multimodal_train_info.get("num_img_tokens")
-        if num_img_tokens is not None:
-            seq_ctx.num_img_tokens = [num_img_tokens]
-    return seq_ctx
-
-
-def is_valid_for_training(group_data_items: list[RolloutState], logger) -> bool:
-    """Checks if a group of rollout states is valid for a training step.
-
-    Args:
-        group_data_items: A list of RolloutState objects.
-
-    Returns:
-        True if the group is valid, False otherwise.
-
-    NOTE: Why this check is needed:
-    - For system fault tolerance, this check is performed at rollout / dataflow
-      time, but we still do it here to ensure training data integrity.
-    - 'filtered'/'failed': These items are fundamentally broken or incomplete and
-      should not be used for training.
-    - 'aborted': These items represent rollouts that were stopped
-      prematurely. Using such partial data could lead the model to learn
-      undesirable behaviors (e.g., stopping generation too early).
-    - Empty response/response_ids: The model's generated response is the core
-      of the training data for RL algorithms like PPO. If the response is
-      missing, there is nothing to compute rewards on or to train the model with.
-    """
-    is_abort = any(item.status == Status.ABORTED for item in group_data_items)
-    is_filtered = any(item.status == Status.FILTERED for item in group_data_items)
-    is_failed = any(item.status == Status.FAILED for item in group_data_items)
-    if is_filtered or is_failed or is_abort:
-        logger.warning(
-            f"Invalid dataflow group found during training, rollout state filtered: {is_filtered}, failed: {is_failed}, aborted: {is_abort}."
-        )
-        return False
-    for item in group_data_items:
-        if item.input_ids is not None:
-            input_ids_valid = len(item.input_ids) > 1
-            labels_valid = item.labels is not None and len(item.labels) == len(item.input_ids)
-            logprobs_valid = item.logprobs is None or len(item.logprobs) == len(item.input_ids)
-            if not input_ids_valid or not labels_valid or not logprobs_valid:
-                logger.warning(
-                    "Invalid dataflow item found during training: input_ids, labels, and logprobs lengths mismatch."
-                )
-                return False
-            continue
-
-        response_valid = item.response is not None and len(item.response) > 0
-        ids_valid = item.response_ids is not None and len(item.response_ids) > 0
-        if not ids_valid:
-            # NOTE: `response_ids` is the critical field for token-in-token-out mode, so we ensure it's not empty.
-            logger.warning(
-                "Invalid dataflow item found during training: no response or response_ids and skip this item."
-            )
-            return False
-        if not response_valid:
-            # NOTE: check valid response string for judger inputs
-            logger.warning("Invalid dataflow item found during training: empty response string and skip this item.")
-            return False
-    return True
 
 
 def _validate_sync_intervals(
@@ -1059,20 +954,13 @@ class BaseRLTrainer:
                 self.train_controller.onload(target="all")
                 self.logger.info("Training controller loaded")
 
-        with timer("prepare_data", step_timer_dict):
-            data_batches, data_info = self._prepare_train_data(
-                train_batch,
-                self._train_worker_cfg.pack_max_length,
-                raw_rewards_sum=raw_rewards_sum,
-                raw_rewards_count=raw_rewards_count,
-            )
-        self.logger.info(f"Prepared {len(data_batches)} training data batches")
-
         with timer("training", step_timer_dict):
-            workers_log_item: list[WorkerLogItem] = self.train_controller.fit(
-                data_batches,
+            workers_log_item, data_info = self.train_controller.fit(
+                train_batch,
                 pack_max_length=self._train_worker_cfg.pack_max_length,
                 rollout_idx=train_step,
+                raw_rewards_sum=raw_rewards_sum,
+                raw_rewards_count=raw_rewards_count,
             )
 
         self._release_trace_sessions_after_train_batch(train_batch)
@@ -1136,291 +1024,6 @@ class BaseRLTrainer:
         ]
         self.logger.info(f"Loaded debug rollout batch for step {train_step} from {debug_file}")
         return cast(list[list[RolloutState]], train_batch)
-
-    # TODO: simplify with Packer.pack_pad_dispatch()
-    def _prepare_train_data(
-        self,
-        data_groups: list[list[RolloutState]],
-        pack_max_length: int,
-        raw_rewards_sum: float = 0.0,
-        raw_rewards_count: int = 0,
-    ):
-        has_agentic_data = any(state.input_ids is not None for group in data_groups for state in group)
-        has_3d_reasoning_data = any(
-            state.input_ids is None and state.position_ids is not None and state.position_ids.ndim == 3
-            for group in data_groups
-            for state in group
-        )
-        use_3d_agentic_position_ids = has_agentic_data and has_3d_reasoning_data
-
-        # Per-session rewards for distribution metrics. Agentic sessions may split into several
-        # trainable segments that share one reward; counting that reward once per session keeps
-        # rewards/* from being weighted by segment count.
-        cluster_rewards_list: list[float] = []
-        distillation_reward_observations: list[tuple[RolloutState, float]] = []
-        advantages_list: list[float] = []
-        prompt_len_list = []
-        response_len_list = []
-        tool_turns_list: list[int] = []
-        training_tokens = 0
-        training_samples = 0
-
-        data_batches = []
-
-        for j, group in enumerate(data_groups):
-            if not is_valid_for_training(group, self.logger):
-                self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
-                continue
-            training_samples += len(group)
-
-            task_adv_weight = self._distillation.task_adv_weight
-            prompt_ids = None
-            if any(data.input_ids is None for data in group):
-                is_vlm_model = "train_prompt_ids" in group[0].extra_fields
-                if is_vlm_model:
-                    # TODO(hha): VLM, 不好的设计，后续要去掉
-                    prompt_ids = group[0].extra_fields["train_prompt_ids"]
-                else:
-                    prompt_ids = group[0].prompt_ids
-                assert prompt_ids is not None and len(prompt_ids) > 0, (
-                    f"Prompt ids cannot be None or empty in data: {group[0]}"
-                )
-            # Collect rewards independently from task-advantage computation. Pure OPD may omit
-            # rewards entirely; when rewards are present they remain useful observability signals.
-            cluster_index_by_key: dict[Any, int] = {}
-            cluster_rewards: list[float] = []
-            cluster_representatives: list[RolloutState] = []
-            sample_cluster_indices: list[int] = []
-            for data in group:
-                # 有可能有重复，但是没有其他更好办法
-                turns = data.extra_fields.get("agent_tool_turns")
-                if isinstance(turns, int):
-                    tool_turns_list.append(turns)
-                if data.reward is None or "score" not in data.reward:
-                    if task_adv_weight > 0:
-                        raise ValueError(
-                            f"Reward is missing or does not contain 'score' key in data: {data}, "
-                            f"but task_adv_weight={task_adv_weight} > 0"
-                        )
-                    else:
-                        continue
-                reward = float(data.reward["score"])
-                # session_id is only set by agentic loops / XTUNER_DETERMINISTIC; plain RL falls back
-                # to rollout_id, which the sampler always assigns. Segments of one session share a key.
-                cluster_key = data.session_id if data.session_id is not None else data.rollout_id
-                cluster_index = cluster_index_by_key.get(cluster_key)
-                if cluster_index is None:
-                    cluster_index = len(cluster_rewards)
-                    cluster_index_by_key[cluster_key] = cluster_index
-                    cluster_rewards.append(reward)
-                    cluster_representatives.append(data)
-                sample_cluster_indices.append(cluster_index)
-
-            cluster_rewards_list.extend(cluster_rewards)
-            distillation_reward_observations.extend(zip(cluster_representatives, cluster_rewards))
-
-            if task_adv_weight == 0:
-                sample_advantages = [0.0] * len(group)
-            else:
-                rewards_tensor = torch.tensor(cluster_rewards, dtype=torch.float32)
-                cluster_advantages = self._advantage_estimator.compute(rewards_tensor, cluster_representatives)
-                sample_advantages = [
-                    cluster_advantages[cluster_index].item() for cluster_index in sample_cluster_indices
-                ]
-
-            prompt_repeat_k = len(group)
-            for i in range(prompt_repeat_k):
-                if group[i].input_ids is not None:
-                    raw_input_ids = cast(list[int], group[i].input_ids)
-                    labels = cast(list[int] | None, group[i].labels)
-                    assert labels is not None, f"Labels cannot be None when input_ids is provided: {group[i]}"
-                    assert len(raw_input_ids) == len(labels), (
-                        f"{len(raw_input_ids)} vs {len(labels)}, data: {group[i]}"
-                    )
-
-                    input_logprobs = group[i].logprobs
-                    if input_logprobs is not None:
-                        assert len(input_logprobs) == len(raw_input_ids), (
-                            f"{len(input_logprobs)} vs {len(raw_input_ids)}, data: {group[i]}"
-                        )
-                        rollout_logprobs: torch.Tensor | None = torch.tensor(
-                            input_logprobs[1:], dtype=torch.float32
-                        ).unsqueeze(0)
-                    else:
-                        raise ValueError(f"Logprobs cannot be None when input_ids is provided: {group[i]}")
-
-                    input_ids = raw_input_ids[:-1]
-                    shifted_labels = labels[1:]
-                    teacher_fields = self._distillation.rollout_teacher_targets(
-                        group[i],
-                        shifted_labels=shifted_labels,
-                    )
-                    prompt_len = sum(label == -100 for label in shifted_labels)
-                    response_len = len(shifted_labels) - prompt_len
-                    prompt_len_list.append(prompt_len)
-                    response_len_list.append(response_len)
-
-                    advatnages_val = sample_advantages[i]
-                    actual_advantages = [0.0 if label == -100 else advatnages_val for label in shifted_labels]
-                    advantages_list.extend(advatnages_val for label in shifted_labels if label != -100)
-
-                    assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
-                    training_tokens += len(input_ids)
-                    input_ids_t = cast(torch.LongTensor, torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0))
-                    shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
-
-                    if rollout_logprobs is not None:
-                        assert rollout_logprobs.size() == shifted_labels_t.size(), (
-                            f"{rollout_logprobs.size()} vs {shifted_labels_t.size()}"
-                        )
-
-                    position_ids = group[i].position_ids
-                    if use_3d_agentic_position_ids:
-                        seq_len = input_ids_t.size(-1)
-                        text_position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, 1, -1)
-                        # Mixed agentic/VLM batches use three-axis MRoPE position IDs. Repeat the
-                        # normal text positions on every axis so agentic samples have the same rank
-                        # as the VLM samples when their sequence contexts are packed together.
-                        position_ids = np.broadcast_to(text_position_ids, (3, 1, seq_len)).copy()
-                    multimodal_train_info = group[i].mm_info
-                    multi_info_cast = cast(dict | None, multimodal_train_info)
-                    seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, multi_info_cast)
-
-                    data_dict = {
-                        "seq_ctx": seq_ctx,
-                        "shifted_labels": shifted_labels_t,
-                        "advantage": actual_advantages,
-                        "rollout_logprobs": rollout_logprobs,
-                    }
-                    data_dict.update(teacher_fields)
-
-                    seq_ctx.rollout_routed_experts = group[i].routed_experts
-                    data_batches.append(data_dict)
-                    continue
-
-                item = group[i].response
-                response_logprobs: list[float] | None = None
-
-                response_ids: List[int] = []
-                assert prompt_ids is not None
-                if group[i].response_ids is not None:
-                    resp_ids_raw = group[i].response_ids
-                    if isinstance(resp_ids_raw, torch.Tensor):
-                        response_ids = resp_ids_raw.flatten().tolist()
-                    else:
-                        response_ids = cast(List[int], resp_ids_raw)
-
-                    response_logprobs = group[i].logprobs
-                    if response_logprobs is not None:
-                        assert len(response_logprobs) == len(response_ids), (
-                            f"{len(response_logprobs)} vs {len(response_ids)}, data: {group[i]}"
-                        )
-                        # 只有 response 部分有 logprobs, 需要前面追加
-                        response_logprobs = [0.0] * (len(prompt_ids) - 1) + response_logprobs
-                else:
-                    assert item is not None, "response item cannot be None"
-                    response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
-
-                # 返回的 routed_experts 不包括 eos 的值，实际上也不需要，需要减一
-                input_ids = prompt_ids + response_ids[:-1]
-
-                prompt_len_list.append(len(prompt_ids))
-                response_len_list.append(len(response_ids))
-
-                # 根据 response_mask 计算 response_ids 对应的shifted_labels
-                if group[i].response_mask is None:
-                    response_mask = [1] * len(response_ids)
-                    response_labels = response_ids
-                else:
-                    assert len(group[i].response_mask) == len(response_ids), (  # type: ignore[arg-type]
-                        f"{len(group[i].response_mask)} vs {len(response_ids)}"  # type: ignore[arg-type]
-                    )
-                    response_mask = cast(list[int], group[i].response_mask)
-                    response_labels = [
-                        response_id if mask_id != 0 else -100
-                        for response_id, mask_id in zip(response_ids, response_mask)
-                    ]
-                shifted_labels = [-100] * (len(prompt_ids) - 1) + response_labels
-                shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
-
-                # Keep the advantage layout aligned with input_ids (response excludes EOS).
-                # Prompt positions predict prompt tokens whose shifted labels are -100, so their
-                # advantage is 0; the last entry of response_ids (EOS) is only a label, never an input.
-                advatnages_val = sample_advantages[i]
-                actual_advantages = [0.0] * (len(prompt_ids) - 1) + [
-                    0.0 if mask == 0 else advatnages_val for mask in response_mask
-                ]
-                advantages_list.extend(advatnages_val for mask in response_mask if mask != 0)
-
-                assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
-                training_tokens += len(input_ids)
-                input_ids_t = cast(torch.LongTensor, torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0))
-
-                if response_logprobs is not None:
-                    rollout_logprobs = torch.tensor(response_logprobs, dtype=torch.float32).unsqueeze(0)
-                    assert rollout_logprobs.size() == shifted_labels_t.size(), (
-                        f"{rollout_logprobs.size()} vs {shifted_labels_t.size()}"
-                    )
-                else:
-                    rollout_logprobs = None
-
-                position_ids = group[i].position_ids
-                multimodal_train_info = group[i].mm_info
-                multi_info_cast = cast(dict | None, multimodal_train_info)
-                seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, multi_info_cast, len(response_ids) - 1)  # type: ignore[arg-type]
-
-                data_dict = {
-                    "seq_ctx": seq_ctx,
-                    "shifted_labels": shifted_labels_t,
-                    "advantage": actual_advantages,
-                    "rollout_logprobs": rollout_logprobs,
-                }
-                teacher_fields = self._distillation.rollout_teacher_targets(
-                    group[i],
-                    shifted_labels=shifted_labels,
-                )
-                data_dict.update(teacher_fields)
-
-                seq_ctx.rollout_routed_experts = group[i].routed_experts  # n,layer*expert
-
-                data_batches.append(data_dict)
-        if not XTUNER_DETERMINISTIC:
-            random.shuffle(data_batches)
-
-        # rewards/* report the per-session reward distribution; batch_size/training_samples
-        # count the valid rollout segments included in training.
-        rewards_t = torch.tensor(cluster_rewards_list).float() if cluster_rewards_list else torch.tensor([0.0]).float()
-        advantages_t = torch.tensor(advantages_list).float() if advantages_list else torch.tensor([0.0]).float()
-        prompt_len_t = torch.tensor(prompt_len_list).float() if prompt_len_list else torch.tensor([0.0]).float()
-        response_len_t = torch.tensor(response_len_list).float() if response_len_list else torch.tensor([0.0]).float()
-
-        raw_rewards_mean = raw_rewards_sum / raw_rewards_count if raw_rewards_count > 0 else rewards_t.mean().item()
-        info_dict = {
-            "batch_size": training_samples,
-            "training_samples": training_samples,
-            "training_tokens": training_tokens,
-            "rewards/mean": rewards_t.mean().item(),
-            "rewards/min": rewards_t.min().item(),
-            "rewards/max": rewards_t.max().item(),
-            "raw_rewards/mean": raw_rewards_mean,
-            "advantages/mean": advantages_t.mean().item(),
-            "advantages/min": advantages_t.min().item(),
-            "advantages/max": advantages_t.max().item(),
-            "response_len/mean": response_len_t.mean().item(),
-            "response_len/min": response_len_t.min().item(),
-            "response_len/max": response_len_t.max().item(),
-            "response_len/std": response_len_t.std().item(),
-            "prompt_len/mean": prompt_len_t.mean().item(),
-            "prompt_len/min": prompt_len_t.min().item(),
-            "prompt_len/max": prompt_len_t.max().item(),
-        }
-        info_dict.update(self._distillation.reward_scalars(distillation_reward_observations))
-        if tool_turns_list:
-            tool_turns_t = torch.tensor(tool_turns_list, dtype=torch.float32)
-            info_dict["tool_turns/mean"] = tool_turns_t.mean().item()
-            info_dict["tool_turns/min"] = float(tool_turns_t.min().item())
-            info_dict["tool_turns/max"] = float(tool_turns_t.max().item())
-        return data_batches, info_dict
 
     def _compute_benchmark_metrics(
         self,
@@ -1777,7 +1380,11 @@ class RLColocateTrainer(BaseRLTrainer):
 
             return
 
-        self.train_controller = self._train_worker_cfg.build(self._pg)
+        self.train_controller = self._train_worker_cfg.build(
+            self._pg,
+            advantage_estimator=self._advantage_estimator,
+            distillation=self._distillation,
+        )
 
         checkpoint_path = self._load_checkpoint_cfg.checkpoint_path
         if checkpoint_path is not None:
@@ -2041,7 +1648,11 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         self._cpu_resource_manager = CPUResourceManager([self._train_pg, self._rollout_pg])
         self._cpu_resource_manager.log_initial_snapshot()
         set_cpu_resource_manager(self._cpu_resource_manager)
-        self.train_controller = self._train_worker_cfg.build(self._train_pg)
+        self.train_controller = self._train_worker_cfg.build(
+            self._train_pg,
+            advantage_estimator=self._advantage_estimator,
+            distillation=self._distillation,
+        )
         self.rollout_controller = self._rollout_config.build(self._rollout_pg)
 
         if self._rollout_config.weight_transport_type != "nccl":
