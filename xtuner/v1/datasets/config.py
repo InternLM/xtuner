@@ -327,6 +327,9 @@ class DataloaderConfig(BaseDataloaderConfig):
         Parameter(help="path to sampler order .npy (mmap read); required when pack_level='preset'"),
     ] = None
     round_up: Annotated[bool, Parameter(help="enable or disable round up mode")] = True
+    sp_media_dedup: Annotated[
+        bool, Parameter(help="Only the SP leader builds a runtime loader; broadcast complete batches")
+    ] = False
 
     @staticmethod
     def _force_preset_pack_settings(dataset_config_list: "DatasetConfigList") -> "DatasetConfigList":
@@ -398,7 +401,8 @@ class DataloaderConfig(BaseDataloaderConfig):
         seed: int,
         shuffle: bool = True,
         total_step: int | None = None,
-    ) -> Dataloader:
+        sp_mesh: DeviceMesh | None = None,
+    ) -> Dataloader | None:
         if self.dataset_config_list is None:
             raise ValueError("dataset_config_list is required.")
 
@@ -486,6 +490,16 @@ class DataloaderConfig(BaseDataloaderConfig):
             packed_samples = len(dataset)
             logger.info(f"[Dataset] (Original) {ori_samples} samples.")
             logger.info(f"[Dataset] (Packed) {packed_samples} samples.")
+
+        # 所有 rank 先完成原有数据准备及 collective，避免 follower 提前退出造成缺员。
+        # 下面才是本地 sampler/collator/DataLoader 组装；follower 改从 SP 广播接收完整 batch。
+        # Everything above must run on ALL ranks (JSONL loading, tokenization/packing cache
+        # sync and their collectives); only the sampler/collator/DataLoader assembly below
+        # is rank-local. With SP batch dedup the SP-group followers skip that assembly and
+        # get complete batches from the per-step broadcast instead (no stub loader).
+        if self.sp_media_dedup and sp_mesh is not None and sp_mesh.size() > 1:
+            if sp_mesh.get_local_rank() != 0:
+                return None
 
         sampler: LengthGroupedSampler | ParallelSampler | RandomSampler | SequentialSampler | PresetSampler
         if self.sampler_type == "preset":

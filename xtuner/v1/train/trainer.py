@@ -80,6 +80,7 @@ from xtuner.v1.utils.internal_metrics import (
 )
 from xtuner.v1.utils.numa_affinity import try_bind_numa
 
+from .sp_batch_broadcast import broadcast_batch, broadcast_control
 from .toy_tokenizer import UTF8ByteTokenizer
 
 
@@ -701,6 +702,16 @@ class Trainer:
                 log_rank0.warning("Outside dataset_cfg will override inner dataset_config_list")
             dataloader_cfg.dataset_config_list = dataset_cfg
 
+        # 仅 mapped DataLoader 开启去重且 SP>1 时改变供数方式；关闭开关或 SP1 保持原路径。
+        # SP batch dedup: only the mapped DataloaderConfig carries the switch, and only
+        # SP>1 re-routes data supply; SP1 or switch-off keeps the original single-copy path.
+        # 当前实现仅支持并验证 TP=1；TP>1 保留现有拒绝分支，不推断其必然失效原因。
+        # This implementation supports and has been validated with TP=1 only; reject TP>1.
+        self._sp_media_dedup = (
+            isinstance(dataloader_cfg, DataloaderConfig) and dataloader_cfg.sp_media_dedup and self.sp_mesh.size() > 1
+        )
+        if self._sp_media_dedup and self.data_mesh["tp"].size() != 1:
+            raise ValueError("SP batch dedup currently requires TP=1")
         self._dataloader = dataloader_cfg.build(
             tokenizer=self.tokenizer,
             dp_mesh=self.data_mesh["dp"],
@@ -708,7 +719,20 @@ class Trainer:
             micro_batch_size=self.micro_batch_size,
             seed=seed,
             total_step=total_step,
+            # 仅该配置的 build 接受 sp_mesh；其他 DataLoader 配置保留原调用签名。
+            # Only the mapped DataloaderConfig.build accepts sp_mesh (for the follower check
+            # inside build); other dataloader config types keep their original signature.
+            **({"sp_mesh": self.sp_mesh} if isinstance(dataloader_cfg, DataloaderConfig) else {}),
         )
+        # 按 epoch 训练时，follower 没有可求长度的 DataLoader，需同步 leader 长度计算总步数。
+        # total_epoch mode: followers have no DataLoader, so len() exists only on the SP
+        # leader. Broadcast the length inside each SP group and derive total_step locally,
+        # otherwise the total_step property's Sized fallback would fail on dataloader=None.
+        if self._sp_media_dedup and self._total_step is None:
+            loader_len = broadcast_control(
+                len(self._dataloader) if self._dataloader is not None else None, self.sp_mesh.get_group()
+            )
+            self._total_step = loader_len * cast(int, self._total_epoch)
 
         # streaming dataloader may override `total_step`, so we may move this check after `build_dataloader` later.
         assert total_epoch is not None or total_step is not None, "`total_epoch` or `total_step` should be set"
@@ -1453,6 +1477,14 @@ class Trainer:
             )
 
     def _save_dataloader(self, dataloader_path: Path | str):
+        # 只有各 SP 组 leader 持有 DataLoader；这些 leader 仍须完整参与其原 DP 组状态汇总。
+        # follower 跳过数据状态保存，world 保存屏障不变，最终仍由 global rank0 写一个文件。
+        # SP dedup: only SP leaders own a DataLoader and still participate in their original
+        # complete DP group. The other
+        # ranks return early; the collective sequence and the world save barrier are the
+        # original ones, and global rank 0 (a leader) still writes the single state file.
+        if self._dataloader is None:
+            return
         dataloader_state = self._dataloader.get_state_dict()
         if self.rank == 0:
             torch.save(dataloader_state, dataloader_path)
@@ -1498,17 +1530,71 @@ class Trainer:
         return self._meta
 
     def _data_iter(self):
-        data_iter = iter(self._dataloader)
-        while self._cur_step < self.total_step:
-            try:
-                data = next(data_iter)
-            except StopIteration:
-                self._cur_epoch += 1
-                self._dataloader.set_epoch(self._cur_epoch)
-                data_iter = iter(self._dataloader)
-                data = next(data_iter)
+        # 共用一份取数循环：持有 DataLoader 的 rank 执行原 next/跨 epoch 逻辑，follower 等广播。
+        # 控制流伪代码 / Fetch-control pseudocode (not extra work each step):
+        #   leader: seed_draw = will_create_underlying_iterator; batch = original_fetch()
+        #   all ranks: batch, epoch, seed_draw = broadcast_batch(...)
+        #   follower: if seed_draw: draw_one_cpu_int64_and_discard()
+        # seed_draw 只传“是否发生一次抽取”，不传 seed 数值，也不创建 follower worker。
+        # Transmit a draw event, not a seed value; followers do not create data workers.
+        # One fetching loop shared by leaders and followers (R2): ranks owning a DataLoader
+        # run the original next/StopIteration/set_epoch sequence; followers contribute
+        # data=None and receive the leader's complete batch from the per-step broadcast.
+        def _iterator_seed_draw() -> bool:
+            # 只在真正新建底层 iterator 时抽 base_seed；persistent workers 跨 epoch 复用时不重抽。
+            # 首次创建要抽；非 persistent 每个 epoch 重建要抽；重启后新建仍按同一规则判断。
+            # Draw on first creation and each non-persistent rebuild, including a fresh
+            # iterator after process restart; persistent-worker reuse does not redraw.
+            # A main-process base_seed is consumed only when a fresh iterator is really
+            # created: persistent workers keep _iterator alive across epochs (no redraw),
+            # otherwise every iter() rebuilds one and draws again.
+            return not self._dataloader.persistent_workers or self._dataloader._iterator is None
 
+        # XTuner 的 __iter__ 含 yield：iter(loader) 只创建外层生成器，首次 next 才创建底层
+        # PyTorch iterator。因此下面的 seed_draw 判断仍发生在真正创建/抽 seed 之前。
+        # XTuner's __iter__ is a generator: iter(loader) defers the underlying PyTorch
+        # iterator creation until next(), so the seed_draw check below runs before that draw.
+        data_iter = iter(self._dataloader) if self._dataloader is not None else None
+        seed_draw = self._sp_media_dedup and data_iter is not None and _iterator_seed_draw()
+        while self._cur_step < self.total_step:
+            data = None
+            if data_iter is not None:
+                try:
+                    data = next(data_iter)
+                except StopIteration:
+                    self._cur_epoch += 1
+                    self._dataloader.set_epoch(self._cur_epoch)
+                    seed_draw = self._sp_media_dedup and _iterator_seed_draw()
+                    data_iter = iter(self._dataloader)
+                    data = next(data_iter)
+            if self._sp_media_dedup:
+                # 同步完整 batch、实际 epoch 和 seed_draw 标记；follower 补消耗一次 CPU 随机数，
+                # 维持 BASE 各 rank 创建 iterator 时的 RNG 推进方式，不是重设或广播 seed 数值。
+                # Broadcast the whole batch, the leader's epoch (followers sync it), and
+                # the seed_draw signal — followers mirror the leader's RNG consumption
+                # below, keeping each main-process RNG stream aligned with
+                # the BASE topology where each rank drew its own base_seed.
+                data, self._cur_epoch, seed_draw = broadcast_batch(
+                    data,
+                    self.sp_mesh.get_group(),
+                    epoch=self._cur_epoch,
+                    seed_draw=seed_draw,
+                )
+                if self._dataloader is None and seed_draw:
+                    # BASE 未传独立 loader generator，创建底层 iterator 会从默认 CPU RNG
+                    # 抽一次 int64 base_seed。follower 不创建 iterator，故“空转”同一次抽取，
+                    # 结果直接丢弃，使本 rank 的 CPU RNG 保持原推进方式；不是重设 seed，
+                    # 也不是每步抽取，更不是恢复全部 RNG 状态或强制各 rank 的 RNG 相同。
+                    # BASE uses the default CPU RNG (no dedicated loader generator) to draw
+                    # one int64 base_seed per new underlying iterator. Followers skip that
+                    # creation, so perform the same draw and discard its value. This preserves
+                    # each rank's RNG progression; it does not reseed, draw on every step,
+                    # restore all RNG states, or force different ranks to share a state.
+                    torch.empty((), dtype=torch.int64).random_()
             yield data
+            # 当前数据路径仅在 iterator 创建事件补抽；普通取下一批不重复补抽。
+            # Mirror iterator creation once; ordinary fetches on this path need no extra draw.
+            seed_draw = False
 
     def _get_checkpoint_path(self, epoch: int, step: int, is_snapshot: bool = False) -> Path:
         prefix = "snapshot-" if is_snapshot else "ckpt-"
@@ -2108,8 +2194,13 @@ class Trainer:
     def _resume_dataloader(self, dataloader_path: Path):
         if not dataloader_path.exists():
             raise FileNotFoundError(f"Dataloader path {dataloader_path} does not exist.")
-        dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
-        self._dataloader.load_state_dict(dataloader_state)
+        # follower 无 DataLoader 则跳过；leader 保留原加载两行，包括 map_location=DEVICE。
+        # SP dedup compatibility: followers have no DataLoader and skip the load; leaders
+        # keep the original two lines, including map_location=DEVICE (R3: do not repoint
+        # the data-state device mapping for this feature).
+        if self._dataloader is not None:
+            dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
+            self._dataloader.load_state_dict(dataloader_state)
 
     def _setup_hooks(self, hooks_config: HooksConfig) -> HooksConfig:
         for stage in HookStage:
