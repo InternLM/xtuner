@@ -140,12 +140,7 @@ case:
                        operator: <
                        aggregate: 80
                     -
-                       metric: eval/gsm8k/acc
-                       threshold: 0.01
-                       method: absolute
-                       operator: <
-                    -
-                       metric: eval/geo3k/acc
+                       metric: eval/accuracy
                        threshold: 0.01
                        method: absolute
                        operator: <
