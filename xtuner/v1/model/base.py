@@ -6,7 +6,7 @@ import pydoc
 import re
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from functools import reduce
+from functools import partial, reduce
 from importlib import import_module
 from itertools import chain
 from math import prod
@@ -223,6 +223,7 @@ class TransformerConfig(XTunerBaseModelConfig):
     linear_attention: Annotated[GatedDeltaNetConfig | KDAConfig | None, Parameter(group="model")] = None
     mlp_bias: Annotated[bool, Parameter(group="model")] = False
     tie_word_embeddings: Annotated[bool, Parameter(group="model")] = False
+    head_type: Annotated[Literal["lm_head", "value_head"], Parameter(group="model")] = "lm_head"
     model_type: Annotated[str | None, Parameter(group="model")] = None  # TODO: yehaochen maybe should be removed
     generate_config: GenerateConfig | None = None
     return_hidden_states: Annotated[bool, Parameter(group="model")] = False
@@ -398,6 +399,39 @@ class TransformerConfig(XTunerBaseModelConfig):
                 "sliding_attention" if i >= self.max_window_layers else "full_attention"
                 for i in range(self.num_hidden_layers)
             ]
+
+    def build_head(self) -> nn.Linear:
+        """Build the output head.
+
+        Returns:
+            LMHead when head_type="lm_head"
+            ValueHead (out_features=1) when head_type="value_head"
+        """
+        from xtuner.v1.module.head import LMHead, ValueHead
+
+        if self.head_type == "value_head":
+            return ValueHead(self.hidden_size, bias=False)
+        elif self.head_type == "lm_head":
+            return LMHead(self.hidden_size, self.vocab_size, bias=False)
+        else:
+            raise ValueError(f"Invalid head_type: {self.head_type}")
+
+    @property
+    def tie_head(self) -> bool:
+        """Whether the output head shares weights with the input embeddings.
+
+        A value head never ties with embeddings, regardless of
+        ``tie_word_embeddings``.
+        """
+        return self.tie_word_embeddings and self.head_type != "value_head"
+
+    def head_fp32(self, fsdp_cfg: FSDPConfig) -> bool:
+        """Whether the output head runs in float32 under FSDP.
+
+        A value head reads the dedicated ``fp32_value_head`` switch instead of
+        ``fp32_lm_head``.
+        """
+        return fsdp_cfg.fp32_value_head if self.head_type == "value_head" else fsdp_cfg.fp32_lm_head
 
 
 class ModelOutputs(PydanticBaseModel):
@@ -598,9 +632,10 @@ class BaseModel(nn.Module):
         if isinstance(hf_path, Path):
             hf_path = str(hf_path)
 
+        self._validate_head_checkpoint(Path(hf_path))
         hf_loader = HFCheckpointLoader(hf_path)
         loaded_keys, unloaded_keys, missing_keys = self._load_params(hf_loader, strict=strict)
-        return loaded_keys, unloaded_keys, missing_keys
+        return self._init_missing_critic_head(hf_loader, loaded_keys, unloaded_keys, missing_keys)
 
     def scale_and_reduce_grad(self):
         return
@@ -612,6 +647,145 @@ class BaseModel(nn.Module):
 
     def to_hf_key_list(self, key: str) -> list[str]:
         raise NotImplementedError()
+
+    def _remap_critic_hf_keys(self, hf_keys: list[str]) -> list[str]:
+        """Map internal lm_head.* names to HF value_head.*.
+
+        内部参数名 lm_head.weight → HF 名 value_head.weight。 只在落盘时使用 value_head，运行时仍使用 lm_head。
+        """
+        remapped: list[str] = []
+        for key in hf_keys:
+            remapped.append(re.sub(r"(^|\.)lm_head(?=\.|$)", r"\1value_head", key))
+        return remapped
+
+    def _to_hf_key_list(self, name: str) -> list[str]:
+        """Convert an internal parameter name to HuggingFace key names.
+
+        Save/load 都走这里，而不是直接调 to_hf_key_list。
+
+        * 普通参数：走子类 to_hf_key_list（加 model. 前缀、layer 重命名、
+          VL 的 language_model. 前缀、tie 时 lm_head → embed_tokens）。
+        * value_head 的 lm_head.*：子类通过 ``config.tie_head`` 判断 tie，
+          value head 天然不 tie，不会被映射成 embed_tokens；这里再做
+          lm_head → value_head 改名。
+        """
+        cleaned = self._clean_param_name(name)
+        if getattr(self.config, "head_type", "lm_head") == "value_head" and cleaned.startswith("lm_head"):
+            return self._remap_critic_hf_keys(self.to_hf_key_list(name))
+        else:
+            return self.to_hf_key_list(name)
+
+    def _head_checkpoint_meta(self) -> dict[str, Any]:
+        """Checkpoint meta written into model.safetensors.index.json
+        metadata."""
+        return {
+            "head_type": getattr(self.config, "head_type", "lm_head"),
+        }
+
+    def _validate_head_checkpoint(self, hf_path: Path) -> None:
+        """Validate that the model's head type matches the checkpoint head
+        type.
+
+        A checkpoint exported by an actor (head_type="lm_head") may initialize a
+        critic model (head_type="value_head"). Its value head is absent and
+        is initialized later by ``_init_missing_critic_head``. The reverse direction
+        is invalid because a critic checkpoint has no vocabulary head.
+
+        Official HF checkpoints without this metadata are skipped. Vision and projector modules have no head_type and
+        are skipped.
+        """
+        if not hasattr(self.config, "head_type"):
+            return
+        index_path = hf_path / "model.safetensors.index.json"
+        if not index_path.is_file():
+            return
+        meta = json.loads(index_path.read_text()).get("metadata") or {}
+        if "head_type" not in meta:
+            return
+        cfg_head_type = self.config.head_type
+        ckpt_head_type = meta.get("head_type", "lm_head")
+        if cfg_head_type == "value_head" and ckpt_head_type == "lm_head":
+            log_rank0.info(
+                "Initializing a value_head critic from an lm_head actor checkpoint; "
+                "the missing value head will be randomly initialized."
+            )
+            return
+        if ckpt_head_type != cfg_head_type:
+            raise RuntimeError(
+                f"Checkpoint head_type={ckpt_head_type!r} does not match config head_type={cfg_head_type!r}."
+            )
+
+    @torch.no_grad()
+    def _init_missing_critic_head(
+        self,
+        hf_loader: HFCheckpointLoader,
+        loaded_keys: set[str],
+        unloaded_keys: set[str],
+        missing_keys: set[str],
+    ) -> tuple[set[str], set[str], set[str]]:
+        """Randomly initialize a critic ValueHead missing from the checkpoint,
+        and reconcile the key sets accordingly.
+
+        The decision is based on the global checkpoint key map, not on the
+        rank-local ``loaded_keys`` returned by ``_load_params``.  For a small
+        value head, FSDP can leave all non-zero local shards on one rank while
+        other ranks own empty shards and report the runtime parameter as
+        loaded.  A rank-local decision would therefore make only one rank enter
+        the DTensor collective used by random initialization.
+
+        ``hf_key_mapping`` is respected because the load spec stores the mapped
+        checkpoint keys. The initialized weight is drawn from ``Normal(0,
+        1 / (hidden_size + 1))``.
+
+        When the ValueHead is randomly initialized, the key sets are updated:
+        ``loaded_keys`` / ``unloaded_keys`` hold runtime names (the XTuner
+        runtime critic module is still named ``lm_head.weight``), while
+        ``missing_keys`` holds HF names.
+
+        Returns:
+            The possibly-updated (loaded_keys, unloaded_keys, missing_keys).
+        """
+
+        # 非critic模型直接返回
+        if getattr(self.config, "head_type", "lm_head") != "value_head":
+            return loaded_keys, unloaded_keys, missing_keys
+
+        # critic 必须有可初始化的线性 head。
+        lm_head = getattr(self, "lm_head", None)
+        if not isinstance(lm_head, nn.Linear):
+            raise TypeError(
+                "Cannot initialize critic value head: config has head_type='value_head' "
+                "but model.lm_head is not nn.Linear."
+            )
+
+        # runtime 参数名 lm_head.weight 对应的 HF checkpoint key。
+        # global_hf_keys 中已经应用过 hf_key_mapping，因此这里不需要再查一次 mapping。
+        # 映射后的 HF key 都存在，说明 checkpoint 提供了完整 value head。
+        # 此时不需要随机初始化；任意 key 缺失则走随机初始化。
+        head_load_spec = self.load_spec_mapping.get("lm_head.weight")
+        if head_load_spec is None:
+            raise ValueError(
+                "Critic model has head_type='value_head' but no load spec for "
+                "'lm_head.weight'. Check model initialization and _init_load_spec()."
+            )
+        if all(hf_loader.is_key_exist(key) for key in head_load_spec.global_hf_keys):
+            return loaded_keys, unloaded_keys, missing_keys
+
+        from xtuner.v1.utils import init_params
+
+        value_head_std = 1.0 / (self.config.hidden_size + 1)
+        init_params(lm_head.weight, partial(nn.init.normal_, mean=0.0, std=value_head_std))
+        log_rank0.info(
+            "Value head (runtime module lm_head) is initialized with "
+            f"Normal(mean=0, std={value_head_std:.6g}) because the checkpoint has no value_head weights; "
+            "the rest of the model is loaded from the checkpoint."
+        )
+
+        # 随机初始化了 ValueHead，对 loaded_keys、unloaded_keys、missing_keys 进行对账
+        loaded_keys.add("lm_head.weight")
+        unloaded_keys.discard("lm_head.weight")
+        missing_keys -= set(head_load_spec.global_hf_keys)
+        return loaded_keys, unloaded_keys, missing_keys
 
     def trainable_parameters(self):
         params = [(name, param) for name, param in self.named_parameters() if param.requires_grad]
@@ -1071,7 +1245,7 @@ class BaseModel(nn.Module):
 
         for name, param in self.state_dict().items():
             name = self._clean_param_name(name)
-            _hf_keys = self.to_hf_key_list(name)
+            _hf_keys = self._to_hf_key_list(name)
 
             if not self.config.hf_key_mapping:
                 hf_keys = _hf_keys
@@ -1678,7 +1852,7 @@ class BaseModel(nn.Module):
             raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
 
         with open(hf_dir / "model.safetensors.index.json", "w") as f:
-            index = {"weight_map": dict(weight_map), "metadata": {}}
+            index = {"weight_map": dict(weight_map), "metadata": self._head_checkpoint_meta()}
             json.dump(index, f, indent=2, ensure_ascii=False)
 
     def _save_hf(
@@ -1783,7 +1957,7 @@ class BaseModel(nn.Module):
 
             # write or overwrite `model.safetensors.index.json`
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
-                index = {"weight_map": weight_map, "metadata": {}}
+                index = {"weight_map": weight_map, "metadata": self._head_checkpoint_meta()}
                 json.dump(index, f, indent=2, ensure_ascii=False)
 
         if dist.is_initialized():
@@ -1791,7 +1965,7 @@ class BaseModel(nn.Module):
 
     def _load_params(self, checkpoint_loader: HFCheckpointLoader, strict=True) -> tuple:
         matched_hf_keys: set[str] = set(checkpoint_loader.weight_map)
-        expected_hf_keys: set[str] = set(chain(*map(self.to_hf_key_list, self.state_dict())))
+        expected_hf_keys: set[str] = set(chain(*map(self._to_hf_key_list, self.state_dict())))
         expected_keys = set(self.state_dict())
 
         if strict and matched_hf_keys != expected_hf_keys:
