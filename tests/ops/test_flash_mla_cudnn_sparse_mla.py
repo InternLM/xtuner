@@ -5,6 +5,9 @@ TestFlashMlaCudnnSparseMLA
     test_forward_backward_matches_torch_reference         前反向与 torch 参考一致
     test_rejects_576_head_dim_without_matching_value_dim  维度白名单不接受错配的 value_dim
     test_accepts_512_head_dim_whitelist_entry             NoPE 的 (512, 512) 在白名单内
+TestDeterministicSparseMLABackward
+    test_deterministic_mode_backward_bitwise_repeatable   确定性模式下反向逐位可重复
+    test_deterministic_backward_matches_torch_reference   确定性参考反向与 torch 参考一致
 """
 
 import importlib.util
@@ -106,3 +109,60 @@ class TestFlashMlaCudnnSparseMLA:
         kv = torch.randn(4, 1, 512, device="cuda", dtype=torch.bfloat16)
         indices = torch.zeros(4, 1, 64, device="cuda", dtype=torch.int32)
         validate_sparse_mla_inputs(q, kv, indices, value_dim=512)  # must not raise
+
+
+class TestDeterministicSparseMLABackward:
+    """XTUNER_DETERMINISTIC 下 flash_mla_cudnn 的 fork 分片归约确定性反向。
+
+    cuDNN 稀疏注意力反向的 dkv 是无序原子累加，同输入两次反向不逐位一致，CI
+    双跑 grad_norm 因此抖动；确定性模式改走 fork 分片归约（cudnn_dsa_det.py：
+    每 CTA 写自己的 FP32 分片、按固定顺序归约，零跨 CTA 原子竞争）。
+    """
+
+    @pytest.fixture
+    def deterministic_mode(self, monkeypatch):
+        from xtuner.v1.ops.sparse_mla import cudnn_dsa
+
+        # 反向分支在调用时读模块级常量，monkeypatch 即可覆盖 import 期绑定。
+        monkeypatch.setattr(cudnn_dsa, "XTUNER_DETERMINISTIC", True)
+        previous = torch.are_deterministic_algorithms_enabled()
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        yield
+        torch.use_deterministic_algorithms(previous)
+
+    def _run_backward(self, q0, kv0, indices, grad_output):
+        q = q0.detach().clone().requires_grad_()
+        kv = kv0.detach().clone().requires_grad_()
+        out = sparse_mla(
+            q, kv, indices.to(torch.int32), scaling=q0.shape[-1] ** -0.5, value_dim=512, backend="flash_mla_cudnn"
+        )
+        out.raw_output.backward(grad_output)
+        return q.grad, kv.grad
+
+    @pytest.mark.skipif(not _flash_mla_cudnn_available(), reason="requires FlashMLA + cuDNN DSA runtimes")
+    def test_deterministic_mode_backward_bitwise_repeatable(self, deterministic_mode):
+        # 同输入两次反向必须逐位一致——cuDNN 反向在此会因 dkv 原子序不同而失败。
+        q0, kv0, indices = _nope_sparse_mla_inputs()
+        grad_output = torch.randn(64, 64, 512, device="cuda", dtype=torch.bfloat16)
+
+        dq1, dkv1 = self._run_backward(q0, kv0, indices, grad_output)
+        dq2, dkv2 = self._run_backward(q0, kv0, indices, grad_output)
+
+        assert torch.equal(dq1, dq2)
+        assert torch.equal(dkv1, dkv2)
+
+    @pytest.mark.skipif(not _flash_mla_cudnn_available(), reason="requires FlashMLA + cuDNN DSA runtimes")
+    def test_deterministic_backward_matches_torch_reference(self, deterministic_mode):
+        # 参考反向只是换累加方式，数值语义必须保持与 torch 参考一致（容差同主测试）。
+        q0, kv0, indices = _nope_sparse_mla_inputs()
+        scaling = 1 / (q0.shape[-1] ** 0.5)
+        q_ref = q0.detach().clone().requires_grad_()
+        kv_ref = kv0.detach().clone().requires_grad_()
+        expected = sparse_mla(q_ref, kv_ref, indices, scaling=scaling, value_dim=512, backend="torch")
+        grad_output = torch.randn_like(expected.raw_output)
+        expected.raw_output.backward(grad_output)
+
+        dq, dkv = self._run_backward(q0, kv0, indices, grad_output)
+
+        torch.testing.assert_close(dq, q_ref.grad, atol=BF16_ATOL, rtol=BF16_RTOL)
+        torch.testing.assert_close(dkv, kv_ref.grad, atol=DKV_ATOL, rtol=DKV_RTOL)
