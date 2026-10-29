@@ -20,6 +20,9 @@ conditional failure modes and [diagnostics](diagnostics.md) for measurement meth
   cause confirmed by a one-variable A/B and the residual is quantified or attributed. A known upstream fix
   list is a post-hoc coverage check, never the convergence target — do not run experiments just to match it.
   Fixes for conditions the current scope never triggers stay "not reproduced in this scope".
+- Before concluding a residual is structural or environment-level, exhaust the inheritable fix list and your
+  own decomposed factors; an exclusion argument whose premise new data has invalidated must be re-run, not
+  carried forward silently.
 
 ## 2. Keep comparisons interpretable
 

@@ -138,6 +138,10 @@ same-side cosine stays near 1 while the cross-framework one collapses, the backw
 structurally (kernels, library versions), and elementwise parity requires a matched stack rather than
 more precision toggles.
 
+That same-side floor is also the stopping rule: attribute a cross-framework residual to kernel noise only
+when it sits at the same-side perturbation floor, and only after a final sweep of the known fix list for
+anything not yet inherited. "Mostly aligned" is not a terminal state.
+
 ## 5. Decompose performance and memory separately
 
 For speed, compare time windows for data preparation, forward/backward compute, communication, recomputation
@@ -158,3 +162,13 @@ Plot aligned loss, pre-clip grad norm, step time and memory; add applied lr/thro
 GB/GiB, allocated/reserved/device memory, timing boundaries, token denominator and rank aggregation.
 Use linear axes by default and setup-specific filenames. Keep raw observations and criterion failures;
 when logs are rounded, state that limit rather than claiming elementwise or bitwise reproducibility.
+
+## 7. Integer selection tensors are a separate check category
+
+Top-k indices, routing tables and sentinel-padded selection masks carry no numeric tolerance: one wrong
+entry is a semantic error, and cosine or relative-L2 tools are meaningless on them. Compare exact sets,
+layout (where sentinel values sit relative to valid entries) and how forward and backward each consume
+the tensor — a kernel that reads a physical prefix silently uses a different key set than one that
+gathers by mask, so a layout mismatch corrupts only one direction. When a component's output gradient
+matches but the discrepancy remains inside the layer, descend to operator inputs; integer selection
+tensors are the first thing to check there.
