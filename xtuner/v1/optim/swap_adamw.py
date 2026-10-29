@@ -1,4 +1,5 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 import torch
 from torch.optim.adam import adam as torch_adam
@@ -18,6 +19,9 @@ class SwapAdamW(AdamW):
 
     Optimizer states are kept canonically on pinned CPU memory. During optimizer step, state tensors are copied to
     temporary device buffers, updated by fused kernels, and copied back to CPU.
+
+    For sharded (``DTensor``) parameters each state entry is a ``DTensor`` with the same mesh and placements as its
+    parameter, so every rank checkpoints only its own shard.
     """
 
     _state_keys = ("exp_avg", "exp_avg_sq", "max_exp_avg_sq")
@@ -60,6 +64,100 @@ class SwapAdamW(AdamW):
         """Keep the canonical optimizer state on the host."""
         return False
 
+    @torch._disable_dynamo
+    @torch.no_grad()
+    def load_state_dict(self, state_dict: Mapping[str, Any]) -> None:
+        """Load into the preallocated pinned host buffers in place.
+
+        Follows the Optimizer.load_state_dict protocol (pre/post hooks, id map, in-place group update) but never
+        delegates to torch.optim.AdamW: the official loader replaces state/group objects and casts moments to the
+        parameter device, which would drop pin_memory and the aliases held by the swap maps. copy_ converts floating-
+        point dtypes instead. An empty state explicitly resets history (the engine's args-only load). Pre/post hooks
+        are replayed from the base class' private hook dicts (torch>=2.6), because calling ``super()`` would re-enter
+        the device cast this method exists to avoid.
+
+        Args:
+            state_dict (Mapping[str, Any]): Optimizer state dict in the ``torch.optim.Optimizer.load_state_dict``
+                schema. ``param_groups`` parameter ids may be indices or FQNs; they are paired with this optimizer's
+                parameters by position, as the official loader does.
+        """
+        # Replay the protocol pre-hooks first; a hook may return a replacement state dict.
+        state_dict = dict(state_dict)
+        for pre_hook in self._optimizer_load_state_dict_pre_hooks.values():
+            result = pre_hook(self, state_dict)
+            if result is not None:
+                state_dict = result
+
+        saved_groups: list[dict[str, Any]] = state_dict["param_groups"]
+        saved_state: Mapping[Any, Mapping[str, Any]] = state_dict["state"]
+
+        # Validate the parameter group layout: saved ids are paired with live parameters by position, so the group
+        # count and every per-group parameter count must match.
+        if len(saved_groups) != len(self.param_groups):
+            raise ValueError("loaded state dict has a different number of parameter groups")
+        if any(
+            len(saved_group["params"]) != len(group["params"])
+            for saved_group, group in zip(saved_groups, self.param_groups)
+        ):
+            raise ValueError(
+                "loaded state dict contains a parameter group that doesn't match the size of optimizer's group"
+            )
+        id_map = {
+            old_id: param
+            for saved_group, group in zip(saved_groups, self.param_groups)
+            for old_id, param in zip(saved_group["params"], group["params"])
+        }
+        # Require an exact id match: the official loader silently resets the history of parameters without saved state
+        # (and keeps orphans), so a mismatch would resume training from mixed moments without any error.
+        if saved_state and set(saved_state) != set(id_map):
+            raise ValueError("loaded state dict contains a parameter state that doesn't match any parameter")
+
+        # Copy every state entry into the preallocated pinned buffers; no state entry or tensor object is replaced.
+        for param_id, param in id_map.items():
+            target_state = self.state[param]
+            # amsgrad=False keeps None placeholders for max_exp_avg_sq; they are not
+            # part of the state contract, so ignore None entries on both sides.
+            expected_keys = {key for key, value in target_state.items() if value is not None}
+            if not saved_state:
+                # The engine's args-only load passes an empty state: reset history instead of keeping it.
+                for key in expected_keys:
+                    self._to_local_tensor(target_state[key]).zero_()
+                continue
+
+            source_state = saved_state[param_id]
+            source_keys = {key for key, value in source_state.items() if value is not None}
+            if source_keys != expected_keys:
+                raise ValueError(
+                    f"loaded state dict has incompatible optimizer state keys for parameter {param_id}: "
+                    f"got {sorted(source_keys)}, expected {sorted(expected_keys)}"
+                )
+            for key in expected_keys:
+                target = self._to_local_tensor(target_state[key])
+                source = self._to_local_tensor(source_state[key])
+                assert isinstance(source, torch.Tensor)
+                # copy_ broadcasts on mismatch, so an old or differently sharded checkpoint would load scrambled
+                # moments silently; reject it with the parameter id and both shapes instead.
+                if target.shape != source.shape:
+                    raise ValueError(
+                        f"loaded state dict has incompatible optimizer state shape for parameter {param_id} "
+                        f"key {key}: got {tuple(source.shape)}, expected {tuple(target.shape)}"
+                    )
+                target.copy_(source)
+
+        # Update the parameter groups in place: _param_to_group_map holds these group objects, so replacing them
+        # would make step() read the build-time hyperparameters forever. Unlike torch, this merges into the existing
+        # groups, so a key absent from the checkpoint keeps its local value.
+        for group, saved_group in zip(self.param_groups, saved_groups):
+            # Shallow-copy per group so param_groups never aliases mutable values of the incoming state dict.
+            saved_group = dict(saved_group)
+            group.update({key: value for key, value in saved_group.items() if key != "params"})
+            # Fall back to AdamW semantics when the checkpoint predates this key.
+            group["decoupled_weight_decay"] = bool(saved_group.get("decoupled_weight_decay", True))
+
+        # Post hooks run last, as in torch.optim.Optimizer.load_state_dict.
+        for post_hook in self._optimizer_load_state_dict_post_hooks.values():
+            post_hook(self)
+
     @staticmethod
     def _to_local_tensor(tensor: torch.Tensor) -> torch.Tensor:
         if hasattr(tensor, "to_local"):
@@ -85,17 +183,19 @@ class SwapAdamW(AdamW):
                 cpu_state_dtensor = self.state[param]
                 cpu_state: dict[str, torch.Tensor | None] = {}
                 amsgrad = bool(self._param_to_group_map[param]["amsgrad"])
-                local_param = self._to_local_tensor(param)
 
                 for key in self._state_keys:
                     if key == "max_exp_avg_sq" and not amsgrad:
                         cpu_state_dtensor[key] = None
                         cpu_state[key] = None
                     else:
-                        cpu_tensor = torch.zeros_like(local_param, memory_format=torch.preserve_format)
-                        cpu_tensor = cpu_tensor.to(device="cpu", non_blocking=True)
-                        cpu_tensor = cpu_tensor.pin_memory()
-                        cpu_state_dtensor[key] = cpu_tensor
+                        # empty_like keeps DTensor global metadata.
+                        state_tensor = torch.empty_like(
+                            param, device="cpu", memory_format=torch.preserve_format, pin_memory=True
+                        )
+                        cpu_tensor = self._to_local_tensor(state_tensor)
+                        cpu_tensor.zero_()
+                        cpu_state_dtensor[key] = state_tensor
                         cpu_state[key] = cpu_tensor
 
                 # Keep per-parameter step semantics consistent with torch.optim.AdamW.
