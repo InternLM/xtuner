@@ -110,11 +110,12 @@ class LMHeadLossContext(BaseLossContext):
         super().__init__(loss_cfg, loss_kwargs)
 
         if loss_cfg.mode == "liger":
-            from liger_kernel.transformers.fused_linear_cross_entropy import (
-                LigerFusedLinearCrossEntropyLoss,
-            )
+            # Device-dispatched FLCE: NPU uses the in-package implementation
+            # (xtuner.v1.loss.get_flce_loss_cls), CUDA uses liger_kernel's
+            # stock class. reduction stays 'sum' on both devices.
+            from xtuner.v1.loss import get_flce_loss_cls
 
-            self.liger_loss_fct = LigerFusedLinearCrossEntropyLoss(
+            self.liger_loss_fct = get_flce_loss_cls()(
                 reduction="sum",
                 accum_dtype=torch.float32,
             )
@@ -251,7 +252,10 @@ class LMHeadLossContext(BaseLossContext):
             loss = self.liger_loss_fct(head_weight, hidden_states, shifted_labels)
             # ProberList.record_tensor(loss, "[lm_head.ce_loss][before calibration]loss")
             mask = loss_weight != 0
-            w = loss_weight.sum() / mask.sum()  # w equals to 1/global_denominator
+            # w equals to 1/global_denominator on normal shards. clamp(min=1)
+            # guards the all-padding SP-shard where mask.sum()==0 would give
+            # 0/0=nan (loss is finite 0 there -> w=0 -> loss*0=0). no-op n_valid>0.
+            w = loss_weight.sum() / mask.sum().clamp(min=1)
             loss = loss * w
             return loss, (None, {})
 
