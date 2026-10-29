@@ -112,11 +112,11 @@ class TestFlashMlaCudnnSparseMLA:
 
 
 class TestDeterministicSparseMLABackward:
-    """XTUNER_DETERMINISTIC 下 flash_mla_cudnn 的有序 FP32 参考反向。
+    """XTUNER_DETERMINISTIC 下 flash_mla_cudnn 的 fork 分片归约确定性反向。
 
     cuDNN 稀疏注意力反向的 dkv 是无序原子累加，同输入两次反向不逐位一致，CI
-    双跑 grad_norm 因此抖动；确定性模式改走参考反向（分块重算 + sort 后
-    Triton 有序段归约累加，见 deterministic_bwd.py）。
+    双跑 grad_norm 因此抖动；确定性模式改走 fork 分片归约（cudnn_dsa_det.py：
+    每 CTA 写自己的 FP32 分片、按固定顺序归约，零跨 CTA 原子竞争）。
     """
 
     @pytest.fixture
