@@ -169,9 +169,9 @@ for input replay, gradient accounting, controlled experiments and worked example
 Label the provenance of every claimed cause: **found independently** (located from your own observation
 before any external answer was seen), **externally informed** (a hint, fix PR or answer preceded or
 guided the localization), **mixed**, or **unknown** (source and timing cannot be established; use N/A
-for open items with no candidate cause yet). Later verification confirms a defect but is weaker evidence
-that this skill guided the discovery; never relabel it as an independent find, and never count it as a
-blind-test pass.
+for open items with no candidate cause yet). An independent find keeps its provenance when later
+verification confirms the defect; what is forbidden is relabeling externally informed or mixed work as
+independent, or counting non-independent localization as a blind-test pass.
 
 ## Reusable helpers
 
@@ -214,8 +214,9 @@ Then include this checklist, marking anything not done as **not verified** inste
 - Gradient evidence type (norm-only or mapped tensors) and tensor coverage.
 - Horizons actually run, per-update records and plots, with units, timing windows and rank aggregation.
 - Source and run identities, an attempt ledger (change → observation → next decision), failures and open items.
-- Cause provenance per open item and claimed cause: found independently vs verified after a known fix; a
-  blind-test report states plainly whether independent localization succeeded.
+- Cause provenance per claimed cause: found independently / externally informed / mixed / unknown;
+  open items without a candidate cause get N/A. A blind-test report states plainly whether independent
+  localization succeeded.
 
 Save per-step data and line plots with setup-specific names; derive step/lr mappings from source in the
 parser, not by shifting curves until they overlap. Keep restricted data and private run details out of

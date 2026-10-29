@@ -48,10 +48,10 @@ documents or sparse execution. Do not generalize one implementation's top-k thre
 
 **P1.10 Constructor defaults hide submodule drift.** Two configs can compare equal while built submodules
 run different effective hyperparameters — for example a norm left on its class-default eps instead of the
-checkpoint's value, with the printed model repr carrying the evidence. Config dumps do not contain
-submodule state; `named_modules()` runtime values do. When forward loss differs with equal inputs, sweep
-every norm/activation submodule's runtime eps and dtype on both sides against the checkpoint config
-before blaming kernels.
+checkpoint's value, with the printed model repr carrying the evidence. Check the constructor parameters
+actually in effect on the active path, including functional or fused call sites that have no discoverable
+module instance; compare against the intended spec when the config exposes one, else record the effective
+value and where it came from. Do this before blaming kernels when forward loss differs on equal inputs.
 
 ## P2 Comparison contract
 
