@@ -8,7 +8,6 @@ import ray
 from xtuner.v1.rl.rollout import trace_store as trace_store_module
 from xtuner.v1.rl.rollout.trace_store import (
     RolloutTraceStore,
-    _free_ray_refs,
     get_existing_store,
     release_and_discard_rollout_groups,
     release_existing_sessions,
@@ -16,32 +15,17 @@ from xtuner.v1.rl.rollout.trace_store import (
 
 
 class TestRolloutTraceCleanup(unittest.TestCase):
-    def test_release_and_discard_detaches_only_trace_owned_refs(self):
-        trace_owned_ref = object()
-        rollout_owned_ref = object()
-        trace_owned = SimpleNamespace(session_id="trace-owned", routed_experts=trace_owned_ref)
-        rollout_owned = SimpleNamespace(session_id="rollout-owned", routed_experts=rollout_owned_ref)
-        routed_experts_seen_by_discard = {}
+    def test_release_and_discard_clears_all_rollout_holders(self):
+        from xtuner.v1.data_proto.rl_data import RolloutState
 
-        def record_discard(item):
-            routed_experts_seen_by_discard[item.session_id] = item.routed_experts
-
-        with (
-            patch(
-                "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
-                new=AsyncMock(return_value={"trace-owned"}),
-            ) as release_sessions,
-            patch(
-                "xtuner.v1.rl.rollout.trace_store.discard_rollout_state",
-                side_effect=record_discard,
-            ) as discard,
-        ):
-            asyncio.run(release_and_discard_rollout_groups([[trace_owned, rollout_owned]]))
-
-        release_sessions.assert_awaited_once_with(["trace-owned", "rollout-owned"])
-        self.assertIsNone(routed_experts_seen_by_discard["trace-owned"])
-        self.assertIs(routed_experts_seen_by_discard["rollout-owned"], rollout_owned_ref)
-        self.assertEqual(discard.call_count, 2)
+        states = [RolloutState(message=[], session_id=i) for i in (1, 2)]
+        with patch(
+            "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
+            new=AsyncMock(return_value={"1"}),
+        ) as release_sessions:
+            asyncio.run(release_and_discard_rollout_groups([states]))
+        release_sessions.assert_awaited_once_with(["1", "2"])
+        self.assertTrue(all(state.session_id is None and state.routed_experts is None for state in states))
 
     def test_get_existing_store_returns_none_when_ray_is_uninitialized(self):
         cached_store = object()
@@ -105,9 +89,15 @@ class TestRolloutTraceStore(unittest.TestCase):
         ):
             self.assertEqual(asyncio.run(release_existing_sessions(["missing"])), set())
 
-    def test_free_ray_refs_recurses_into_nested_containers(self):
-        object_ref = ray.put({"payload": [1, 2, 3]})
-        with patch.object(ray.internal, "free") as free:
-            _free_ray_refs({"outer": [({"inner": object_ref},)]})
-
-        free.assert_called_once_with([object_ref], local_only=False)
+    def test_release_preserves_exported_refs(self):
+        store = RolloutTraceStore.remote()
+        ref = ray.put({"payload": [1, 2, 3]})
+        try:
+            ray.get(store.insert.remote("a", "prompt", {"routed_experts": ref}))
+            _, nodes = ray.get(store.search.remote("a", "prompt"))
+            borrowed = nodes[-1].value["routed_experts"]
+            ray.get(store.release.remote("a"))
+            self.assertEqual(ray.get(borrowed, timeout=5), {"payload": [1, 2, 3]})
+            self.assertEqual(ray.get(store.list_sessions.remote()), [])
+        finally:
+            ray.kill(store)

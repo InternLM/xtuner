@@ -31,8 +31,6 @@ DEVICE_MODULE = get_torch_device_module()
 if TYPE_CHECKING:
     from logging import Logger
 
-    from torch.distributed.device_mesh import DeviceMesh
-
     from xtuner.v1.data_proto.sequence_context import SequenceContext
     from xtuner.v1.loss import BaseLossContext
     from xtuner.v1.model.base import TransformerConfig
@@ -105,9 +103,8 @@ def resolve_routed_experts(
 
     Pure CPU / ray.get work on the calling thread. Never frees refs: actor
     fit materializes each pack several times (old/ref/teacher/train passes)
-    and each pass re-resolves from the pristine cache, so freeing happens
-    exactly once, at the end of the batch, via
-    ``free_rollout_routed_expert_refs``.
+    and each pass re-resolves from the pristine cache. Ray reclaims the data
+    once the batch cache, rollout states, and trace store drop their refs.
     """
     rollout_routed_experts = seq_ctx.rollout_routed_experts
     if rollout_routed_experts is None:
@@ -175,33 +172,6 @@ def resolve_routed_experts(
         f"rollout_routed_experts.size(0) {seq_ctx.rollout_routed_experts.size(0)} "
         f"!= input_ids.size(1) {seq_ctx.input_ids.size(1)}"
     )
-
-
-def free_rollout_routed_expert_refs(samples: list[TrainSample], *, sp_mesh: DeviceMesh | None) -> None:
-    """Release the cached routed-expert object refs once, after every consumer
-    of the batch is done.
-
-    Agent-loop trace-store refs may be shared by multiple trainable segments and replicated train workers, so within an
-    SP mesh only rank 0 frees, after a mesh-wide barrier; without SP every rank frees its own refs.
-    """
-    refs: list[ray.ObjectRef] = []
-    for sample in samples:
-        rollout_routed_experts = sample.seq_ctx.rollout_routed_experts
-        if rollout_routed_experts is None or isinstance(rollout_routed_experts, torch.Tensor):
-            continue
-        if isinstance(rollout_routed_experts, ray.ObjectRef):
-            refs.append(rollout_routed_experts)
-        elif isinstance(rollout_routed_experts, list):
-            refs.extend(ref for ref in rollout_routed_experts if isinstance(ref, ray.ObjectRef))
-
-    if sp_mesh is not None and sp_mesh.size() > 1:
-        # Every rank must enter the barrier; only then may rank 0 free refs
-        # that other ranks of the mesh may still be resolving.
-        dist.barrier()
-        if sp_mesh.get_local_rank() == 0 and refs:
-            ray.internal.free(refs, local_only=False)
-    elif refs:
-        ray.internal.free(refs, local_only=False)
 
 
 class RoleWorker(ABC):
@@ -376,8 +346,8 @@ class RoleWorker(ABC):
         fixed):
 
         - ``_resolve_refs`` and ``pack_seq_ctx`` must stay pure CPU: no CUDA
-          calls and no ``dist.*`` collectives in the producer thread. Ref
-          freeing lives in the roles' fit finally, never here.
+          calls and no ``dist.*`` collectives in the producer thread. Each
+          holder drops its own refs when its lifetime ends.
         - The consumer side must always run to ``finally``: the stop flag +
           queue drain there is what unblocks a producer blocked on ``put``
           when the generator is abandoned (consumer exception, early return).

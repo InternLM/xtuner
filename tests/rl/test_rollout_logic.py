@@ -1271,12 +1271,8 @@ class TestRolloutHealthManager(unittest.TestCase):
             rollout_controller=MagicMock(),
             rollout_config=SimpleNamespace(weight_transport_type="checkpoint_engine"),
         )
-        manager._pending_rollout_weight_update_stop_event = SimpleNamespace(
-            wait=MagicMock(side_effect=(False, True))
-        )
-        manager._rollout_resources_available = SimpleNamespace(
-            is_set=MagicMock(side_effect=(True, False))
-        )
+        manager._pending_rollout_weight_update_stop_event = SimpleNamespace(wait=MagicMock(side_effect=(False, True)))
+        manager._rollout_resources_available = SimpleNamespace(is_set=MagicMock(side_effect=(True, False)))
         manager._rollout_weight_update_lock = SimpleNamespace(
             acquire=MagicMock(return_value=True),
             release=MagicMock(),
@@ -1660,6 +1656,7 @@ class TestRolloutHealthManager(unittest.TestCase):
         self.assertEqual(actor.offload.calls, [()])
         self.assertEqual(actor.restore_skip_load_weights.calls, [()])
 
+
 class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
     async def test_preprocess_and_postprocess_preserve_response_prefix(self):
         # partial rollout 续写时应复用 prompt+历史 response，并把新 response token 追加到历史后面。
@@ -1743,50 +1740,3 @@ class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(rollout_state.response_ids, [101, 102, 201, 202, 301])
         self.assertLessEqual(len(rollout_state.response_ids), max_tokens)
-
-    async def test_postprocess_frees_old_routed_expert_refs_after_concat(self):
-        # partial rollout 拼接 routed_experts 后，应释放历史和当前 ObjectRef，避免长期占用对象存储。
-        class FakeObjectRef:
-            def __init__(self, value):
-                self.value = value
-
-            def __await__(self):
-                async def _resolve():
-                    return self.value
-
-                return _resolve().__await__()
-
-        history_ref = FakeObjectRef([[1], [2]])
-        cur_ref = FakeObjectRef([[1], [2], [3]])
-        concat_ref = FakeObjectRef(None)
-        rollout_state = RolloutState(
-            message=[],
-            response="old",
-            response_ids=[1, 2],
-            logprobs=[0.1, 0.2],
-            routed_experts=history_ref,
-            status=Status.ABORTED,
-        )
-
-        with (
-            patch("xtuner.v1.rl.rollout.utils.RayObjectRef", FakeObjectRef),
-            patch("xtuner.v1.rl.rollout.utils.ray.put", return_value=concat_ref) as ray_put,
-            patch("xtuner.v1.rl.rollout.utils.free_object_refs") as free_object_refs,
-        ):
-            out = await PartialRolloutHandler().postprocess(
-                rollout_state,
-                response="new",
-                response_ids=[3],
-                logprobs=[0.3],
-                routed_experts=cur_ref,
-                finish_reason="abort",
-                status=Status.ABORTED,
-                prompt_tokens=3,
-                completion_tokens=1,
-            )
-
-        self.assertIs(out.routed_experts, concat_ref)
-        self.assertEqual(ray_put.call_args.args[0].tolist(), [[1], [2], [3]])
-        free_object_refs.assert_any_call([history_ref])
-        free_object_refs.assert_any_call([cur_ref])
-        self.assertEqual(free_object_refs.call_count, 2)

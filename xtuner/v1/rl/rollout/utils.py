@@ -8,7 +8,6 @@ import ray
 from ray import ObjectRef as RayObjectRef
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.rl.utils import free_object_refs
 from xtuner.v1.utils import get_logger
 
 
@@ -103,7 +102,6 @@ class SessionRouter:
 async def _resolve_routed_experts(routed_experts: np.ndarray | RayObjectRef) -> np.ndarray:
     if isinstance(routed_experts, RayObjectRef):
         routed_experts_value = await routed_experts
-        free_object_refs([routed_experts])
     else:
         routed_experts_value = routed_experts
     assert routed_experts_value is not None, "routed_experts should not be empty after resolution"

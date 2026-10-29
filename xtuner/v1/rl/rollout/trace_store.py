@@ -14,34 +14,6 @@ _STORE_NAMESPACE = "xtuner_rollout"
 _handle_cache: Any = None
 
 
-def _free_ray_refs(obj: Any):
-    """Recursively free ray.ObjectRef instances trapped inside an object.
-
-    Args:
-        obj (Any): The object that may contain ray.ObjectRef references (e.g., dict, list, tuple).
-    """
-    if isinstance(obj, ray.ObjectRef):
-        try:
-            ray.internal.free([obj], local_only=False)
-        except Exception as e:
-            get_logger().error(f"Failed to free Ray ObjectRef {obj}: {e}")
-    elif isinstance(obj, dict):
-        for v in obj.values():
-            _free_ray_refs(v)
-    elif isinstance(obj, (list, tuple)):
-        for v in obj:
-            _free_ray_refs(v)
-    elif hasattr(obj, "model_dump"):  # Pydantic v2
-        for v in obj.model_dump().values() if hasattr(obj.model_dump, "__call__") else {}.values():
-            _free_ray_refs(v)
-    elif hasattr(obj, "dict") and callable(getattr(obj, "dict")):  # Pydantic v1
-        for v in obj.dict().values():
-            _free_ray_refs(v)
-    elif hasattr(obj, "__dict__"):
-        for v in vars(obj).values():
-            _free_ray_refs(v)
-
-
 def _common_prefix_len(left: str, right: str) -> int:
     for idx, (left_ch, right_ch) in enumerate(zip(left, right)):
         if left_ch != right_ch:
@@ -210,10 +182,11 @@ class Trie:
         return "".join(key_path), matched_nodes
 
     def release(self, key: str | None = None):
-        """Release nodes and free associated resources (e.g. Ray objects) for a
+        """Drop the store's references to nodes and their values for a
         given key.
 
         If the key is None, the entire Trie is released. Prunes empty branches bottom-up.
+        Borrowers keep values alive through Ray reference counting.
 
         Args:
             key (Optional[str]): The key string whose associated nodes should be released.
@@ -224,7 +197,6 @@ class Trie:
             for child in node.children.values():
                 _free_subtree(child)
             if node.value is not None:
-                _free_ray_refs(node.value)
                 node.value = None
             node.children.clear()
 
@@ -248,7 +220,6 @@ class Trie:
                 return
 
         if node.value is not None:
-            _free_ray_refs(node.value)
             node.value = None
 
         for parent, token in reversed(path):
@@ -510,19 +481,12 @@ async def release_existing_sessions(session_ids: list[str]) -> set[str]:
 
 
 async def release_and_discard_rollout_groups(groups: list[list[RolloutState]]) -> None:
-    """Release trace-owned resources before discarding terminal rollouts.
-
-    Sessions released by the trace store have already freed their routed-expert references. Detach those references
-    before the generic rollout-state cleanup so it does not explicitly free them a second time. Rollouts whose sessions
-    are absent from the store retain their references for the generic cleanup path.
-    """
-    released_session_ids = await release_existing_sessions(
+    """Drop terminal sessions and rollout states; other borrowers retain their refs."""
+    await release_existing_sessions(
         [str(item.session_id) for group in groups for item in group if item.session_id is not None]
     )
     for group in groups:
         for item in group:
-            if item.session_id is not None and str(item.session_id) in released_session_ids:
-                item.routed_experts = None
             discard_rollout_state(item)
 
 
