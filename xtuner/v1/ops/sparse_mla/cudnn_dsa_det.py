@@ -36,15 +36,12 @@ def flash_attn_bwd_sm90(
     out: torch.Tensor,
     dout: torch.Tensor,
     lse: torch.Tensor,
-    attn_sink: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     dq: Optional[torch.Tensor] = None,
     dkv: Optional[torch.Tensor] = None,
-    d_sink: Optional[torch.Tensor] = None,
     dkv_accum: Optional[torch.Tensor] = None,
     topk_idxs: torch.Tensor = None,
     topk_length: torch.Tensor = None,
-    need_d_sink: bool = False,
     current_stream=None,
     zero_accum: bool = True,
     run_postprocess: bool = True,
@@ -65,18 +62,15 @@ def flash_attn_bwd_sm90(
         out: (total_S_q, nheads, headdim_v) bfloat16
         dout: (total_S_q, nheads, headdim_v) bfloat16
         lse: (total_S_q, nheads) float32
-        attn_sink: (nheads,) float32, optional. When provided, the backward
-            probabilities use sink-aware LSE.
         softmax_scale: float (default: 1/sqrt(headdim))
         dq: pre-allocated (total_S_q, nheads, headdim), optional
         dkv: pre-allocated (total_S_kv, headdim), optional
-        d_sink: pre-allocated (nheads,), optional
         topk_idxs: (total_S_q, topk_max) int32, global indices
         topk_length: (total_S_q,) int32, per-query valid count, optional
-        need_d_sink: return and compute d_sink when True
 
     Returns:
-        (dq, dkv) or (dq, dkv, d_sink) — flat layout gradients
+        (dq, dkv) — flat layout gradients. Sink support is dropped: this driver
+        always runs sink-free (GLM DSA uses attn_sink=-inf, i.e. no sink).
     """
     compute_capability = _get_device_capability()
     assert compute_capability == 9, f"Only SM90, got SM{compute_capability}0"
@@ -116,10 +110,6 @@ def flash_attn_bwd_sm90(
     assert q4.dtype == kv4.dtype == out4.dtype == dout4.dtype
     assert lse4.dtype == torch.float32
     assert all(t.is_cuda for t in (q4, kv4, out4, dout4, lse4))
-    if attn_sink is not None:
-        assert attn_sink.dtype == torch.float32
-        assert attn_sink.shape == (num_head,)
-        assert attn_sink.is_cuda
     assert num_head > num_head_kv, "MLA/MQA requires num_head > num_head_kv"
     assert head_dim in [512, 576]
 
@@ -137,16 +127,6 @@ def flash_attn_bwd_sm90(
 
     dq4 = dq.unsqueeze(0)  # (1, total_S_q, H, D)
     dkv4 = dkv.unsqueeze(0).unsqueeze(2)  # (1, total_S_kv, 1, D)
-
-    sink_enabled = attn_sink is not None
-    return_d_sink = need_d_sink or d_sink is not None
-    if return_d_sink:
-        assert attn_sink is not None, "attn_sink is required when requesting d_sink"
-        if d_sink is None:
-            d_sink = torch.zeros_like(attn_sink)
-        else:
-            d_sink.fill_(0)
-    write_d_sink = sink_enabled and return_d_sink
 
     head_dim_rounded = (head_dim + 32 - 1) // 32 * 32
 
@@ -201,15 +181,13 @@ def flash_attn_bwd_sm90(
         head_dim_v,
         m_block_size,
         num_threads,
-        sink_enabled,
-        write_d_sink,
     )
     if compile_key_pre not in flash_attn_bwd_sm90.compile_cache_pre:
         o_tensor, do_tensor = [to_cute_tensor(t) for t in (out4, dout4)]
         dpsum_tensor, lse_log2_tensor = [to_cute_tensor(t) for t in (dpsum, lse_log2)]
         lse_tensor = to_cute_tensor(lse4, assumed_align=4)
-        attn_sink_tensor = to_cute_tensor(attn_sink) if sink_enabled else None
-        d_sink_tensor = to_cute_tensor(d_sink) if write_d_sink else None
+        attn_sink_tensor = None
+        d_sink_tensor = None
         fa_bwd_pre = _FlashAttentionDSABackwardPreprocessSm90(
             dtype,
             head_dim_v,
@@ -239,8 +217,8 @@ def flash_attn_bwd_sm90(
             dpsum,
             lse4,
             lse_log2,
-            attn_sink if sink_enabled else None,
-            d_sink if write_d_sink else None,
+            None,
+            None,
             None,
             None,
             None,
@@ -387,8 +365,6 @@ def flash_attn_bwd_sm90(
     )
 
     # dq / dkv are already the flat tensors (unsqueeze was a view)
-    if return_d_sink:
-        return dq, dkv, d_sink
     return dq, dkv
 
 
