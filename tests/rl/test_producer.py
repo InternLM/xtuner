@@ -402,9 +402,9 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         state = make_rollout_state(1, status=Status.INIT)
         agent_loop.generate_group = AsyncMock(return_value=[state])
         ctx = self._build_context(strategy, "bad_status", agent_loop, self._build_sampler(), batch_size=1)
+        # 行为：非法状态不再抛出，组被记录并整组丢弃（返回 False），不进入 replay buffer。
         result = await ctx.generate_group([state])
-        with self.assertRaisesRegex(ValueError, "invalid generated status"):
-            await ctx.put_generated_group(result)
+        self.assertFalse(await ctx.put_generated_group(result))
         self.assertEqual(len(self.replay_buffer), 0)
 
     async def test_put_generated_group_releases_non_retryable_trace_sessions(self):

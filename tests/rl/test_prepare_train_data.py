@@ -230,21 +230,25 @@ class TestAgentLoopCanonicalizeTrainFields(unittest.TestCase):
         self.assertEqual(state.extra_fields["train_prompt_length"], 1)
         self.assertEqual(state.extra_fields["supervised_tokens"], 2)
 
-    def test_missing_prompt_ids_propagates_construction_error(self):
+    def test_missing_prompt_ids_marks_sample_failed(self):
+        # 行为：构造错误不再向外抛，样本被标记 FAILED 并带上 error_msg，交由 producer 丢弃整组。
         loop = self._make_loop()
         state = self._state()
         state.prompt_ids = None
-        with self.assertRaisesRegex(AssertionError, "Prompt ids cannot be None or empty"):
-            loop.canonicalize_train_fields([state])
-        self.assertEqual(state.status, Status.COMPLETED)
+        loop.canonicalize_train_fields([state])
+        self.assertEqual(state.status, Status.FAILED)
+        self.assertIn("canonicalize_train_fields failed", state.error_msg)
+        self.assertIn("Prompt ids cannot be None or empty", state.error_msg)
 
-    def test_construction_error_stops_the_group(self):
+    def test_construction_error_does_not_poison_other_samples(self):
+        # 行为：组内单个样本构造失败只标记自身，其余样本照常完成字段构造。
         loop = self._make_loop()
         bad, good = self._state(uid=1), self._state(uid=2)
         bad.prompt_ids = None
-        with self.assertRaises(AssertionError):
-            loop.canonicalize_train_fields([bad, good])
-        self.assertIsNone(good.input_ids)
+        loop.canonicalize_train_fields([bad, good])
+        self.assertEqual(bad.status, Status.FAILED)
+        self.assertEqual(good.status, Status.COMPLETED)
+        self.assertIsNotNone(good.input_ids)
 
 
 class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
@@ -410,12 +414,13 @@ class TestPrepareRolloutItems(unittest.TestCase):
         controller.task_adv_weight = task_adv_weight
         controller.distillation = DistillationTrainerAdapter(None)
         controller.logger = MagicMock()
+        controller._gae_reward_scope = None
         return controller
 
     def _prepare(self, controller, data_groups):
         prepared = controller._prepare_rollout_items(data_groups, rollout_idx=0)
         plan = {"dp_plans": {}, "plan_log": {}}
-        advantages = controller._prepare_advantages(prepared, plan)
+        advantages, _, _, _ = controller._estimate_advantages(prepared, prepared["rollout_items"], plan, None, 1)
         return (
             prepared["rollout_items"],
             advantages,
@@ -491,7 +496,10 @@ class TestPrepareRolloutItems(unittest.TestCase):
         prepared = controller._prepare_rollout_items([[self._state()]], rollout_idx=0)
         self.assertEqual(controller.advantage_estimator.calls, [])
         self.assertNotIn("advantages", prepared)
-        self.assertEqual(controller._prepare_advantages(prepared, {"dp_plans": {}, "plan_log": {}}), [1.0])
+        self.assertEqual(
+            controller._estimate_advantages(prepared, prepared["rollout_items"], {"dp_plans": {}, "plan_log": {}}, None, 1)[0],
+            [1.0],
+        )
         self.assertEqual(len(controller.advantage_estimator.calls), 1)
 
     def test_returns_items_with_per_sample_advantages(self):

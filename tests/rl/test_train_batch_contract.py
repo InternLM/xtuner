@@ -252,7 +252,7 @@ class TestTrainBatchContract(unittest.IsolatedAsyncioTestCase):
 
 
 class TestPackPlanDispatch(unittest.TestCase):
-    def test_layout_without_advantages_preserves_mapping_when_targets_change(self):
+    def test_layout_maps_global_indices_to_local_packs(self):
         controller = TrainingController(workers=[object()] * 4)
         states = [canonical_state(i) for i in range(5)]
         for state, length in zip(states, [6, 4, 7, 3, 8]):
@@ -265,25 +265,7 @@ class TestPackPlanDispatch(unittest.TestCase):
         self.assertEqual(plan["dp_plans"][0]["global_indices"], [0, 1, 4])
         self.assertEqual(plan["dp_plans"][0]["plan"], [[[0, 1]], [[2]]])
         self.assertEqual(plan["dp_plans"][1]["plan"], [[[0, 1]], [[]]])
-        for advantages in ([1.0, 2.0, 3.0, 4.0, 5.0], [-5.0, -4.0, -3.0, -2.0, -1.0]):
-            dispatches = controller._build_dispatches(states, advantages, plan)
-            for rank, dp_plan in plan["dp_plans"].items():
-                dispatch = dispatches[rank]
-                self.assertIs(dispatch["plan"], dp_plan["plan"])
-                self.assertEqual(dispatch["advantages"], [advantages[i] for i in dp_plan["global_indices"]])
-                self.assertEqual(dispatch["rollout_items"], [states[i] for i in dp_plan["global_indices"]])
-        with self.assertRaisesRegex(ValueError, "lengths differ"):
-            controller._build_dispatches(states, [], plan)
-        token_advantages = [[float(index)] * state.num_tokens for index, state in enumerate(states)]
-        for rank, dispatch in controller._build_dispatches(states, token_advantages, plan).items():
-            self.assertEqual(
-                dispatch["advantages"], [token_advantages[index] for index in plan["dp_plans"][rank]["global_indices"]]
-            )
-        with self.assertRaisesRegex(ValueError, "Token advantage length mismatch"):
-            controller._build_dispatches(states, [[0.0]] * len(states), plan)
         with patch("xtuner.v1.rl.trainer.pack.XTUNER_DETERMINISTIC", True):
             padding_plan = controller._build_pack_plan(states[:1], 10, config, 1)
-        dispatches = controller._build_dispatches(states[:1], [1.0], padding_plan)
-        self.assertEqual(dispatches[3]["rollout_items"], [])
-        self.assertEqual(dispatches[3]["advantages"], [])
-        self.assertEqual(dispatches[3]["plan"], [[[]]])
+        self.assertEqual(padding_plan["dp_plans"][3]["global_indices"], [])
+        self.assertEqual(padding_plan["dp_plans"][3]["plan"], [[[]]])

@@ -150,9 +150,9 @@ class _FakeTrainController:
         self.update_weights_count += 1
         return "updated"
 
-    def fit(self, data_batches, pack_max_length: int, rollout_idx: int):
+    def fit(self, data_batches, pack_max_length: int, rollout_idx: int, raw_rewards_sum: float = 0.0, raw_rewards_count: float = 0.0):
         self.fit_steps.append(rollout_idx)
-        return [
+        workers_log_item = [
             {
                 "rollout_is_metrics": {},
                 "mismatch_metrics": {},
@@ -162,6 +162,7 @@ class _FakeTrainController:
                 "sft_train_metrics": {},
             }
         ]
+        return workers_log_item, {}
 
     def save(self, checkpoint_path: str, no_save_optimizer: bool):
         path = Path(checkpoint_path)

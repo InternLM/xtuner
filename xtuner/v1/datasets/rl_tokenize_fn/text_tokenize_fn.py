@@ -76,7 +76,9 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState]):
             assert data_source is not None, "data_source is required in item"
             extra_info["origin_data_source"] = data_source
             if self.data_judger_mapping is not None:
-                mapped_judger_name_and_weight = self.data_judger_mapping.get(data_source)
+                if data_source not in self.data_judger_mapping:
+                    raise KeyError(f"data_source {data_source!r} is not in data_judger_mapping")
+                mapped_judger_name_and_weight = self.data_judger_mapping[data_source]
             else:
                 mapped_judger_name_and_weight = {data_source: 1.0}
 
@@ -105,6 +107,14 @@ class RLTextTokenizeFnConfig(BaseModel):
     model_config = ConfigDict(title="Text RL dataset config for xtuner", extra="forbid")
     max_length: int | None = None
     tools_schema: list | None = None
+    system_prompt: str | None = None
+    data_judger_mapping: dict | None = None
 
     def build(self, tokenizer: PreTrainedTokenizer, **kwargs) -> RLTextTokenizeFn:
-        return RLTextTokenizeFn(tokenizer=tokenizer, max_length=self.max_length, tools_schema=self.tools_schema)
+        return RLTextTokenizeFn(
+            tokenizer=tokenizer,
+            max_length=self.max_length,
+            tools_schema=self.tools_schema,
+            system_prompt=self.system_prompt,
+            data_judger_mapping=self.data_judger_mapping,
+        )
