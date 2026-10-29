@@ -500,12 +500,24 @@ def _assistant_plan(
     index: int,
     last_user_index: int,
     clear_thinking: bool,
+    _literal_spans: list[tuple[int, int]] | None = None,
 ) -> tuple[str, str | None, bool, bool]:
     """单条 assistant 的判定式（监督与否、是否发射 reasoning），render 与 slowspeed 的唯一事实来源。
 
     返回 ``(content, reasoning_content, supervised, render_reasoning)``。
+    可选 ``_literal_spans`` 相对于去掉首尾空白后的 content，不包含媒体标记。
     """
-    content, reasoning_content = _assistant_content_and_reasoning(message, _media_placeholder=_MEDIA_PLACEHOLDER)
+    content, reasoning_content = _assistant_content_and_reasoning(
+        message, _media_placeholder=_MEDIA_PLACEHOLDER, _literal_spans=_literal_spans
+    )
+    if _literal_spans is not None:
+        trim_left = len(content) - len(content.lstrip())
+        trim_right = len(content.rstrip())
+        _literal_spans[:] = [
+            (max(start, trim_left) - trim_left, min(end, trim_right) - trim_left)
+            for start, end in _literal_spans
+            if max(start, trim_left) < min(end, trim_right)
+        ]
     # slowspeed 的生成段仍逐段手写复刻 render 的发射逻辑——交叉校验的价值正在于生成段独立；
     # 但判定式若两处各写一份，render 判错时 slowspeed 会以同样方式判错，fast == slow 对照失效
     # 且无测试报警，所以判定式只允许存在这一份。clear_thinking 屏蔽"最后一个 user 之前"的整轮
@@ -567,8 +579,9 @@ def render_glm53_chat(
             append("<|system|>", False)
             append(_visible_text(message.get("content", ""), _literal_spans, len(text)), False)
         elif role == "assistant":
+            content_spans: list[tuple[int, int]] | None = [] if _literal_spans is not None else None
             content, reasoning_content, loss, render_reasoning = _assistant_plan(
-                message, index, last_user_index, clear_thinking
+                message, index, last_user_index, clear_thinking, content_spans
             )
 
             append("<|assistant|>", False)
@@ -580,8 +593,12 @@ def render_glm53_chat(
             else:
                 append("<think>", False)
                 append("</think>", loss)
-            if content.strip():
-                append(content.strip(), loss, literal=True)
+            stripped_content = content.strip()
+            if stripped_content:
+                # Keep per-part text provenance: generated media markers are controls.
+                if _literal_spans is not None and content_spans:
+                    _literal_spans.extend((len(text) + start, len(text) + end) for start, end in content_spans)
+                append(stripped_content, loss)
             if message.get("tool_calls"):
                 append(_render_tool_calls(message["tool_calls"], _literal_spans, len(text)), loss)
             previous_assistant_loss = loss
@@ -672,8 +689,9 @@ def glm53_tokenize_fn_slowspeed(
         if message.get("role") != "assistant":
             continue
         # 判定式（监督与否、是否发射 reasoning）与 render 共用同一份实现，见 _assistant_plan。
+        content_spans: list[tuple[int, int]] = []
         content, reasoning_content, supervised, render_reasoning = _assistant_plan(
-            message, index, last_user_index, clear_thinking
+            message, index, last_user_index, clear_thinking, content_spans
         )
         if not supervised:
             continue
@@ -706,7 +724,8 @@ def glm53_tokenize_fn_slowspeed(
         else:
             gen_append("</think>")
         if content.strip():
-            gen_append(content.strip(), literal=True)
+            generated_spans.extend((len(generated) + start, len(generated) + end) for start, end in content_spans)
+            gen_append(content.strip())
         if message.get("tool_calls"):
             gen_append(_render_tool_calls(message["tool_calls"], generated_spans, len(generated)))
         next_role = messages[index + 1].get("role") if index + 1 < len(messages) else None

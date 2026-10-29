@@ -35,9 +35,12 @@ TestGlm53DirtyDataDoesNotHalt
     test_non_mapping_media_value_is_discarded       image 值是字符串：collector TypeError 走丢弃通道
     test_config_error_still_raises_in_cache         配置错误（enable_thinking=False）不被丢弃通道吞掉
     test_non_positive_pixel_limits_rejected_at_config_build  max_pixels/min_pixels<=0 构造期拒绝，不进每样本丢弃通道
-    test_literal_image_token_in_pure_text_is_discarded  纯文本含字面 <|image|>：cache 丢弃、runtime 抛错
-    test_literal_marker_before_media_escapes_count_checks_is_discarded  字面标记在真实媒体前+真实标记被截断：旧计数校验放行，渲染前丢弃
-    test_literal_marker_in_renderer_text_sources_is_discarded  tool 输出/reasoning/tool_calls/tools 定义中的字面标记同样在源头丢弃
+    test_literal_image_token_in_pure_text_is_preserved  正文字面标记按普通 BPE 保留
+    test_literal_marker_before_media_does_not_capture_expansion  仅展开真实媒体，截断校验仍有效
+    test_literal_marker_in_renderer_text_sources_is_preserved  工具和 reasoning 字面量不丢弃
+TestGlm53LiteralTokens
+    test_all_added_literals_with_media  36 个字面量在纯文本/图片/视频中的编码与 cache/runtime 一致
+    test_literal_text_survives_mixed_pack  真实 collator 中只有媒体 patch 占位符被标记为视觉
 TestGlm53CacheInvalidation
     test_glm53_cache_invalidates_on_processor_or_pack_change  processor/pack 变化使缓存失效
     test_glm53_hash_covers_every_init_parameter  逐参数 hash 失效 + __init__ 参数分类完备性
@@ -46,6 +49,7 @@ TestGlm53CacheInvalidation
 import base64
 import copy
 import inspect
+import json
 import os
 import weakref
 from pathlib import Path
@@ -56,10 +60,16 @@ import pytest
 import torch
 from PIL import Image
 from pydantic import ValidationError
+from tokenizers import Tokenizer
 
 from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizerBase
 from transformers.video_utils import VideoMetadata
-from xtuner.v1.data_proto.messages.glm53_chat import _tokenize_with_loss_mask, render_glm53_chat
+from xtuner.v1.data_proto.messages.glm53_chat import (
+    _tokenize_with_loss_mask,
+    glm53_tokenize_fn_fastspeed,
+    glm53_tokenize_fn_slowspeed,
+    render_glm53_chat,
+)
 from xtuner.v1.datasets.mllm_tokenize_fn import Glm53VLTokenizeFnConfig, Glm53VLTokenizeFunction
 from xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn import collect_image_video_paths_and_extra
 from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import _expand_marker
@@ -478,6 +488,68 @@ class TestGlm53MixedMediaAndTruncation:
 
 
 class TestGlm53MediaRoleContract:
+    @pytest.mark.parametrize("media", ["image", "video"])
+    @pytest.mark.parametrize("literal", [None, "<|image|>", "<|video|>", "</think>"])
+    def test_assistant_media_cache_runtime_preserves_literals_and_labels(
+        self, tokenize_fn, tokenizer, image_fixture, video_fixture, media, literal
+    ):
+        item = _image_item(image_fixture) if media == "image" else _video_item(video_fixture.rstrip("/") + "/")
+        part = item["messages"][0]["content"][0]
+        prefix = " \n" if literal is None else f" \n前文 {literal} 中间 "
+        suffix = " \t " if literal is None else f" 后文 {literal} 收尾 \t "
+        item["messages"][0]["content"] = "please respond"
+        item["messages"][1]["content"] = [
+            {"type": "text", "text": prefix},
+            part,
+            {"type": "text", "text": suffix},
+        ]
+
+        spans = []
+        rendered, mask = render_glm53_chat(item["messages"], _literal_spans=spans)
+        assert (rendered, mask) == render_glm53_chat(item["messages"])
+        assert glm53_tokenize_fn_fastspeed(tokenizer, item["messages"]) == glm53_tokenize_fn_slowspeed(
+            tokenizer, item["messages"]
+        )
+        assert all(0 <= start < end <= len(rendered) for start, end in spans)
+        for marker in (f"<|begin_of_{media}|>", f"<|{media}|>", f"<|end_of_{media}|>"):
+            start = rendered.index(f"<|begin_of_{media}|>")
+            start = rendered.index(marker, start)
+            assert not any(left < start + len(marker) and right > start for left, right in spans)
+
+        tokenize_fn.state = "cache"
+        cached = tokenize_fn(item)
+        tokenize_fn.state = "runtime"
+        runtime = tokenize_fn(item)
+        ids, labels = runtime["input_ids"], runtime["labels"]
+        assert cached["num_tokens"] == runtime["num_tokens"] == len(ids) > 0
+        assert cached["num_img_tokens"] == runtime["num_img_tokens"]
+        image_id = tokenize_fn.processor.image_token_id
+        expected_visual = sum(runtime["num_img_tokens"]) // tokenize_fn.merge_unit
+        types = runtime["mm_token_type_ids"][0]
+        assert ids.count(image_id) == int(types.ne(0).sum()) == expected_visual > 0
+        for index, token_id in enumerate(ids):
+            assert types[index] == ({"image": 1, "video": 2}[media] if token_id == image_id else 0)
+            if types[index] != 0:
+                assert labels[index] == -100
+        for marker in (f"<|begin_of_{media}|>", f"<|end_of_{media}|>"):
+            token_id = tokenizer.convert_tokens_to_ids(marker)
+            assert ids.count(token_id) == 1
+            assert labels[ids.index(token_id)] == token_id
+        assert ids[-1] == labels[-1] == tokenizer.eos_token_id
+
+        # Check trimmed text on both sides against independent contextual base BPE.
+        serialized = json.loads(tokenizer.backend_tokenizer.to_str())
+        serialized["added_tokens"] = []
+        base = Tokenizer.from_str(json.dumps(serialized))
+        expected_prefix = base.encode(prefix.lstrip(), add_special_tokens=False).ids
+        start = ids.index(tokenizer.convert_tokens_to_ids("</think>")) + 1
+        assert ids[start : start + len(expected_prefix)] == expected_prefix
+        assert labels[start : start + len(expected_prefix)] == expected_prefix
+        expected_suffix = base.encode(suffix.rstrip(), add_special_tokens=False).ids
+        if expected_suffix:
+            assert ids[-len(expected_suffix) - 1 : -1] == expected_suffix
+            assert labels[-len(expected_suffix) - 1 : -1] == expected_suffix
+
     @pytest.mark.parametrize("role", ["system", "assistant", "tool"])
     def test_media_is_collected_from_all_roles(self, tokenize_fn: Glm53VLTokenizeFunction, role: str) -> None:
         image = {"type": "image", "image": {"url": "unused.jpg", "image_wh": [448, 448]}}
@@ -744,15 +816,7 @@ class TestGlm53DirtyDataDoesNotHalt:
         with pytest.raises(ValidationError, match=field):
             Glm53VLTokenizeFnConfig(processor_path=ckpt_path, **{field: value})
 
-    def test_literal_image_token_in_pure_text_is_discarded(
-        self, tokenize_fn: Glm53VLTokenizeFunction, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # 纯文本样本含字面 <|image|>（线上 256 卡 Step 8 崩溃的根因样本形态：tool 消息里的
-        # 代码字符串）。HF 接受这种输入，但当前 splice 掩码无法区分字面/真实占位符——在正确
-        # 掩码修复落地前按脏数据丢弃：cache 警告 + num_tokens=0，runtime 抛错由上游换占位样本，
-        # 两种状态都不能让它流进混合 pack 把 collator/splice 打崩。
-        logger_mock = Mock()
-        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn.logger", logger_mock)
+    def test_literal_image_token_in_pure_text_is_preserved(self, tokenize_fn: Glm53VLTokenizeFunction) -> None:
         item = {
             "messages": [
                 {"role": "user", "content": "How would you rate the quality of this image?\n<|image|>"},
@@ -760,21 +824,22 @@ class TestGlm53DirtyDataDoesNotHalt:
             ]
         }
         tokenize_fn.state = "cache"
-        assert tokenize_fn(item)["num_tokens"] == 0
-        assert logger_mock.warning.called
-        assert "literal visual placeholder" in logger_mock.warning.call_args[0][0]
+        cached = tokenize_fn(item)
         tokenize_fn.state = "runtime"
-        with pytest.raises(RuntimeError, match="literal visual placeholder"):
-            tokenize_fn(item)
+        runtime = tokenize_fn(item)
+        assert cached["num_tokens"] == runtime["num_tokens"] > 0
+        assert tokenize_fn.processor.image_token_id not in runtime["input_ids"]
+        assert not runtime["mm_token_type_ids"].any()
+        assert "<|image|>" in tokenize_fn.tokenizer.decode(runtime["input_ids"], skip_special_tokens=False)
 
-    def test_literal_marker_before_media_escapes_count_checks_is_discarded(
+    def test_literal_marker_before_media_does_not_capture_expansion(
         self, tokenize_fn: Glm53VLTokenizeFunction, image_fixture: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # 字面 <|image|> 在真实媒体之前 + 真实标记被 max_length 截断：
         # _expand_marker 按首次出现位置展开，patch 会展开到字面字符串的位置，真实 <|image|> 保持
         # 字面残留；把截断点精确设在最后一个占位符之后——残留被切掉，占位符数量恰好等于 patch 数，
-        # cache/runtime/collator 三层计数校验全部放行，而媒体绑定已经错位。必须在渲染前扫描文本
-        # 来源丢弃这类样本，计数校验防不住这条组合路径。
+        # cache/runtime/collator 三层计数校验全部放行，而媒体绑定已经错位。新的展开跳过
+        # 字面量，原截断点会切入真实媒体跨度，因此仍由已有的视觉计数校验安全丢弃。
         item = {
             "messages": [
                 {
@@ -789,7 +854,7 @@ class TestGlm53DirtyDataDoesNotHalt:
             ]
         }
         image_token_id = tokenize_fn.processor.image_token_id
-        # 绕开 _render_base（会被新检查拦下），手工复现旧代码的展开+tokenize，找出逃逸截断点。
+        # Deliberately omit literal spans here to reproduce the old first-match expansion.
         text, loss_mask = render_glm53_chat(item["messages"])
         grid = tokenize_fn._predict_image_grid(448, 448)
         expansion = tokenize_fn.processor.replace_image_token({"image_grid_thw": torch.tensor([grid])}, 0)
@@ -800,14 +865,14 @@ class TestGlm53DirtyDataDoesNotHalt:
         assert full_ids[:cut].count(image_token_id) == (grid[1] * grid[2]) // tokenize_fn.merge_unit
 
         logger_mock = Mock()
-        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn.logger", logger_mock)
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn.logger", logger_mock)
         tokenize_fn.max_length = cut
         tokenize_fn.state = "cache"
         assert tokenize_fn(item)["num_tokens"] == 0
         assert logger_mock.warning.called
-        assert "before media expansion" in logger_mock.warning.call_args[0][0]
+        assert "visual span" in logger_mock.warning.call_args[0][0]
         tokenize_fn.state = "runtime"
-        with pytest.raises(RuntimeError, match="before media expansion"):
+        with pytest.raises(AssertionError, match="placeholder count"):
             tokenize_fn(item)
 
     @pytest.mark.parametrize(
@@ -861,21 +926,250 @@ class TestGlm53DirtyDataDoesNotHalt:
             ),
         ],
     )
-    def test_literal_marker_in_renderer_text_sources_is_discarded(
-        self, tokenize_fn: Glm53VLTokenizeFunction, item: dict, monkeypatch: pytest.MonkeyPatch
+    def test_literal_marker_in_renderer_text_sources_is_preserved(
+        self, tokenize_fn: Glm53VLTokenizeFunction, item: dict
     ) -> None:
-        # renderer 会把 tool 输出、reasoning、tool_calls 参数、tools 定义原样写进文本——字面
-        # <|image|>/<|video|> 藏在哪一处都要在渲染前被扫描到（按同一规则检查）。断言警告来自
-        # 源头扫描（before media expansion）而非 tokenize 兜底。
+        tokenize_fn.state = "cache"
+        cached = tokenize_fn(item)
+        tokenize_fn.state = "runtime"
+        runtime = tokenize_fn(item)
+        assert cached["num_tokens"] == runtime["num_tokens"] > 0
+        assert tokenize_fn.processor.image_token_id not in runtime["input_ids"]
+        assert not runtime["mm_token_type_ids"].any()
+        text, _ = tokenize_fn._render_base(item)
+        assert tokenize_fn.tokenizer.decode(runtime["input_ids"], skip_special_tokens=False) == text
+
+
+class TestGlm53LiteralTokens:
+    @pytest.mark.parametrize("media", ["image", "video"])
+    @pytest.mark.parametrize("literal_only", [False, True])
+    def test_marker_payload_mismatch_has_sample_context(
+        self, tokenize_fn, image_fixture, video_fixture, media, literal_only, monkeypatch
+    ):
+        item = _image_item(image_fixture) if media == "image" else _video_item(video_fixture.rstrip("/") + "/")
+        item["id"] = "marker-mismatch-42"
+        marker = f"<|{media}|>"
+
+        def render_without_real_marker(data_item, literal_spans=None):
+            text = marker if literal_only else "no media marker"
+            if literal_only and literal_spans is not None:
+                literal_spans.append((0, len(text)))
+            return text, [False] * len(text)
+
+        monkeypatch.setattr(tokenize_fn, "_render_base", render_without_real_marker)
         logger_mock = Mock()
         monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.base_mllm_tokenize_fn.logger", logger_mock)
         tokenize_fn.state = "cache"
         assert tokenize_fn(item)["num_tokens"] == 0
-        assert logger_mock.warning.called
-        assert "before media expansion" in logger_mock.warning.call_args[0][0]
+        cache_message = logger_mock.warning.call_args[0][0]
         tokenize_fn.state = "runtime"
-        with pytest.raises(RuntimeError, match="before media expansion"):
+        with pytest.raises(RuntimeError) as exc:
             tokenize_fn(item)
+        for message in (cache_message, str(exc.value)):
+            assert "marker/payload mismatch" in message
+            assert marker in message
+            assert "expansion 1/1" in message
+            assert tokenize_fn.data_name in message
+            assert item["id"] in message
+
+    @pytest.mark.parametrize("marker", ["<|image|>", "<|video|>"])
+    def test_expansion_skips_literals_and_shifts_spans(self, marker):
+        literal = "中文 " + marker
+        text = literal + "|" + marker + "|" + literal + "|" + marker + "|" + literal
+        first = 0
+        middle = len(literal) + len(marker) + 2
+        last = middle + len(literal) + len(marker) + 2
+        spans = [(start, start + len(literal)) for start in (first, middle, last)]
+        original_spans = spans.copy()
+        mask = [False] * len(text)
+        for start, end in spans:
+            mask[start:end] = [True] * (end - start)
+        expanded, expanded_mask = _expand_marker(text, mask, marker, ["大图展开", "x"], spans)
+        assert expanded == literal + "|大图展开|" + literal + "|x|" + literal
+        assert spans == [
+            original_spans[0],
+            (middle + len("大图展开") - len(marker), middle + len("大图展开") - len(marker) + len(literal)),
+            (len(expanded) - len(literal), len(expanded)),
+        ]
+        assert len(expanded_mask) == len(expanded)
+        for start, end in spans:
+            assert expanded[start:end] == literal
+            assert all(expanded_mask[start:end])
+        assert sum(expanded_mask) == len(literal) * 3
+        with pytest.raises(RuntimeError, match="marker/payload mismatch"):
+            _expand_marker(marker, [True] * len(marker), marker, ["patches"], [(0, len(marker))])
+        with pytest.raises(RuntimeError, match="expansion 2/2"):
+            _expand_marker(marker, [True] * len(marker), marker, ["first", "second"])
+
+    @pytest.mark.parametrize("media", ["pure_text", "image", "video"])
+    @pytest.mark.parametrize("added_index", range(36))
+    def test_all_added_literals_with_media(
+        self, tokenize_fn, tokenizer, image_fixture, video_fixture, media, added_index
+    ):
+        added = sorted(tokenizer.get_added_vocab())
+        assert len(added) == 36
+        literal = added[added_index]
+        body = '中文 "' + literal + '" 继续'
+        if media == "image":
+            item = _image_item(image_fixture)
+        elif media == "video":
+            item = _video_item(video_fixture.rstrip("/") + "/")
+        else:
+            item = {"messages": [{"role": "user", "content": [{"type": "text", "text": "question"}]}]}
+        item["messages"][0]["content"].insert(0, {"type": "text", "text": body})
+        item["messages"][0]["content"].append({"type": "text", "text": body})
+        item["messages"] = [
+            {"role": "system", "content": body},
+            item["messages"][0],
+            {
+                "role": "assistant",
+                "content": body,
+                "reasoning_content": body,
+                "tool_calls": [{"function": {"name": literal, "arguments": {literal: {"value": body}}}}],
+            },
+            {"role": "tool", "content": [{"output": body}]},
+            {"role": "assistant", "content": body},
+        ]
+        item["tools"] = [{"type": "function", "function": {"name": "lookup", "description": body}}]
+
+        tokenize_fn.state = "cache"
+        cached = tokenize_fn(item)
+        tokenize_fn.state = "runtime"
+        runtime = tokenize_fn(item)
+        assert cached["num_tokens"] == runtime["num_tokens"] == len(runtime["input_ids"]) > 0
+        assert cached["num_img_tokens"] == runtime["num_img_tokens"]
+        image_id = tokenize_fn.processor.image_token_id
+        expected_visual = sum(runtime["num_img_tokens"]) // tokenize_fn.merge_unit
+        assert runtime["input_ids"].count(image_id) == expected_visual
+        types = runtime["mm_token_type_ids"][0]
+        expected_type = {"pure_text": 0, "image": 1, "video": 2}[media]
+        assert int(types.ne(0).sum()) == expected_visual
+        for index, token_id in enumerate(runtime["input_ids"]):
+            assert types[index] == (expected_type if token_id == image_id else 0)
+            if types[index] != 0:
+                assert runtime["labels"][index] == -100
+
+        # An independent tokenizer with no added registrations checks contextual BPE
+        # and the shifted assistant loss mask after the expanded visual span.
+        serialized = json.loads(tokenizer.backend_tokenizer.to_str())
+        serialized["added_tokens"] = []
+        base = Tokenizer.from_str(json.dumps(serialized))
+        expected = base.encode(body, add_special_tokens=False).ids
+        assert runtime["input_ids"][-len(expected) - 1 : -1] == expected
+        assert runtime["labels"][-len(expected) - 1 : -1] == expected
+        assert runtime["input_ids"][-1] == runtime["labels"][-1] == tokenizer.eos_token_id
+
+        # Replacing content literals must leave every real control ID and label intact.
+        def clean(value):
+            if isinstance(value, str):
+                return value.replace(literal, "ordinary")
+            if isinstance(value, list):
+                return [clean(v) for v in value]
+            if isinstance(value, dict):
+                return {clean(k): clean(v) for k, v in value.items()}
+            return value
+
+        clean_runtime = tokenize_fn(clean(item))
+        added_ids = set(tokenizer.get_added_vocab().values())
+        assert [(i, label) for i, label in zip(runtime["input_ids"], runtime["labels"]) if i in added_ids] == [
+            (i, label) for i, label in zip(clean_runtime["input_ids"], clean_runtime["labels"]) if i in added_ids
+        ]
+        for key in ("pixel_values", "image_grid_thw", "pixel_values_videos", "video_grid_thw"):
+            if key in runtime:
+                assert torch.equal(runtime[key], clean_runtime[key])
+
+    def test_multiple_images_keep_binding_and_literal_offsets(self, tokenize_fn, image_fixture, tmp_path):
+        other = tmp_path / "other.png"
+        Image.new("RGB", (224, 448), color=(20, 180, 40)).save(other)
+        item = _image_item(image_fixture)
+        parts = item["messages"][0]["content"]
+        parts.insert(0, {"type": "text", "text": "before <|image|> 中文"})
+        parts.extend(
+            [
+                {"type": "text", "text": "between <|image|><|video|>"},
+                {"type": "image", "image": {"url": str(other), "image_wh": [224, 448]}},
+                {"type": "text", "text": "after <|image|>"},
+            ]
+        )
+        tokenize_fn.state = "cache"
+        cached = tokenize_fn(item)
+        tokenize_fn.state = "runtime"
+        runtime = tokenize_fn(item)
+        assert cached["num_tokens"] == runtime["num_tokens"]
+        assert cached["num_img_tokens"] == runtime["num_img_tokens"]
+        assert runtime["num_imgs"] == [2]
+        grids = runtime["image_grid_thw"].tolist()
+        assert grids == [
+            list(tokenize_fn._predict_image_grid(448, 448)),
+            list(tokenize_fn._predict_image_grid(224, 448)),
+        ]
+        expected_pixels = torch.cat(
+            [
+                tokenize_fn.image_processor(images=[Image.open(path).convert("RGB")], return_tensors="pt")[
+                    "pixel_values"
+                ]
+                for path in (image_fixture, str(other))
+            ],
+            dim=0,
+        )
+        assert torch.equal(runtime["pixel_values"], expected_pixels)
+        begin_image_id = tokenize_fn.tokenizer.convert_tokens_to_ids("<|begin_of_image|>")
+        prefix = runtime["input_ids"][: runtime["input_ids"].index(begin_image_id)]
+        assert "before <|image|> 中文" in tokenize_fn.tokenizer.decode(prefix, skip_special_tokens=False)
+
+    def test_literal_text_survives_mixed_pack(self, tokenize_fn, image_fixture, video_fixture):
+        from xtuner.v1.datasets.collator import glm53_vl_sft_collator
+
+        items = [_image_item(image_fixture), _video_item(video_fixture.rstrip("/") + "/")]
+        items.append(
+            {
+                "messages": [
+                    {"role": "user", "content": "<|image|><|video|>"},
+                    {"role": "assistant", "content": "</think>"},
+                ]
+            }
+        )
+        for item in items[:2]:
+            item["messages"][0]["content"].insert(0, {"type": "text", "text": "<|image|><|video|>"})
+        tokenize_fn.state = "runtime"
+        runtime = [tokenize_fn(item) for item in items]
+        total = sum(item["num_tokens"] for item in runtime)
+        result = glm53_vl_sft_collator(
+            [runtime],
+            pack_max_length=total,
+            padding_token_idx=tokenize_fn.tokenizer.pad_token_id,
+            image_token_id=tokenize_fn.processor.image_token_id,
+            merge_unit=tokenize_fn.merge_unit,
+            pack_to_max_length=False,
+        )[0]
+        context = result["seq_ctx"]
+        assert context.input_ids.numel() == total - 1
+        assert len(context.cu_seq_lens_q) == 4
+        types = context.mm_token_type_ids
+        image_id = tokenize_fn.processor.image_token_id
+        assert torch.equal(types.ne(0), context.input_ids.eq(image_id))
+        assert int(types.eq(1).sum()) == sum(runtime[0]["num_img_tokens"]) // tokenize_fn.merge_unit
+        assert int(types.eq(2).sum()) == sum(runtime[1]["num_img_tokens"]) // tokenize_fn.merge_unit
+        assert torch.equal(
+            result["shifted_labels"],
+            torch.tensor([label for item in runtime for label in item["labels"]][1:]).unsqueeze(0),
+        )
+
+    def test_cache_version_and_explicit_override(self, ckpt_path, tokenizer, monkeypatch):
+        fn = Glm53VLTokenizeFnConfig(processor_path=ckpt_path).build(tokenizer, anno_name="test")
+        current_hash = fn.hash()
+        assert "_literal_added_tokens_v2" in fn._hash_str
+        fn._hash = None
+        fn._hash_str = fn._hash_str.replace("_literal_added_tokens_v2", "")
+        assert fn.hash() != current_hash
+        warning = Mock()
+        monkeypatch.setattr("xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn.logger", warning)
+        explicit = Glm53VLTokenizeFnConfig(processor_path=ckpt_path, hash="user-version").build(
+            tokenizer, anno_name="test"
+        )
+        assert explicit.hash() == "user-version"
+        assert warning.warning.call_count == 1
+        assert "rebuild" in warning.warning.call_args[0][0]
 
 
 class TestGlm53CacheInvalidation:

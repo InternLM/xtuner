@@ -82,12 +82,16 @@ def _render_tools(tools: List[Dict[str, Any]], _literal_spans=None, _offset: int
 
 
 def _assistant_content_and_reasoning(
-    message: Mapping[str, Any], _media_placeholder: Optional[Mapping[str, str]] = None
+    message: Mapping[str, Any],
+    _media_placeholder: Optional[Mapping[str, str]] = None,
+    _literal_spans: list[tuple[int, int]] | None = None,
 ) -> tuple[str, str | None]:
     """Shared by GLM-5.2/5.3: ``_media_placeholder`` selects how media parts in
     assistant content render — as the given placeholder markers (GLM-5.3) when
     provided, or as ``<reminder>`` degradation text (GLM-5.2, the default)."""
-    content = _visible_text(message.get("content", ""), _media_placeholder=_media_placeholder)
+    content = _visible_text(
+        message.get("content", ""), _literal_spans=_literal_spans, _media_placeholder=_media_placeholder
+    )
     reasoning_content = message.get("reasoning_content")
     # Reasoning is a structured field; think-tag spellings in content are always literal text.
     return content, reasoning_content if isinstance(reasoning_content, str) else None
