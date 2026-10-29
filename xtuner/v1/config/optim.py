@@ -91,6 +91,9 @@ class MuonConfig(OptimConfig):
     adjust_lr: Annotated[
         Literal["rms_norm", "spectral_norm", "none"], Parameter(help="Method for adjusting lr in Muon")
     ] = "rms_norm"
+    use_triton: Annotated[
+        bool, Parameter(help="Use the Triton Newton-Schulz kernel for Muon; faster on large matrices")
+    ] = False
     enable_all2all: Annotated[
         bool, Parameter(help="Allow all-to-all comm strategy; set False on topologies where all-to-all is unreliable")
     ] = True
@@ -274,7 +277,7 @@ class MuonConfig(OptimConfig):
             nesterov=True,
             flatten=True,
             adjust_lr=self.adjust_lr,
-            use_triton=False,
+            use_triton=self.use_triton,
             epsilon=self.eps,
             enable_all2all=self.enable_all2all,
             remainder_strategy=self.remainder_strategy,

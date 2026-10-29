@@ -47,7 +47,8 @@ class TestNewtonSchulz(DeterministicDDPTestCase):
         return 1
 
     def test_triton_vs_pytorch(self):
-        """Triton and PyTorch NS implementations should produce similar results."""
+        """Triton and PyTorch NS implementations should produce similar
+        results."""
         # 行为：同一输入（2D 单矩阵 / 3D expert batch）下，triton 与 torch 实现的 NS 结果一致
         self.create_pg("cuda")
         from xtuner.v1.optim.newton_schulz_triton import newton_schulz_triton
@@ -166,7 +167,8 @@ class ToyMoEModel(BaseModel):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        """Trivial forward that touches all params and returns a scalar loss."""
+        """Trivial forward that touches all params and returns a scalar
+        loss."""
         h = self.embed_tokens(input_ids)
         h = h + sum(fc(h) for fc in self.fcs)
         h = self.norm(h)
@@ -221,7 +223,10 @@ class ReferenceMuon(torch.optim.Optimizer):
         weight_decay: float,
         epsilon: float,
         betas: tuple[float, float] = (0.9, 0.95),
+        *,
+        newton_schulz_func: Callable | None = None,
     ):
+        self._newton_schulz_func = newton_schulz_func
         n_routed_experts = model.config.n_routed_experts
         muon_groups: list[dict] = []
         adamw_params: list[nn.Parameter] = []
@@ -299,17 +304,22 @@ class ReferenceMuon(torch.optim.Optimizer):
                     X = U.to(dtype=torch.bfloat16)
                     N = X.size(-1)
                     X = X.view(num_experts, -1, N)
-                    need_transpose = X.size(-2) > X.size(-1)
-                    if need_transpose:
-                        X = X.mT
-                    X = X / (X.norm(dim=(-2, -1), keepdim=True) + eps)
-                    for a, b, c in self.NS_CONSTS:
-                        A = X @ X.mT
-                        B = b * A + c * (A @ A)
-                        X = a * X + B @ X
-                    if need_transpose:
-                        X = X.mT
-                    X = X.view(U.shape)
+                    if self._newton_schulz_func is not None:
+                        # Keep per-parameter grouping/momentum/decay independent of production;
+                        # share only the selected mathematical kernel for integration checks.
+                        X = self._newton_schulz_func(X, epsilon=eps)
+                    else:
+                        need_transpose = X.size(-2) > X.size(-1)
+                        if need_transpose:
+                            X = X.mT
+                        X = X / (X.norm(dim=(-2, -1), keepdim=True) + eps)
+                        for a, b, c in self.NS_CONSTS:
+                            A = X @ X.mT
+                            B = b * A + c * (A @ A)
+                            X = a * X + B @ X
+                        if need_transpose:
+                            X = X.mT
+                    X = X.reshape(U.shape)
 
                     # Weight decay (uses base_lr, not adjusted_lr)
                     base_lr = group["base_lr"]
@@ -348,6 +358,26 @@ def test_muon_clip_grad_mode_defaults_to_adamw_only():
     assert MuonConfig().clip_grad_mode == "adamw_only"
 
 
+class TestMuonConfigBackend:
+    def test_muon_use_triton_defaults_to_false(self) -> None:
+        assert MuonConfig().use_triton is False
+
+    @pytest.mark.parametrize("use_triton", [False, True])
+    def test_muon_use_triton_build(self, use_triton: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A single expert avoids DTensor subgroup setup in this CPU construction test.
+        # Real sharded MoE updates are covered by test_triton_optimizer_step below.
+        monkeypatch.setattr(dist, "get_rank", lambda: 0)
+        model = ToyMoEModelConfig(compile_cfg=False, n_routed_experts=1).build()
+        optimizer = MuonConfig(use_triton=use_triton).build(model)
+        expected = zeropower_via_newtonschulz5
+        if use_triton:
+            from xtuner.v1.optim.newton_schulz_triton import newton_schulz_triton
+
+            expected = newton_schulz_triton
+        assert optimizer._newton_schulz_func is expected
+        assert {p for group in optimizer.param_groups for p in group["params"]} == set(model.parameters())
+
+
 def test_muon_remainder_strategy_validation():
     param = nn.Parameter(torch.empty(2, 2))
 
@@ -369,13 +399,48 @@ class TestMuonSingleGPU(DeterministicDDPTestCase):
     def world_size(self) -> int:
         return 1
 
+    def test_triton_optimizer_step(self) -> None:
+        """Compare sharded Triton updates to an independent per-parameter
+        reference."""
+        from xtuner.v1.optim.newton_schulz_triton import newton_schulz_triton
+
+        self.create_pg("cuda")
+        fsdp = FSDPConfig(param_dtype=torch.float32, reduce_dtype=torch.float32, torch_compile=False)
+        for swap in (False, True):
+            torch.manual_seed(42)
+            model = ToyMoEModelConfig(compile_cfg=False).build().to("cuda")
+            reference = copy.deepcopy(model)
+            model.fully_shard(fsdp)
+            inputs = torch.randint(0, 64, (1, 8), device="cuda")
+            model(inputs).backward()
+            reference(inputs).backward()
+            for name, p in model.named_parameters():
+                torch.testing.assert_close(p.grad.full_tensor(), reference.get_parameter(name).grad, atol=0, rtol=0)
+            expected_optimizer = ReferenceMuon(
+                reference,
+                lr=0.01,
+                mu=0.95,
+                weight_decay=0.1,
+                epsilon=1e-8,
+                newton_schulz_func=newton_schulz_triton,
+            )
+            expected_optimizer.step()
+            MuonConfig(lr=0.01, use_triton=True, swap_optimizer=swap).build(model).step()
+            for name, p in model.named_parameters():
+                torch.testing.assert_close(
+                    p.full_tensor(),
+                    reference.get_parameter(name),
+                    atol=1e-6,
+                    rtol=1e-5,
+                    msg=lambda message: f"{name}: {message}",
+                )
+
     def test_muon_single_gpu_matches_reference(self):
         """On a single GPU, production Muon must match the reference for every
         parameter within tight tolerances (everything is fp32, no comms).
 
-        fully_shard() is required even here: the production Muon optimizer
-        assumes that parameters are DTensors and will fail on plain tensors.
-        With world_size=1 it is a no-op sharding-wise.
+        fully_shard() is required even here: the production Muon optimizer assumes that parameters are DTensors and
+        will fail on plain tensors. With world_size=1 it is a no-op sharding-wise.
         """
         self.create_pg("cuda")
         device = "cuda"
@@ -427,7 +492,8 @@ class TestMuonSingleGPU(DeterministicDDPTestCase):
             )
 
     def test_swap_optimizer_matches_device_state_and_loads_pinned(self):
-        """Real Muon and AdamW groups keep identical updates when their state is swapped."""
+        """Real Muon and AdamW groups keep identical updates when their state
+        is swapped."""
         self.create_pg("cuda")
         config = ToyMoEModelConfig(compile_cfg=False)
         fsdp = FSDPConfig(param_dtype=torch.float32, reduce_dtype=torch.float32, torch_compile=False)
@@ -507,7 +573,8 @@ class TestMuonSingleGPU(DeterministicDDPTestCase):
 
     @parametrize.parametrize("swap", [False, True])
     def test_adamw_state_device_policy(self, swap: bool):
-        """AdamW moves existing state; SwapAdamW keeps its pinned state on the host."""
+        """AdamW moves existing state; SwapAdamW keeps its pinned state on the
+        host."""
         self.create_pg("cuda")
         model = ToyMoEModelConfig(compile_cfg=False).build().to("cuda")
         optimizer = AdamWConfig(lr=0.01, swap_optimizer=swap).build(model)
@@ -636,9 +703,8 @@ class TestMuonFSDP(DeterministicDDPTestCase):
         """One Muon step on a fully-sharded model must match the single-process
         reference for every parameter, across all param categories.
 
-        Each rank processes a different sample (as in real DDP/FSDP training).
-        The reference processes all samples and averages the loss to produce
-        equivalent gradients.
+        Each rank processes a different sample (as in real DDP/FSDP training). The reference processes all samples and
+        averages the loss to produce equivalent gradients.
         """
         self.create_pg("cuda")
         device = "cuda"
@@ -783,8 +849,9 @@ class TestMuonFSDP(DeterministicDDPTestCase):
             )
 
     def test_muon_moe_uses_subgroup_allgather_when_params_fill_a_batch(self):
-        """MoE params whose experts span an FSDP sub-group must take the sub-group
-        all-gather path even when there are enough of them to fill a full batch.
+        """MoE params whose experts span an FSDP sub-group must take the sub-
+        group all-gather path even when there are enough of them to fill a full
+        batch.
 
         Regression: the sub-group path used to be gated on ``len(params) < fsdp_size``, so a
         deep MoE model (many layers -> many same-shape expert params) fell back to the
