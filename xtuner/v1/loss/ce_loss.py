@@ -30,10 +30,13 @@ class CELossConfig(BaseLossConfig):
         chunk_size (int | None): The chunk size for "chunk" mode. Ignored if mode is "eager".
             Defaults to 1024.
         loss_reduction (str): The reduction mode for the loss. Options are "token", "sample", and "square".
+        z_loss_coefficient (float): Coefficient of the LM logits z-loss (squared log-sum-exp regularizer).
+            Defaults to 0.0 (disabled).
     """
 
     mode: Annotated[Literal["eager", "chunk", "liger"], Parameter(help="loss calculation mode")] = "eager"  # type: ignore
     loss_reduction: Annotated[Literal["token", "sample", "square"], Parameter(help="loss reduction mode")] = "token"
+    z_loss_coefficient: Annotated[float, Parameter(help="coefficient for LM logits z-loss")] = 0.0
 
     @property
     def loss_ctx_cls(self) -> type["CELossContext"]:
@@ -46,6 +49,8 @@ class CELossConfig(BaseLossConfig):
     def model_post_init(self, _context: Any) -> None:
         if self.mode == "liger":
             assert self.loss_reduction == "token", "Currently, cannot use liger kernel with sample or square reduction"
+        if self.z_loss_coefficient < 0:
+            raise ValueError("z_loss_coefficient must be non-negative")
 
     def build(
         self,
@@ -110,13 +115,16 @@ class LMHeadLossContext(BaseLossContext):
         super().__init__(loss_cfg, loss_kwargs)
 
         if loss_cfg.mode == "liger":
-            from liger_kernel.transformers.fused_linear_cross_entropy import (
-                LigerFusedLinearCrossEntropyLoss,
-            )
+            # Device-dispatched FLCE: NPU uses the in-package implementation
+            # (xtuner.v1.loss.get_flce_loss_cls), CUDA uses liger_kernel's
+            # stock class. reduction stays 'sum' on both devices.
+            from xtuner.v1.loss import get_flce_loss_cls
 
-            self.liger_loss_fct = LigerFusedLinearCrossEntropyLoss(
+            self.liger_loss_fct = get_flce_loss_cls()(
                 reduction="sum",
                 accum_dtype=torch.float32,
+                lse_square_scale=loss_cfg.z_loss_coefficient,
+                return_z_loss=loss_cfg.z_loss_coefficient > 0,
             )
         else:
             self.liger_loss_fct = None
@@ -211,7 +219,16 @@ class LMHeadLossContext(BaseLossContext):
             # Step 2.b in the loss calculation: sum the loss over all tokens
             loss = (loss * loss_weight).sum()
 
-        return loss, (logits, {})
+        extra_info: dict[str, Any] = {}
+        if self.loss_cfg.z_loss_coefficient > 0:
+            valid_mask = shifted_labels != self.loss_cfg.ignore_idx
+            z_loss_1d = torch.logsumexp(logits, dim=-1).square()
+            z_loss_1d = z_loss_1d * self.loss_cfg.z_loss_coefficient
+            z_loss_1d = z_loss_1d.masked_fill(~valid_mask, 0.0)
+            loss = loss + (z_loss_1d * loss_weight).sum()
+            extra_info["lm_z_loss"] = (z_loss_1d.sum() / valid_mask.sum().clamp(min=1)).detach()
+
+        return loss, (logits, extra_info)
 
     def eager_mode(
         self,
@@ -248,12 +265,26 @@ class LMHeadLossContext(BaseLossContext):
             shifted_labels = shifted_labels.flatten()
             # liger kernel dont support reduction=="none"
             # step 2.b in the loss calculation: sum the loss over all tokens, then multiply the loss weight (i.e. divide by the global_denominator)
-            loss = self.liger_loss_fct(head_weight, hidden_states, shifted_labels)
+            liger_output = self.liger_loss_fct(head_weight, hidden_states, shifted_labels)
+            if self.loss_cfg.z_loss_coefficient > 0:
+                loss, z_loss = liger_output
+            else:
+                loss = liger_output
+                z_loss = None
             # ProberList.record_tensor(loss, "[lm_head.ce_loss][before calibration]loss")
             mask = loss_weight != 0
-            w = loss_weight.sum() / mask.sum()  # w equals to 1/global_denominator
+            # w equals to 1/global_denominator on normal shards. clamp(min=1)
+            # guards the all-padding SP-shard where mask.sum()==0 would give
+            # 0/0=nan (loss is finite 0 there -> w=0 -> loss*0=0). no-op n_valid>0.
+            num_valid = mask.sum().clamp(min=1)
+            w = loss_weight.sum() / num_valid
             loss = loss * w
-            return loss, (None, {})
+            liger_extra_info: dict[str, Any] = {}
+            if z_loss is not None:
+                # The fused kernel returns coefficient * LSE^2 summed over local
+                # valid tokens. Log a local token mean without another collective.
+                liger_extra_info["lm_z_loss"] = (z_loss / num_valid).detach()
+            return loss, (None, liger_extra_info)
 
     @property
     def batch_size(self) -> int:
