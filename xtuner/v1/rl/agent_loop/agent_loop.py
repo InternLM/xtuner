@@ -25,7 +25,6 @@ from xtuner.v1.rl.utils import (
     create_task,
     register_cpu_resources,
 )
-from xtuner.v1.rl.utils.async_utils import gather_cleanup
 from xtuner.v1.utils import get_logger, ray_method
 from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
 
@@ -484,18 +483,17 @@ AgentLoopSpec: TypeAlias = AgentLoop | RayAgentLoopProxy | RouterAgentLoop
 
 
 async def call_agent_loop_hook(agent_loop: AgentLoopSpec, name: str) -> None:
-    """Invoke an optional lifecycle hook locally or on its owning Ray actor."""
-    method = getattr(agent_loop, name, None)
-    if method is not None:
-        if isinstance(agent_loop, ray.actor.ActorHandle):
-            await method.remote()
-        else:
-            await method()
+    """Invoke a lifecycle hook locally or on its owning Ray actor."""
+    method = getattr(agent_loop, name)
+    if isinstance(agent_loop, ray.actor.ActorHandle):
+        await method.remote()
+    else:
+        await method()
 
 
 async def close_agent_loops(loops: list[AgentLoopSpec]) -> None:
-    """Close every owner even when another owner fails to release resources."""
-    owners = {id(loop): loop for loop in loops}
-    await gather_cleanup(
-        (call_agent_loop_hook(loop, "close") for loop in owners.values()), "Agent loop cleanup failed"
-    )
+    """Close every loop, then raise the first failure."""
+    results = await asyncio.gather(*(call_agent_loop_hook(loop, "close") for loop in loops), return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result

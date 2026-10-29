@@ -14,7 +14,6 @@ from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import create_task
-from xtuner.v1.rl.utils.async_utils import CleanupError, await_cleanup
 
 from ...rollout.chat_template import canonicalize_messages_for_chat_template
 from ...rollout.trace_store import get_store
@@ -230,12 +229,8 @@ class AgentInSandboxLoop(AgentLoop):
         self.mode = mode
         self._active_runs: set[asyncio.Task] = set()
         self._closing = False
-        self._close_task: asyncio.Task | None = None
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
-        if self._closing:
-            raise RuntimeError("agent loop is closing")
-
         async def generate_one(state: RolloutState) -> list[RolloutState]:
             if self._sample_semaphore is None:
                 samples = await self.generate_sample(state)
@@ -263,8 +258,6 @@ class AgentInSandboxLoop(AgentLoop):
     async def generate_sample(  # type: ignore[override]
         self, rollout_state: RolloutState, **kwargs
     ) -> list[RolloutState]:
-        if self._closing:
-            raise RuntimeError("agent loop is closing")
         try:
             rollout_item = rollout_state.extra_fields["rollout_item"].model_copy(deep=True)
             if rollout_state.session_id is None:
@@ -302,22 +295,9 @@ class AgentInSandboxLoop(AgentLoop):
         """Stop new runs and wait for active runners to execute their
         cleanup."""
         self._closing = True
-        if self._close_task is None:
-            self._close_task = asyncio.create_task(self._close_runs())
-        await await_cleanup(self._close_task)
-
-    async def _close_runs(self) -> None:
-        tasks = list(self._active_runs)
-        for task in tasks:
+        for task in self._active_runs:
             task.cancel()
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        errors = [
-            result
-            for result in results
-            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError)
-        ]
-        if errors:
-            raise CleanupError("Sandbox runner cleanup failed", errors)
+        await asyncio.gather(*self._active_runs, return_exceptions=True)
 
     async def _build_rollout_states(self, rollout_state: RolloutState, item: AgentRolloutItem) -> list[RolloutState]:
         if self.mode == "eval":

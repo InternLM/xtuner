@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import os
 import random
@@ -7,7 +8,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from shutil import rmtree
-from typing import Any, List, NoReturn, cast
+from typing import Any, List, cast
 
 import numpy as np
 import ray
@@ -56,7 +57,6 @@ from xtuner.v1.rl.utils import (
     set_cpu_resource_manager,
     sort_rollout_state_for_deterministic,
 )
-from xtuner.v1.rl.utils.async_utils import CleanupError, await_cleanup, gather_cleanup
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
@@ -878,24 +878,13 @@ class BaseRLTrainer:
         return checkpoint_path
 
     async def _close_agent_loop_managers(self) -> None:
-        managers = [getattr(self, name, None) for name in ("agent_loop_manager", "eval_agent_loop_manager")]
-        owners = {id(manager): manager for manager in managers if manager is not None}
-        await gather_cleanup((manager.close() for manager in owners.values()), "Agent manager cleanup failed")
-
-    def _close_after_fit(self, failure: BaseException | None) -> None:
-        try:
-            asyncio_run(self._close_agent_loop_managers())
-        except BaseException as cleanup_error:
-            self._raise_cleanup_failure(failure, cleanup_error)
-
-    @staticmethod
-    def _raise_cleanup_failure(failure: BaseException | None, cleanup_error: BaseException) -> NoReturn:
-        if failure is None or failure is cleanup_error:
-            raise cleanup_error
-        previous_cause = failure.__cause__
-        if previous_cause is not None and previous_cause is not cleanup_error:
-            cleanup_error = CleanupError("Multiple shutdown failures", [previous_cause, cleanup_error])
-        raise failure from cleanup_error
+        managers = [self.agent_loop_manager]
+        if self._enable_evaluate:
+            managers.append(self.eval_agent_loop_manager)
+        results = await asyncio.gather(*(manager.close() for manager in managers), return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                self.logger.opt(exception=result).error("Failed to close agent loop manager")
 
     async def _resume_agent_loop_manager(self, checkpoint_path: Path | str) -> int:
         self.logger.info(f"Resume agent_loop_manager from {checkpoint_path}")
@@ -1868,15 +1857,11 @@ class RLColocateTrainer(BaseRLTrainer):
 
     def fit(self):
         self.rl_health_manager.start()
-        failure: BaseException | None = None
         try:
             self._fit()
-        except BaseException as exc:
-            failure = exc
-            raise
         finally:
             try:
-                self._close_after_fit(failure)
+                asyncio_run(self._close_agent_loop_managers())
             finally:
                 self.rl_health_manager.stop()
                 self._exp_tracker.close()
@@ -2139,15 +2124,11 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
     def fit(self):
         # 对外同步 fit；内部用 async loop 组织 producer/consumer。
-        failure: BaseException | None = None
         try:
             return asyncio_run(self._fit())
-        except BaseException as exc:
-            failure = exc
-            raise
         finally:
             try:
-                self._close_after_fit(failure)
+                asyncio_run(self._close_agent_loop_managers())
             finally:
                 self._exp_tracker.close()
                 close_trace()
@@ -2204,7 +2185,6 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             ),
             done_callbacks=[],
         )
-        failure: BaseException | None = None
         try:
             # train_step 表示“下一步待完成训练”；空 expired 不算完成，所以必须用 while 支持重试同一步。
             train_step = self._cur_step + 1
@@ -2282,28 +2262,13 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 self._log_step(train_step, step_timer_dict, produce_result, train_log_info, eval_log_info)
                 self._cur_step = train_step
                 train_step = self._cur_step + 1
-        except BaseException as exc:
-            failure = exc
-            raise
         finally:
             self.agent_loop_manager.shutdown()
-            try:
-                await await_cleanup(self._stop_producer(producer_task))
-            except BaseException as cleanup_error:
-                self._raise_cleanup_failure(failure, cleanup_error)
-
-    async def _stop_producer(self, producer_task: asyncio.Task) -> None:
-        # Give the shutdown event a chance to stop an idle producer, then cancel
-        # a producer blocked on generation. Its unexpected errors must survive.
-        await asyncio.sleep(0)
-        cancelled_by_shutdown = not producer_task.done()
-        if cancelled_by_shutdown:
+            # Let an idle producer observe shutdown; cancel one blocked on generation.
+            await asyncio.sleep(0)
             producer_task.cancel()
-        try:
-            await producer_task
-        except asyncio.CancelledError:
-            if not cancelled_by_shutdown:
-                raise
+            with contextlib.suppress(asyncio.CancelledError):
+                await producer_task
 
     async def _sync_weights_and_save(self, model_step: int, step_timer_dict: dict):
         # producer 已暂停；保持 save -> bind -> update 顺序。

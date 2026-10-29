@@ -51,7 +51,8 @@ def _pytest_invocation_paths() -> list[Path]:
 def _should_install_import_stubs() -> bool:
     paths = _pytest_invocation_paths()
     return bool(paths) and all(
-        path.is_file() and path.parent == _RL_TEST_DIR and path.name in _LIGHTWEIGHT_TEST_FILES for path in paths
+        path.is_file() and path.parent == _RL_TEST_DIR and path.name in _LIGHTWEIGHT_TEST_FILES
+        for path in paths
     )
 
 
