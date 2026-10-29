@@ -156,37 +156,13 @@ class AgentInLocalhostLoop(AgentLoop):
         return self.canonicalize_train_fields(samples)
 
     def canonicalize_train_fields(self, group: list[RolloutState]) -> list[RolloutState]:
-        """Validate the canonical training fields of one localhost agentic
-        rollout group.
+        """Preserve trace-exported unshifted fields and write train metadata.
 
-        This loop fills ``input_ids``/``labels``/``logprobs`` from the trace store as one
-        unshifted full sequence, so there is nothing left to assemble. Canonicalization
-        only re-checks the unified convention (``labels`` present and of equal length,
-        ``logprobs`` either ``None`` or of equal length) and marks a violating sample
-        ``Status.FAILED`` instead of raising into the producer. States without
-        ``input_ids`` (eval-mode states) carry no training fields and are skipped.
-
-        Args:
-            group (list[RolloutState]): One group of rollout states after generation,
-                judging, and filtering.
-
-        Returns:
-            list[RolloutState]: The same group with validated training fields.
+        Eval states without training fields are left untouched. The trainer checks full training fields before
+        consuming a group.
         """
         for state in group:
-            if state.status != Status.COMPLETED or state.input_ids is None:
-                continue
-            try:
-                labels = state.labels
-                if labels is None or len(labels) != len(state.input_ids):
-                    expected = 0 if labels is None else len(labels)
-                    raise ValueError(f"labels length mismatch: {expected} vs {len(state.input_ids)}")
-                if state.logprobs is not None and len(state.logprobs) != len(state.input_ids):
-                    raise ValueError(f"logprobs length mismatch: {len(state.logprobs)} vs {len(state.input_ids)}")
-            except Exception as exc:
-                self.logger.error(f"Canonicalize train fields failed for rollout_id={state.rollout_id}: {exc}")
-                state.status = Status.FAILED
-                state.error_msg = f"canonicalize_train_fields failed: {exc}"
+            self._write_train_meta(state)
         return group
 
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:

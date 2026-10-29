@@ -285,63 +285,6 @@ def reset_rollout_response(rollout_state: RolloutState) -> RolloutState:
     return rollout_state
 
 
-def is_valid_for_training(group_data_items: list[RolloutState], logger) -> bool:
-    """Checks if a group of rollout states is valid for a training step.
-
-    Args:
-        group_data_items (list[RolloutState]): A list of RolloutState objects.
-        logger (logging.Logger): Logger used to report the invalid reason.
-
-    Returns:
-        bool: True if the group is valid, False otherwise.
-
-    NOTE: Why this check is needed:
-    - For system fault tolerance, this check is performed at rollout / dataflow
-      time, but we still do it here to ensure training data integrity.
-    - 'filtered'/'failed': These items are fundamentally broken or incomplete and
-      should not be used for training.
-    - 'aborted': These items represent rollouts that were stopped
-      prematurely. Using such partial data could lead the model to learn
-      undesirable behaviors (e.g., stopping generation too early).
-    - Empty response/response_ids: The model's generated response is the core
-      of the training data for RL algorithms like PPO. If the response is
-      missing, there is nothing to compute rewards on or to train the model with.
-    """
-    is_abort = any(item.status == Status.ABORTED for item in group_data_items)
-    is_filtered = any(item.status == Status.FILTERED for item in group_data_items)
-    is_failed = any(item.status == Status.FAILED for item in group_data_items)
-    if is_filtered or is_failed or is_abort:
-        logger.warning(
-            f"Invalid dataflow group found during training, rollout state filtered: {is_filtered}, failed: {is_failed}, aborted: {is_abort}."
-        )
-        return False
-    for item in group_data_items:
-        if item.input_ids is not None:
-            input_ids_valid = len(item.input_ids) > 1
-            labels_valid = item.labels is not None and len(item.labels) == len(item.input_ids)
-            logprobs_valid = item.logprobs is None or len(item.logprobs) == len(item.input_ids)
-            if not input_ids_valid or not labels_valid or not logprobs_valid:
-                logger.warning(
-                    "Invalid dataflow item found during training: input_ids, labels, and logprobs lengths mismatch."
-                )
-                return False
-            continue
-
-        response_valid = item.response is not None and len(item.response) > 0
-        ids_valid = item.response_ids is not None and len(item.response_ids) > 0
-        if not ids_valid:
-            # NOTE: `response_ids` is the critical field for token-in-token-out mode, so we ensure it's not empty.
-            logger.warning(
-                "Invalid dataflow item found during training: no response or response_ids and skip this item."
-            )
-            return False
-        if not response_valid:
-            # NOTE: check valid response string for judger inputs
-            logger.warning("Invalid dataflow item found during training: empty response string and skip this item.")
-            return False
-    return True
-
-
 def get_group_status(rollout_states: list[RolloutState]) -> Status:
     """Get the group status based on the individual rollout states.
 
@@ -464,8 +407,7 @@ def calculate_group_effective_response_masks(
     policy.
 
     The function is pure: ``group`` is inspected, not modified. Each returned mask is the effective
-    response mask aligned with ``response_ids``; callers bake them into ``labels`` when the train
-    batch is taken, clearing zero-mask supervised positions to ``-100``. The clearing only ever
+    response mask aligned with ``response_ids``; callers bake them into ``labels`` in ``take_train_batch``, clearing zero-mask supervised positions to ``-100``. The clearing only ever
     extends, so masks computed at growing trainer steps converge to the same labels. ``None`` means
     token staleness is disabled or does not apply to that state (no labels, or no ``response_ids`` to
     align with).
@@ -495,3 +437,72 @@ def calculate_group_effective_response_masks(
             )
         )
     return masks
+
+
+def validate_rollout_group(group: list[RolloutState], *, task_name: str) -> None:
+    """Check producer result structure, final status and existing version
+    bounds.
+
+    This function is read-only: it neither counts tokens nor fills model versions.
+    """
+    allowed = {Status.COMPLETED, Status.FAILED, Status.FILTERED, Status.ABORTED, Status.EXPIRED}
+    for state in group:
+        context = f"task={task_name!r}, group_id={state.group_id}, rollout_id={state.rollout_id}"
+        if state.status not in allowed:
+            raise ValueError(f"{context}: invalid generated status {state.status}")
+        response_length = len(state.response_ids or [])
+        version_length = len(state.response_model_steps or [])
+        if version_length > response_length:
+            raise ValueError(
+                f"{context}: response_model_steps length={version_length}, expected at most response_ids={response_length}"
+            )
+
+
+def validate_train_group(group: list[RolloutState], *, task_name: str) -> None:
+    """Check a completed group's full fields immediately before training.
+
+    Raise ValueError so the training boundary can discard the entire group. This function does not fill source versions
+    or modify labels or metadata.
+    """
+    if not group or any(not isinstance(state, RolloutState) or state.status != Status.COMPLETED for state in group):
+        raise ValueError(f"task={task_name!r}: training requires a nonempty COMPLETED rollout group")
+    for state in group:
+        context = f"task={task_name!r}, group_id={state.group_id}, rollout_id={state.rollout_id}"
+        input_ids = state.input_ids
+        if input_ids is None or len(input_ids) < 2:
+            length = None if input_ids is None else len(input_ids)
+            raise ValueError(f"{context}: input_ids must contain at least 2 tokens, got {length}")
+        for field in ("labels", "logprobs"):
+            value = getattr(state, field)
+            if field == "logprobs" and value is None:
+                continue
+            length = None if value is None else len(value)
+            if length != len(input_ids):
+                raise ValueError(f"{context}: {field} length mismatch: {length}, expected input_ids={len(input_ids)}")
+        labels = state.labels
+        assert labels is not None
+        response_ids = state.response_ids or []
+        version_length = len(state.response_model_steps or [])
+        if version_length != len(response_ids):
+            raise ValueError(
+                f"{context}: response_model_steps length={version_length}, expected response_ids={len(response_ids)}"
+            )
+        position_ids = state.position_ids
+        expected = {
+            "train_response_length": len(response_ids),
+            "supervised_tokens": sum(label != -100 for label in labels[1:]),
+            "position_layout": "mrope_3d" if position_ids is not None and position_ids.ndim == 3 else "1d",
+            "has_rollout_logprobs": state.logprobs is not None,
+            "has_routed_experts": state.routed_experts is not None,
+        }
+        if state.num_tokens != len(input_ids) - 1:
+            raise ValueError(
+                f"{context}: num_tokens={state.num_tokens}, expected={len(input_ids) - 1}; missing or stale train meta"
+            )
+        prompt_length = state.extra_fields.get("train_prompt_length")
+        if not isinstance(prompt_length, int) or prompt_length < 0:
+            raise ValueError(f"{context}: missing or invalid train_prompt_length={prompt_length}")
+        for key, value in expected.items():
+            actual = state.extra_fields.get(key)
+            if actual != value:
+                raise ValueError(f"{context}: train meta {key}={actual!r}, expected={value!r}")
