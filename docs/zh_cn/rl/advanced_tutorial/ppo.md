@@ -110,6 +110,13 @@ hf/
 
 critic value head 的 HF 权重名是 `value_head.weight`。
 
+配置了 scheduler 的 role 会在各自的 DCP 目录保存 `lr_scheduler.json`，
+即使 `no_save_optimizer=True` 也保留调度进度。恢复默认读取该文件，
+使 actor 和 critic 分别继续各自的学习率曲线；`load_optimizer_states` 和
+`load_optimizer_args` 不控制 scheduler 的恢复。
+旧 checkpoint 缺少此文件，或需要从头开始调度时，显式设置
+`load_checkpoint_cfg.load_scheduler=False`，从当前配置的初始学习率重新开始。
+
 ## CriticLossConfig
 
 [`CriticLossConfig`](xtuner.v1.rl.loss.CriticLossConfig) 不继承 policy loss。它回归的是 value head，不是词表。
