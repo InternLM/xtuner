@@ -157,11 +157,11 @@ case:
             parameters:
                 config: autotest/config/rl_qwen3_2B_vl_mopd_topk.py
                 infer_backend: lmdeploy
-                pip_package: pip install lmdeploy==0.18.0;pip install 'ray[default]==2.58.0';pip install -e . --no-deps
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 num_nodes: 2
                 memory_per_task: 1200
+                pip_package: pip install lmdeploy==0.18.0;pip install 'ray[default]==2.58.0';pip install -e . --no-deps
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-2B-Instruct
                     - GSM8K_TEACHER_MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-4B-Instruct-2507
