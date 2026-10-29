@@ -38,7 +38,7 @@ from xtuner.v1.rl.utils import (
     get_eos_token,
     register_cpu_resources,
 )
-from xtuner.v1.rl.utils.multimodal import validate_image_only_rollout
+from xtuner.v1.rl.utils.misc import validate_image_only_rollout
 from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 

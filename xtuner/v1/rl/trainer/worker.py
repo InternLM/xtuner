@@ -31,6 +31,7 @@ from typing_extensions import NotRequired
 from transformers import AutoTokenizer
 from xtuner.v1.config.fsdp import FSDPConfig
 from xtuner.v1.config.optim import LRConfig, OptimConfig
+from xtuner.v1.data_proto.rl_data import MM_PIXEL_FIELDS
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.dataloader import Dataloader
@@ -54,7 +55,6 @@ from xtuner.v1.rl.loss import (
 )
 from xtuner.v1.rl.model_utils import build_frozen_model
 from xtuner.v1.rl.utils import SingleAcceleratorWorker
-from xtuner.v1.rl.utils.multimodal import resolve_multimodal_inputs
 from xtuner.v1.rl.weight_update import WeightUpdater
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
@@ -247,6 +247,19 @@ class WorkerLogItem(TypedDict):
     rollout_is_metrics: NotRequired[dict[str, float]]
     train_metrics: List[WorkerTrainLogItem]
     sft_train_metrics: NotRequired[dict[str, float]]
+
+
+def _resolve_multimodal_inputs(seq_ctx: SequenceContext) -> None:
+    """Materialize packed media refs on CPU before device transfer and SP
+    splitting."""
+    for name in MM_PIXEL_FIELDS:
+        value = getattr(seq_ctx, name)
+        if value is None or isinstance(value, torch.Tensor):
+            continue
+        assert isinstance(value, list), f"{name} should be a list of Ray ObjectRef, got {type(value)}"
+        # Batch the object-store fetch; a pack can contain many media refs, including shared repeats.
+        tensors = [torch.as_tensor(item) for item in ray.get(value)]
+        setattr(seq_ctx, name, torch.cat(tensors, dim=0))
 
 
 class TrainingWorker(SingleAcceleratorWorker):
@@ -679,7 +692,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             # update seq_ctx
             seq_ctx = data["seq_ctx"]
             teacher_indices = data.get("teacher_indices")
-            resolve_multimodal_inputs(seq_ctx)
+            _resolve_multimodal_inputs(seq_ctx)
 
             rollout_routed_experts = seq_ctx.rollout_routed_experts
             if rollout_routed_experts is not None:

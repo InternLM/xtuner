@@ -68,6 +68,11 @@ class MultimodalInfo(TypedDict):
     mm_token_type_ids: NotRequired[np.ndarray | None]
 
 
+# Tensor payload keys that the sampler moves into the Ray object store; SequenceContext mirrors them.
+MMPixelField: TypeAlias = Literal["pixel_values", "pixel_values_videos"]
+MM_PIXEL_FIELDS: tuple[MMPixelField, ...] = ("pixel_values", "pixel_values_videos")
+
+
 class RolloutFunctionCall(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

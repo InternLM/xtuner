@@ -15,11 +15,9 @@ from xtuner.v1.rl.agent_loop_manager.sampler import put_to_ray
 from xtuner.v1.rl.distillation.rollout_teacher_manager import RolloutTeacherClient
 from xtuner.v1.rl.distillation.train_teacher_manager import TrainTeacherManager
 from xtuner.v1.rl.rollout.worker import RolloutWorker
-from xtuner.v1.rl.utils.multimodal import (
-    free_multimodal_inputs,
-    resolve_multimodal_inputs,
-    validate_image_only_rollout,
-)
+from xtuner.v1.rl.trainer.controller import _free_multimodal_inputs
+from xtuner.v1.rl.trainer.worker import _resolve_multimodal_inputs
+from xtuner.v1.rl.utils.misc import validate_image_only_rollout
 from xtuner.v1.train.rl_trainer import get_train_seq_ctx
 
 
@@ -79,28 +77,25 @@ class TestMultimodalTrainingInputs:
         ctx = get_train_seq_ctx(torch.arange(4).view(1, -1), multimodal_train_info=state.mm_info)
         packed = SequenceContext.cat([ctx, ctx])
         worker_ctx = packed.copy()
-        resolve_multimodal_inputs(worker_ctx)
+        _resolve_multimodal_inputs(worker_ctx)
         teacher = TrainTeacherManager.construct_teacher_seq_ctx(worker_ctx, is_composed=True)
         torch.testing.assert_close(teacher.pixel_values, torch.from_numpy(np.concatenate([image, image])))
         torch.testing.assert_close(teacher.pixel_values_videos, torch.from_numpy(np.concatenate([video, video])))
         assert teacher.mm_token_type_ids.tolist() == [[1, 2, 2, 0] * 2]
         assert teacher.video_grid_thw.tolist() == [[2, 2, 2], [2, 2, 2]]
         with patch("xtuner.v1.rl.utils.ray_utils.ray._private.internal_api.free") as free:
-            free_multimodal_inputs([packed])
+            _free_multimodal_inputs([packed])
         assert set(free.call_args.args[0]) == set(refs)
         assert len(free.call_args.args[0]) == 2
         assert packed.pixel_values == [refs[0], refs[0]]
 
-    @pytest.mark.parametrize("kind", ["array", "tensor", "list"])
     @pytest.mark.parametrize("field", ["pixel_values", "pixel_values_videos"])
-    def test_resolves_direct_payloads(self, kind: str, field: str) -> None:
-        values = torch.ones(4, 3)
-        payload = {"array": values.numpy(), "tensor": values, "list": [values.numpy(), values.numpy()]}[kind]
+    def test_resolve_rejects_payloads_outside_ref_list_contract(self, field: str) -> None:
+        # 生产契约与旧实现一致：packing 后媒体字段是 list[ObjectRef]；直收 ndarray/单 ref 一律拒绝。
         ctx = SequenceContext.from_input_ids((torch.ones(1, 2, dtype=torch.long),), device="cpu")
-        setattr(ctx, field, payload)
-        resolve_multimodal_inputs(ctx)
-        expected = torch.cat([values, values]) if kind == "list" else values
-        torch.testing.assert_close(getattr(ctx, field), expected)
+        setattr(ctx, field, np.ones((4, 3)))
+        with pytest.raises(AssertionError, match="list of Ray ObjectRef"):
+            _resolve_multimodal_inputs(ctx)
 
 
 class TestOnlineVideoGuard:
