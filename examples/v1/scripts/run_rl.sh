@@ -10,6 +10,8 @@ ray stop --force
 # bash examples/v1/scripts/run_rl.sh examples/v1/config/rl_interns2_preview_vl_grpo.py "lmdeploy" $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
 # bash examples/v1/scripts/run_rl.sh examples/v1/config/rl_interns2_preview_vl_dapo.py "lmdeploy" $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
 # bash examples/v1/scripts/run_rl.sh examples/v1/config/rl_interns2_preview_gsm8k_dapo.py "lmdeploy" $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
+# GLM-5.3-Flash text GRPO + GSM8K:
+# bash examples/v1/scripts/run_rl.sh examples/v1/config/rl_glm53_25B_grpo_gsm8k.py "lmdeploy" $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
 CONFIG_PATH=$1
 INFER_BACKEND=$2
 MODEL_PATH=$3
