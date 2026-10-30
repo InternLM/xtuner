@@ -9,7 +9,7 @@ export GROUPED_GEMM_URL=https://github.com/InternLM/GroupedGEMM@aa5ffb21cb626d6c
 export DEEP_EP_URL=https://github.com/deepseek-ai/DeepEP@9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee # v1.2.1
 export DEEP_GEMM_URL=https://github.com/deepseek-ai/DeepGEMM@88965b078186ee7510ab9fc4f1d5ebc19adfa8d1 # v2.6.1 88965b0
 export CAUSAL_CONV1D_URL=https://github.com/Dao-AILab/causal-conv1d@c51519fb10d92ffa257c1982e1831d3243454b2f # v1.6.1
-export FLA_URL="${FLA_URL-https://github.com/HAOCHENYE/flash-linear-attention@tmp-tensor-cache}"
+export FLA_URL="${FLA_URL-https://github.com/fla-org/flash-linear-attention@v0.5.2}"
 
 export DEEPSELECT_URL=https://github.com/deepseek-ai/DeepSelect@0f03b68748b304863fdf0181a11458d04ae533a9
 export FLASHMLA_URL=https://github.com/deepseek-ai/FlashMLA@9241ae3ef9bac614dd25e45e507e089f888280e0

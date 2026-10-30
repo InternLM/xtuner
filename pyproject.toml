@@ -86,7 +86,7 @@ all = [
   "jsonlines",
   "decord",
   "av",
-  "ray[default]",
+  "ray[default]==0.58.0",
   "httpx",
   "fastapi",
   "uvicorn",
@@ -94,7 +94,7 @@ all = [
   "parametrize",
   "mathruler",
   "pylatexenc",
-  "flash-linear-attention==0.4.2"
+  "flash-linear-attention==0.5.2"
 ]
 
 [tool.mypy]
