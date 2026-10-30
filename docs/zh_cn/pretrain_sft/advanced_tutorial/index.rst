@@ -7,6 +7,7 @@
 
    model.md
    data_flow.md
+   token_statistics.md
    loss.md
    float8.md
    profile.md
