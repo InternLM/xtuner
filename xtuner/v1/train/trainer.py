@@ -78,6 +78,7 @@ from xtuner.v1.utils.internal_metrics import (
     InternalMetricsRecorder,
     flatten_internal_metrics_for_logs,
 )
+from xtuner.v1.utils.numa_affinity import try_bind_numa
 
 from .toy_tokenizer import UTF8ByteTokenizer
 
@@ -1525,42 +1526,7 @@ class Trainer:
         set_random_seed(seed)
 
     def _try_bind_numa(self):
-        if os.getenv("XTUNER_DISABLE_NUMA", "0") == "1":
-            logger.info(f"Rank: {self.rank} skip numa binding because XTUNER_DISABLE_NUMA=1.")
-            return
-        if str(DEVICE) != "cuda":
-            log_rank0.info("Current device is not cuda, skip numa binding.")
-            return
-
-        try:
-            import numa
-            from numa import memory, schedule
-
-            numa_node_num = numa.info.get_max_node() + 1
-            total_GPU_per_node = DEVICE_MODULE.device_count()
-
-            # return while total_GPU_per_node is larger than numa_node_num or is not divisible by numa_node_num
-            if total_GPU_per_node <= numa_node_num:
-                return
-            if total_GPU_per_node % numa_node_num != 0:
-                return
-            # return while the number of processes is smaller than one node GPUs num
-            if self.world_size < total_GPU_per_node:
-                return
-
-            local_rank = self.rank % total_GPU_per_node
-            # compute numa id for each locak rank
-            per_numa = total_GPU_per_node // numa_node_num
-            numa_id = local_rank // per_numa
-
-            # bind numa node
-            schedule.run_on_nodes(numa_id)
-            memory.set_membind_nodes(numa_id)
-        except Exception:
-            logger.info(f"Rank: {self.rank} failed to bind process to numa node.")
-            return  # try_bind_numa should not raise exception
-        else:
-            logger.info(f"Rank: {self.rank} success bind process to numa node: {numa_id}")
+        try_bind_numa(self.rank)
 
     def _init_dist(self, backend: str | None = None):
         if backend is None:

@@ -2104,6 +2104,11 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         saved_model_step = asyncio_run(self._resume_agent_loop_manager(checkpoint_path))
         assert self._cur_step == saved_model_step
 
+        # Empty-init engines can retain GPU allocations while marked asleep.
+        # Use the same offload/allocate/receive/warmup lifecycle as online sync;
+        # NCCL transfer alone does not clear the engine's weights sleep tag.
+        ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
+        ray.get(self.rollout_controller.onload_weights.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
         self.weight_update()
         # Empty-init workers need KV cache allocation and warmup before inference.
         ray.get(self.rollout_controller.onload_kvcache.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)

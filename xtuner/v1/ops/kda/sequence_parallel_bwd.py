@@ -22,7 +22,9 @@ from fla.ops.kda.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.op import exp, exp2
-from fla.utils import USE_CUDA_GRAPH, autotune_cache_kwargs, check_shared_mem
+from fla.utils import autotune_cache_kwargs, check_shared_mem
+
+from ..fla_compat import USE_CUDA_GRAPH, fla_state_layout_kwargs
 
 
 @triton.heuristics(
@@ -349,6 +351,12 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     rank = dist.get_rank(context.group)
 
     B, T, H, K, V = *q.shape, do.shape[-1]
+    # The merge kernel indexes the state by value heads (``HV`` on FLA 0.5.2). KDA uses one head
+    # count for queries and values, so fail loudly instead of mixing ``H`` and ``HV`` silently.
+    assert do.shape[-2] == H, (
+        f"KDA CP backward assumes H == HV, got H={H}, HV={do.shape[-2]}; "
+        "grouped value attention needs separate dht sizing."
+    )
     # N: the actual number of sequences in the batch with either equal or variable lengths
     BT = 64
     assert K <= 256, "current kernel does not support head dimension being larger than 256."
@@ -405,14 +413,14 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             init_offsets=None,
             h0_seq_ids=None,
             h0=None,
-            H=H,
             K=K,
             V=V,
             BK=BK,
             FORWARD=False,
             INTRACARD_MODE=False,
             NUM_SEQ_ENTRIES=0,
-            TRANSPOSE_STATE=transpose_state_layout,
+            # ``do`` carries the value head count (HV); the merge kernel indexes the state by it.
+            **fla_state_layout_kwargs(merge_fwd_bwd_kernel, transpose_state_layout, q=q, v=do),
         )
 
     # initial_state is None in the CP mode
@@ -481,8 +489,7 @@ def chunk_kda_bwd(
             output_final_state=False,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
-            use_exp2=True,
-            transpose_state_layout=transpose_state_layout,
+            **fla_state_layout_kwargs(chunk_gated_delta_rule_fwd_h, transpose_state_layout),
         )
     else:
         w, u, qg, kg, v_new, h = kwargs["w"], kwargs["u"], kwargs["qg"], kwargs["kg"], kwargs["v_new"], kwargs["h"]
@@ -536,8 +543,7 @@ def chunk_kda_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=True,
-        transpose_state_layout=transpose_state_layout,
+        **fla_state_layout_kwargs(chunk_gated_delta_rule_bwd_dhu, transpose_state_layout),
     )
 
     dq, dk, dv, db, dg, dAkk = chunk_kda_bwd_wy_dqkg_fused(
@@ -556,7 +562,7 @@ def chunk_kda_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        transpose_state_layout=transpose_state_layout,
+        **fla_state_layout_kwargs(chunk_kda_bwd_wy_dqkg_fused, transpose_state_layout),
     )
 
     dq, dk, db, dg = chunk_kda_bwd_intra(

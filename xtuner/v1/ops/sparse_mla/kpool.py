@@ -40,6 +40,7 @@ from typing import Literal
 
 import torch
 from torch import Tensor
+from torch.nn import functional as F
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.ops.comm import gather_for_sequence_parallel
@@ -104,20 +105,24 @@ def build_pool_index(seq_ctx: SequenceContext, seq_len: int, index_kpool: int, d
     boundary.
 
     Returns:
-        Tensor: ``pool_index``, shape ``[P, index_kpool]`` int64. ``pool_index[p, slot]`` is
-            the global token id at that slot, or ``-1`` if the pool is incomplete there (its
-            document ended before filling the pool).
+        Tensor: ``pool_index``, shape ``[P_max, index_kpool]`` int64. ``pool_index[p, slot]`` is
+            the global token id at that slot, or ``-1`` if its document ended. Any unused
+            trailing pools are all ``-1`` and never enter a causal selection range.
     """
     cu = seq_ctx.cu_seq_lens_q.to(device=device)
-    num_pools_per_doc, doc_pool_start = _doc_pool_layout(cu, index_kpool)
+    _, doc_pool_start = _doc_pool_layout(cu, index_kpool)
     # start=0: pools always cover the whole sequence, never a shard (see build_pools).
     token_ids, doc_of_token, local_pos = _token_doc_layout(cu, 0, seq_len, device)
 
     pool_id = doc_pool_start[doc_of_token] + local_pos // index_kpool
     slot = local_pos % index_kpool
 
-    num_pools = int(num_pools_per_doc.sum().item())
-    pool_index = torch.full((num_pools, index_kpool), -1, device=device, dtype=torch.int64)
+    # sum(ceil(doc_len/k)) <= ceil(seq_len/k) + num_docs - 1. Computing the
+    # exact count with .item() synchronizes GPU to host, and its data-dependent
+    # pool dimension makes torch.compile recompile when the count changes.
+    # Allocate this shape-only bound; causal ranges skip unused trailing rows.
+    max_pools = (seq_len + index_kpool - 1) // index_kpool + cu.shape[0] - 2
+    pool_index = torch.full((max_pools, index_kpool), -1, device=device, dtype=torch.int64)
     pool_index[pool_id, slot] = token_ids
     return pool_index
 
@@ -151,9 +156,9 @@ def build_pools(
 
     Returns:
         tuple[Tensor, Tensor, Tensor]:
-            - ``pool_key`` ``[P, index_head_dim]``, same dtype as ``k``.
-            - ``pool_index`` ``[P, index_kpool]`` int32 (global token ids, ``-1`` if invalid).
-            - ``pool_complete`` ``[P]`` bool (all ``index_kpool`` slots valid).
+            - ``pool_key`` ``[P_max, index_head_dim]``, same dtype as ``k``.
+            - ``pool_index`` ``[P_max, index_kpool]`` int32 (global token ids, ``-1`` if invalid).
+            - ``pool_complete`` ``[P_max]`` bool (all ``index_kpool`` slots valid).
     """
     seq_len, device = k.shape[0], k.device
     # Reading `cu_seq_lens_q[-1]` is a host sync, and under `torch.compile` it is also a graph
@@ -161,7 +166,11 @@ def build_pools(
     # the SP mesh -- is a programming error, not a data condition, so eager (which every test and
     # the first training step exercise) is where it is worth paying for.
     if not torch.compiler.is_compiling():
-        global_len = int(seq_ctx.cu_seq_lens_q[-1].item())
+        global_len = (
+            seq_ctx._raw_input_ids.shape[1]
+            if seq_ctx._raw_input_ids is not None
+            else int(seq_ctx.cu_seq_lens_q[-1].item())
+        )
         if seq_len != global_len:
             raise RuntimeError(
                 f"build_pools needs key features for the whole sequence ({global_len} tokens) but "
@@ -176,8 +185,7 @@ def build_pools(
 
     logits = grouped_gate.float() + kpool_ape.float().unsqueeze(0)
     logits = logits.masked_fill(~valid.unsqueeze(-1), float("-inf"))
-    # A fully-invalid pool never occurs in practice (every document has >= 1 token, so its
-    # first pool always has >= 1 valid slot), but nan_to_num matches HF's defensive guard.
+    # Trailing padding pools have only -inf logits; map their NaN softmax to zero keys.
     probs = torch.nan_to_num(logits.softmax(dim=1)).to(grouped_k.dtype)
     pool_key = (probs * grouped_k).sum(dim=1)
     pool_complete = valid.all(dim=-1)
@@ -204,8 +212,8 @@ def pool_causal_ranges(
     Args:
         seq_ctx (SequenceContext): Packed-sequence metadata; ``shard_start`` locates this rank's
             queries inside the global sequence.
-        pool_index (Tensor): From :func:`build_pools`, shape ``[P, index_kpool]``, covering the
-            **whole** sequence (pool ids returned here index into it).
+        pool_index (Tensor): From :func:`build_pools`, shape ``[P_max, index_kpool]``, covering the
+            **whole** sequence with any unused pools at the end.
         query_len (int): Number of local queries on this rank.
         device: Device to build the range tensors on.
 
@@ -261,7 +269,7 @@ def expand_pools_and_tail(
     Args:
         selected_pool_ids (Tensor): Top-k pool ids from the indexer kernel, shape
             ``[S, 1, index_topk // index_kpool]``, ``-1`` for unfilled slots.
-        pool_index (Tensor): From :func:`build_pools`, shape ``[P, index_kpool]``.
+        pool_index (Tensor): From :func:`build_pools`, shape ``[P_max, index_kpool]``.
         seq_ctx (SequenceContext): Packed-sequence metadata.
         index_topk (int): Semantic token budget (e.g. 2048).
         index_kpool (int): Pool size.
@@ -307,13 +315,14 @@ def kpool_topk_indices(
     alignment: int = 512,
     query_chunk_size: int | None = None,
     scorer: Literal["original", "cooperative"] = "original",
+    selector: Literal["torch", "deep_select"] = "torch",
     balance_sp: bool = False,
     sp_full_pool_work_ratio: float = 0.5,
 ) -> Tensor:
     """Build pools (A), score/select pools (B), expand to token ids + tail (C).
 
-    ``scorer="original"`` retains TileLang + torch.topk. ``"cooperative"`` uses
-    the SM90 BF16 producer kernel + DeepSelect with reusable query-chunk scratch.
+    ``scorer="original"`` uses TileLang scoring with the selected TopK kernel;
+    ``"cooperative"`` uses its fused scoring and selection path.
 
     Args:
         q (Tensor): Index query, shape ``[1, S, index_n_heads, index_head_dim]``, bf16.
@@ -329,6 +338,7 @@ def kpool_topk_indices(
         index_topk (int): Semantic token budget (e.g. 2048); must be divisible by ``index_kpool``.
         always_select_tail (bool): Whether to append the incomplete trailing pool.
         alignment (int): Output width alignment (FlashMLA: 512; TileLang: 64).
+        selector (Literal["torch", "deep_select"]): TopK kernel for original TileLang scoring.
         balance_sp (bool): Redistribute query scoring work with neighbor P2P, then
             restore attention ownership before token expansion and tail selection.
         sp_full_pool_work_ratio (float): Fixed per-query selection/launch estimate
@@ -338,6 +348,8 @@ def kpool_topk_indices(
         Tensor: ``[S, 1, kpool_output_width(index_topk, index_kpool, alignment)]`` int32.
     """
     assert index_topk % index_kpool == 0
+    if scorer == "cooperative" and selector != "torch":
+        raise ValueError("selector is only supported with the original KPool scorer")
     if not math.isfinite(sp_full_pool_work_ratio) or sp_full_pool_work_ratio < 0:
         raise ValueError("sp_full_pool_work_ratio must be finite and nonnegative")
     # SP: queries stay sharded; the key side gathers *before* pooling, because a pool can
@@ -391,6 +403,12 @@ def kpool_topk_indices(
         )
     elif scorer == "original":
         starts, ends = pool_causal_ranges(query_ctx, pool_index, q_local.shape[0], q.device)
+        if selector == "deep_select":
+            # DeepSelect requires a 1024-byte logits row stride. Pad the small BF16
+            # key table before scoring; causal ends still exclude the added pools.
+            padding = -pool_key.shape[0] % 256
+            if padding:
+                pool_key = F.pad(pool_key, (0, 0, 0, padding))
         selected_pool_ids = tilelang_indexer_topk_from_ranges(
             q_local,
             pool_key.contiguous(),
@@ -399,6 +417,7 @@ def kpool_topk_indices(
             ends,
             select_k,
             query_chunk_size=query_chunk_size,
+            selector=selector,
         )
     else:
         raise ValueError(f"Unsupported KPool scorer: {scorer}")

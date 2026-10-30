@@ -10,6 +10,17 @@
 python xtuner/v1/train/cli/sft.py --help
 ```
 
+如果训练使用 `torch.compile` 或 JIT 内核，可以在启动前设置共享编译缓存目录。后续使用相同环境和配置的任务可以复用 PyTorch Inductor、Triton、TileLang、CuTe DSL 和 CUDA 驱动的缓存；第一次运行仍需生成缓存。
+
+```{code-block} bash
+export XTUNER_COMPILE_CACHE_DIR=/path/to/shared/compile_cache
+torchrun --nproc-per-node 8 xtuner/v1/train/cli/sft.py --config config.py
+```
+
+请在导入 XTuner 之前设置该变量。若已单独设置 `TORCHINDUCTOR_CACHE_DIR`、`TRITON_CACHE_DIR`、`TILELANG_CACHE_DIR`、`CUTE_DSL_CACHE_DIR` 或 `CUDA_CACHE_PATH`，各自的设置优先。升级编译器或 GPU 环境后，建议使用新的缓存目录。
+
+当共享缓存位于远端文件系统时，本地模式会让训练期间编译器只访问节点本地目录；设置了 `XTUNER_COMPILE_CACHE_DIR` 就会自动启用。每个节点的 local rank 0 会在导入 XTuner 之前把共享缓存预热到 `/tmp/xtuner-compile-cache`，训练结束后由 global rank 0 把各节点新增的缓存产物合并回共享缓存。共享缓存会按编译器版本和 GPU 架构存放在一个命名空间子目录中。显式设置在节点本地目录之外的编译器缓存变量会被直接报错，以避免个别编译器继续写远端。共享同一个节点或缓存根目录的任务不应并发运行。
+
 ```{hint}
 :class: margin
 如果觉得训练入口不合心意？也可以自己动手 DIY 哦。

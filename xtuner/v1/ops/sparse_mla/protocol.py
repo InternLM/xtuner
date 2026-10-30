@@ -13,8 +13,8 @@ DSAIndexerBackend = Literal[
     "torch", "tilelang", "cudnn_dsa", "flash_mla", "deep_gemm_fp8", "cute_dsl", "tilelang_deepselect"
 ]
 
-# Cooperative BF16 scoring + DeepSelect retains the original TileLang backend.
-KPoolIndexerBackend = Literal["torch", "tilelang", "tilelang_cooperative"]
+# Both DeepSelect variants keep KPool's TileLang-compatible output contract.
+KPoolIndexerBackend = Literal["torch", "tilelang", "tilelang_deepselect", "tilelang_cooperative"]
 
 
 class SparseMLAOutputs(NamedTuple):
