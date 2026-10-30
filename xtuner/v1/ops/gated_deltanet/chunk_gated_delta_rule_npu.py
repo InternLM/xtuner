@@ -668,6 +668,151 @@ class ChunkGatedDeltaRule(torch.autograd.Function):
         return dq, dk, dv, dg, db, None, dh0, None, None, None
 
 
+# ---------------------------------------------------------------------------
+# Fused-forward GDN glue (fla_npu >= 26.10 composite fwd)
+#
+# The 26.10 wheel ships ``npu_chunk_gated_delta_rule_fwd``: one AscendC call
+# covering the chunk-local cumsum, the WY/KKT scores, the tri-inverse, the
+# state pass and the output projection that the decomposed forward above runs
+# as three Triton helpers + three AscendC ops plus six transposes. The
+# composite is layout-native BSND, so the module's T-major q/k/v/g/beta flow
+# through un-transposed and the output ``o`` comes back T-major.
+#
+# The composite *backward* (``npu_chunk_gated_delta_rule_bwd``) is Ascend950
+# only -- aclnn rejects it with "ChunkGatedDeltaRuleBwd is supported on
+# Ascend950 only" on the 910 parts this repo trains on (measured 2026-10-30) --
+# so this arm pairs the fused forward with the decomposed backward as-is. The
+# backward consumes the same H-major mirrors the decomposed forward used to
+# save, so the fused forward builds them once: q/k/v/beta transposed, and
+# ``g`` as the composite's own ``g_cumsum`` output (fp32, in-kernel cumsum)
+# transposed to [B, H, T]. ``A`` comes back [B, HV, T, chunk] bf16, exactly
+# the layout solve_tril used to produce.
+#
+# Selected by XTUNER_NPU_GDN_FUSED_FWD: 0 forces the decomposed chain;
+# unset/1 selects the composite forward when the wheel ships it. Defaulting
+# to 1 keeps pre-26.10 wheels on the decomposed chain via the availability
+# fallback below -- only an explicit =1 with a missing composite is treated
+# as a routing error (strict mode fail-fasts on that; the silent default-on
+# fallback logs once instead, so a wheel downgrade degrades instead of
+# breaking). Kernel-facing semantics match the module contract exactly:
+# ``use_qk_l2norm_in_kernel=False`` / ``use_beta_sigmoid_in_kernel=False``
+# (the module normalizes q/k and sigmoids beta itself), ``use_exp2=False``
+# (same as the decomposed ops), ``disable_recompute=True`` (the default --
+# forward keeps only what backward cannot recompute, backward rebuilds the
+# rest), ``scale=k^-0.5``, ``initial_state`` forwarded for the state-carrying
+# call shape.
+# ---------------------------------------------------------------------------
+_FUSED_GDN_FWD_API: Optional[Any] = None
+_FUSED_GDN_FWD_RESOLVED = False
+
+
+def _fused_gdn_fwd_enabled() -> bool:
+    return os.environ.get("XTUNER_NPU_GDN_FUSED_FWD", "1") != "0"
+
+
+def _fused_gdn_fwd_requested() -> bool:
+    # True only for an explicit =1: the strict-mode fail-fast keys on this,
+    # so a default-on arm missing on an old wheel degrades quietly while a
+    # user-requested route that cannot resolve still raises.
+    return os.environ.get("XTUNER_NPU_GDN_FUSED_FWD", "") == "1"
+
+
+def _fused_gdn_fwd_api() -> Optional[Any]:
+    """Resolve the composite forward once; None keeps the fallback.
+
+    ``load_ascendc_ops`` has already run by the time the wrapper is wired, so
+    the import itself only fails when the installed wheel predates the
+    composite operators (26.6 and earlier).
+    """
+    global _FUSED_GDN_FWD_API, _FUSED_GDN_FWD_RESOLVED
+    if not _FUSED_GDN_FWD_RESOLVED:
+        _FUSED_GDN_FWD_RESOLVED = True
+        try:
+            from fla_npu.ops.ascendc import (  # type: ignore[import-untyped]
+                npu_chunk_gated_delta_rule_fwd,
+            )
+
+            _FUSED_GDN_FWD_API = npu_chunk_gated_delta_rule_fwd
+        except Exception as exc:  # noqa: BLE001 -- any import failure means "not available"
+            _log_once(f"[gdn_fused_fwd] composite forward unavailable ({exc}); decomposed fallback")
+            _FUSED_GDN_FWD_API = None
+    return _FUSED_GDN_FWD_API
+
+
+class FusedFwdChunkGatedDeltaRule(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_state, cu_seqlens, chunk_size):
+        if q.shape[-1] != 128 or v.shape[-1] not in (128, 256):
+            raise ValueError(
+                f"the composite GDN kernel requires K=128 and V in (128, 256); got K={q.shape[-1]}, V={v.shape[-1]}"
+            )
+        fwd_api = _fused_gdn_fwd_api()
+        assert fwd_api is not None  # dispatch guarantees the resolution
+        # The composite takes host int64 lists for cu_seqlens/chunk_indices
+        # (a device tensor would D2H-sync inside _host_ints); both host
+        # mirrors are already cached sync-free for the packed batch.
+        cu_host = _cu_seqlens_host(cu_seqlens)
+        chunk_indices = _prepare_chunk_indices_host(cu_seqlens, chunk_size)
+        # The decomposed chain feeds fp32 beta (post-sigmoid) into its ops;
+        # keep that precision for the composite so both arms see the same
+        # kernel-facing dtype.
+        beta32 = beta.float() if beta.dtype != torch.float32 else beta
+        o, final_state, g_cumsum, A, _beta_eff, _h, _q_hat, _k_hat, _q_rstd, _k_rstd = fwd_api(
+            q,
+            k,
+            v,
+            g,
+            beta32,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            chunk_size=chunk_size,
+            cu_seqlens=cu_host,
+            chunk_indices=chunk_indices,
+            scale=float(scale),
+            use_exp2=False,
+            use_qk_l2norm_in_kernel=False,
+            use_beta_sigmoid_in_kernel=False,
+            allow_neg_eigval=False,
+            disable_recompute=True,
+            layout="BSND",
+        )
+        # The decomposed backward consumes H-major contiguous mirrors
+        # ([B, H, T, ...]); build them here once, exactly what the decomposed
+        # forward used to save. g_cumsum replaces the Mindspeed Triton
+        # chunk_local_cumsum output; A is already [B, HV, T, chunk] bf16.
+        q_h = q.transpose(1, 2).contiguous()
+        k_h = k.transpose(1, 2).contiguous()
+        v_h = v.transpose(1, 2).contiguous()
+        g_h = g_cumsum.transpose(1, 2).contiguous()
+        beta_h = beta32.transpose(1, 2).contiguous()
+        ctx.save_for_backward(q_h, k_h, v_h, g_h, beta_h, A, initial_state, cu_seqlens)
+        ctx.scale = scale
+        ctx.chunk_size = chunk_size
+        return o, final_state
+
+    @staticmethod
+    def backward(ctx, do, dht):
+        q_h, k_h, v_h, g_h, beta_h, A, initial_state, cu_seqlens = ctx.saved_tensors
+        dq, dk, dv, db, dg, dh0 = chunk_gated_delta_rule_bwd(
+            q_h, k_h, v_h, g_h, beta_h, A, ctx.scale, initial_state, do, dht, cu_seqlens, ctx.chunk_size
+        )
+        # One grad per forward input, in order: q, k, v, g, beta, scale,
+        # initial_state, output_final_state, cu_seqlens, chunk_size.
+        return dq, dk, dv, dg, db, None, dh0, None, None, None
+
+
+def _gdn_function() -> type[torch.autograd.Function]:
+    """Pick the autograd Function behind ``chunk_gated_delta_rule``."""
+    if not _fused_gdn_fwd_enabled():
+        return ChunkGatedDeltaRule
+    if _fused_gdn_fwd_api() is None:
+        if _fused_gdn_fwd_requested() and _strict_kernels():
+            raise RuntimeError("XTUNER_NPU_GDN_FUSED_FWD=1 but the composite GDN forward is unavailable")
+        _log_once("[gdn_fused_fwd] composite forward unavailable on this wheel; decomposed fallback")
+        return ChunkGatedDeltaRule
+    return FusedFwdChunkGatedDeltaRule
+
+
 def chunk_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -740,8 +885,9 @@ def chunk_gated_delta_rule(
         and 0 < _GDN_SLAB_SPLIT_MAX_TOKENS < q.shape[1]
     ):
         o_slabs = []
+        gdn_fn = _gdn_function()
         for t_lo, t_hi, slab_cu, _slab_host in _split_varlen_slabs(cu_seqlens):
-            slab_o, _ = ChunkGatedDeltaRule.apply(
+            slab_o, _ = gdn_fn.apply(
                 q[:, t_lo:t_hi],
                 k[:, t_lo:t_hi],
                 v[:, t_lo:t_hi],
@@ -756,7 +902,7 @@ def chunk_gated_delta_rule(
             o_slabs.append(slab_o)
         return torch.cat(o_slabs, dim=1), None
 
-    o, final_state = ChunkGatedDeltaRule.apply(
+    o, final_state = _gdn_function().apply(
         q, k, v, g, beta, scale, initial_state, output_final_state, cu_seqlens, chunk_size
     )
     return o, final_state
@@ -778,6 +924,17 @@ def ascendc_chunk_gated_delta_rule_fn():
             raise RuntimeError(f"strict NCP kernel mode rejected GDN fallback: {exc}") from exc
         _log_once(f"[gdn_ascendc] GDN kernel: fla_npu AscendC unavailable ({exc}); Triton fallback")
         return None
+
+    if _fused_gdn_fwd_enabled():
+        # Resolve at wiring time so a missing composite forward (pre-26.10
+        # wheel) surfaces in the startup log / strict gate instead of the
+        # first apply() call. The strict gate only fires for an explicit =1;
+        # the default-on arm degrades to the decomposed chain instead.
+        if _fused_gdn_fwd_api() is None:
+            if _fused_gdn_fwd_requested() and _strict_kernels():
+                raise RuntimeError("XTUNER_NPU_GDN_FUSED_FWD=1 but the composite GDN forward is unavailable")
+        else:
+            _log_once("[gdn_fused_fwd] fla_npu composite GDN forward active (layout=BSND, bwd decomposed)")
 
     def delta(q, k, v, **kwargs):
         # XTuner's NPU SequenceContext keeps these small metadata tensors
