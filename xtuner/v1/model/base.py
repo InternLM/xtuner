@@ -4,6 +4,7 @@ import multiprocessing as py_mp
 import os
 import pydoc
 import re
+from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from functools import reduce
@@ -122,12 +123,6 @@ class HFSaveCfg(PydanticBaseModel):
             ),
         ),
     ] = 1024**3 * 4
-    # TODO: `XTunerBaseModel` should also be able to specify which parameters to be trained in fp32,
-    # currently it could only be specified in HFSaveCfg
-    # Each entry is a **regex** pattern (passed to `re.search`) matched against the HF parameter name.
-    # Remember to escape literal dots, e.g. use r"model\.layers\.\d+\.weight" instead of
-    # r"model.layers.\d+.weight" to avoid unintended wildcard matches.
-    fp32_keys_pattern: Annotated[list[str] | None, Parameter(group="model")] = None
 
 
 class XTunerBaseModelConfig(PydanticBaseModel):
@@ -546,6 +541,210 @@ class _HFSaveBucketItem(NamedTuple):
     reconstruction_bytes: int
 
 
+def reduce_replicated_grads(params: Iterable[tuple[str, torch.Tensor]]) -> None:
+    """Mean-reduce the gradients that FSDP leaves unreduced.
+
+    Parameters kept outside FSDP's param groups exist as one full copy per rank, so PyTorch never
+    all-reduces their gradients. Replicas are grouped by their target process group and reduced with
+    one coalesced collective per group. Plain FSDP shards have no Replicate dimension and are skipped.
+
+    Args:
+        params (Iterable[tuple[str, torch.Tensor]]): Runtime names and the parameters to reduce; entries
+            whose ``grad`` is ``None`` are ignored.
+    """
+    grads_by_group: dict[dist.ProcessGroup, list[torch.Tensor]] = {}
+    for _, param in params:
+        if param.grad is None or not isinstance(param, DTensor):
+            continue
+        replicate_dims = [i for i, placement in enumerate(param.placements) if isinstance(placement, Replicate)]
+        if not replicate_dims:
+            continue
+
+        mesh = param.device_mesh
+        if mesh.ndim == 1:
+            # The single dimension is the replica dimension: a world mesh (Dense) or an EP sub-mesh.
+            group, replica_size = mesh.get_group(), mesh.size()
+        else:
+            assert mesh.mesh_dim_names is not None
+            dim_names = tuple(mesh.mesh_dim_names[i] for i in replicate_dims)
+            # `DeviceMesh.get_group()` only supports a single mesh dimension, so calling it directly on
+            # a multi-dim sub-mesh raises. `_flatten()` collapses all Replicate dims into a 1D mesh
+            # whose process group covers every rank across those dimensions, allowing a single
+            # all_reduce regardless of how many Replicate dims exist.
+            flat_mesh = mesh[dim_names]._flatten() if len(dim_names) > 1 else mesh[dim_names[0]]
+            group, replica_size = flat_mesh.get_group(), flat_mesh.size()
+
+        grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
+        # Pre-scale locally so the SUM all_reduce below yields the mean across replicas.
+        grad.div_(replica_size)
+        grads_by_group.setdefault(group, []).append(grad)
+
+    for group, grads in grads_by_group.items():
+        with dist._coalescing_manager(group=group):
+            for grad in grads:
+                dist.all_reduce(grad, dist.ReduceOp.SUM, group=group)
+
+
+class PrecisionPolicy:
+    """Single owner of one model instance's FP32 declarations.
+
+    A module declares its own precision intent with the instance attributes ``fp32_param_names`` and
+    ``fp32_buffer_names``, holding names relative to that module and independent of the HF checkpoint
+    namespace. Declarations are resolved into runtime names on first query and cached, because
+    ``fully_shard`` rebuilds every ``Parameter`` (fp32 master, DTensor, float8 padding) while the
+    runtime names stay stable.
+
+    Three kinds of declaration, each with its own FSDP and save semantics:
+
+    - **fp32 params**: kept as world-wide ``Replicate`` outside FSDP's param groups. They need one
+      explicit gradient reduction and are written back to the checkpoint as fp32.
+    - **fp32 buffers**: only protected from dtype casts. They are neither sharded nor reduced, and are
+      written back as fp32.
+    - **fp32 units** (``pin_unit``): an existing FSDP unit that simply computes in fp32. Its weights
+      are still sharded and are still saved as bf16.
+
+    Args:
+        model (BaseModel): The model instance that owns this policy.
+    """
+
+    def __init__(self, model: "BaseModel") -> None:
+        self.model = model
+        self._resolved = False
+        self._param_names: frozenset[str] = frozenset()
+        self._buffer_names: frozenset[str] = frozenset()
+        self._fp32_units: set[nn.Module] = set()
+
+    @property
+    def param_names(self) -> frozenset[str]:
+        """Runtime names of the parameters that must stay in fp32 compute."""
+        self._resolve()
+        return self._param_names
+
+    def keeps_buffer(self, name: str) -> bool:
+        """Whether ``_to_device_dtype`` must preserve this buffer's dtype.
+
+        Args:
+            name (str): Runtime buffer name.
+
+        Returns:
+            bool: ``True`` when the buffer is declared as an fp32 buffer.
+        """
+        self._resolve()
+        return name in self._buffer_names
+
+    def save_dtype(self, name: str, runtime_dtype: torch.dtype, *, is_buffer: bool) -> torch.dtype:
+        """Checkpoint dtype for one runtime tensor.
+
+        Args:
+            name (str): Runtime parameter or buffer name.
+            runtime_dtype (torch.dtype): The dtype the tensor currently holds.
+            is_buffer (bool): Whether ``name`` refers to a buffer.
+
+        Returns:
+            torch.dtype: The dtype to write into the HF checkpoint.
+        """
+        self._resolve()
+        if is_buffer:
+            # Undeclared buffers keep their runtime dtype; changing them would alter existing checkpoints.
+            return torch.float32 if name in self._buffer_names else runtime_dtype
+        # Pinned units only affect compute: their weights still go out as bf16, on purpose.
+        return torch.float32 if name in self._param_names else torch.bfloat16
+
+    def pin_unit(self, module: nn.Module) -> None:
+        """Mark an existing FSDP unit to compute in fp32.
+
+        Args:
+            module (nn.Module): An ``nn.Module`` that ``fully_shard`` is later called on.
+        """
+        self._fp32_units.add(module)
+
+    def mp_policy(self, module: nn.Module, default: MixedPrecisionPolicy) -> MixedPrecisionPolicy:
+        """Mixed precision for one FSDP unit.
+
+        Args:
+            module (nn.Module): The FSDP unit about to be sharded.
+            default (MixedPrecisionPolicy): The policy to use when the unit is not pinned.
+
+        Returns:
+            MixedPrecisionPolicy: fp32 in/out for pinned units, ``default`` otherwise.
+        """
+        if module in self._fp32_units:
+            return MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32)
+        return default
+
+    def to_world_replicate(self, name: str, param: nn.Parameter, world_mesh: DeviceMesh) -> nn.Parameter:
+        """Rebuild ``param`` as a world-wide ``Replicate`` DTensor.
+
+        Idempotent: a parameter that already matches is returned unchanged, which keeps its identity
+        across MoE's layer-then-root ``fully_shard`` calls.
+
+        Args:
+            name (str): Runtime parameter name, used in error messages.
+            param (nn.Parameter): The parameter as currently registered.
+            world_mesh (DeviceMesh): The mesh covering every training replica.
+
+        Returns:
+            nn.Parameter: ``param`` itself when it is already world-wide ``Replicate``, otherwise a
+            rebuilt parameter.
+        """
+        if isinstance(param, DTensor):
+            if any(not isinstance(placement, Replicate) for placement in param.placements):
+                # Gathering shards is outside this path's responsibility.
+                raise ValueError(
+                    f"FP32 parameter {name} has non-replicate placements {tuple(param.placements)} on "
+                    f"mesh {param.device_mesh}; cannot rematerialize it as a world-wide replica "
+                    f"without gathering shards."
+                )
+            if param.device_mesh == world_mesh:
+                # MoE shards every layer and then the root; keep the parameter identity on the second pass.
+                return param
+            # A fully replicated sub-mesh already holds the full value on every rank: never gather.
+            local = param.to_local().detach()
+        else:
+            local = param
+        return nn.Parameter(
+            distribute_tensor(local, world_mesh, [Replicate() for _ in range(world_mesh.ndim)]),
+            requires_grad=param.requires_grad,
+        )
+
+    def _resolve(self) -> None:
+        if self._resolved:
+            return
+        clean = self.model._clean_param_name
+        actual_params: set[str] = set()
+        actual_buffers: set[str] = set()
+        declared_params: set[str] = set()
+        declared_buffers: set[str] = set()
+        for path, module in self._iter_owned_modules():
+            prefix = f"{path}." if path else ""
+            actual_params.update(clean(prefix + name) for name, _ in module.named_parameters(recurse=False))
+            actual_buffers.update(clean(prefix + name) for name, _ in module.named_buffers(recurse=False))
+            declared_params.update(clean(prefix + name) for name in getattr(module, "fp32_param_names", ()))
+            declared_buffers.update(clean(prefix + name) for name in getattr(module, "fp32_buffer_names", ()))
+
+        # Names are declared by hand, so a typo or a rename must fail on first use instead of silently
+        # leaving the tensor unpinned.
+        if missing := declared_params - actual_params:
+            raise ValueError(f"FP32 parameter declarations not found in the runtime model: {sorted(missing)}")
+        if missing := declared_buffers - actual_buffers:
+            raise ValueError(f"FP32 buffer declarations not found in the runtime model: {sorted(missing)}")
+
+        self._param_names = frozenset(declared_params)
+        self._buffer_names = frozenset(declared_buffers)
+        self._resolved = True
+
+    def _iter_owned_modules(self) -> Iterable[tuple[str, nn.Module]]:
+        def walk(module: nn.Module, path: str) -> Iterable[tuple[str, nn.Module]]:
+            yield path, module
+            for name, child in module.named_children():
+                if isinstance(child, BaseModel):
+                    # A nested model owns its own policy and resolves its own declarations.
+                    continue
+                yield from walk(child, f"{path}.{name}" if path else name)
+
+        yield from walk(self.model, "")
+
+
 class BaseModel(nn.Module):
     """Base class for all xtuner training models with HF checkpoint I/O
     support.
@@ -572,6 +771,7 @@ class BaseModel(nn.Module):
     def __init__(self, config: XTunerBaseModelConfig):
         super().__init__()
         self.config = config
+        self.precision = PrecisionPolicy(self)
 
         self._hf_path: Path | None = None  # type: ignore
         self._async_hf_tensor_cache: dict[tuple[Any, ...], torch.Tensor] = {}
@@ -602,8 +802,21 @@ class BaseModel(nn.Module):
         loaded_keys, unloaded_keys, missing_keys = self._load_params(hf_loader, strict=strict)
         return loaded_keys, unloaded_keys, missing_keys
 
+    @torch.no_grad()
     def scale_and_reduce_grad(self):
-        return
+        """Reduce the gradients that FSDP does not reduce.
+
+        Pinned parameters live outside FSDP's param groups as one full copy per rank, so PyTorch never all-reduces
+        them. Ordinary FSDP shards have no Replicate dimension and need no help here.
+        """
+        pinned = self.precision.param_names
+        if not pinned:
+            return
+        reduce_replicated_grads(
+            (name, param)
+            for name, param in self.trainable_parameters()
+            if param.grad is not None and self._clean_param_name(name) in pinned
+        )
 
     def cal_grad_norm(self, grads: list[DTensor], dtype=torch.float32):
         from xtuner.v1.utils.grad_norm import cal_grad_norm
@@ -664,85 +877,42 @@ class BaseModel(nn.Module):
         offload_policy: CPUOffloadPolicy | None,
         module: nn.Module | None = None,
     ) -> None:
-        def traverse(module):
-            for name, param in module.named_parameters(recurse=False):
-                full_name = full_param_name_mapping[id(param)]
-                full_name = self._clean_param_name(full_name)
-                # Match fp32 patterns against the post-mapping HF keys (the names that actually land
-                # in the saved checkpoint), so this FSDP-ignore decision stays consistent with the
-                # save path (`_split_ignored_params` / `_get_save_dtype`). `load_spec_mapping` is
-                # built in `_init_load_spec` during __init__ (and rebuilt after fp8 padding), both
-                # of which run before `fully_shard`, so the lookup is always populated here.
-                load_spec = self.load_spec_mapping.get(full_name)
-                if load_spec is None:
-                    raise ValueError(f"Internal Error. Parameter {full_name} not found in load_spec_mapping.")
-                hf_name_list = load_spec.global_hf_keys
-
-                for hf_name in hf_name_list:
-                    if any(re.search(p, hf_name) for p in patterns):  # type: ignore
-                        # FP32-ignored params must be world-wide replicas so
-                        # scale_and_reduce_grad / grad-norm cover every FSDP rank.
-                        # MoE may have already placed them on an EP-only (or EP x
-                        # expert-TP) mesh; normalize that layout here.
-                        if isinstance(param, DTensor):
-                            # Already DTensor(world_mesh, all Replicate) → no-op
-                            # (idempotent under MoE's layer-then-root _fully_shard).
-                            if param.device_mesh == self.world_mesh and all(
-                                isinstance(placement, Replicate) for placement in param.placements
-                            ):
-                                ignored_params.add(param)
-                                break
-                            # Any non-replicate placement → fail closed. Gathering
-                            # shards is outside this path's responsibility.
-                            if any(not isinstance(placement, Replicate) for placement in param.placements):
-                                raise ValueError(
-                                    f"FP32-ignored parameter {full_name} has non-replicate "
-                                    f"placements {tuple(param.placements)} on mesh "
-                                    f"{param.device_mesh}; cannot rematerialize as a "
-                                    f"world-wide replica without gathering shards."
-                                )
-                            # Fully-replicated DTensor on another mesh → rematerialize
-                            # via to_local() (local already holds the full value; never gather).
-                            local_param = param.to_local().detach()
-                        else:
-                            # Plain tensor → rematerialize onto world_mesh as all Replicate.
-                            local_param = param
-                        assert self.world_mesh is not None
-                        dist_param = nn.Parameter(
-                            distribute_tensor(
-                                local_param, self.world_mesh, [Replicate() for _ in range(self.world_mesh.ndim)]
-                            ),
-                            requires_grad=param.requires_grad,
-                        )
-                        module.register_parameter(name, dist_param)
-                        ignored_params.add(dist_param)
-                        break
-
-            for child in module.children():
-                traverse(child)
-
-        # Collect the parameters of `target` that match any fp32 pattern so they can be
-        # excluded from FSDP sharding (passed as `ignored_params`).
-        #
-        # We intentionally iterate over `self.named_parameters()` rather than
-        # `target.named_parameters()` so that `name` is always relative to the root model
-        # (`self`). This matters when `target` is a sub-module (e.g. `self.embed_tokens`):
-        # `target.named_parameters()` would yield bare names like `"weight"`, which
-        # `to_hf_key_list` cannot resolve correctly. By iterating from `self` we get the
-        # full path (e.g. `"embed_tokens.weight"`) and filter to `target`'s parameters
-        # using identity comparison.
-        full_param_name_mapping = {id(param): name for name, param in self.named_parameters()}
-        ignored_params: set[nn.Parameter] = set()
-        patterns = self.config.hf_save_cfg.fp32_keys_pattern
-
         target = module or self
-        if patterns:
+        ignored_params: set[nn.Parameter] = set()
+        pinned = self.precision.param_names
+        world_mesh = self.world_mesh
+        if pinned and world_mesh is not None:
+            # Map parameters back to their root-relative names via `self` rather than `target`: a
+            # sub-module target only exposes bare names like "weight". `remove_duplicate=False` keeps
+            # both names of a tied parameter (`embed_tokens.weight` / `lm_head.weight`), so a
+            # declaration under either name still matches.
+            names_by_id: dict[int, list[str]] = defaultdict(list)
+            for name, param in self.named_parameters(remove_duplicate=False):
+                names_by_id[id(param)].append(self._clean_param_name(name))
+
+            def traverse(mod: nn.Module) -> None:
+                for local_name, param in mod.named_parameters(recurse=False):
+                    names = names_by_id[id(param)]
+                    if not any(name in pinned for name in names):
+                        continue
+                    # FP32 parameters must be world-wide replicas so that `scale_and_reduce_grad`
+                    # and the grad norm cover every FSDP rank. MoE may already have placed them on
+                    # an EP-only (or EP x expert-TP) mesh; normalize that layout here.
+                    dist_param = self.precision.to_world_replicate(names[0], param, world_mesh)
+                    if dist_param is not param:
+                        mod.register_parameter(local_name, dist_param)
+                    ignored_params.add(dist_param)
+                for child in mod.children():
+                    traverse(child)
+
             traverse(target)
 
         fully_shard(
             target,
             mesh=mesh,
-            mp_policy=mp_policy,
+            # `fp32_lm_head` registers its units on the policy; Dense / MoE no longer compute a
+            # second policy of their own.
+            mp_policy=self.precision.mp_policy(target, mp_policy),
             reshard_after_forward=reshard_after_forward,
             offload_policy=offload_policy,
             ignored_params=ignored_params if ignored_params else None,
@@ -1301,12 +1471,6 @@ class BaseModel(nn.Module):
         )
         return ret
 
-    def _get_save_dtype(self, name: str, dtype: torch.dtype) -> torch.dtype:
-        patterns = self.config.hf_save_cfg.fp32_keys_pattern
-        if patterns and any(re.search(p, name) for p in patterns):
-            return torch.float32
-        return dtype
-
     def _get_hf_param(
         self,
         params: list[tuple[torch.Tensor, LoadSpec]],
@@ -1395,11 +1559,12 @@ class BaseModel(nn.Module):
         # LoadSpec records both continuous and interleaved shard history, so every
         # parameter enters the same SavePlan path from its runtime-local tensor.
         runtime_tensor = param._local_tensor if isinstance(param, DTensor) else param
-        if runtime_tensor.is_floating_point() and not is_buffer:
-            save_dtype = self._get_save_dtype(load_spec.global_hf_keys[0], torch.bfloat16)
+        if runtime_tensor.is_floating_point():
+            # Parameters and buffers share one declaration list, so a fused parameter writes all of its
+            # HF keys with the same dtype instead of only the first one.
+            save_dtype = self.precision.save_dtype(load_spec.name, runtime_tensor.dtype, is_buffer=is_buffer)
             checkpoint_tensor = runtime_tensor.to(dtype=save_dtype)
         else:
-            # Persistent buffers, e.g. FoPE rotary coefficients, keep their runtime dtype.
             checkpoint_tensor = runtime_tensor
 
         save_plan = load_spec.plan_hf_save(
@@ -1972,18 +2137,24 @@ class BaseModel(nn.Module):
                 f"_to_device_dtype only accepts floating point or complex dtypes, but got desired dtype={dtype}"
             )
 
-        buffer_ids = set()
+        # `Module._apply()` only passes the tensor itself into `fn`, so the exempt buffers are collected
+        # by identity beforehand. A single `_to_device_dtype` call on a Compose model recurses into the
+        # sub-models, so each nested model's own policy contributes its declared buffers.
+        buffer_ids = {
+            id(buffer)
+            for model in self.modules()
+            if isinstance(model, BaseModel)
+            for name, buffer in model.named_buffers()
+            if model.precision.keeps_buffer(model._clean_param_name(name))
+        }
         if skip_buffers_dtype:
-            # `Module._apply()` only passes the tensor itself into `fn`, so we
-            # detect buffers by identity and let `_apply()` keep handling the
-            # recursion for us.
-            buffer_ids = {
+            buffer_ids |= {
                 id(buffer) for module in self.modules() for buffer in module._buffers.values() if buffer is not None
             }
 
         def _convert_tensor(tensor: torch.Tensor) -> torch.Tensor:
             try:
-                if skip_buffers_dtype and id(tensor) in buffer_ids:
+                if id(tensor) in buffer_ids:
                     if device is None:
                         return tensor
                     return tensor.to(device=device, non_blocking=non_blocking)

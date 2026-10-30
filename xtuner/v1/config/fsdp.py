@@ -19,8 +19,8 @@ class FSDPConfig(BaseModel):
     vision_recompute_ratio: Annotated[float, Parameter(help="Recompute ratio for vision modules")] = 1.0
     checkpoint_preserve_rng_state: Annotated[bool, Parameter(help="Preserve RNG state during checkpointing")] = True
     # Training-time FSDP CPU offload is version-sensitive for XTuner model configs
-    # that keep selected fp32 trainable parameters outside FSDP via
-    # fp32_keys_pattern. The Qwen3.5-VL MoE RL path was verified to run on Torch
+    # that keep selected fp32 trainable parameters outside FSDP (see
+    # `PrecisionPolicy`). The Qwen3.5-VL MoE RL path was verified to run on Torch
     # 2.9, but on PyTorch 2.12.x the combination of ignored fp32 params,
     # checkpointed forward/backward, and CPU offload can trigger autograd's
     # internal stream assertion:

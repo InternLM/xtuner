@@ -74,6 +74,9 @@ class NoAuxRouter(nn.Module, RouterProtocol):
         self.register_buffer(
             "e_score_correction_bias", torch.empty((self.n_routed_experts), device=get_device(), dtype=torch.float32)
         )
+        # The bias is accumulated after every optimizer step, so bf16 would eat the update; read by
+        # `BaseModel.precision` to keep it out of dtype casts and write it back as fp32.
+        self.fp32_buffer_names = ("e_score_correction_bias",)
 
     def forward(self, logits, rollout_routed_experts: torch.Tensor | None = None) -> RouterResults:
         if self.scoring_func == "sigmoid":

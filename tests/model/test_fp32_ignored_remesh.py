@@ -1,6 +1,6 @@
 """Regression tests for FP32-ignored param remesh inside ``BaseModel._fully_shard``.
 
-Contract: parameters matching ``fp32_keys_pattern`` must end as
+Contract: parameters declared in ``fp32_param_names`` must end as
 ``DTensor(world_mesh, all Replicate)`` so grad reduce / norm stay consistent
 across FSDP ranks. Remesh must be idempotent under MoE's layer-then-root
 ``_fully_shard`` calls.
@@ -16,7 +16,6 @@ from torch.distributed.tensor import DTensor, Replicate
 
 from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.config import FSDPConfig
-from xtuner.v1.model.base import HFSaveCfg
 from xtuner.v1.model.moe.moe import MoE
 from xtuner.v1.model.moe.qwen3 import Qwen3MoEConfig
 from xtuner.v1.module.attention import MHAConfig
@@ -51,8 +50,6 @@ def _tiny_moe_cfg() -> Qwen3MoEConfig:
         compile_cfg=False,
         balancing_loss_cfg=None,
         z_loss_cfg=None,
-        # Match router gate HF key ``model.layers.*.mlp.gate.weight``.
-        hf_save_cfg=HFSaveCfg(fp32_keys_pattern=[r"gate\.weight"]),
     )
 
 
@@ -70,6 +67,8 @@ class TestFP32IgnoredRemesh(DeterministicDDPTestCase):
         torch.cuda.set_device(rank % torch.cuda.device_count())
         model = _tiny_moe_cfg().build().cuda()
         model.init_weights()
+        # Pin the router gate so `_fully_shard` has to normalize its layout.
+        model.layers["0"].gate.fp32_param_names = ("weight",)
         model._init_device_mesh(
             FSDPConfig(
                 ep_size=2,

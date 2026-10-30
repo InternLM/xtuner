@@ -49,7 +49,6 @@ def _config(ep_size: int, sp_size: int) -> Qwen3MoEConfig:
         balancing_loss_cfg=None,
         z_loss_cfg=None,
     )
-    config.hf_save_cfg.fp32_keys_pattern = [r"^model\.layers\.0\.input_layernorm\.weight$"]
     return config
 
 
@@ -76,6 +75,8 @@ class TestMoEIgnoredGradSync(DeterministicDDPTestCase):
         with torch.device("meta"):
             model = _config(ep_size, sp_size).build()
         assert all(parameter.is_meta for parameter in model.parameters())
+        # Pin one ordinary parameter so it is excluded from FSDP and must be reduced by hand.
+        model.layers["0"].input_layernorm.fp32_param_names = ("weight",)
         model.fully_shard(
             FSDPConfig(ep_size=ep_size, param_dtype=torch.bfloat16, reduce_dtype=torch.float32, recompute_ratio=0)
         )
