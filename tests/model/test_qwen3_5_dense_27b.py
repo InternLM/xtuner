@@ -471,10 +471,13 @@ class TestQwen3_8_VLDense27B(DeterministicDDPTestCase):
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires 2 CUDA devices")
 class TestQwen3_8MTPSequenceParallel(DeterministicDDPTestCase):
-    def test_mtp_loss_and_gradients_match_full_sequence(self):
+    @parametrize.parametrize("loss_type", [("ce",), ("e2e_tv",)])
+    def test_mtp_loss_and_gradients_match_full_sequence(self, loss_type):
         """Packed LM/MTP loss and parameter grads under SP2 match the unsplit baseline."""
         self.create_pg("cuda")
         config = _tiny_qwen3_8_text_config()
+        assert config.mtp_config is not None
+        config.mtp_config = config.mtp_config.model_copy(update={"loss_type": loss_type})
         self.assertEqual(config.layers_type[-1], "full_attention")
 
         torch.manual_seed(17)
@@ -527,13 +530,12 @@ class TestQwen3_8MTPSequenceParallel(DeterministicDDPTestCase):
             float((sp_gradients[name] - expected).norm() / expected.norm().clamp_min(1e-12))
             for name, expected in baseline_gradients.items()
         )
+        # F.cosine_similarity clamps the norm product at 1e-8; GDN dt_bias/A_log grads in this
+        # tiny model are ~1e-9, so compute the cosine directly.
         min_cosine_similarity = min(
             float(
-                F.cosine_similarity(
-                    sp_gradients[name].flatten(),
-                    expected.flatten(),
-                    dim=0,
-                )
+                (sp_gradients[name].flatten() @ expected.flatten())
+                / (sp_gradients[name].norm() * expected.norm()).clamp_min(1e-30)
             )
             for name, expected in baseline_gradients.items()
         )
