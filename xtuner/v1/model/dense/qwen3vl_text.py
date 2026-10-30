@@ -95,6 +95,7 @@ class Qwen3VLTextDense(Qwen3Dense):
 
         self._maybe_forward_mtp(
             layer_hidden_states=layer_hidden_states,
+            hidden_states=hidden_states,
             seq_ctx=seq_ctx,
             loss_ctx=loss_ctx,
             position_embeddings=position_embeddings,

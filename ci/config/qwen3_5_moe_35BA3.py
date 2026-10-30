@@ -11,7 +11,7 @@ from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model.compose.qwen3_5.qwen3_5_config import Qwen3_5_VLMoE35BA3SplitConfig
 from xtuner.v1.model.moe.qwen3_5_text_split import Qwen3_5_VLTextMoE35BA3BSplitConfig
 from xtuner.v1.train import TrainerConfig
-from xtuner.v1.model.moe.moe import MTPConfig
+from xtuner.v1.module.mtp import MTPConfig
 
 
 from xtuner.v1.float8.config import Float8Config, ScalingGranularity
