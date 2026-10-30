@@ -15,6 +15,12 @@ TestGlm53VlCollatorCastsMediaToBf16
     test_multi_item_pack_cast_preserves_order_and_values  拼包逐段数值一致
 TestGlm53PlaceholderPackWalksLossPath
     test_glm53_placeholder_pack_walks_ce_loss_path  占位 pack 走完 CE loss 路径：0 loss、可 backward
+TestGlm53VlCollatorSingleMediaReuse
+    test_single_image_pack_reuses_item_tensor        单图 pack 复用 item 张量（零拷贝）
+    test_single_video_pack_reuses_item_tensor        单视频 pack 复用 item 张量（零拷贝）
+    test_multi_item_pack_still_concatenates          多 item pack 仍走 cat 且顺序保持
+    test_truncated_pack_reuses_survivor_media        截断丢尾后幸存者媒体被复用
+    test_mixed_image_and_video_items_reuse_independently  图+视频 pack 各模态独立复用
 TestGlm53SequenceContextSplitKeepsMmAlignment
     test_glm53_sequence_context_split_keeps_mm_alignment  SP 切分保持模态标记对齐
 """
@@ -359,6 +365,68 @@ class TestGlm53PlaceholderPackWalksLossPath:
         loss.backward()
         assert hidden.grad is not None
         assert torch.isfinite(hidden.grad).all()
+
+
+class TestGlm53VlCollatorSingleMediaReuse:
+    IMAGE_TOKEN_ID = 999
+    MERGE_UNIT = 4
+
+    def _collate(self, pack, pack_max_length=64):
+        # media_dtype=fp32 隔离 #2207 的运输 cast（默认 bf16 会复制张量），
+        # 让本类的 `is` 断言只检验单媒体复用本身。
+        return glm53_vl_sft_collator(
+            [pack],
+            pack_max_length=pack_max_length,
+            padding_token_idx=0,
+            image_token_id=self.IMAGE_TOKEN_ID,
+            merge_unit=self.MERGE_UNIT,
+            media_dtype=torch.float32,
+        )[0]["seq_ctx"]
+
+    def test_single_image_pack_reuses_item_tensor(self):
+        # 单媒体 pack（最常见情形）必须零拷贝：直接复用 item 里已有的张量（引用相等）。
+        item = _glm53_item(text_len=10, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=4)
+        seq_ctx = self._collate([item])
+        assert seq_ctx.pixel_values is item["pixel_values"]
+        assert seq_ctx.image_grid_thw is item["image_grid_thw"]
+        assert seq_ctx.pixel_values.is_contiguous()
+
+    def test_single_video_pack_reuses_item_tensor(self):
+        item = _glm53_video_item(text_len=10, image_token_id=self.IMAGE_TOKEN_ID, num_frames=4)
+        seq_ctx = self._collate([item])
+        assert seq_ctx.pixel_values_videos is item["pixel_values_videos"]
+        assert seq_ctx.video_grid_thw is item["video_grid_thw"]
+        assert seq_ctx.pixel_values_videos.is_contiguous()
+
+    def test_multi_item_pack_still_concatenates(self):
+        # 多 item pack 语义不变：真 cat、结果与参考一致、新缓冲、顺序保持。
+        item_a = _glm53_item(text_len=8, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=2)
+        item_b = _glm53_item(text_len=6, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=1)
+        seq_ctx = self._collate([item_a, item_b])
+        expected = torch.cat([item_a["pixel_values"], item_b["pixel_values"]], dim=0)
+        assert torch.equal(seq_ctx.pixel_values, expected)
+        assert seq_ctx.pixel_values.data_ptr() != item_a["pixel_values"].data_ptr()
+        assert seq_ctx.pixel_values.data_ptr() != item_b["pixel_values"].data_ptr()
+        assert torch.equal(seq_ctx.pixel_values[: item_a["pixel_values"].shape[0]], item_a["pixel_values"])
+        assert seq_ctx.image_grid_thw.shape[0] == 2
+
+    def test_truncated_pack_reuses_survivor_media(self):
+        # 超长 pack 丢尾后只剩单个幸存 item：被丢弃 item 的媒体不进列表，幸存者被复用。
+        survivor = _glm53_item(text_len=10, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=4)
+        dropped = _glm53_item(text_len=30, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=2)
+        seq_ctx = self._collate([survivor, dropped], pack_max_length=16)
+        assert seq_ctx.pixel_values is survivor["pixel_values"]
+        assert seq_ctx.image_grid_thw is survivor["image_grid_thw"]
+
+    def test_mixed_image_and_video_items_reuse_independently(self):
+        # 图+视频 pack：两模态各自单元素，各自独立复用。
+        image_item = _glm53_item(text_len=8, image_token_id=self.IMAGE_TOKEN_ID, num_placeholders=2)
+        video_item = _glm53_video_item(text_len=8, image_token_id=self.IMAGE_TOKEN_ID, num_frames=1)
+        seq_ctx = self._collate([image_item, video_item])
+        assert seq_ctx.pixel_values is image_item["pixel_values"]
+        assert seq_ctx.image_grid_thw is image_item["image_grid_thw"]
+        assert seq_ctx.pixel_values_videos is video_item["pixel_values_videos"]
+        assert seq_ctx.video_grid_thw is video_item["video_grid_thw"]
 
 
 @pytest.fixture

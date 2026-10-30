@@ -363,8 +363,14 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             image_grid_list.append(processed_i["image_grid_thw"])
             del image, processed_i
 
-        pixel_values = torch.cat(pixel_values_list, dim=0)
-        image_grid_thw = torch.cat(image_grid_list, dim=0)
+        # A single-image sample already holds the processor's final tensor; reuse it
+        # instead of paying a full torch.cat copy of every patch.
+        if len(pixel_values_list) == 1:
+            pixel_values = pixel_values_list[0]
+            image_grid_thw = image_grid_list[0]
+        else:
+            pixel_values = torch.cat(pixel_values_list, dim=0)
+            image_grid_thw = torch.cat(image_grid_list, dim=0)
         num_images = len(pixel_values_list)
         del pixel_values_list, image_grid_list
 
@@ -511,7 +517,12 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             grid_list.append(out["video_grid_thw"][0])
             metadata_list.append(metadata)
 
-        pixel_values_videos = torch.cat(pixel_values_list, dim=0)
+        # A single-video sample already holds the processor's final tensor; reuse it
+        # instead of paying a full torch.cat copy of every patch.
+        if len(pixel_values_list) == 1:
+            pixel_values_videos = pixel_values_list[0]
+        else:
+            pixel_values_videos = torch.cat(pixel_values_list, dim=0)
         video_grid_thw = torch.stack(grid_list)
 
         literal_spans: list[tuple[int, int]] = []

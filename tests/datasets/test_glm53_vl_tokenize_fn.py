@@ -20,6 +20,9 @@ TestGlm53NativeHFInputContract
 TestGlm53MixedMediaAndTruncation
     test_glm53_mixed_media_is_discarded             图文混合视频未支持：cache 警告丢弃、runtime 占位，不中断训练
     test_glm53_visual_truncation_is_dropped         截断会切断视觉跨度时 cache 阶段就丢弃
+TestGlm53SingleMediaTokenizeReuse
+    test_single_image_reuses_processor_output       单图样本复用 processor 输出（零拷贝）
+    test_single_video_reuses_processor_output       单视频样本同上
 TestGlm53MediaRoleContract
     test_media_is_collected_from_all_roles           system/assistant/tool 角色的图片也会被收集
     test_media_collection_preserves_input_order     媒体按原始消息顺序收集，与 HF 一致
@@ -485,6 +488,59 @@ class TestGlm53MixedMediaAndTruncation:
         short_fn.state = "runtime"
         with pytest.raises(AssertionError):
             short_fn(_image_item(image_fixture))
+
+
+class TestGlm53SingleMediaTokenizeReuse:
+    def _recording_processor(self, original, recorded):
+        # Spy that records each call's output and forwards everything else -- attributes
+        # included, since the tokenize fn also reads geometry attrs off the processor.
+        class Spy:
+            def __call__(self, **kwargs):
+                out = original(**kwargs)
+                recorded.append(out)
+                return out
+
+            def __getattr__(self, name):
+                return getattr(original, name)
+
+        return Spy()
+
+    def test_single_image_reuses_processor_output(self, tokenize_fn, image_fixture, monkeypatch):
+        # 单图样本（最常见情形）的 pixel_values/image_grid_thw 应是 processor 原输出对象本身，
+        # 而不是 cat 出来的全量拷贝（引用相等 = 零拷贝），且值与真实 processor 输出一致。
+        original = tokenize_fn.image_processor
+        recorded = []
+        monkeypatch.setattr(tokenize_fn, "image_processor", self._recording_processor(original, recorded))
+        tokenize_fn.state = "runtime"
+        actual = tokenize_fn(_image_item(image_fixture))
+
+        assert len(recorded) == 1
+        assert actual["pixel_values"] is recorded[0]["pixel_values"]
+        assert actual["image_grid_thw"] is recorded[0]["image_grid_thw"]
+
+        monkeypatch.undo()
+        from xtuner.v1.datasets.mllm_tokenize_fn import glm53_vl_tokenize_fn as module
+
+        image = module.apply_exif_orientation(module.load_image(image_fixture))
+        expected = original(images=[image], return_tensors="pt")
+        image.close()
+        assert torch.equal(actual["pixel_values"], expected["pixel_values"])
+        assert torch.equal(actual["image_grid_thw"], expected["image_grid_thw"])
+
+    def test_single_video_reuses_processor_output(self, tokenize_fn, video_fixture, monkeypatch):
+        original = tokenize_fn.video_processor
+        recorded = []
+        monkeypatch.setattr(tokenize_fn, "video_processor", self._recording_processor(original, recorded))
+        tokenize_fn.state = "runtime"
+        actual = tokenize_fn(_video_item(video_fixture))
+
+        assert len(recorded) == 1
+        assert actual["pixel_values_videos"] is recorded[0]["pixel_values_videos"]
+
+        # 去掉 spy 再跑一遍真实路径，值必须逐位一致。
+        monkeypatch.undo()
+        second = tokenize_fn(_video_item(video_fixture))
+        assert torch.equal(actual["pixel_values_videos"], second["pixel_values_videos"])
 
 
 class TestGlm53MediaRoleContract:

@@ -325,3 +325,62 @@ class TestGlm53ComposeForward:
         reference = model.language_model(ref_ctx, None).logits
 
         torch.testing.assert_close(logits, reference, rtol=0, atol=0)
+
+
+@pytest.mark.gpu
+class TestGlm53ComposeSingleModalityNoCopy:
+    """单模态 pack 进视觉塔前不再做全量 cat 拷贝（复用唯一张量）；图+视频 pack 仍统一
+    cat 后一次塔调用（保持各 rank 的 FSDP all-gather 序列一致，见上面的测试）。"""
+
+    def test_image_only_pack_feeds_tower_without_copy(self):
+        model = _build_model()
+        captured = []
+        handle = model.vision_tower.register_forward_pre_hook(lambda module, args: captured.append(args))
+        try:
+            num_placeholders = 4  # merge_unit = MERGE**2 = 4
+            raw_patches = num_placeholders * MERGE * MERGE
+            grid_side = int(raw_patches**0.5)
+            pixel_values = torch.randn(raw_patches, _patch_dim(model), device="cuda", dtype=torch.bfloat16)
+            image_grid_thw = torch.tensor([[1, grid_side, grid_side]], device="cuda")
+            input_ids = torch.randint(2, 200, (1, SEQ_LEN), device="cuda")
+            mm_type = torch.zeros(1, SEQ_LEN, dtype=torch.long, device="cuda")
+            mm_type[0, 10 : 10 + num_placeholders] = 1
+            seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cuda")
+            seq_ctx.mm_token_type_ids = mm_type
+            seq_ctx.pixel_values = pixel_values
+            seq_ctx.image_grid_thw = image_grid_thw
+            model(seq_ctx=seq_ctx, loss_ctx=None)
+        finally:
+            handle.remove()
+
+        # 塔收到的就是 pack 里的张量本体（引用相等 = 零拷贝）。
+        assert len(captured) == 1
+        assert captured[0][0] is pixel_values
+        assert captured[0][1] is image_grid_thw
+
+    def test_mixed_pack_still_concatenates_for_the_tower(self):
+        model = _build_model()
+        captured = []
+        handle = model.vision_tower.register_forward_pre_hook(lambda module, args: captured.append(args))
+        try:
+            input_ids = torch.randint(2, 200, (1, SEQ_LEN), device="cuda")
+            mm_type = torch.zeros(1, SEQ_LEN, dtype=torch.long, device="cuda")
+            mm_type[0, 10] = 1  # 一个图像 token：[1, 2, 2] 的 4 个 patch 合并成 1 个
+            mm_type[0, 60] = 2  # 一个视频 token
+            pixel_values = torch.randn(4, _patch_dim(model), device="cuda", dtype=torch.bfloat16)
+            pixel_values_videos = torch.randn(4, _patch_dim(model), device="cuda", dtype=torch.bfloat16)
+            grid = torch.tensor([[1, 2, 2]], device="cuda")
+            seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cuda")
+            seq_ctx.mm_token_type_ids = mm_type
+            seq_ctx.pixel_values, seq_ctx.image_grid_thw = pixel_values, grid
+            seq_ctx.pixel_values_videos, seq_ctx.video_grid_thw = pixel_values_videos, grid
+            model(seq_ctx=seq_ctx, loss_ctx=None)
+        finally:
+            handle.remove()
+
+        # 图+视频 pack 仍收到 cat 之后的新缓冲（值一致、地址独立于两个源）。
+        assert len(captured) == 1
+        tower_patches = captured[0][0]
+        assert torch.equal(tower_patches, torch.cat([pixel_values, pixel_values_videos], dim=0))
+        assert tower_patches.data_ptr() != pixel_values.data_ptr()
+        assert tower_patches.data_ptr() != pixel_values_videos.data_ptr()
