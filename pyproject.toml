@@ -86,7 +86,7 @@ all = [
   "jsonlines",
   "decord",
   "av",
-  "ray[default]==0.58.0",
+  "ray[default]==2.58.0",
   "httpx",
   "fastapi",
   "uvicorn",
