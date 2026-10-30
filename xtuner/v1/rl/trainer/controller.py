@@ -1,11 +1,13 @@
 import math
 import os
+from collections.abc import Iterable
 from typing import Any, Literal, TypedDict
 
 import ray
 import torch
 from typing_extensions import NotRequired
 
+from xtuner.v1.data_proto.rl_data import MM_PIXEL_FIELDS
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.rl.utils import free_object_refs
@@ -16,6 +18,18 @@ from .worker import TrainingWorker, WorkerLogItem
 
 
 TRAIN_RAY_GET_TIMEOUT = os.getenv("XTUNER_TRAIN_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
+
+
+def _free_multimodal_inputs(contexts: Iterable[SequenceContext]) -> None:
+    """Release sampler-owned media refs once all training workers finished the
+    batch."""
+    refs = []
+    for seq_ctx in contexts:
+        for name in MM_PIXEL_FIELDS:
+            value = getattr(seq_ctx, name)
+            if isinstance(value, list):
+                refs.extend(value)
+    free_object_refs(refs)
 
 
 class ColateItem(TypedDict):
@@ -396,13 +410,7 @@ class TrainingController:
         try:
             log_infos = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         finally:
-            # free pixel values ref
-            free_pixel_value_refs: list[ray.ObjectRef] = []
-            for data in packed_data_batches:
-                if data["seq_ctx"].pixel_values is not None:
-                    free_pixel_value_refs.extend(data["seq_ctx"].pixel_values)
-            if len(free_pixel_value_refs) > 0:
-                free_object_refs(free_pixel_value_refs)
+            _free_multimodal_inputs(data["seq_ctx"] for data in packed_data_batches)
             del data_batch_refs
             del packed_data_batches
         return log_infos

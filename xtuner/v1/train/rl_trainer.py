@@ -308,6 +308,18 @@ def get_train_seq_ctx(
     if multimodal_train_info:
         seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
         seq_ctx.image_grid_thw = _to_cpu_tensor(multimodal_train_info.get("image_grid_thw"), dtype=torch.long)
+        seq_ctx.pixel_values_videos = multimodal_train_info.get("pixel_values_videos")
+        seq_ctx.video_grid_thw = _to_cpu_tensor(multimodal_train_info.get("video_grid_thw"), dtype=torch.long)
+        mm_token_type_ids = _to_cpu_tensor(multimodal_train_info.get("mm_token_type_ids"), dtype=torch.long)
+        if mm_token_type_ids is not None:
+            # 模态标记覆盖展开后的 prompt；response 的输入 token 是文本，补 0（末 token 已由调用方去尾）。
+            expected_prompt_length = input_ids.size(-1) - len_response_ids
+            if mm_token_type_ids.shape != (1, expected_prompt_length):
+                raise ValueError(
+                    f"mm_token_type_ids shape {tuple(mm_token_type_ids.shape)} does not match "
+                    f"training prompt shape (1, {expected_prompt_length})"
+                )
+            seq_ctx.mm_token_type_ids = torch.nn.functional.pad(mm_token_type_ids, (0, len_response_ids), value=0)
         num_img_tokens = multimodal_train_info.get("num_img_tokens")
         if num_img_tokens is not None:
             seq_ctx.num_img_tokens = [num_img_tokens]
