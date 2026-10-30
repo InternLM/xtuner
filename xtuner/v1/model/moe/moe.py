@@ -77,7 +77,7 @@ from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
     MoEDecoderLayerOutput,
     MoEGate,
 )
-from xtuner.v1.module.mtp import MTPBlock, MTPLayer
+from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer  # noqa: F401  # MTPConfig re-exported for old imports
 from xtuner.v1.utils import (
     get_device,
     get_logger,

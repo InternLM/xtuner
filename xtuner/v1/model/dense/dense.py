@@ -18,8 +18,8 @@ from typing_extensions import overload, override
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.loss import BaseLossContext
-from xtuner.v1.loss.mtp_loss import MTPLossConfig, MTPLossContext
+from xtuner.v1.loss import BaseLossContext, MTPE2ETVLossContext
+from xtuner.v1.loss.mtp_loss import MTPE2ETVLossConfig, MTPLossConfig, MTPLossContext
 from xtuner.v1.model.base import (
     DEFAULT_FLOAT8_CFG,
     BaseModel,
@@ -57,6 +57,7 @@ DENSE_COMPILE_CFG: dict[str, TorchCompileOption] = {
 class DenseLossContextDict(TypedDict):
     lm: BaseLossContext
     mtp: list[BaseLossContext] | None
+    mtp_e2e_tv: BaseLossContext | None
 
 
 class Dense(BaseModel):
@@ -133,6 +134,7 @@ class Dense(BaseModel):
 
         self._maybe_forward_mtp(
             layer_hidden_states=layer_hidden_states,
+            hidden_states=hidden_states,
             seq_ctx=seq_ctx,
             loss_ctx=loss_ctx,
             position_embeddings=position_embeddings,
@@ -147,6 +149,7 @@ class Dense(BaseModel):
         self,
         *,
         layer_hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor,
         seq_ctx: SequenceContext,
         loss_ctx: DenseLossContextDict | None,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
@@ -154,7 +157,11 @@ class Dense(BaseModel):
         position_ids: torch.Tensor,
         output: dict,
     ) -> None:
-        if self.mtp_block is None or loss_ctx is None or (mtp_loss_ctx_list := loss_ctx.get("mtp")) is None:
+        if self.mtp_block is None or loss_ctx is None:
+            return
+        mtp_loss_ctx_list = loss_ctx.get("mtp")
+        mtp_tv_loss_ctx = loss_ctx.get("mtp_e2e_tv")
+        if mtp_loss_ctx_list is None and mtp_tv_loss_ctx is None:
             return
         assert self.config.mtp_config is not None
 
@@ -170,12 +177,21 @@ class Dense(BaseModel):
             seq_ctx=mtp_seq_ctx,
         )
 
-        mtp_losses = torch.tensor(0.0, device=DEVICE)
-        for mtp_hidden, mtp_ctx in zip(mtp_outputs, mtp_loss_ctx_list):
-            mtp_loss, _ = self.lm_head(mtp_hidden["hidden_states"], cast(MTPLossContext, mtp_ctx))
-            mtp_losses += mtp_loss
+        if mtp_tv_loss_ctx is not None:
+            # One joint call is required: the acceptance products couple all recurrent MTP steps.
+            draft_hidden_states = [mtp_hidden["hidden_states"] for mtp_hidden in mtp_outputs]
+            mtp_losses, _ = self.lm_head(
+                (hidden_states, draft_hidden_states),
+                cast(MTPE2ETVLossContext, mtp_tv_loss_ctx),
+            )
+        else:
+            assert mtp_loss_ctx_list is not None
+            mtp_losses = torch.tensor(0.0, device=DEVICE)
+            for mtp_hidden, mtp_ctx in zip(mtp_outputs, mtp_loss_ctx_list):
+                mtp_loss, _ = self.lm_head(mtp_hidden["hidden_states"], cast(MTPLossContext, mtp_ctx))
+                mtp_losses += mtp_loss
+            mtp_losses = mtp_losses / len(mtp_loss_ctx_list)
 
-        mtp_losses = mtp_losses / len(mtp_loss_ctx_list)
         output["mtp_loss"] = mtp_losses * self.config.mtp_config.loss_scaling_factor
 
     def build_loss_ctx_batch(  # type: ignore[override]
@@ -186,12 +202,31 @@ class Dense(BaseModel):
         res: list[dict] = super().build_loss_ctx_batch(data_batch, sp_mesh)
         cu_seq_lens_list = [data["seq_ctx"].cu_seq_lens_k for data in data_batch]
 
-        if self.config.mtp_config is not None:
-            for mtp_idx in range(self.config.mtp_config.num_layers):
+        mtp_config = self.config.mtp_config
+        if mtp_config is not None and mtp_config.loss_type == "e2e_tv":
+            tv_loss_cfg = MTPE2ETVLossConfig(
+                ignore_idx=self.config.lm_loss_cfg.ignore_idx,
+                mode="chunk",
+                chunk_size=mtp_config.tv_loss_chunk_size,
+                loss_reduction=self.config.lm_loss_cfg.loss_reduction,
+                num_steps=mtp_config.num_layers,
+                detach_mtp_lm_head_weight=mtp_config.detach_mtp_lm_head_weight,
+            )
+            tv_loss_ctx_list = self._build_loss_ctx(tv_loss_cfg, data_batch, sp_mesh)
+            if tv_loss_ctx_list is not None:
+                tv_loss_ctx_list = MTPE2ETVLossContext.build_batches(  # type: ignore[assignment]
+                    cast(list[MTPE2ETVLossContext], tv_loss_ctx_list),  # type: ignore[arg-type]
+                    cu_seq_lens_list=cu_seq_lens_list,
+                    sp_mesh=sp_mesh,
+                )
+                for i, tv_loss_ctx in enumerate(tv_loss_ctx_list):
+                    res[i]["mtp_e2e_tv"] = tv_loss_ctx
+        elif mtp_config is not None:
+            for mtp_idx in range(mtp_config.num_layers):
                 mtp_loss_cfg = MTPLossConfig(
                     **self.config.lm_loss_cfg.model_dump(),
                     mtp_depth=mtp_idx + 1,
-                    detach_mtp_lm_head_weight=self.config.mtp_config.detach_mtp_lm_head_weight,
+                    detach_mtp_lm_head_weight=mtp_config.detach_mtp_lm_head_weight,
                 )
                 mtp_loss_ctx_list = self._build_loss_ctx(mtp_loss_cfg, data_batch, sp_mesh)
                 if mtp_loss_ctx_list is not None:
@@ -204,12 +239,10 @@ class Dense(BaseModel):
                         if "mtp" not in res[i]:
                             res[i]["mtp"] = []
                         res[i]["mtp"].append(mtp_loss_ctx)  # type: ignore[union-attr]
-            for loss_ctx_dict in res:
-                if "mtp" not in loss_ctx_dict:
-                    loss_ctx_dict["mtp"] = None
-        else:
-            for loss_ctx_dict in res:
-                loss_ctx_dict["mtp"] = None
+        # Ensure all microbatches have both MTP keys.
+        for loss_ctx_dict in res:
+            loss_ctx_dict.setdefault("mtp", None)
+            loss_ctx_dict.setdefault("mtp_e2e_tv", None)
         return cast(list[DenseLossContextDict], res)
 
     def build_embeddings(self, config: TransformerConfig):
@@ -369,7 +402,11 @@ class Dense(BaseModel):
         for layer_idx in tqdm(shuffled_layers_idxs, desc="[FSDP Sharding]"):
             layer = self.layers[str(int(layer_idx))]
             layer_idx = int(layer_idx)
-            if layer_idx < num_recompute_layers:
+            if (
+                self._should_recompute(layer_idx=layer_idx, mtp_idx=None)
+                if self.mtp_block is not None
+                else layer_idx < num_recompute_layers
+            ):
                 layer = apply_activation_checkpointing(
                     layer,
                     preserve_rng_state=checkpoint_preserve_rng_state,
