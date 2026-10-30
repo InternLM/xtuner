@@ -9,7 +9,7 @@ default_config:
             cpus_per_task: 256
             memory_per_task: 1920
             image: ccr-hw/910c_cann910_pta291_fixzero:v1.0.0-20260826T012241Z
-            pip_package: pip install transformers==5.17.0;pip install -e . --no-deps; pip install more-itertools triton
+            pip_package: pip install transformers==5.17.0;pip install -e . --no-deps; pip install more-itertools triton==2.8.0
             envs: 
                 - HF_HUB_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/models/hf_hub
     eval:
@@ -217,8 +217,8 @@ case:
                 accelerator: NPU
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cic/qa-llm-cicd/test_output
             resource:
-                image: ccr-hw/910c_cann910_pta291_rl_s1_vllm:v0.5.0-20260917T114217Z
-                pip_package: unset ASCEND_WORK_PATH;pip install -e . --no-deps; pip install more-itertools triton
+                image: vllm-ascend:v0.30.0rc2-a3-vllmrouter-logprob-developer-fix-transformers5.17-qa-lm
+                pip_package: unset ASCEND_WORK_PATH;pip install -e . --no-deps; pip install more-itertools triton==2.8.0
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/gsm8k/train-mini.jsonl
