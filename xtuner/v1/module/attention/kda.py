@@ -193,6 +193,8 @@ class KDAConfig(BaseModel):
     sp_impl: Literal["ulysses", "fla"] = "ulysses"
     # Opt-in: keep sensitive gate projections outside FP8 and fix their token-row shape.
     gate_projection_block_size: int = Field(default=0, ge=0)
+    # Some mixed-FP8 checkpoints exclude all KDA projections, not only the sensitive gates.
+    quantize_projections: bool = True
 
     def build(
         self,
@@ -203,9 +205,9 @@ class KDAConfig(BaseModel):
     ) -> KimiDeltaAttention:
         del kwargs  # layer_type / rope_scaling_cfg / generate_config: KDA is NoPE, unused.
         return KimiDeltaAttention(
-            **self.model_dump(),
+            **self.model_dump(exclude={"quantize_projections"}),
             hidden_size=hidden_size,
-            float8_cfg=float8_cfg,
+            float8_cfg=float8_cfg if self.quantize_projections else None,
             layer_idx=layer_idx,
         )
 

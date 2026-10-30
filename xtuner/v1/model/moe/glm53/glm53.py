@@ -322,7 +322,10 @@ class Glm53TextMoEConfig(MoEConfig):
         index_n_heads=32,
         index_kpool=4,
     )
-    linear_attention: KDAConfig | None = KDAConfig(num_heads=64, head_dim=128, gate_lower_bound=-5.0)
+    # The official FP8 checkpoint excludes KDA projections via modules_to_not_convert.
+    linear_attention: KDAConfig | None = KDAConfig(
+        num_heads=64, head_dim=128, gate_lower_bound=-5.0, quantize_projections=False
+    )
 
     tie_word_embeddings: bool = False
     n_routed_experts: int = 288
@@ -442,6 +445,7 @@ class Glm53TextMoEConfig(MoEConfig):
                 rms_norm_eps=cfg.rms_norm_eps,
             ),
             linear_attention=KDAConfig(
+                quantize_projections=False,
                 num_heads=cfg.linear_attn_config["num_heads"],
                 head_dim=cfg.linear_attn_config["head_dim"],
                 conv_kernel_size=cfg.linear_attn_config["short_conv_kernel_size"],
