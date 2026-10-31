@@ -28,6 +28,7 @@ from mindspeed.ops.triton.solve_tril import solve_tril  # type: ignore[import-un
 
 
 _l2norm_fused = None
+_l2norm_source = "inline"
 _l2norm_checked = False
 
 
@@ -54,31 +55,56 @@ def _log_once(message: str) -> None:
 
 
 def _fused_l2norm():
-    """Resolve the fla_npu triton l2norm once; None keeps the inline
-    fallback."""
-    global _l2norm_fused, _l2norm_checked
-    if not _l2norm_checked:
-        _l2norm_checked = True
-        try:
-            from fla_npu.ops.triton import l2norm  # type: ignore[import-untyped]
+    """Resolve the triton l2norm once; None keeps the inline fallback.
 
-            _l2norm_fused = l2norm
-        except Exception as exc:
-            _log_once(f"[l2norm] fla_npu l2norm unavailable ({exc!r}); inline fallback")
-            _l2norm_fused = None
+    Defaults to the xtuner runtime-length l2norm: fla_npu's kernels declare
+    the row count ``T`` as ``tl.constexpr``, so a megabatch whose padded
+    token count differs by a few tokens forces a fresh seconds-long bisheng
+    compile mid-run on the ranks that see the new value. The runtime-length
+    kernels compile once for every row count. ``XTUNER_GDN_L2NORM``
+    selects ``rt`` (default) / ``fla`` / ``inline``.
+    """
+    global _l2norm_fused, _l2norm_source, _l2norm_checked
+    if not _l2norm_checked:
+        mode = os.environ.get("XTUNER_GDN_L2NORM", "rt").strip().lower()
+        if mode not in {"rt", "fla", "inline"}:
+            # Deliberately not cached: a later call with a corrected env re-validates.
+            raise ValueError(f"unsupported XTUNER_GDN_L2NORM={mode!r}")
+        _l2norm_checked = True
+        _l2norm_fused = None
+        _l2norm_source = "inline"
+        if mode in {"rt", "fla"}:
+            if mode == "rt":
+                try:
+                    from xtuner.v1.ops.gated_deltanet.l2norm_npu import l2norm as rt_l2norm
+
+                    _l2norm_fused = rt_l2norm
+                    _l2norm_source = "rt"
+                except Exception as exc:
+                    _log_once(f"[l2norm] runtime-length l2norm unavailable ({exc!r}); fla_npu fallback")
+            if _l2norm_fused is None:
+                try:
+                    from fla_npu.ops.triton import l2norm as fla_l2norm  # type: ignore[import-untyped]
+
+                    _l2norm_fused = fla_l2norm
+                    _l2norm_source = "fla"
+                except Exception as exc:
+                    _log_once(f"[l2norm] fla_npu l2norm unavailable ({exc!r}); inline fallback")
+                    _l2norm_fused = None
     return _l2norm_fused
 
 
 def warm_l2norm():
     """Resolve the l2norm path at wiring time and log which one is live.
 
-    The lazy resolver caches its first result forever, so a transient fla_npu import failure would silently pin the
+    The lazy resolver caches its first result forever, so a transient import failure would silently pin the
     inline fallback for every later step. Calling this once from the GDN getter surfaces that at startup instead.
     """
     fused = _fused_l2norm()
     if fused is None and _strict_kernels():
-        raise RuntimeError("strict NCP kernel mode requires fla_npu Triton l2norm")
-    _log_once(f"[l2norm] {'fla_npu triton' if fused is not None else 'inline fallback'}")
+        raise RuntimeError("strict NCP kernel mode requires a fused triton l2norm")
+    label = {"rt": "runtime-length triton", "fla": "fla_npu triton", "inline": "inline fallback"}[_l2norm_source]
+    _log_once(f"[l2norm] {label}")
     return fused
 
 
