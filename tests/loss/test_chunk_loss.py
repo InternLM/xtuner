@@ -1,6 +1,7 @@
 import traceback
 from unittest.mock import patch
 
+import pytest
 import torch
 
 from xtuner.v1.loss.chunk_loss import ChunkLoss
@@ -21,11 +22,11 @@ def _reference_loss(hidden_states, head_weight, scales, chunk_size):
     )
 
 
-def test_chunk_loss_matches_reference_with_trainable_head():
+@pytest.mark.parametrize("upstream_gradient", [1.0, 0.37])
+def test_chunk_loss_matches_reference_with_trainable_head(upstream_gradient):
     torch.manual_seed(0)
     chunk_size = 3
     scales = [0.5, 1.25, 0.75]
-    upstream_gradient = 0.37
     hidden_states = torch.randn(2, 7, 4, dtype=torch.float32)
     head_weight = torch.randn(6, 4, dtype=torch.float32)
 

@@ -11,7 +11,6 @@ TEACHER_MODEL_INFO_URLS=()
 TEACHER_LOG_FILES=()
 TEACHER_PIDS=()
 STUDENT_CUDA_VISIBLE_DEVICES=
-XTUNER_RL_NUM_WORKERS=
 
 start_single_teacher_server() {
     _start_teacher_servers "$1" "$2" "$3" "1"
@@ -166,7 +165,6 @@ _start_teacher_servers() {
     TEACHER_LOG_FILES=()
     TEACHER_PIDS=()
     STUDENT_CUDA_VISIBLE_DEVICES=
-    XTUNER_RL_NUM_WORKERS=
     mkdir -p "${work_dir}"
 
     # Command builder output:

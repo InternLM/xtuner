@@ -44,7 +44,7 @@ from xtuner.v1.float8.fsdp_utils import (
     WeightWithDynamicTilewiseFloat8CastTensor,
 )
 from xtuner.v1.loss import BaseLossConfig, BaseLossContext, CELossConfig
-from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig, MLAConfig
+from xtuner.v1.module.attention import GatedDeltaNetConfig, KDAConfig, MHAConfig, MLAConfig
 from xtuner.v1.module.rope import RopeParametersConfig, RopeScalingConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, log_rank0, profile_time_and_memory
 from xtuner.v1.utils.compile import MaybeCompile, is_compiled_function, maybe_compile
@@ -220,7 +220,7 @@ class TransformerConfig(XTunerBaseModelConfig):
     rms_norm_type: Annotated[Literal["default", "zero_centered"], Parameter(group="model")] = "default"
     hidden_act: Annotated[str, Parameter(group="model")]  # key defined in `transformers.activations.ACT2CLS`
     attention: MLAConfig | MHAConfig
-    linear_attention: Annotated[GatedDeltaNetConfig | None, Parameter(group="model")] = None
+    linear_attention: Annotated[GatedDeltaNetConfig | KDAConfig | None, Parameter(group="model")] = None
     mlp_bias: Annotated[bool, Parameter(group="model")] = False
     tie_word_embeddings: Annotated[bool, Parameter(group="model")] = False
     model_type: Annotated[str | None, Parameter(group="model")] = None  # TODO: yehaochen maybe should be removed
@@ -680,23 +680,42 @@ class BaseModel(nn.Module):
 
                 for hf_name in hf_name_list:
                     if any(re.search(p, hf_name) for p in patterns):  # type: ignore
-                        if not isinstance(param, DTensor):
-                            dist_param = nn.Parameter(
-                                distribute_tensor(
-                                    param, self.world_mesh, [Replicate() for _ in range(self.world_mesh.ndim)]
-                                ),
-                                requires_grad=param.requires_grad,
-                            )
-                            module.register_parameter(name, dist_param)
-                            ignored_params.add(dist_param)
+                        # FP32-ignored params must be world-wide replicas so
+                        # scale_and_reduce_grad / grad-norm cover every FSDP rank.
+                        # MoE may have already placed them on an EP-only (or EP x
+                        # expert-TP) mesh; normalize that layout here.
+                        if isinstance(param, DTensor):
+                            # Already DTensor(world_mesh, all Replicate) → no-op
+                            # (idempotent under MoE's layer-then-root _fully_shard).
+                            if param.device_mesh == self.world_mesh and all(
+                                isinstance(placement, Replicate) for placement in param.placements
+                            ):
+                                ignored_params.add(param)
+                                break
+                            # Any non-replicate placement → fail closed. Gathering
+                            # shards is outside this path's responsibility.
+                            if any(not isinstance(placement, Replicate) for placement in param.placements):
+                                raise ValueError(
+                                    f"FP32-ignored parameter {full_name} has non-replicate "
+                                    f"placements {tuple(param.placements)} on mesh "
+                                    f"{param.device_mesh}; cannot rematerialize as a "
+                                    f"world-wide replica without gathering shards."
+                                )
+                            # Fully-replicated DTensor on another mesh → rematerialize
+                            # via to_local() (local already holds the full value; never gather).
+                            local_param = param.to_local().detach()
                         else:
-                            # param is already a DTensor (e.g. distributed by
-                            # MoE._replicate_other_params on ep_mesh before _fully_shard
-                            # is called). We skip re-distributing on world_mesh and just
-                            # add it to ignored_params so FSDP leaves it alone.
-                            # ASSUMPTION: fp32 distribution always happens AFTER any
-                            # prior EP distribution, so the existing placement is correct.
-                            ignored_params.add(param)
+                            # Plain tensor → rematerialize onto world_mesh as all Replicate.
+                            local_param = param
+                        assert self.world_mesh is not None
+                        dist_param = nn.Parameter(
+                            distribute_tensor(
+                                local_param, self.world_mesh, [Replicate() for _ in range(self.world_mesh.ndim)]
+                            ),
+                            requires_grad=param.requires_grad,
+                        )
+                        module.register_parameter(name, dist_param)
+                        ignored_params.add(dist_param)
                         break
 
             for child in module.children():
@@ -2106,13 +2125,15 @@ class BaseModel(nn.Module):
             self._compile_overwrite(target, option)
 
     def _mark_dynamic(self, seq_ctx: SequenceContext, dim=0):
-        """`cu_seq_lens_q` and `cu_seq_lens_k` are dynamic shapes in each
-        fwd/bwd pass.
+        """Packed offsets on GPU and their optional CPU source change shape in
+        each fwd/bwd pass.
 
         Mark them as dynamic explicitly to avoid recompilation.
         """
         torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_q, dim)
         torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_k, dim)
+        if seq_ctx.cu_seq_lens_q_cpu is not None and seq_ctx.cu_seq_lens_q_cpu is not seq_ctx.cu_seq_lens_q:
+            torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_q_cpu, dim)
 
     def _init_world_mesh(self):
         device = DEVICE

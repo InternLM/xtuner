@@ -2,6 +2,7 @@
 from typing import cast
 
 import torch
+from torch.distributed._functional_collectives import all_gather_tensor_autograd
 from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
@@ -20,15 +21,20 @@ class SequenceContext:
             Gets cumulative sequence length for query state.
         cu_seq_lens_k (`torch.LongTensor`, *optional*)
             Gets cumulative sequence length for key state.
+        cu_seq_lens_q_cpu (`torch.IntTensor | None`):
+            CPU source of query offsets, kept for packed KDA chunk tables.
         max_length_q (`torch.Tensor | int`, *optional*):
             Maximum sequence length for query state.
         max_length_k (`torch.Tensor | int`, *optional*):
             Maximum sequence length for key state.
     """
 
+    TEXT_MODALITY_ID = 0
+
     input_ids: torch.LongTensor | None  # shape (1, seq_len)
     cu_seq_lens_q: torch.IntTensor
     cu_seq_lens_k: torch.IntTensor
+    cu_seq_lens_q_cpu: torch.IntTensor | None
     max_length_q: torch.Tensor
     max_length_k: torch.Tensor
     num_padding: int
@@ -46,6 +52,11 @@ class SequenceContext:
     pixel_values: torch.FloatTensor | None
     inputs_embeds: torch.FloatTensor | None
     num_img_tokens: list[list[int]] | None
+
+    # Glm53VL
+    pixel_values_videos: torch.FloatTensor | None
+    video_grid_thw: torch.Tensor | None
+    mm_token_type_ids: torch.Tensor | None  # 0=text, 1=image, 2=video; same layout as input_ids
 
     # moe routed_experts
     rollout_routed_experts: torch.Tensor | None
@@ -77,6 +88,10 @@ class SequenceContext:
         pixel_values: torch.FloatTensor | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         num_img_tokens: list[list[int]] | None = None,
+        # Glm53VL
+        pixel_values_videos: torch.FloatTensor | None = None,
+        video_grid_thw: torch.Tensor | None = None,
+        mm_token_type_ids: torch.Tensor | None = None,
         rollout_routed_experts: torch.Tensor | None = None,
         offload_rollout_routed_experts: bool = False,
         # SP shard metadata: private, accessed via properties below
@@ -84,12 +99,16 @@ class SequenceContext:
         raw_inputs_embeds: torch.FloatTensor | None = None,
         shard_start: int = 0,
         shard_size: int = 0,
+        cu_seq_lens_q_cpu: torch.IntTensor | None = None,
     ):
         # Only to distinguish parameters accepted by the constructor from attributes. For example, for `max_length_q`,
         # the argument can be an int, but as an attribute it can only be a tensor
         self.input_ids = input_ids
         self.cu_seq_lens_q = cu_seq_lens_q
         self.cu_seq_lens_k = cu_seq_lens_k
+        # Data collators build packed offsets on CPU; retain that source when the
+        # GPU copy is made so KDA need not synchronize to read document lengths.
+        self.cu_seq_lens_q_cpu = cu_seq_lens_q if cu_seq_lens_q.device.type == "cpu" else cu_seq_lens_q_cpu
         # force max_length_q and max_length_k be cpu tensors to avoid cuda synchronization
         # max_length_q and max_length_k should be unpacked to int in attention implementation
         if isinstance(max_length_q, int):
@@ -111,6 +130,9 @@ class SequenceContext:
         self.pixel_values = pixel_values
         self.inputs_embeds = inputs_embeds
         self.num_img_tokens = num_img_tokens
+        self.pixel_values_videos = pixel_values_videos
+        self.video_grid_thw = video_grid_thw
+        self.mm_token_type_ids = mm_token_type_ids
         self.rollout_routed_experts = rollout_routed_experts
         self.offload_rollout_routed_experts = offload_rollout_routed_experts
         self._raw_input_ids = raw_input_ids
@@ -142,6 +164,16 @@ class SequenceContext:
     def sp_rank(self):
         return self._sp_rank
 
+    @property
+    def shard_start(self) -> int:
+        """Global position of this rank's first local token.
+
+        ``split()`` keeps ``cu_seq_lens_q`` in **global** coordinates and records the local
+        shard's offset here, so anything mapping local positions onto document boundaries must
+        add it -- see :meth:`packed_causal_query_ranges`. ``0`` without sequence parallelism.
+        """
+        return self._shard_start
+
     def packed_causal_query_ranges(
         self,
         query_len: int,
@@ -172,16 +204,18 @@ class SequenceContext:
             assert ids.shape[0] == 1, "input_ids must have batch size of 1"
         num_tokens = [x.numel() for x in input_ids]
 
-        cu_seq_lens = cast(torch.IntTensor, torch.cumsum(torch.LongTensor([0] + num_tokens), dim=0).to(device).int())
+        cu_seq_lens_cpu = cast(torch.IntTensor, torch.cumsum(torch.LongTensor([0] + num_tokens), dim=0).int())
+        cu_seq_lens = cast(torch.IntTensor, cu_seq_lens_cpu.to(device))
         return cls(
             input_ids=cast(torch.LongTensor, torch.cat(input_ids, dim=1).to(device)),
             cu_seq_lens_k=cu_seq_lens,
             cu_seq_lens_q=cu_seq_lens,
-            max_length_q=cast(int, (cu_seq_lens[1:] - cu_seq_lens[:-1]).max().item()),
-            max_length_k=cast(int, (cu_seq_lens[1:] - cu_seq_lens[:-1]).max().item()),
+            max_length_q=max(num_tokens),
+            max_length_k=max(num_tokens),
             block_table=block_table,
             sequence_parallel_mesh=sp_mesh,
             device=device,
+            cu_seq_lens_q_cpu=cu_seq_lens_cpu,
         )
 
     def split(self, sequence_parallel_mesh: DeviceMesh | None = None) -> Self:
@@ -210,7 +244,21 @@ class SequenceContext:
             else:
                 new_cu_seq_lens = self.cu_seq_lens_q.clone()
             new_cu_seq_lens = cast(torch.IntTensor, new_cu_seq_lens)
-            new_max_length = cast(int, max(self.seq_lens_q.max().item(), new_padding))
+            new_cu_seq_lens_cpu = self.cu_seq_lens_q_cpu
+            if new_cu_seq_lens_cpu is not None and new_padding > 0:
+                if self.num_padding > 0:
+                    new_cu_seq_lens_cpu = cast(torch.IntTensor, new_cu_seq_lens_cpu.clone())
+                    new_cu_seq_lens_cpu[-1] += new_padding
+                else:
+                    new_cu_seq_lens_cpu = cast(
+                        torch.IntTensor, torch.cat((new_cu_seq_lens_cpu, new_cu_seq_lens_cpu[-1:] + new_padding))
+                    )
+            lengths = (
+                new_cu_seq_lens_cpu[1:] - new_cu_seq_lens_cpu[:-1]
+                if new_cu_seq_lens_cpu is not None
+                else self.seq_lens_q
+            )
+            new_max_length = cast(int, max(lengths.max().item(), new_padding))
             num_non_padding = self.input_ids.shape[1] - self.num_padding
             start = sp_input_ids.shape[1] * sequence_parallel_mesh.get_local_rank()
             end = start + sp_input_ids.shape[1]
@@ -224,6 +272,15 @@ class SequenceContext:
                     split_for_sequence_parallel(pad_position_ids, dim=-1, sp_mesh=sequence_parallel_mesh),
                 )
                 self.position_ids = position_ids
+
+            if self.mm_token_type_ids is not None:
+                # Must use the same pad/split as input_ids (§8.3): modality can't be re-derived
+                # from a local shard's begin/end tokens alone.
+                pad_mm_token_type_ids = pad_to_multiple_of(self.mm_token_type_ids, 0, multiple_of, -1)
+                self.mm_token_type_ids = cast(
+                    torch.Tensor,
+                    split_for_sequence_parallel(pad_mm_token_type_ids, dim=-1, sp_mesh=sequence_parallel_mesh),
+                )
 
             if self.rollout_routed_experts is not None:
                 assert isinstance(self.rollout_routed_experts, torch.Tensor), (
@@ -239,6 +296,7 @@ class SequenceContext:
                 input_ids=sp_input_ids,
                 cu_seq_lens_q=new_cu_seq_lens,
                 cu_seq_lens_k=new_cu_seq_lens,
+                cu_seq_lens_q_cpu=new_cu_seq_lens_cpu,
                 max_length_q=new_max_length,
                 max_length_k=new_max_length,
                 num_padding=sp_num_padding,
@@ -251,6 +309,9 @@ class SequenceContext:
                 image_grid_thw=self.image_grid_thw,
                 inputs_embeds=self.inputs_embeds,
                 num_img_tokens=self.num_img_tokens,
+                pixel_values_videos=self.pixel_values_videos,
+                video_grid_thw=self.video_grid_thw,
+                mm_token_type_ids=self.mm_token_type_ids,
                 rollout_routed_experts=self.rollout_routed_experts,
                 offload_rollout_routed_experts=self.offload_rollout_routed_experts,
                 raw_input_ids=cast(torch.LongTensor, pad_input_ids),
@@ -281,6 +342,16 @@ class SequenceContext:
         rollout_routed_experts = []
         offload_rollout_routed_experts = False
 
+        pixel_values_videos: list | torch.Tensor | None
+        pixel_values_videos = []
+        video_grid_thw = []
+        mm_token_type_ids = []
+        # 提前找到首个非空模态标记张量：pack 开头也可能是纯文本或 padding。
+        # 后续补零沿用它的 dtype/device；若整个 pack 都没有模态标记，则保持原行为。
+        mm_reference = next(
+            (ctx.mm_token_type_ids for ctx in sequence_context_list if ctx.mm_token_type_ids is not None), None
+        )
+
         for seq_ctx in sequence_context_list:
             assert seq_ctx.sequence_parallel_mesh is None
             if seq_ctx.input_ids is not None:
@@ -307,6 +378,12 @@ class SequenceContext:
                 image_grid_thw.append(seq_ctx.image_grid_thw)
             if seq_ctx.num_img_tokens is not None:
                 num_img_tokens.extend(seq_ctx.num_img_tokens)
+            if seq_ctx.pixel_values_videos is not None:
+                pixel_values_videos.append(seq_ctx.pixel_values_videos)
+            if seq_ctx.video_grid_thw is not None:
+                video_grid_thw.append(seq_ctx.video_grid_thw)
+            if mm_reference is not None:
+                mm_token_type_ids.append(cls._pack_mm_token_type_ids(seq_ctx, mm_reference))
             if seq_ctx.rollout_routed_experts is not None:
                 rollout_routed_experts.append(seq_ctx.rollout_routed_experts)
             offload_rollout_routed_experts = offload_rollout_routed_experts or seq_ctx.offload_rollout_routed_experts
@@ -318,6 +395,12 @@ class SequenceContext:
                 pixel_values = torch.cat(pixel_values, dim=0)
         else:
             pixel_values = None
+
+        if pixel_values_videos:
+            if isinstance(pixel_values_videos[0], torch.Tensor):
+                pixel_values_videos = torch.cat(pixel_values_videos, dim=0)
+        else:
+            pixel_values_videos = None
 
         return cls(
             input_ids=torch.cat(packed_input_ids, dim=1) if len(packed_input_ids) > 0 else None,  # type: ignore
@@ -331,6 +414,9 @@ class SequenceContext:
             pixel_values=pixel_values,  # type: ignore
             image_grid_thw=torch.cat(image_grid_thw, dim=0) if image_grid_thw else None,  # type: ignore
             num_img_tokens=num_img_tokens if num_img_tokens else None,
+            pixel_values_videos=pixel_values_videos,  # type: ignore
+            video_grid_thw=torch.cat(video_grid_thw, dim=0) if video_grid_thw else None,  # type: ignore
+            mm_token_type_ids=torch.cat(mm_token_type_ids, dim=-1) if mm_token_type_ids else None,  # type: ignore
             position_ids=torch.cat(position_ids, dim=-1) if position_ids else None,  # type: ignore
             rollout_routed_experts=rollout_routed_experts if len(rollout_routed_experts) > 0 else None,  # type: ignore
             offload_rollout_routed_experts=offload_rollout_routed_experts,
@@ -407,8 +493,11 @@ class SequenceContext:
             return None
         if self.sequence_parallel_mesh is None or self.sequence_parallel_mesh.size() == 1:
             return self.inputs_embeds
-        gathered = gather_for_sequence_parallel(
-            self.inputs_embeds, dim=1, sp_group=self.sequence_parallel_mesh.get_group()
+        # MTP rolls these embeddings to construct its future-token input. Unlike
+        # integer input_ids, this gather must reduce-scatter gradients back to
+        # their owners, including gradients crossing an SP shard boundary.
+        gathered = all_gather_tensor_autograd(
+            self.inputs_embeds.contiguous(), gather_dim=1, group=self.sequence_parallel_mesh
         )
         self._raw_inputs_embeds = cast(torch.FloatTensor, gathered)
         return self._raw_inputs_embeds
@@ -484,6 +573,9 @@ class SequenceContext:
             input_ids=overrides.get("input_ids", self.input_ids),
             cu_seq_lens_q=overrides.get("cu_seq_lens_q", self.cu_seq_lens_q),
             cu_seq_lens_k=overrides.get("cu_seq_lens_k", self.cu_seq_lens_k),
+            cu_seq_lens_q_cpu=overrides.get(
+                "cu_seq_lens_q_cpu", self.cu_seq_lens_q_cpu if "cu_seq_lens_q" not in overrides else None
+            ),
             max_length_q=overrides.get("max_length_q", self.max_length_q),
             max_length_k=overrides.get("max_length_k", self.max_length_k),
             num_padding=overrides.get("num_padding", self.num_padding),
@@ -497,6 +589,9 @@ class SequenceContext:
             pixel_values=overrides.get("pixel_values", self.pixel_values),
             inputs_embeds=overrides.get("inputs_embeds", self.inputs_embeds),
             num_img_tokens=overrides.get("num_img_tokens", self.num_img_tokens),
+            pixel_values_videos=overrides.get("pixel_values_videos", self.pixel_values_videos),
+            video_grid_thw=overrides.get("video_grid_thw", self.video_grid_thw),
+            mm_token_type_ids=overrides.get("mm_token_type_ids", self.mm_token_type_ids),
             rollout_routed_experts=overrides.get("rollout_routed_experts", self.rollout_routed_experts),
             offload_rollout_routed_experts=overrides.get(
                 "offload_rollout_routed_experts", self.offload_rollout_routed_experts
@@ -517,12 +612,17 @@ class SequenceContext:
             Self: The context with tensors moved to the target device.
         """
         self.input_ids = self.input_ids.to(device)  # type: ignore
+        # Keep shared training boundaries shared after transfer; the retained CPU
+        # offsets then describe both query and key without a second GPU copy.
+        shared_cu_seq_lens = self.cu_seq_lens_q is self.cu_seq_lens_k
         if device == "npu" or isinstance(device, torch.device) and device.type == "npu":
             self.cu_seq_lens_q = self.cu_seq_lens_q.cpu()  # type: ignore
-            self.cu_seq_lens_k = self.cu_seq_lens_k.cpu()  # type: ignore
+            self.cu_seq_lens_k = self.cu_seq_lens_q if shared_cu_seq_lens else self.cu_seq_lens_k.cpu()  # type: ignore
         else:
             self.cu_seq_lens_q = self.cu_seq_lens_q.to(device)  # type: ignore
-            self.cu_seq_lens_k = self.cu_seq_lens_k.to(device)  # type: ignore
+            self.cu_seq_lens_k = self.cu_seq_lens_q if shared_cu_seq_lens else self.cu_seq_lens_k.to(device)  # type: ignore
+        if self.cu_seq_lens_q.device.type == "cpu":
+            self.cu_seq_lens_q_cpu = self.cu_seq_lens_q
 
         if self.position_ids is not None and hasattr(self.position_ids, "to"):
             self.position_ids = self.position_ids.to(device)  # type: ignore
@@ -555,6 +655,14 @@ class SequenceContext:
         if self.image_grid_thw is not None and hasattr(self.image_grid_thw, "to"):
             self.image_grid_thw = self.image_grid_thw.to(device)  # type: ignore
 
+        if self.video_grid_thw is not None and hasattr(self.video_grid_thw, "to"):
+            self.video_grid_thw = self.video_grid_thw.to(device)  # type: ignore
+
+        if self.mm_token_type_ids is not None and hasattr(self.mm_token_type_ids, "to"):
+            self.mm_token_type_ids = self.mm_token_type_ids.to(device)  # type: ignore
+
+        # pixel_values_videos intentionally stays on CPU, same rationale as pixel_values above.
+
         if (
             self.rollout_routed_experts is not None
             and not self.offload_rollout_routed_experts
@@ -577,6 +685,7 @@ class SequenceContext:
             "input_ids": self.input_ids,
             "cu_seq_lens_q": self.cu_seq_lens_q,
             "cu_seq_lens_k": self.cu_seq_lens_k,
+            "cu_seq_lens_q_cpu": self.cu_seq_lens_q_cpu,
             "max_length_q": self.max_length_q,
             "max_length_k": self.max_length_k,
             "num_padding": self.num_padding,
@@ -590,6 +699,31 @@ class SequenceContext:
             "pixel_values": self.pixel_values,
             "inputs_embeds": self.inputs_embeds,
             "num_img_tokens": self.num_img_tokens,
+            "pixel_values_videos": self.pixel_values_videos,
+            "video_grid_thw": self.video_grid_thw,
+            "mm_token_type_ids": self.mm_token_type_ids,
             "rollout_routed_experts": self.rollout_routed_experts,
             "offload_rollout_routed_experts": self.offload_rollout_routed_experts,
         }
+
+    @classmethod
+    def _pack_mm_token_type_ids(cls, seq_ctx: "SequenceContext", mm_reference: torch.Tensor) -> torch.Tensor:
+        if seq_ctx.input_ids is not None:
+            token_shape = seq_ctx.input_ids.shape
+        elif seq_ctx.inputs_embeds is not None:
+            token_shape = seq_ctx.inputs_embeds.shape[:-1]
+        else:
+            raise ValueError("Packing modality IDs requires input_ids or inputs_embeds for every sequence")
+
+        local_mm_token_type_ids = seq_ctx.mm_token_type_ids
+        if local_mm_token_type_ids is None:
+            if seq_ctx.pixel_values is not None or seq_ctx.pixel_values_videos is not None:
+                raise ValueError("Cannot pack a visual sequence without mm_token_type_ids")
+            # 纯文本和 padding 也占 token 位置，按该段完整长度补文本模态标记。
+            # 保留这些位置，才能让拼接后的模态标记与 input_ids/inputs_embeds 同长、同序。
+            return mm_reference.new_full(token_shape, cls.TEXT_MODALITY_ID)
+        if local_mm_token_type_ids.shape != token_shape:
+            raise ValueError(
+                f"mm_token_type_ids shape {local_mm_token_type_ids.shape} does not match token shape {token_shape}"
+            )
+        return local_mm_token_type_ids

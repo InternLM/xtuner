@@ -39,6 +39,7 @@ from xtuner.v1.model.base import (
     ModelOutputs,
     XTunerBaseModelConfig,
 )
+from xtuner.v1.optim.optimizer import Optimizer
 from xtuner.v1.patch import InterleavedShardLoadPlanner, InterleavedShardSavePlanner
 from xtuner.v1.patch.xtuner_storage import XtunerCacheWriter, _get_async_dcp_save_timeout
 from xtuner.v1.profiler.prober import ProberList
@@ -141,7 +142,7 @@ class HFCheckpointLoader:
 
 class TrainEngine:
     model: BaseModel
-    optimizer: torch.optim.Optimizer
+    optimizer: Optimizer
     scheduler: torch.optim.lr_scheduler.LRScheduler
 
     def __init__(
@@ -180,7 +181,7 @@ class TrainEngine:
             log_rank0.info(model)
         return model
 
-    def build_optimizer(self, optim_cfg: OptimConfig) -> torch.optim.Optimizer:
+    def build_optimizer(self, optim_cfg: OptimConfig) -> Optimizer:
         return optim_cfg.build(self.model)
 
     @property
@@ -250,7 +251,13 @@ class TrainEngine:
 
                 loss = self._get_total_loss(output)
                 loss.backward()
-                total_loss += loss.detach()
+                # Logging must not retain checkpoint contexts from completed backwards.
+                # Detaching here leaves accumulated parameter gradients untouched.
+                loss = loss.detach()
+                for field in type(output).model_fields:
+                    if "loss" in field and isinstance(getattr(output, field), torch.Tensor):
+                        setattr(output, field, getattr(output, field).detach())
+                total_loss += loss
                 # call dump_forward_records after backward to record the recomputed activations
                 ProberList.after_micro_iter_forward()
 
@@ -590,18 +597,9 @@ class TrainEngine:
         return True
 
     def put_optimizer_to_device(self, device: torch.device | str) -> bool:
-        """Put the optimizer to the given device."""
-        if getattr(self.optim_cfg, "swap_optimizer", False):
-            return False
-        if not self.optimizer.state:
-            return False
-        for state in self.optimizer.state.values():
-            if isinstance(state, dict):
-                for key, val in state.items():
-                    if isinstance(val, torch.Tensor):
-                        state[key] = val.to(device, non_blocking=True)
-        DEVICE_MODULE.synchronize()
-        return True
+        """Move optimizer state according to the optimizer's residency
+        policy."""
+        return self.optimizer.put_state_to_device(device)
 
     def _maybe_precompute_float8_dynamic_scale_for_fsdp(self):
         for model in self.model.modules():

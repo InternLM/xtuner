@@ -98,7 +98,13 @@ class MTPLossConfig(CELossConfig):
             return None
 
         shifted_labels = data["shifted_labels"]
-        cu_seq_lens = data["seq_ctx"].cu_seq_lens_k
+        seq_ctx = data["seq_ctx"]
+        cu_seq_lens = seq_ctx.cu_seq_lens_k
+        # Label rolling only reads boundaries on the host. Reuse the collator's
+        # CPU offsets when query and key share the packed layout.
+        cu_seq_lens_cpu = getattr(seq_ctx, "cu_seq_lens_q_cpu", None)
+        if cu_seq_lens_cpu is not None and cu_seq_lens is getattr(seq_ctx, "cu_seq_lens_q", None):
+            cu_seq_lens = cu_seq_lens_cpu
 
         # cu_seq_lens[-1] may be larger than shifted_labels.shape[-1] when seq_ctx
         # was split for sequence parallelism (padding is added to make the sequence
@@ -398,7 +404,11 @@ class MTPE2ETVLossContext(LMHeadLossContext):
         valid_mask = loss_weight != 0
 
         if not valid_mask.any():
-            loss = head_weight.sum() * 0.0 + sum(draft.sum() * 0.0 for draft in draft_hidden_states)
+            # Empty SP shards must match the FP32 loss on non-empty ranks
+            # before the collective, while retaining zero-gradient edges.
+            loss = head_weight.sum(dtype=torch.float32) * 0.0 + sum(
+                draft.sum(dtype=torch.float32) * 0.0 for draft in draft_hidden_states
+            )
         else:
             selected_weight = loss_weight[valid_mask]
             alpha_per_step: list[torch.Tensor] = []

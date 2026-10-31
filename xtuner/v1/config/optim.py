@@ -1,13 +1,12 @@
 from abc import abstractmethod
-from typing import Literal, Optional, Tuple
+from typing import Any, Literal, Optional, Tuple
 
-import torch
 import torch.distributed as dist
 from cyclopts import Parameter
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import Annotated
 
-from xtuner.v1.optim import Muon, SwapAdamW
+from xtuner.v1.optim import AdamW, Muon, Optimizer, SwapAdamW
 from xtuner.v1.utils import get_logger
 
 
@@ -23,7 +22,7 @@ class OptimConfig(BaseModel):
     ] = None
 
     @abstractmethod
-    def build(self, params):
+    def build(self, params) -> Optimizer:
         pass
 
 
@@ -34,7 +33,7 @@ class AdamWConfig(OptimConfig):
     foreach: Annotated[Optional[bool], Parameter(help="Use foreach implementation for AdamW")] = None
     swap_optimizer: Annotated[Optional[bool], Parameter(help="Swap optimizer states to host memory.")] = False
 
-    def build(self, model):
+    def build(self, model) -> Optimizer:
         params = [p for p in model.parameters() if p.requires_grad]
 
         trainable_parameters_names = model.trainable_parameters()
@@ -62,13 +61,30 @@ class AdamWConfig(OptimConfig):
                 weight_decay=self.weight_decay,
                 foreach=self.foreach,
             )
-        return torch.optim.AdamW(
+        return AdamW(
             params, lr=self.lr, betas=self.betas, eps=self.eps, weight_decay=self.weight_decay, foreach=self.foreach
         )
 
 
 class MuonConfig(OptimConfig):
     weight_decay: Annotated[float, Parameter(help="Weight decay coefficient for L2 regularization")] = 0.1
+    adamw_params_lr: Annotated[
+        float | None, Parameter(help="LR for ordinary AdamW parameters, excluding embedding/head; None inherits lr")
+    ] = Field(default=None, ge=0)
+    adamw_params_weight_decay: Annotated[
+        float | None,
+        Parameter(help="Decay for ordinary AdamW parameters, excluding embedding/head; None inherits weight_decay"),
+    ] = Field(default=None, ge=0)
+    embed_lr: Annotated[float | None, Parameter(help="Embedding LR; None inherits lr")] = Field(default=None, ge=0)
+    embed_weight_decay: Annotated[float | None, Parameter(help="Embedding decay; None inherits weight_decay")] = Field(
+        default=None, ge=0
+    )
+    lm_head_lr: Annotated[
+        float | None, Parameter(help="LM head LR; None inherits lr (no automatic dimension scaling)")
+    ] = Field(default=None, ge=0)
+    lm_head_weight_decay: Annotated[float | None, Parameter(help="LM head decay; None inherits weight_decay")] = Field(
+        default=None, ge=0
+    )
     momentum: Annotated[float, Parameter(help="Momentum coefficients for Muon optimizer")] = 0.95
     betas: Annotated[Tuple[float, float], Parameter(help="Beta coefficients for AdamW optimizer")] = (0.9, 0.95)
     eps: Annotated[float, Parameter(help="Epsilon value for numerical stability in Muon optimizer")] = 1e-8
@@ -86,8 +102,11 @@ class MuonConfig(OptimConfig):
         Literal["all", "adamw_only"],
         Parameter(help="Gradient clipping policy: clip all parameters or only the AdamW parameter groups"),
     ] = "adamw_only"
+    swap_optimizer: Annotated[
+        bool, Parameter(help="Keep Muon momentum and AdamW momentum and variance in pinned host memory")
+    ] = False
 
-    def build(self, model):
+    def build(self, model) -> Optimizer:
         trainable_parameters_names = model.trainable_parameters()
         trainable_names = {name for name, _ in trainable_parameters_names}
 
@@ -124,17 +143,19 @@ class MuonConfig(OptimConfig):
         muon_params_moe_fused_w1w3 = []  # num_experts = 2 * n_routed_experts
         muon_params_moe_other = []  # num_experts = n_routed_experts
         adamw_params = []
+        embed_params = []
+        lm_head_params = []
 
         for name, p in model.named_parameters():
             n = p.numel()
             num_total += n
             if name in trainable_names:
                 num_total_requires_grad += n
-                # we want to avoid using Muon for 1D-tensors, as well as embed_tokens and lm_head.
-                # effectively-1D tensors where one dimension accounts for all elements (e.g. shape [1, D]) should
-                # also be excluded, and hence the `p.numel() not in p.shape` condition.
+                # Muon only applies to 2D matrices; 3D tensors (e.g. depthwise conv1d) and 1D tensors use AdamW,
+                # matching Megatron and Automodel. Effectively-1D tensors where one dimension accounts for all
+                # elements (e.g. shape [1, D]) should also be excluded, hence the `p.numel() not in p.shape` condition.
                 is_muon_tensor = (
-                    p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name and p.numel() not in p.shape
+                    p.ndim == 2 and "embed_tokens" not in name and "lm_head" not in name and p.numel() not in p.shape
                 )
                 if is_muon_tensor:
                     if is_moe_model and any(pattern in name for pattern in fused_w1w3_patterns):
@@ -153,7 +174,12 @@ class MuonConfig(OptimConfig):
                         if dist.get_rank() == 0:
                             logger.info(f"Muon regular param: [{name}]: shape = {p.shape}")
                 else:
-                    adamw_params.append(p)
+                    if "embed_tokens" in name:
+                        embed_params.append(p)
+                    elif "lm_head" in name:
+                        lm_head_params.append(p)
+                    else:
+                        adamw_params.append(p)
                     num_adamw += n
                     if dist.get_rank() == 0:
                         logger.info(f"AdamW param: [{name}]: shape = {p.shape}")
@@ -162,7 +188,7 @@ class MuonConfig(OptimConfig):
 
         # Build parameter groups
         clip_muon_grad = self.clip_grad_mode == "all"
-        param_groups = []
+        param_groups: list[dict[str, Any]] = []
         if muon_params_regular:
             param_groups.append(dict(params=muon_params_regular, clip_grad=clip_muon_grad))
         # fused_w1w3: w1 and w3 are fused, so num_experts = 2 * n_routed_experts
@@ -177,12 +203,41 @@ class MuonConfig(OptimConfig):
         # Other expert params: num_experts = n_routed_experts
         if muon_params_moe_other:
             param_groups.append(dict(params=muon_params_moe_other, num_experts=num_experts, clip_grad=clip_muon_grad))
-        param_groups.append(dict(params=adamw_params, algorithm="adamw", clip_grad=True))
+        if adamw_params:
+            param_groups.append(
+                dict(
+                    params=adamw_params,
+                    algorithm="adamw",
+                    clip_grad=True,
+                    lr=self.lr if self.adamw_params_lr is None else self.adamw_params_lr,
+                    weight_decay=self.weight_decay
+                    if self.adamw_params_weight_decay is None
+                    else self.adamw_params_weight_decay,
+                )
+            )
+        if embed_params:
+            param_groups.append(
+                dict(
+                    params=embed_params,
+                    algorithm="adamw",
+                    clip_grad=True,
+                    lr=self.lr if self.embed_lr is None else self.embed_lr,
+                    weight_decay=self.weight_decay if self.embed_weight_decay is None else self.embed_weight_decay,
+                )
+            )
+        if lm_head_params:
+            param_groups.append(
+                dict(
+                    params=lm_head_params,
+                    algorithm="adamw",
+                    clip_grad=True,
+                    lr=self.lr if self.lm_head_lr is None else self.lm_head_lr,
+                    weight_decay=self.weight_decay if self.lm_head_weight_decay is None else self.lm_head_weight_decay,
+                )
+            )
 
         # Sanity check: ensure all trainable parameters are assigned to optimizer
-        total_assigned = (
-            len(muon_params_regular) + len(muon_params_moe_fused_w1w3) + len(muon_params_moe_other) + len(adamw_params)
-        )
+        total_assigned = sum(len(group["params"]) for group in param_groups)
         total_trainable = len(trainable_names)
         assert total_assigned == total_trainable, (
             f"Parameter assignment mismatch: {total_assigned} assigned vs {total_trainable} trainable. "
@@ -224,6 +279,7 @@ class MuonConfig(OptimConfig):
             enable_all2all=self.enable_all2all,
             remainder_strategy=self.remainder_strategy,
             muon_split_sizes=muon_split_sizes,
+            swap_optimizer=self.swap_optimizer,
         )
 
         return optimizer
