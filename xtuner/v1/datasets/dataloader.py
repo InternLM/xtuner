@@ -28,10 +28,11 @@ def reduce_sum_across_dp_group(dp_mesh: DeviceMesh | None, local_value: int) -> 
         return int(local_value)
     if not dist.is_available() or not dist.is_initialized():
         return int(local_value)
-    if torch.cuda.is_available():
-        device = torch.device(f"cuda:{torch.cuda.current_device()}")
-    else:
-        device = torch.device("cpu")
+    # ``dp_mesh`` is guaranteed to be set here (the early return above handles
+    # ``None``), and it already carries the device type of the mesh the
+    # collective runs on (cuda / npu / xpu / ...), so use it instead of
+    # assuming CUDA.
+    device = torch.device(dp_mesh.device_type)
     tensor = torch.tensor([local_value], dtype=torch.int64, device=device)
     dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=dp_mesh.get_group())
     return int(tensor.item())
