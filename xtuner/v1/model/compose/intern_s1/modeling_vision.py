@@ -358,7 +358,7 @@ class InternS1VisionModel(BaseModel):
             hidden_states=encoder_outputs.hidden_states,
         )
 
-    def to_hf_key_list(self, key: str) -> list[str]:
+    def _model_hf_keys(self, key: str) -> list[str]:
         return [self._hf_prefix + key]
 
     @override

@@ -194,7 +194,7 @@ class Glm52MoE(MoE):
             return cast(GLM52MoEDecoderLayerMicroBatchOutput, layer_results)
         return cast(GLM52MoEDecoderLayerOutput, layer_results)
 
-    def to_hf_key_list(self, key: str) -> list[str]:
+    def _model_hf_keys(self, key: str) -> list[str]:
         if self.config.tie_word_embeddings and "lm_head" in key:
             key = key.replace("lm_head", "embed_tokens")
 
