@@ -108,8 +108,8 @@ case:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-2B-Instruct
                     - GSM8K_TEACHER_MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-4B-Instruct-2507
                     - GEO3K_TEACHER_MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-4B-Instruct
-                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/opd_train_meta.json
-                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/opd_eval_meta.json
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/on_policy_distillation/gsm8k_geo3k_train.json
+                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/on_policy_distillation/gsm8k_geo3k_eval.json
                     - OPD_CONFIG_PATH=autotest/config/rl_qwen3_2B_vl_mopd_k1.py
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
@@ -161,8 +161,8 @@ case:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-2B-Instruct
                     - GSM8K_TEACHER_MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-4B-Instruct-2507
                     - GEO3K_TEACHER_MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-4B-Instruct
-                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/opd_train_meta.json
-                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/opd_eval_meta.json
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/on_policy_distillation/gsm8k_geo3k_train.json
+                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/on_policy_distillation/gsm8k_geo3k_eval.json
                     - OPD_CONFIG_PATH=autotest/config/rl_qwen3_2B_vl_mopd_topk.py
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
