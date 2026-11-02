@@ -1,11 +1,17 @@
-"""Critic model unit tests on Qwen3.5-VL (compose) models.
+"""Critic 模型单测(Qwen3.5-VL compose 模型)。
 
-Coverage:
-- value_head models reject MTP
-- Qwen3.5-VL value-head HF keys are top-level (value_head.weight, no language_model. prefix)
-- SFT value loss (returns only): forward, loss value, and backward
-- PPO critic value loss (returns + old_values): forward, loss value, and backward
-- load a Qwen3.5-VL actor HF checkpoint into a critic, save_hf, and reload
+覆盖的行为:
+- TestCriticCustomHFKeyMapping(CPU,无需 GPU/权重)
+    - test_loaded_mapped_critic_head_is_not_reinitialized: hf_key_mapping 映射的 value head strict 加载后保留 checkpoint 值
+    - test_actor_to_critic_strict_load_initializes_head: actor checkpoint strict 加载进 critic,缺失头随机初始化
+    - test_backbone_missing_still_strict_error: head 豁免不掩盖 backbone 缺失,strict 仍报错
+- TestCriticSFT(8 卡 + QWEN3_5_MOE_PATH)
+    - test_critic_rejects_mtp: value_head 配置拒绝 MTP
+    - test_critic_qwen35_value_head_hf_keys: value head 落盘为顶层 value_head.weight(无 language_model. 前缀)
+    - test_critic_accepts_xtuner_actor_checkpoint_head_metadata: checkpoint head 元数据的角色校验(actor→critic 放行,critic→actor 拒绝)
+    - test_critic_sft_loss: SFT MSE 路径,从 build_loss_ctx_batch 公开入口进入的 forward/backward 与数值
+    - test_critic_clipped_value_loss: PPO clipped 路径,同上
+    - test_critic_load_actor_and_save_hf: actor 权重加载 → save_hf → strict 重载一致性
 """
 
 from __future__ import annotations
@@ -49,11 +55,20 @@ class _MappedCriticConfig(XTunerBaseModelConfig):
 class _MappedCriticModel(BaseModel):
     def __init__(self, config: _MappedCriticConfig):
         super().__init__(config)
+        self.backbone = torch.nn.Linear(config.hidden_size, config.hidden_size, bias=False)
         self.lm_head = torch.nn.Linear(config.hidden_size, 1, bias=False)
         self._init_load_spec()
 
     def to_hf_key_list(self, key: str) -> list[str]:
         return [key]
+
+
+def _write_mapped_ckpt(tmpdir: str, tensors: dict, head_type: str | None) -> None:
+    index: dict = {"weight_map": {key: "model.safetensors" for key in tensors}}
+    if head_type is not None:
+        index["metadata"] = {"head_type": head_type}
+    save_file(tensors, str(Path(tmpdir) / "model.safetensors"))
+    (Path(tmpdir) / "model.safetensors.index.json").write_text(json.dumps(index))
 
 
 def _critic_model_cfg() -> Qwen3_5_VLMoE35BA3Config:
@@ -68,27 +83,53 @@ def _critic_model_cfg() -> Qwen3_5_VLMoE35BA3Config:
 
 
 class TestCriticCustomHFKeyMapping(unittest.TestCase):
+    """Critic head 的 HF key 映射与 strict 加载契约(自定义 hf_key_mapping,无需 GPU)。"""
+
     def test_loaded_mapped_critic_head_is_not_reinitialized(self):
-        """A value head loaded through hf_key_mapping must retain checkpoint values."""
+        # 经 hf_key_mapping 映射的 value head 在 strict 加载后必须保留 checkpoint 值,不被随机初始化覆盖
         model = _MappedCriticModel(_MappedCriticConfig())
         expected = torch.tensor([[1.0, 2.0, 3.0, 4.0]], dtype=torch.float32)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            save_file({"critic.weight": expected}, str(Path(tmpdir) / "model.safetensors"))
-            (Path(tmpdir) / "model.safetensors.index.json").write_text(
-                json.dumps(
-                    {
-                        "metadata": {"head_type": "value_head"},
-                        "weight_map": {"critic.weight": "model.safetensors"},
-                    }
-                )
+            _write_mapped_ckpt(
+                tmpdir,
+                {"critic.weight": expected, "backbone.weight": torch.zeros(4, 4)},
+                head_type="value_head",
             )
-            loaded_keys, unloaded_keys, missing_keys = model.from_hf(tmpdir, strict=False)
+            loaded_keys, unloaded_keys, missing_keys = model.from_hf(tmpdir, strict=True)
 
         self.assertIn("lm_head.weight", loaded_keys)
+        self.assertIn("backbone.weight", loaded_keys)
         self.assertNotIn("lm_head.weight", unloaded_keys)
         self.assertNotIn("critic.weight", missing_keys)
         torch.testing.assert_close(model.lm_head.weight, expected)
+
+    def test_actor_to_critic_strict_load_initializes_head(self):
+        # actor checkpoint strict 加载进 critic:缺失的 value head 被随机初始化,backbone 正常加载,key 对账正确
+        model = _MappedCriticModel(_MappedCriticConfig())
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _write_mapped_ckpt(
+                tmpdir,
+                {"backbone.weight": torch.ones(4, 4), "lm_head.weight": torch.zeros(4, 4)},
+                head_type="lm_head",
+            )
+            loaded_keys, unloaded_keys, missing_keys = model.from_hf(tmpdir, strict=True)
+
+        self.assertIn("backbone.weight", loaded_keys)
+        self.assertIn("lm_head.weight", loaded_keys)
+        self.assertNotIn("lm_head.weight", unloaded_keys)
+        self.assertNotIn("critic.weight", missing_keys)
+        self.assertNotEqual(model.lm_head.weight.abs().sum().item(), 0.0)
+
+    def test_backbone_missing_still_strict_error(self):
+        # head 豁免不得掩盖 backbone 缺失:strict 加载仍必须报错
+        model = _MappedCriticModel(_MappedCriticConfig())
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _write_mapped_ckpt(tmpdir, {"lm_head.weight": torch.zeros(4, 4)}, head_type="lm_head")
+            with self.assertRaisesRegex(RuntimeError, "Missing keys in checkpoint"):
+                model.from_hf(tmpdir, strict=True)
 
 
 def _mse_value_loss(
@@ -252,6 +293,7 @@ class TestCriticSFT(DeterministicDDPTestCase):
 
     @unittest.skipUnless(QWEN3_5_MOE_PATH, "QWEN3_5_MOE_PATH is not set")
     def test_critic_sft_loss(self):
+        # SFT MSE 路径:只有 returns 时,经模型公开入口组装并前向/反向,loss 与手算 oracle 一致
         """SFT path: only returns is provided, loss is unclipped MSE."""
         pg = self.create_pg(str(DEVICE))
         torch.manual_seed(0)
@@ -297,6 +339,7 @@ class TestCriticSFT(DeterministicDDPTestCase):
 
     @unittest.skipUnless(QWEN3_5_MOE_PATH, "QWEN3_5_MOE_PATH is not set")
     def test_critic_clipped_value_loss(self):
+        # PPO critic 路径:提供 old_values 时,经模型公开入口组装,clipped loss 与手算 oracle 一致且区别于 MSE
         """PPO critic path: old_values is provided, loss is clipped value loss."""
         pg = self.create_pg(str(DEVICE))
         torch.manual_seed(0)
