@@ -1,11 +1,12 @@
 """NPU fused gated RMSNorm for GatedDeltaNet.
 
-One fused RMSNorm pass (fp32 gamma/rstd, bf16 output) plus a bf16 silu/mul
-replaces the ~13-pass fp32 decomposition; native NpuRmsNormBackward0
-autograd carries the gradients. XTUNER_NPU_FUSED_GATED_NORM=1 (default)
-selects the fused branch inside ``forward``; the module's own one-shot
-``npu_rms_norm`` self-test downgrades the whole class to the fp32 python
-fallback when the fused op fails.
+One fused RMSNorm pass (fp32 gamma/rstd, bf16 output) plus the
+shape-dispatched silu-gate tail of :func:`xtuner.v1.ops.act_fn.fused_silu_mul`
+replaces the ~13-pass fp32 decomposition; native NpuRmsNormBackward0 autograd
+carries the gradients. XTUNER_NPU_FUSED_GATED_NORM=1 (default) selects the
+fused branch inside ``forward``; the module's own one-shot ``npu_rms_norm``
+self-test downgrades the whole class to the fp32 python fallback when the
+fused op fails.
 """
 
 import os
@@ -15,6 +16,8 @@ import torch.nn.functional as F
 import torch_npu  # type: ignore[import-untyped]
 from torch import nn
 from torch.distributed.tensor import DTensor
+
+from xtuner.v1.ops.act_fn import fused_silu_mul
 
 
 _FUSED_GATED_NORM = bool(int(os.environ.get("XTUNER_NPU_FUSED_GATED_NORM", "1")))
@@ -73,10 +76,12 @@ class RMSNormGated(nn.Module):
 
     def forward(self, x, g):
         if _FUSED_GATED_NORM and gated_fused_ok():
-            # One fused RMSNorm pass (fp32 gamma/rstd, bf16 output) plus a
-            # bf16 silu/mul replaces the ~13-pass fp32 decomposition; native
+            # One fused RMSNorm pass (fp32 gamma/rstd, bf16 output) plus the
+            # shape-dispatched silu-gate tail (fused_silu_mul: the plain bf16
+            # tail below 2**25 elements, the triton fp32-rounding kernel pair
+            # above) replaces the ~13-pass fp32 decomposition; native
             # NpuRmsNormBackward0 autograd carries the gradients.
             y = torch_npu.npu_rms_norm(x, local(self.weight), epsilon=self.eps)[0]
-            return y * F.silu(g.to(x.dtype))
+            return fused_silu_mul(y, g)
         normalized = x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + self.eps)
         return (normalized * local(self.weight).float() * F.silu(g.float())).to(x.dtype)
