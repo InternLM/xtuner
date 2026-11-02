@@ -98,17 +98,17 @@ def _mse_value_loss(
     """Hand-computed SFT critic loss used to document / check CriticLossContext.
 
     Args:
-        vpred (torch.Tensor): Current value predictions.
+        vpred (torch.Tensor): Current value predictions, [B, S, 1].
         returns (torch.Tensor): Per-token regression targets.
         loss_weight (torch.Tensor): Normalized per-token weights.
 
     Returns:
         torch.Tensor: Scalar sum_t w_t * 0.5 * (v - R)^2.
     """
-    vpred = vpred.squeeze(-1) if vpred.dim() > 0 and vpred.size(-1) == 1 else vpred
-    returns = returns.squeeze(-1) if returns.dim() > 0 and returns.size(-1) == 1 else returns
-    loss_weight = loss_weight.squeeze(-1) if loss_weight.dim() > 0 and loss_weight.size(-1) == 1 else loss_weight
-    per_token = 0.5 * (vpred - returns) ** 2
+    v = vpred.squeeze(-1)  # drop the head output dim only; it is always 1
+    returns = returns.reshape_as(v)
+    loss_weight = loss_weight.reshape_as(v)
+    per_token = 0.5 * (v - returns) ** 2
     return (per_token * loss_weight).sum()
 
 
@@ -122,7 +122,7 @@ def _clipped_value_loss(
     """Hand-computed PPO critic loss used to document / check CriticLossContext.
 
     Args:
-        vpred (torch.Tensor): Current value predictions.
+        vpred (torch.Tensor): Current value predictions, [B, S, 1].
         old_values (torch.Tensor): Frozen values used for clipping.
         returns (torch.Tensor): Per-token regression targets.
         loss_weight (torch.Tensor): Normalized per-token weights.
@@ -131,12 +131,12 @@ def _clipped_value_loss(
     Returns:
         torch.Tensor: Scalar sum_t w_t * 0.5 * max((v-R)^2, (v_clip-R)^2).
     """
-    vpred = vpred.squeeze(-1) if vpred.dim() > 0 and vpred.size(-1) == 1 else vpred
-    old_values = old_values.squeeze(-1) if old_values.dim() > 0 and old_values.size(-1) == 1 else old_values
-    returns = returns.squeeze(-1) if returns.dim() > 0 and returns.size(-1) == 1 else returns
-    loss_weight = loss_weight.squeeze(-1) if loss_weight.dim() > 0 and loss_weight.size(-1) == 1 else loss_weight
-    v_clip = old_values + (vpred - old_values).clamp(-cliprange_value, cliprange_value)
-    per_token = 0.5 * torch.maximum((vpred - returns) ** 2, (v_clip - returns) ** 2)
+    v = vpred.squeeze(-1)  # drop the head output dim only; it is always 1
+    old_values = old_values.reshape_as(v)
+    returns = returns.reshape_as(v)
+    loss_weight = loss_weight.reshape_as(v)
+    v_clip = old_values + (v - old_values).clamp(-cliprange_value, cliprange_value)
+    per_token = 0.5 * torch.maximum((v - returns) ** 2, (v_clip - returns) ** 2)
     return (per_token * loss_weight).sum()
 
 
@@ -218,13 +218,13 @@ class TestCriticSFT(DeterministicDDPTestCase):
         except (AssertionError, ValueError):
             pass
 
-    def _make_batch(self, model_cfg: Qwen3_5_VLMoE35BA3Config, loss_cfg: CriticLossConfig):
+    def _make_batch(self, model_cfg: Qwen3_5_VLMoE35BA3Config, ignore_idx: int = -100):
         seq_len = 32
         prompt_len = 8
         vocab_size = model_cfg.text_config.vocab_size
         input_ids = torch.randint(0, vocab_size, (1, seq_len), device=DEVICE)
         shifted_labels = input_ids.clone()
-        shifted_labels[:, :prompt_len] = loss_cfg.ignore_idx
+        shifted_labels[:, :prompt_len] = ignore_idx
         returns = torch.zeros(1, seq_len, device=DEVICE, dtype=torch.float32)
         returns[:, prompt_len:] = 1.0
         seq_ctx = SequenceContext.from_input_ids((input_ids,), device=str(DEVICE))
@@ -256,7 +256,7 @@ class TestCriticSFT(DeterministicDDPTestCase):
         torch.manual_seed(0)
 
         model_cfg = _critic_model_cfg()
-        loss_cfg = CriticLossConfig()
+        model_cfg.text_config.lm_loss_cfg = CriticLossConfig()
         engine = _critic_engine(model_cfg)
         engine.from_hf(QWEN3_5_MOE_PATH, strict=False)
 
@@ -266,15 +266,16 @@ class TestCriticSFT(DeterministicDDPTestCase):
         self.assertEqual(lm_head.out_features, 1)
         self.assertIsInstance(lm_head, ValueHead)
 
-        seq_ctx, shifted_labels, returns = self._make_batch(model_cfg, loss_cfg)
+        seq_ctx, shifted_labels, returns = self._make_batch(model_cfg)
         engine.model.train()
-        loss_ctx = loss_cfg.build(
-            data={"shifted_labels": shifted_labels, "returns": returns},
-            sp_mesh=None,
+        # Go through the public batch entry so the model-side call protocol
+        # (cu_seq_lens_list / sp_mesh keywords) stays covered by CI.
+        loss_ctx_batch = engine.model.build_loss_ctx_batch(
+            [{"seq_ctx": seq_ctx, "shifted_labels": shifted_labels, "returns": returns}], None
         )
+        loss_ctx = loss_ctx_batch[0]["lm"]
         assert loss_ctx is not None
         self.assertIsNone(loss_ctx.loss_kwargs.old_values)
-        loss_ctx = loss_cfg.loss_ctx_cls.build_batches([loss_ctx])[0]
         out = engine.model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
         assert out.loss is not None
         assert out.logits is not None
@@ -300,11 +301,11 @@ class TestCriticSFT(DeterministicDDPTestCase):
         torch.manual_seed(0)
 
         model_cfg = _critic_model_cfg()
-        loss_cfg = CriticLossConfig(cliprange_value=CLIPRANGE_VALUE)
+        model_cfg.text_config.lm_loss_cfg = CriticLossConfig(cliprange_value=CLIPRANGE_VALUE)
         engine = _critic_engine(model_cfg)
         engine.from_hf(QWEN3_5_MOE_PATH, strict=False)
 
-        seq_ctx, shifted_labels, returns = self._make_batch(model_cfg, loss_cfg)
+        seq_ctx, shifted_labels, returns = self._make_batch(model_cfg)
         engine.model.train()
         with torch.no_grad():
             freeze_out = engine.model(seq_ctx=seq_ctx, loss_ctx=None)
@@ -312,17 +313,22 @@ class TestCriticSFT(DeterministicDDPTestCase):
             # v_old is shifted away from R=1 so the clipped term is the larger square.
             old_values = freeze_out.logits.float().squeeze(-1).detach() - 1.0
 
-        loss_ctx = loss_cfg.build(
-            data={
-                "shifted_labels": shifted_labels,
-                "returns": returns,
-                "old_values": old_values,
-            },
-            sp_mesh=None,
+        # Go through the public batch entry so the model-side call protocol
+        # (cu_seq_lens_list / sp_mesh keywords) stays covered by CI.
+        loss_ctx_batch = engine.model.build_loss_ctx_batch(
+            [
+                {
+                    "seq_ctx": seq_ctx,
+                    "shifted_labels": shifted_labels,
+                    "returns": returns,
+                    "old_values": old_values,
+                }
+            ],
+            None,
         )
+        loss_ctx = loss_ctx_batch[0]["lm"]
         assert loss_ctx is not None
         self.assertIsNotNone(loss_ctx.loss_kwargs.old_values)
-        loss_ctx = loss_cfg.loss_ctx_cls.build_batches([loss_ctx])[0]
         out = engine.model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
         assert out.loss is not None
         assert out.logits is not None
