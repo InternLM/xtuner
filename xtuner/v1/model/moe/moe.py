@@ -186,8 +186,8 @@ class MoEConfig(TransformerConfig):
     @model_validator(mode="after")
     def _validate_critic_head(self) -> Self:
         """Reject MTP on value-head (critic) models."""
-        if self.head_type == "value_head" and self.mtp_config is not None:
-            raise ValueError("head_type='value_head' does not support MTP; set mtp_config=None")
+        if self.head_config.type == "value_head" and self.mtp_config is not None:
+            raise ValueError("head_config.type='value_head' does not support MTP; set mtp_config=None")
         return self
 
     def build(self) -> "MoE":

@@ -193,6 +193,39 @@ DEFAULT_FLOAT8_CFG = {
 }
 
 
+class HeadConfig(PydanticBaseModel):
+    """Output head configuration owning the head-type selection and
+    construction.
+
+    Args:
+        type (str): "lm_head" for the vocabulary head, "value_head" for the
+            critic value head.
+    """
+
+    model_config = ConfigDict(title="Head config", extra="forbid", protected_namespaces=())
+
+    type: Literal["lm_head", "value_head"] = "lm_head"
+
+    def build(self, hidden_size: int, vocab_size: int | None = None) -> nn.Linear:
+        """Build the output head.
+
+        Args:
+            hidden_size (int): Hidden size shared from the parent model config.
+            vocab_size (int | None): Vocabulary size; required by "lm_head" and
+                unused by the value head. Defaults to None.
+
+        Returns:
+            nn.Linear: LMHead for "lm_head", ValueHead (out_features=1) for "value_head".
+        """
+        from xtuner.v1.module.head import LMHead, ValueHead
+
+        if self.type == "value_head":
+            return ValueHead(hidden_size, bias=False)
+        if vocab_size is None:
+            raise ValueError("vocab_size is required to build an lm_head")
+        return LMHead(hidden_size, vocab_size, bias=False)
+
+
 class TransformerConfig(XTunerBaseModelConfig):
     """Base transformer configuration with unified RoPE parameters.
 
@@ -223,7 +256,7 @@ class TransformerConfig(XTunerBaseModelConfig):
     linear_attention: Annotated[GatedDeltaNetConfig | KDAConfig | None, Parameter(group="model")] = None
     mlp_bias: Annotated[bool, Parameter(group="model")] = False
     tie_word_embeddings: Annotated[bool, Parameter(group="model")] = False
-    head_type: Annotated[Literal["lm_head", "value_head"], Parameter(group="model")] = "lm_head"
+    head_config: Annotated[HeadConfig, Parameter(group="model")] = Field(default_factory=HeadConfig)
     model_type: Annotated[str | None, Parameter(group="model")] = None  # TODO: yehaochen maybe should be removed
     generate_config: GenerateConfig | None = None
     return_hidden_states: Annotated[bool, Parameter(group="model")] = False
@@ -401,29 +434,24 @@ class TransformerConfig(XTunerBaseModelConfig):
             ]
 
     def build_head(self) -> nn.Linear:
-        """Build the output head.
+        """Build the output head from ``head_config``.
 
         Returns:
-            LMHead when head_type="lm_head"
-            ValueHead (out_features=1) when head_type="value_head"
+            nn.Linear: LMHead for "lm_head", ValueHead (out_features=1) for "value_head".
         """
-        from xtuner.v1.module.head import LMHead, ValueHead
+        return self.head_config.build(self.hidden_size, self.vocab_size)
 
-        if self.head_type == "value_head":
-            return ValueHead(self.hidden_size, bias=False)
-        elif self.head_type == "lm_head":
-            return LMHead(self.hidden_size, self.vocab_size, bias=False)
-        else:
-            raise ValueError(f"Invalid head_type: {self.head_type}")
-
-    @property
-    def tie_head(self) -> bool:
-        """Whether the output head shares weights with the input embeddings.
-
-        A value head never ties with embeddings, regardless of
-        ``tie_word_embeddings``.
-        """
-        return self.tie_word_embeddings and self.head_type != "value_head"
+    @model_validator(mode="after")
+    def _untie_value_head(self) -> Self:
+        # ``tie_word_embeddings`` is the single source of truth for weight tying;
+        # a value head can never tie with the embeddings, so normalize it here.
+        if self.head_config.type == "value_head" and self.tie_word_embeddings:
+            log_rank0.info(
+                "head_config.type='value_head' can never tie with the embeddings; "
+                "normalizing tie_word_embeddings=True to False."
+            )
+            self.tie_word_embeddings = False
+        return self
 
     def head_fp32(self, fsdp_cfg: FSDPConfig) -> bool:
         """Whether the output head runs in float32 under FSDP.
@@ -431,7 +459,7 @@ class TransformerConfig(XTunerBaseModelConfig):
         A value head reads the dedicated ``fp32_value_head`` switch instead of
         ``fp32_lm_head``.
         """
-        return fsdp_cfg.fp32_value_head if self.head_type == "value_head" else fsdp_cfg.fp32_lm_head
+        return fsdp_cfg.fp32_value_head if self.head_config.type == "value_head" else fsdp_cfg.fp32_lm_head
 
 
 class ModelOutputs(PydanticBaseModel):
@@ -665,12 +693,13 @@ class BaseModel(nn.Module):
 
         * 普通参数：走子类 to_hf_key_list（加 model. 前缀、layer 重命名、
           VL 的 language_model. 前缀、tie 时 lm_head → embed_tokens）。
-        * value_head 的 lm_head.*：子类通过 ``config.tie_head`` 判断 tie，
-          value head 天然不 tie，不会被映射成 embed_tokens；这里再做
+        * value_head 的 lm_head.*：``tie_word_embeddings`` 已在配置归一化时
+          置 False，不会被映射成 embed_tokens；这里再做
           lm_head → value_head 改名。
         """
         cleaned = self._clean_param_name(name)
-        if getattr(self.config, "head_type", "lm_head") == "value_head" and cleaned.startswith("lm_head"):
+        head_cfg = getattr(self.config, "head_config", None)
+        if head_cfg is not None and head_cfg.type == "value_head" and cleaned.startswith("lm_head"):
             return self._remap_critic_hf_keys(self.to_hf_key_list(name))
         else:
             return self.to_hf_key_list(name)
@@ -678,8 +707,10 @@ class BaseModel(nn.Module):
     def _head_checkpoint_meta(self) -> dict[str, Any]:
         """Checkpoint meta written into model.safetensors.index.json
         metadata."""
+        head_cfg = getattr(self.config, "head_config", None)
+        head_type = head_cfg.type if head_cfg is not None else "lm_head"
         return {
-            "head_type": getattr(self.config, "head_type", "lm_head"),
+            "head_type": head_type,
         }
 
     def _validate_head_checkpoint(self, hf_path: Path) -> None:
@@ -694,7 +725,7 @@ class BaseModel(nn.Module):
         Official HF checkpoints without this metadata are skipped. Vision and projector modules have no head_type and
         are skipped.
         """
-        if not hasattr(self.config, "head_type"):
+        if not hasattr(self.config, "head_config"):
             return
         index_path = hf_path / "model.safetensors.index.json"
         if not index_path.is_file():
@@ -702,7 +733,7 @@ class BaseModel(nn.Module):
         meta = json.loads(index_path.read_text()).get("metadata") or {}
         if "head_type" not in meta:
             return
-        cfg_head_type = self.config.head_type
+        cfg_head_type = self.config.head_config.type
         ckpt_head_type = meta.get("head_type", "lm_head")
         if cfg_head_type == "value_head" and ckpt_head_type == "lm_head":
             log_rank0.info(
@@ -712,7 +743,7 @@ class BaseModel(nn.Module):
             return
         if ckpt_head_type != cfg_head_type:
             raise RuntimeError(
-                f"Checkpoint head_type={ckpt_head_type!r} does not match config head_type={cfg_head_type!r}."
+                f"Checkpoint head_type={ckpt_head_type!r} does not match config head_config.type={cfg_head_type!r}."
             )
 
     @torch.no_grad()
@@ -747,14 +778,15 @@ class BaseModel(nn.Module):
         """
 
         # 非critic模型直接返回
-        if getattr(self.config, "head_type", "lm_head") != "value_head":
+        head_cfg = getattr(self.config, "head_config", None)
+        if head_cfg is None or head_cfg.type != "value_head":
             return loaded_keys, unloaded_keys, missing_keys
 
         # critic 必须有可初始化的线性 head。
         lm_head = getattr(self, "lm_head", None)
         if not isinstance(lm_head, nn.Linear):
             raise TypeError(
-                "Cannot initialize critic value head: config has head_type='value_head' "
+                "Cannot initialize critic value head: config has head_config.type='value_head' "
                 "but model.lm_head is not nn.Linear."
             )
 
@@ -765,7 +797,7 @@ class BaseModel(nn.Module):
         head_load_spec = self.load_spec_mapping.get("lm_head.weight")
         if head_load_spec is None:
             raise ValueError(
-                "Critic model has head_type='value_head' but no load spec for "
+                "Critic model has head_config.type='value_head' but no load spec for "
                 "'lm_head.weight'. Check model initialization and _init_load_spec()."
             )
         if all(hf_loader.is_key_exist(key) for key in head_load_spec.global_hf_keys):

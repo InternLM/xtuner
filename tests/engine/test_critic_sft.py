@@ -18,6 +18,7 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
+from pydantic import Field
 from safetensors.torch import save_file
 from torch.distributed.tensor import DTensor
 
@@ -26,7 +27,7 @@ from xtuner.v1.config import AdamWConfig, FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.loss.critic_loss import CriticLossConfig
-from xtuner.v1.model.base import BaseModel, XTunerBaseModelConfig
+from xtuner.v1.model.base import BaseModel, HeadConfig, XTunerBaseModelConfig
 from xtuner.v1.model.compose.qwen3_5.qwen3_5_config import Qwen3_5_VLMoE35BA3Config
 from xtuner.v1.model.moe.qwen3_5_text import Qwen3_5_VLTextMoE35BA3BConfig
 from xtuner.v1.module.head import ValueHead
@@ -41,7 +42,7 @@ QWEN3_5_MOE_PATH = os.environ.get("QWEN3_5_MOE_PATH")
 
 class _MappedCriticConfig(XTunerBaseModelConfig):
     hidden_size: int = 4
-    head_type: str = "value_head"
+    head_config: HeadConfig = Field(default_factory=lambda: HeadConfig(type="value_head"))
     hf_key_mapping: dict[str, str] | None = {r"^value_head\.weight$": "critic.weight"}
 
 
@@ -62,7 +63,7 @@ def _critic_model_cfg() -> Qwen3_5_VLMoE35BA3Config:
         only_llm_forward=True,
         compile_cfg=False,
     )
-    model_cfg.text_config.head_type = "value_head"
+    model_cfg.text_config.head_config.type = "value_head"
     return model_cfg
 
 
@@ -176,7 +177,7 @@ class TestCriticSFT(DeterministicDDPTestCase):
     def test_critic_rejects_mtp(self):
         pg = self.create_pg(str(DEVICE))
         with self.assertRaisesRegex(ValueError, "does not support MTP"):
-            Qwen3_5_VLTextMoE35BA3BConfig(head_type="value_head", mtp_config=MTPConfig(num_layers=1))
+            Qwen3_5_VLTextMoE35BA3BConfig(head_config=HeadConfig(type="value_head"), mtp_config=MTPConfig(num_layers=1))
         try:
             dist.destroy_process_group(pg)
         except (AssertionError, ValueError):
@@ -209,8 +210,8 @@ class TestCriticSFT(DeterministicDDPTestCase):
 
             # A critic checkpoint cannot initialize an actor because it has no vocabulary head.
             index_path.write_text(json.dumps({"metadata": {"head_type": "value_head"}}))
-            model.language_model.config.head_type = "lm_head"
-            with self.assertRaisesRegex(RuntimeError, "does not match config head_type"):
+            model.language_model.config.head_config.type = "lm_head"
+            with self.assertRaisesRegex(RuntimeError, "does not match config head_config.type"):
                 model.language_model._validate_head_checkpoint(Path(tmpdir))
 
         try:
