@@ -11,7 +11,7 @@ from .qwen3vl_text import Qwen3VLTextDense
 
 
 class Qwen3_5_VLTextDense(Qwen3VLTextDense):
-    def to_hf_key_list(self, key: str) -> list[str]:
+    def _model_hf_keys(self, key: str) -> list[str]:
         # Emit the standalone language-model layout (``model.<...>``). The VLM nesting
         # under ``model.language_model.`` is applied by the config's ``hf_key_mapping``
         # so this tower stays unaware of how it is composed into the VLM.
