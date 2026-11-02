@@ -710,49 +710,29 @@ class BaseModel(nn.Module):
             remapped.append(re.sub(r"(^|\.)lm_head(?=\.|$)", r"\1value_head", key))
         return remapped
 
-    def _head_checkpoint_meta(self) -> dict[str, Any]:
-        """Checkpoint meta written into model.safetensors.index.json
-        metadata."""
-        head_cfg = getattr(self.config, "head_config", None)
-        head_type = head_cfg.type if head_cfg is not None else "lm_head"
-        return {
-            "head_type": head_type,
-        }
-
     def _validate_head_checkpoint(self, hf_path: Path) -> None:
-        """Validate that the model's head type matches the checkpoint head
-        type.
+        """Reject loading a critic checkpoint into an actor model.
 
-        A checkpoint exported by an actor (head_type="lm_head") may initialize a
-        critic model (head_type="value_head"). Its value head is absent and
-        is initialized later by ``_init_missing_critic_head``. The reverse direction
-        is invalid because a critic checkpoint has no vocabulary head.
-
-        Official HF checkpoints without this metadata are skipped. Vision and projector modules have no head_type and
-        are skipped.
+        The role is inferred from the actual checkpoint keys: any ``value_head.*``
+        weight (an XTuner-reserved name that official HF checkpoints never use)
+        marks a critic checkpoint. The reverse direction (actor checkpoint ->
+        critic model) stays valid; the missing head is randomly initialized by
+        ``_init_missing_critic_head``. Vision and projector modules have no
+        head and are skipped.
         """
         if not hasattr(self.config, "head_config"):
             return
         index_path = hf_path / "model.safetensors.index.json"
         if not index_path.is_file():
             return
-        meta = json.loads(index_path.read_text()).get("metadata") or {}
-        if "head_type" not in meta:
-            return
-        cfg_head_type = self.config.head_config.type
-        ckpt_head_type = meta.get("head_type", "lm_head")
-        if cfg_head_type == "value_head" and ckpt_head_type == "lm_head":
-            log_rank0.info(
-                "Initializing a value_head critic from an lm_head actor checkpoint; "
-                "the missing value head will be randomly initialized."
-            )
-            return
-        if ckpt_head_type != cfg_head_type:
+        weight_map = (json.loads(index_path.read_text()).get("weight_map") or {}).keys()
+        has_value_head = any(re.search(r"(^|\.)value_head(?=\.|$)", key) for key in weight_map)
+        if self.config.head_config.type == "lm_head" and has_value_head:
             raise RuntimeError(
-                f"Checkpoint head_type={ckpt_head_type!r} does not match config head_config.type={cfg_head_type!r}."
+                "Cannot load a checkpoint containing value_head weights into an actor model: "
+                "the critic checkpoint has no vocabulary head."
             )
 
-    @torch.no_grad()
     def _critic_head_hf_keys(self) -> set[str] | None:
         """HF checkpoint keys of the critic value head (hf_key_mapping
         applied).
@@ -773,6 +753,7 @@ class BaseModel(nn.Module):
             )
         return set(head_spec.global_hf_keys)
 
+    @torch.no_grad()
     def _init_missing_critic_head(
         self,
         hf_loader: HFCheckpointLoader,
@@ -1277,7 +1258,7 @@ class BaseModel(nn.Module):
             return get_rope_embedding(config=config)
 
     def _init_load_spec(self) -> None:
-        if self.__class__.to_hf_key_list is BaseModel.to_hf_key_list:
+        if self.__class__._model_hf_keys is BaseModel._model_hf_keys:
             self.load_spec_mapping = {}
             return
 
@@ -1893,7 +1874,7 @@ class BaseModel(nn.Module):
             raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
 
         with open(hf_dir / "model.safetensors.index.json", "w") as f:
-            index = {"weight_map": dict(weight_map), "metadata": self._head_checkpoint_meta()}
+            index = {"weight_map": dict(weight_map)}
             json.dump(index, f, indent=2, ensure_ascii=False)
 
     def _save_hf(
@@ -1998,7 +1979,7 @@ class BaseModel(nn.Module):
 
             # write or overwrite `model.safetensors.index.json`
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
-                index = {"weight_map": weight_map, "metadata": self._head_checkpoint_meta()}
+                index = {"weight_map": weight_map}
                 json.dump(index, f, indent=2, ensure_ascii=False)
 
         if dist.is_initialized():
