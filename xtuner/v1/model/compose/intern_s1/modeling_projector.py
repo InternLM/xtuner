@@ -44,7 +44,7 @@ class InternS1MultiModalProjector(BaseModel):
         hidden_states = self.linear_2(hidden_states)
         return hidden_states
 
-    def to_hf_key_list(self, key: str) -> list[str]:
+    def _model_hf_keys(self, key: str) -> list[str]:
         return [self._hf_prefix + key]
 
     # Note: 因为 model 本身就是 self，暂时无法实现在 fully_shard 时候进行 checkpoint

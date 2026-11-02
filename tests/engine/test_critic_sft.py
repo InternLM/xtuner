@@ -59,7 +59,7 @@ class _MappedCriticModel(BaseModel):
         self.lm_head = torch.nn.Linear(config.hidden_size, 1, bias=False)
         self._init_load_spec()
 
-    def to_hf_key_list(self, key: str) -> list[str]:
+    def _model_hf_keys(self, key: str) -> list[str]:
         return [key]
 
 
@@ -89,6 +89,9 @@ class TestCriticCustomHFKeyMapping(unittest.TestCase):
         # 经 hf_key_mapping 映射的 value head 在 strict 加载后必须保留 checkpoint 值,不被随机初始化覆盖
         model = _MappedCriticModel(_MappedCriticConfig())
         expected = torch.tensor([[1.0, 2.0, 3.0, 4.0]], dtype=torch.float32)
+
+        # 公开 to_hf_key_list 已包含 critic 改名(hf_key_mapping 仍在 load spec 阶段单独应用)
+        self.assertEqual(model.to_hf_key_list("lm_head.weight"), ["value_head.weight"])
 
         with tempfile.TemporaryDirectory() as tmpdir:
             _write_mapped_ckpt(
@@ -230,7 +233,7 @@ class TestCriticSFT(DeterministicDDPTestCase):
         with torch.device("meta"):
             model = _critic_model_cfg().build()
         self.assertEqual(
-            model.language_model._to_hf_key_list("lm_head.weight"),
+            model.language_model.to_hf_key_list("lm_head.weight"),
             ["value_head.weight"],
         )
         try:

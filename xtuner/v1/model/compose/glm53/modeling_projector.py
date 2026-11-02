@@ -73,7 +73,7 @@ class Glm53Projector(BaseModel):
     def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
         return GLM53_PROJECTOR_COMPILE_CFG
 
-    def to_hf_key_list(self, key: str) -> list[str]:
+    def _model_hf_keys(self, key: str) -> list[str]:
         return [self._hf_prefix + key]
 
     @torch.no_grad()
