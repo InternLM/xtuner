@@ -10,6 +10,17 @@ import torch.distributed as dist
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 
 
+def mirror_base_seed_draw() -> None:
+    """Mirror one default CPU RNG base-seed draw on a follower and discard it.
+
+    BASE supplies no dedicated loader generator. Followers skip iterator creation, so mirror its RNG consumption
+    without reseeding or creating workers. This does not restore all RNG states or force different ranks to share a
+    state.
+    """
+    # follower “空转”抽一次并丢弃；仅响应 iterator 创建事件，不在普通取数时重复抽。
+    torch.empty((), dtype=torch.int64, device="cpu").random_()
+
+
 # 生产复用原 SP NCCL 组并使用当前 GPU；CPU/Gloo 仅用于已有测试。
 # Production reuses the SP NCCL group on the local GPU; CPU/Gloo supports existing tests.
 def _device(group):
@@ -17,7 +28,8 @@ def _device(group):
 
 
 def broadcast_control(value, group):
-    """Small metadata, also used to share loader length during initialization."""
+    """Small metadata, also used to share loader length during
+    initialization."""
     # 这里只传小元信息；tensor 内容在 broadcast_batch 中直接传输。
     # Send small metadata here; broadcast_batch transfers tensor contents directly.
     values = [value]

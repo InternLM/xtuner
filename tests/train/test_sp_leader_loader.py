@@ -38,12 +38,12 @@ def _config(data_dir, workers, enabled=True):
     )
 
 
-def _trainer(mesh, cfg, steps=None, epoch=1, cur_step=0):
+def _trainer(mesh, cfg, steps=None, epoch=1, cur_step=0, total_epochs=2):
     obj = Trainer.__new__(Trainer)
     obj.data_mesh, obj.sp_mesh = mesh, mesh["sp"]
     obj.tokenizer = UTF8ByteTokenizer()
     obj._global_batch_size, obj._micro_batch_size = 4, None
-    obj._total_step, obj._total_epoch = steps, 2 if steps is None else None
+    obj._total_step, obj._total_epoch = steps, total_epochs if steps is None else None
     obj._cur_step, obj._cur_epoch = cur_step, epoch
     # Execute the actual data-initialization section of __init__, without constructing
     # a model/optimizer. Do not add a production wrapper just to accommodate this test.
@@ -60,9 +60,20 @@ def _trainer(mesh, cfg, steps=None, epoch=1, cur_step=0):
         if isinstance(node, ast.Assign)
         and any(isinstance(t, ast.Attribute) and t.attr == "_sp_media_dedup" for t in node.targets)
     )
-    end = next(i for i in range(start + 1, len(nodes)) if isinstance(nodes[i], ast.Assert))
+    end = next(
+        i
+        for i in range(start + 1, len(nodes))
+        if isinstance(nodes[i], ast.If)
+        and isinstance(nodes[i].test, ast.Call)
+        and isinstance(nodes[i].test.func, ast.Name)
+        and nodes[i].test.func.id == "isinstance"
+        and isinstance(nodes[i].test.args[0], ast.Name)
+        and nodes[i].test.args[0].id == "load_from"
+    )
     section = ast.Module(body=nodes[start:end], type_ignores=[])
-    namespace = dict(vars(trainer_module), self=obj, dataloader_cfg=cfg, seed=17, total_step=steps)
+    namespace = dict(
+        vars(trainer_module), self=obj, dataloader_cfg=cfg, seed=17, total_step=steps, total_epoch=obj._total_epoch
+    )
     exec(compile(section, "<Trainer.__init__:data initialization>", "exec"), namespace)
     return obj
 
@@ -280,3 +291,56 @@ def test_direct_failure_terminates_workers(tmp_path):
 
     with pytest.raises(ProcessRaisedException):
         mp.spawn(_failure_worker, args=(str(tmp_path / "store"),), nprocs=2, join=True)
+
+
+class TestBaseSeedDraw:
+    @pytest.mark.parametrize("workers", [0, 4])
+    @pytest.mark.parametrize("epoch_index", [0, 1])
+    def test_predicate_matches_actual_rng_consumption(self, workers: int, epoch_index: int) -> None:
+        from xtuner.v1.datasets.dataloader import Dataloader
+
+        loader = Dataloader(
+            torch.utils.data.TensorDataset(torch.arange(2)),
+            batch_size=1,
+            num_workers=workers,
+            persistent_workers=workers > 0,
+        )
+        try:
+            for _ in range(epoch_index):
+                list(loader)
+            stream = iter(loader)  # The XTuner wrapper defers PyTorch iterator creation.
+            before = torch.get_rng_state()
+            expected_draw = epoch_index == 0 or workers == 0
+            assert loader.will_consume_base_seed() is expected_draw
+            next(stream)
+            actual = torch.get_rng_state()
+            torch.set_rng_state(before)
+            if expected_draw:
+                transport.mirror_base_seed_draw()
+            assert torch.equal(torch.get_rng_state(), actual)
+            list(stream)
+        finally:
+            # Persistent DataLoader workers otherwise outlive the case until GC.
+            if loader._iterator is not None:
+                loader._iterator._shutdown_workers()
+
+
+class TestTrainingLimits:
+    def test_missing_limits_fail_before_broadcast(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from unittest.mock import MagicMock
+
+        from xtuner.v1.train import trainer as trainer_module
+
+        mesh = MagicMock()
+        sp_mesh, tp_mesh = MagicMock(), MagicMock()
+        sp_mesh.size.return_value = 2
+        tp_mesh.size.return_value = 1
+        mesh.__getitem__.side_effect = {"sp": sp_mesh, "tp": tp_mesh, "dp": MagicMock()}.__getitem__
+        monkeypatch.setattr(DataloaderConfig, "build", lambda *args, **kwargs: None)
+
+        def unexpected_broadcast(*args: object, **kwargs: object) -> None:
+            pytest.fail("Invalid training limits must be rejected before broadcasting loader length")
+
+        monkeypatch.setattr(trainer_module, "broadcast_control", unexpected_broadcast)
+        with pytest.raises(AssertionError, match="should be set"):
+            _trainer(mesh, DataloaderConfig(sp_media_dedup=True), total_epochs=None)
