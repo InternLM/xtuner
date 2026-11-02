@@ -674,6 +674,30 @@ class BaseModel(nn.Module):
         return cal_grad_norm(grads, dtype=dtype)
 
     def to_hf_key_list(self, key: str) -> list[str]:
+        """Convert an internal parameter name to the actual HuggingFace key
+        names.
+
+        This is the full mapping used by checkpoint I/O and test utilities:
+        model-family rules come from the ``_model_hf_keys`` hook (prefixes,
+        layer renames, tie-time lm_head -> embed_tokens), and value-head
+        critic models additionally rename ``lm_head.*`` to ``value_head.*``.
+
+        Args:
+            key (str): Internal parameter name.
+
+        Returns:
+            list[str]: HF key names as they appear in the checkpoint.
+        """
+        hf_keys = self._model_hf_keys(key)
+        cleaned = self._clean_param_name(key)
+        head_cfg = getattr(self.config, "head_config", None)
+        if head_cfg is not None and head_cfg.type == "value_head" and cleaned.startswith("lm_head"):
+            return self._remap_critic_hf_keys(hf_keys)
+        return hf_keys
+
+    def _model_hf_keys(self, key: str) -> list[str]:
+        """Model-family internal-name -> HF-key rules; subclasses override
+        this."""
         raise NotImplementedError()
 
     def _remap_critic_hf_keys(self, hf_keys: list[str]) -> list[str]:
@@ -685,24 +709,6 @@ class BaseModel(nn.Module):
         for key in hf_keys:
             remapped.append(re.sub(r"(^|\.)lm_head(?=\.|$)", r"\1value_head", key))
         return remapped
-
-    def _to_hf_key_list(self, name: str) -> list[str]:
-        """Convert an internal parameter name to HuggingFace key names.
-
-        Save/load 都走这里，而不是直接调 to_hf_key_list。
-
-        * 普通参数：走子类 to_hf_key_list（加 model. 前缀、layer 重命名、
-          VL 的 language_model. 前缀、tie 时 lm_head → embed_tokens）。
-        * value_head 的 lm_head.*：``tie_word_embeddings`` 已在配置归一化时
-          置 False，不会被映射成 embed_tokens；这里再做
-          lm_head → value_head 改名。
-        """
-        cleaned = self._clean_param_name(name)
-        head_cfg = getattr(self.config, "head_config", None)
-        if head_cfg is not None and head_cfg.type == "value_head" and cleaned.startswith("lm_head"):
-            return self._remap_critic_hf_keys(self.to_hf_key_list(name))
-        else:
-            return self.to_hf_key_list(name)
 
     def _head_checkpoint_meta(self) -> dict[str, Any]:
         """Checkpoint meta written into model.safetensors.index.json
@@ -1280,7 +1286,7 @@ class BaseModel(nn.Module):
 
         for name, param in self.state_dict().items():
             name = self._clean_param_name(name)
-            _hf_keys = self._to_hf_key_list(name)
+            _hf_keys = self.to_hf_key_list(name)
 
             if not self.config.hf_key_mapping:
                 hf_keys = _hf_keys
@@ -2024,7 +2030,8 @@ class BaseModel(nn.Module):
             return set(), set()
         if not (value_head_keys & present):
             # Actor -> critic: value head fully absent, actor head keys are extra.
-            return value_head_keys, set(self.to_hf_key_list("lm_head.weight"))
+            # NOTE: the hook (not the public mapping) gives the actor-side name.
+            return value_head_keys, set(self._model_hf_keys("lm_head.weight"))
         # Partial presence stays a strict error.
         return set(), set()
 

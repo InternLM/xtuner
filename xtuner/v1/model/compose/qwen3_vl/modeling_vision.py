@@ -302,7 +302,7 @@ class Qwen3VLVisionModel(BaseModel):
         if (missing := expected_param_name - initialized_params):
             raise RuntimeError(f"{missing} is not initialized")
 
-    def to_hf_key_list(self, key: str) -> list[str]:
+    def _model_hf_keys(self, key: str) -> list[str]:
         return [self._hf_prefix + key]
 
     @override
