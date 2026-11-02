@@ -63,10 +63,8 @@ class _MappedCriticModel(BaseModel):
         return [key]
 
 
-def _write_mapped_ckpt(tmpdir: str, tensors: dict, head_type: str | None) -> None:
-    index: dict = {"weight_map": {key: "model.safetensors" for key in tensors}}
-    if head_type is not None:
-        index["metadata"] = {"head_type": head_type}
+def _write_mapped_ckpt(tmpdir: str, tensors: dict) -> None:
+    index = {"weight_map": {key: "model.safetensors" for key in tensors}}
     save_file(tensors, str(Path(tmpdir) / "model.safetensors"))
     (Path(tmpdir) / "model.safetensors.index.json").write_text(json.dumps(index))
 
@@ -97,7 +95,6 @@ class TestCriticCustomHFKeyMapping(unittest.TestCase):
             _write_mapped_ckpt(
                 tmpdir,
                 {"critic.weight": expected, "backbone.weight": torch.zeros(4, 4)},
-                head_type="value_head",
             )
             loaded_keys, unloaded_keys, missing_keys = model.from_hf(tmpdir, strict=True)
 
@@ -115,7 +112,6 @@ class TestCriticCustomHFKeyMapping(unittest.TestCase):
             _write_mapped_ckpt(
                 tmpdir,
                 {"backbone.weight": torch.ones(4, 4), "lm_head.weight": torch.zeros(4, 4)},
-                head_type="lm_head",
             )
             loaded_keys, unloaded_keys, missing_keys = model.from_hf(tmpdir, strict=True)
 
@@ -130,7 +126,7 @@ class TestCriticCustomHFKeyMapping(unittest.TestCase):
         model = _MappedCriticModel(_MappedCriticConfig())
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            _write_mapped_ckpt(tmpdir, {"lm_head.weight": torch.zeros(4, 4)}, head_type="lm_head")
+            _write_mapped_ckpt(tmpdir, {"lm_head.weight": torch.zeros(4, 4)})
             with self.assertRaisesRegex(RuntimeError, "Missing keys in checkpoint"):
                 model.from_hf(tmpdir, strict=True)
 
@@ -241,21 +237,23 @@ class TestCriticSFT(DeterministicDDPTestCase):
         except (AssertionError, ValueError):
             pass
 
-    def test_critic_accepts_xtuner_actor_checkpoint_head_metadata(self):
-        """An XTuner actor checkpoint may initialize a critic with a new value head."""
+    def test_head_checkpoint_role_inferred_from_keys(self):
+        # 角色由 checkpoint 实际 keys 推断:含 value_head 权重的 ckpt 不能加载进 actor;
+        # actor ckpt(无 value_head 权重)初始化 critic 放行
         pg = self.create_pg(str(DEVICE))
         with torch.device("meta"):
             model = _critic_model_cfg().build()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             index_path = Path(tmpdir) / "model.safetensors.index.json"
-            index_path.write_text(json.dumps({"metadata": {"head_type": "lm_head"}}))
+            # actor checkpoint:无 value_head 权重,critic 模型放行(头稍后随机初始化)
+            index_path.write_text(json.dumps({"weight_map": {"lm_head.weight": "model.safetensors"}}))
             model.language_model._validate_head_checkpoint(Path(tmpdir))
 
-            # A critic checkpoint cannot initialize an actor because it has no vocabulary head.
-            index_path.write_text(json.dumps({"metadata": {"head_type": "value_head"}}))
+            # critic checkpoint:含 value_head 权重,actor 模型必须拒绝(没有词表头)
+            index_path.write_text(json.dumps({"weight_map": {"value_head.weight": "model.safetensors"}}))
             model.language_model.config.head_config.type = "lm_head"
-            with self.assertRaisesRegex(RuntimeError, "does not match config head_config.type"):
+            with self.assertRaisesRegex(RuntimeError, "Cannot load a checkpoint containing value_head"):
                 model.language_model._validate_head_checkpoint(Path(tmpdir))
 
         try:
@@ -304,7 +302,7 @@ class TestCriticSFT(DeterministicDDPTestCase):
         model_cfg = _critic_model_cfg()
         model_cfg.text_config.lm_loss_cfg = CriticLossConfig()
         engine = _critic_engine(model_cfg)
-        engine.from_hf(QWEN3_5_MOE_PATH, strict=False)
+        engine.from_hf(QWEN3_5_MOE_PATH, strict=True)
 
         lm_head = _text_module(engine.model).lm_head
         head_weight = _full_tensor(lm_head.weight)
@@ -350,7 +348,7 @@ class TestCriticSFT(DeterministicDDPTestCase):
         model_cfg = _critic_model_cfg()
         model_cfg.text_config.lm_loss_cfg = CriticLossConfig(cliprange_value=CLIPRANGE_VALUE)
         engine = _critic_engine(model_cfg)
-        engine.from_hf(QWEN3_5_MOE_PATH, strict=False)
+        engine.from_hf(QWEN3_5_MOE_PATH, strict=True)
 
         seq_ctx, shifted_labels, returns = self._make_batch(model_cfg)
         engine.model.train()
@@ -415,7 +413,7 @@ class TestCriticSFT(DeterministicDDPTestCase):
 
         model_cfg = _critic_model_cfg()
         engine = _critic_engine(model_cfg)
-        engine.from_hf(QWEN3_5_MOE_PATH, strict=False)
+        engine.from_hf(QWEN3_5_MOE_PATH, strict=True)
 
         text = _text_module(engine.model)
         self.assertIsInstance(text.lm_head, ValueHead)
@@ -434,7 +432,7 @@ class TestCriticSFT(DeterministicDDPTestCase):
 
             if dist.get_rank() == 0:
                 index = json.loads((save_path / "model.safetensors.index.json").read_text())
-                self.assertEqual(index["metadata"]["head_type"], "value_head")
+                self.assertNotIn("metadata", index)
                 self.assertIn("value_head.weight", index["weight_map"])
                 self.assertNotIn("lm_head.weight", index["weight_map"])
                 self.assertNotIn("language_model.value_head.weight", index["weight_map"])
