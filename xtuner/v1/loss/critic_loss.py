@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from collections.abc import Sequence
 from typing import Any, cast
 
 import torch
@@ -54,6 +55,7 @@ class CriticLossConfig(BaseLossConfig):
         self,
         data: dict,
         sp_mesh: DeviceMesh | None = None,
+        device: str | torch.device = DEVICE,
     ) -> "CriticLossContext | None":
         """Build critic loss context from data dict.
 
@@ -64,6 +66,9 @@ class CriticLossConfig(BaseLossConfig):
                 - old_values (torch.Tensor | None): Frozen values for clipping
                   (optional, can be omitted for SFT MSE)
             sp_mesh (DeviceMesh | None): Sequence parallel device mesh
+            device (str | torch.device): Target device for shifted_labels / returns /
+                old_values. Matches the RL loss `build` protocol, where worker.py packs
+                contexts on CPU (`device="cpu"`) before moving them to the compute device.
 
         Returns:
             CriticLossContext | None: The built loss context, or None if required
@@ -80,7 +85,7 @@ class CriticLossConfig(BaseLossConfig):
             shifted_labels=shifted_labels,
             returns=returns,
             old_values=old_values,
-        ).to(DEVICE)
+        ).to(device)
         if sp_mesh is not None and sp_mesh.size() > 1:
             loss_kwargs = loss_kwargs.sp_split(sp_mesh)
 
@@ -133,7 +138,14 @@ class CriticLossContext(BaseLossContext):
         super().__init__(loss_cfg, loss_kwargs)
 
     @staticmethod
-    def build_batches(loss_ctx_list: list["CriticLossContext"]) -> list["CriticLossContext"]:  # type: ignore[override]
+    def build_batches(  # type: ignore[override]
+        loss_ctx_list: list["CriticLossContext"],
+        cu_seq_lens_list: Sequence[torch.IntTensor] | None = None,
+        sp_mesh: DeviceMesh | None = None,
+    ) -> list["CriticLossContext"]:
+        # Accepted for the `BaseModel.build_loss_ctx_batch` call protocol; unused because
+        # critic loss calibrates per token via the ignore mask below.
+        del cu_seq_lens_list, sp_mesh
         assert len(loss_ctx_list) > 0, "loss_ctx_list can not be empty"
 
         loss_cfg = loss_ctx_list[0].loss_cfg
@@ -168,29 +180,28 @@ class CriticLossContext(BaseLossContext):
         loss_kwargs: CriticLossKwargs,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
         values = F.linear(hidden_states, head_weight, head_bias).float()
-        values_squeezed = values.squeeze(-1)
+        # Only the head output dim (always 1) may be squeezed; supervision fields are
+        # aligned via reshape_as so S==1 cannot collapse the sequence dim.
+        v = values.squeeze(-1)  # [B, S]
 
         shifted_labels = loss_kwargs.shifted_labels
-        returns = loss_kwargs.returns
+        returns = loss_kwargs.returns.reshape_as(v)
+        assert loss_kwargs.loss_weight is not None, "loss_weight can not be None"
+        loss_weight = loss_kwargs.loss_weight.reshape_as(v)
         old_values = loss_kwargs.old_values
-        loss_weight = loss_kwargs.loss_weight
-        assert loss_weight is not None, "loss_weight can not be None"
-
-        returns = returns.squeeze(-1)
-        loss_weight = loss_weight.squeeze(-1)
         if old_values is not None:
-            old_values = old_values.squeeze(-1)
+            old_values = old_values.reshape_as(v)
 
         rank_grad_tokens = (shifted_labels != self.loss_cfg.ignore_idx).sum()
         if rank_grad_tokens == 0:
             loss = values.sum() * 0
         elif old_values is None:
-            per_token = 0.5 * (values_squeezed - returns) ** 2
+            per_token = 0.5 * (v - returns) ** 2
             loss = (per_token * loss_weight).sum()
         else:
             cliprange = self.loss_cfg.cliprange_value
-            v_clip = old_values + (values_squeezed - old_values).clamp(-cliprange, cliprange)
-            per_token = 0.5 * torch.maximum((values_squeezed - returns) ** 2, (v_clip - returns) ** 2)
+            v_clip = old_values + (v - old_values).clamp(-cliprange, cliprange)
+            per_token = 0.5 * torch.maximum((v - returns) ** 2, (v_clip - returns) ** 2)
             loss = (per_token * loss_weight).sum()
 
         return loss, (values, {})
