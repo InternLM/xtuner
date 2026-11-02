@@ -747,6 +747,26 @@ class BaseModel(nn.Module):
             )
 
     @torch.no_grad()
+    def _critic_head_hf_keys(self) -> set[str] | None:
+        """HF checkpoint keys of the critic value head (hf_key_mapping
+        applied).
+
+        Returns:
+            set[str] | None: The head's HF keys for critic models, None for
+            non-critic models. Raises ValueError for a critic config without a
+            head load spec.
+        """
+        head_cfg = getattr(self.config, "head_config", None)
+        if head_cfg is None or head_cfg.type != "value_head":
+            return None
+        head_spec = self.load_spec_mapping.get("lm_head.weight")
+        if head_spec is None:
+            raise ValueError(
+                "Critic model has head_config.type='value_head' but no load spec for "
+                "'lm_head.weight'. Check model initialization and _init_load_spec()."
+            )
+        return set(head_spec.global_hf_keys)
+
     def _init_missing_critic_head(
         self,
         hf_loader: HFCheckpointLoader,
@@ -764,10 +784,6 @@ class BaseModel(nn.Module):
         loaded.  A rank-local decision would therefore make only one rank enter
         the DTensor collective used by random initialization.
 
-        ``hf_key_mapping`` is respected because the load spec stores the mapped
-        checkpoint keys. The initialized weight is drawn from ``Normal(0,
-        1 / (hidden_size + 1))``.
-
         When the ValueHead is randomly initialized, the key sets are updated:
         ``loaded_keys`` / ``unloaded_keys`` hold runtime names (the XTuner
         runtime critic module is still named ``lm_head.weight``), while
@@ -776,32 +792,17 @@ class BaseModel(nn.Module):
         Returns:
             The possibly-updated (loaded_keys, unloaded_keys, missing_keys).
         """
-
-        # 非critic模型直接返回
-        head_cfg = getattr(self.config, "head_config", None)
-        if head_cfg is None or head_cfg.type != "value_head":
+        value_head_keys = self._critic_head_hf_keys()
+        if value_head_keys is None or value_head_keys <= set(hf_loader.weight_map):
+            # 非critic模型,或 checkpoint 已提供完整 value head(不覆盖已加载权重)。
             return loaded_keys, unloaded_keys, missing_keys
 
-        # critic 必须有可初始化的线性 head。
         lm_head = getattr(self, "lm_head", None)
         if not isinstance(lm_head, nn.Linear):
             raise TypeError(
                 "Cannot initialize critic value head: config has head_config.type='value_head' "
                 "but model.lm_head is not nn.Linear."
             )
-
-        # runtime 参数名 lm_head.weight 对应的 HF checkpoint key。
-        # global_hf_keys 中已经应用过 hf_key_mapping，因此这里不需要再查一次 mapping。
-        # 映射后的 HF key 都存在，说明 checkpoint 提供了完整 value head。
-        # 此时不需要随机初始化；任意 key 缺失则走随机初始化。
-        head_load_spec = self.load_spec_mapping.get("lm_head.weight")
-        if head_load_spec is None:
-            raise ValueError(
-                "Critic model has head_config.type='value_head' but no load spec for "
-                "'lm_head.weight'. Check model initialization and _init_load_spec()."
-            )
-        if all(hf_loader.is_key_exist(key) for key in head_load_spec.global_hf_keys):
-            return loaded_keys, unloaded_keys, missing_keys
 
         from xtuner.v1.utils import init_params
 
@@ -816,7 +817,7 @@ class BaseModel(nn.Module):
         # 随机初始化了 ValueHead，对 loaded_keys、unloaded_keys、missing_keys 进行对账
         loaded_keys.add("lm_head.weight")
         unloaded_keys.discard("lm_head.weight")
-        missing_keys -= set(head_load_spec.global_hf_keys)
+        missing_keys -= value_head_keys
         return loaded_keys, unloaded_keys, missing_keys
 
     def trainable_parameters(self):
@@ -1997,18 +1998,51 @@ class BaseModel(nn.Module):
         if dist.is_initialized():
             torch.distributed.barrier()
 
-    def _load_params(self, checkpoint_loader: HFCheckpointLoader, strict=True) -> tuple:
-        matched_hf_keys: set[str] = set(checkpoint_loader.weight_map)
-        expected_hf_keys: set[str] = set(chain(*map(self._to_hf_key_list, self.state_dict())))
-        expected_keys = set(self.state_dict())
+    def _head_load_exceptions(self, checkpoint_loader: HFCheckpointLoader) -> tuple[set[str], set[str]]:
+        """Strict-check exemptions for the actor -> critic value-head
+        transition.
 
-        if strict and matched_hf_keys != expected_hf_keys:
-            _missing_keys = expected_hf_keys - matched_hf_keys
-            if _missing_keys:
-                raise RuntimeError(f"Missing keys in checkpoint: {_missing_keys}. ")
-            unexpected_keys = matched_hf_keys - expected_hf_keys
-            if unexpected_keys:
-                raise RuntimeError(f"Unexpected keys in checkpoint: {unexpected_keys}. ")
+        When a critic model is initialized from an actor checkpoint, the value-head
+        keys are absent (the head is randomly initialized later by
+        ``_init_missing_critic_head``) and the actor vocabulary-head keys are extra.
+        Both sides are exempted only when the value head is *entirely* absent;
+        partial presence stays a strict error. Non-critic models and critic
+        checkpoints that already contain the value head get no exceptions.
+
+        Args:
+            checkpoint_loader (HFCheckpointLoader): Loader over the checkpoint.
+
+        Returns:
+            tuple: (allowed missing HF keys, allowed extra HF keys).
+        """
+        value_head_keys = self._critic_head_hf_keys()
+        if value_head_keys is None:
+            return set(), set()
+        present = set(checkpoint_loader.weight_map)
+        if value_head_keys <= present:
+            # The critic checkpoint already provides the value head.
+            return set(), set()
+        if not (value_head_keys & present):
+            # Actor -> critic: value head fully absent, actor head keys are extra.
+            return value_head_keys, set(self.to_hf_key_list("lm_head.weight"))
+        # Partial presence stays a strict error.
+        return set(), set()
+
+    def _load_params(self, checkpoint_loader: HFCheckpointLoader, strict=True) -> tuple:
+        # The load spec (with hf_key_mapping applied) is the single source of truth
+        # for the expected HF key set; strict checks and the copy loop below share it.
+        present_hf_keys: set[str] = set(checkpoint_loader.weight_map)
+        expected_hf_keys: set[str] = {key for spec in self.load_spec_mapping.values() for key in spec.global_hf_keys}
+        expected_keys = set(self.state_dict())
+        allowed_missing, allowed_extra = self._head_load_exceptions(checkpoint_loader)
+
+        if strict:
+            _missing_keys = expected_hf_keys - present_hf_keys - allowed_missing
+            _unexpected_keys = present_hf_keys - expected_hf_keys - allowed_extra
+            if _missing_keys or _unexpected_keys:
+                raise RuntimeError(
+                    f"Missing keys in checkpoint: {_missing_keys or '{}'}. Unexpected keys: {_unexpected_keys or '{}'}."
+                )
 
         missing_keys: set[str] = set()
         loaded_keys: set[str] = set()
@@ -2046,11 +2080,22 @@ class BaseModel(nn.Module):
             torch.accelerator.synchronize()
             torch.cpu.synchronize()
 
-        if missing_keys and strict:
-            raise RuntimeError(f"Internal error, Missing keys in checkpoint: {missing_keys}")
-
-        if (unloaded_keys := (expected_keys - loaded_keys)) and strict:
-            raise RuntimeError(f"Internal error, Unloaded keys in model: {unloaded_keys}")
+        unloaded_keys = expected_keys - loaded_keys
+        if strict:
+            # Only value-head keys that will be randomly initialized are exempt;
+            # backbone gaps stay strict errors, and unloaded params are not
+            # marked loaded prematurely.
+            bad_missing = missing_keys - allowed_missing
+            bad_unloaded = {
+                name
+                for name in unloaded_keys
+                if not set(self.load_spec_mapping[name].global_hf_keys) <= allowed_missing
+            }
+            if bad_missing or bad_unloaded:
+                raise RuntimeError(
+                    f"Internal error, Missing keys in checkpoint: {bad_missing or '{}'}; "
+                    f"Unloaded keys in model: {bad_unloaded or '{}'}"
+                )
 
         return loaded_keys, unloaded_keys, missing_keys
 
