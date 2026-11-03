@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import Status
-from xtuner.v1.rl.agent_loop import AgentLoopConfig, IsValidSampleFn
+from xtuner.v1.rl.agent_loop import AgentLoopConfig, IsValidSampleFn, collect_agent_loop_metrics, merge_metric_dicts
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
@@ -306,6 +306,11 @@ class AgentLoopManager:
             "AgentLoopManager.produce_batch() must return non-empty rollout_states for colocated training. "
             "Use get_batch() for disaggregated empty/expired reads."
         )
+        window_metrics = merge_metric_dicts(
+            await asyncio.gather(*(collect_agent_loop_metrics(task.agent_loop) for task in active_tasks))
+        )
+        if window_metrics:
+            result.custom_scalars = window_metrics
 
         self.logger.info(
             f"[AgentLoopManager][{self.name}] produce_batch done "

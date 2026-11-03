@@ -7,8 +7,10 @@ from .agent_loop import (
     RayAgentLoop,
     RayAgentLoopProxy,
     RouterAgentLoop,
+    collect_agent_loop_metrics,
     get_agent_loop_rollout_ctl,
     maybe_filter_invalid_sample,
+    merge_metric_dicts,
 )
 from .single_turn_agent_loop import SingleTurnAgentLoop, SingleTurnAgentLoopConfig
 
@@ -26,6 +28,8 @@ __all__ = [
     "maybe_filter_invalid_sample",
     "SingleTurnAgentLoop",
     "get_agent_loop_rollout_ctl",
+    "collect_agent_loop_metrics",
+    "merge_metric_dicts",
 ]
 
 try:

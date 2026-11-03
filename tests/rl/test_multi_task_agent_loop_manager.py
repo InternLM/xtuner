@@ -194,6 +194,8 @@ def _fake_agent_loop():
     rollout_ctl.get_weight_update_targets.remote = AsyncMock(return_value=())
     agent_loop = MagicMock()
     agent_loop.rollout_ctl = rollout_ctl
+    # collect_metrics 遵循 drain 契约；替身实现返回空窗口。
+    agent_loop.collect_metrics.remote = AsyncMock(return_value={})
     return agent_loop
 
 
