@@ -1094,7 +1094,7 @@ class Trainer:
         """
         if self._total_step is None:
             assert isinstance(self._dataloader, Sized), (
-                f"`total_epoch` should be set for a Mapped dataset, but got {self._dataloader.dataset}"
+                f"Epoch-based training requires a sized dataloader, got {type(self._dataloader).__name__}"
             )
             self._total_step = len(self._dataloader) * cast(int, self._total_epoch)
         return self._total_step

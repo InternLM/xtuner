@@ -3,7 +3,7 @@ import os
 import pydoc
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Iterable, Literal, Optional, Protocol, Union, runtime_checkable
+from typing import Annotated, Iterable, Literal, Optional, Protocol, Union, overload, runtime_checkable
 
 import torch
 from cyclopts import Parameter
@@ -391,6 +391,34 @@ class DataloaderConfig(BaseDataloaderConfig):
             if data["pack_level"] == "none" and data["group_by_length"] is True:
                 raise ValueError("group_by_length must be False when pack_level is none.")
         return data
+
+    # Without an SP mesh, build always returns a loader. Only SP followers may
+    # return None; preserve the non-optional contract for existing callers.
+    @overload
+    def build(
+        self,
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        dp_mesh: DeviceMesh | None,
+        global_batch_size: int,
+        micro_batch_size: int,
+        seed: int,
+        shuffle: bool = True,
+        total_step: int | None = None,
+        sp_mesh: None = None,
+    ) -> Dataloader: ...
+
+    @overload
+    def build(
+        self,
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        dp_mesh: DeviceMesh | None,
+        global_batch_size: int,
+        micro_batch_size: int,
+        seed: int,
+        shuffle: bool = True,
+        total_step: int | None = None,
+        sp_mesh: DeviceMesh | None = None,
+    ) -> Dataloader | None: ...
 
     def build(
         self,

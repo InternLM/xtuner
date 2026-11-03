@@ -326,6 +326,14 @@ class TestBaseSeedDraw:
 
 
 class TestTrainingLimits:
+    def test_total_step_rejects_missing_loader(self) -> None:
+        trainer = Trainer.__new__(Trainer)
+        trainer._total_step = None
+        trainer._total_epoch = 1
+        trainer._dataloader = None
+        with pytest.raises(AssertionError, match="requires a sized dataloader, got NoneType"):
+            _ = trainer.total_step
+
     def test_missing_limits_fail_before_broadcast(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from unittest.mock import MagicMock
 
