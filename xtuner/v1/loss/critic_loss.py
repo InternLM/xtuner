@@ -80,16 +80,31 @@ class CriticLossConfig(BaseLossConfig):
         shifted_labels = data["shifted_labels"]
         returns = data["returns"]
         old_values = data.get("old_values", None)
-
+        # Only the trailing value channel may be squeezed; [B, S] targets and S==1
+        # must never collapse the sequence dimension.
+        if returns.ndim == 3 and returns.shape[-1] == 1:
+            returns = returns.squeeze(-1)
+        if old_values is not None and old_values.ndim == 3 and old_values.shape[-1] == 1:
+            old_values = old_values.squeeze(-1)
+        if returns.shape != shifted_labels.shape or (
+            old_values is not None and old_values.shape != shifted_labels.shape
+        ):
+            raise ValueError(
+                "Critic targets must match shifted_labels shape "
+                f"{tuple(shifted_labels.shape)}, got returns {tuple(returns.shape)}"
+            )
+        # Full-sample supervision weight; sp_split pads it with 0 so the global
+        # denominator never counts padding.
+        loss_weight = shifted_labels.ne(self.ignore_idx).to(torch.float32)
         loss_kwargs = CriticLossKwargs(
             shifted_labels=shifted_labels,
             returns=returns,
             old_values=old_values,
-        ).to(device)
+            loss_weight=loss_weight,
+        )
         if sp_mesh is not None and sp_mesh.size() > 1:
             loss_kwargs = loss_kwargs.sp_split(sp_mesh)
-
-        return CriticLossContext(self, loss_kwargs)
+        return CriticLossContext(self, loss_kwargs.to(device))
 
 
 class CriticLossKwargs(BaseLossKwargs):
@@ -113,6 +128,8 @@ class CriticLossKwargs(BaseLossKwargs):
         self.returns = sp_split(self.returns, sp_mesh=sp_mesh, split_dim=1, padding_value=0.0)
         if self.old_values is not None:
             self.old_values = sp_split(self.old_values, sp_mesh=sp_mesh, split_dim=1, padding_value=0.0)
+        if self.loss_weight is not None:
+            self.loss_weight = sp_split(self.loss_weight, sp_mesh=sp_mesh, split_dim=1, padding_value=0.0)
         return self
 
     def to(self, device: torch.device | str) -> "CriticLossKwargs":
@@ -120,6 +137,8 @@ class CriticLossKwargs(BaseLossKwargs):
         self.returns = self.returns.to(device)
         if self.old_values is not None:
             self.old_values = self.old_values.to(device)
+        if self.loss_weight is not None:
+            self.loss_weight = self.loss_weight.to(device)
         return self
 
 
@@ -143,33 +162,41 @@ class CriticLossContext(BaseLossContext):
         cu_seq_lens_list: Sequence[torch.IntTensor] | None = None,
         sp_mesh: DeviceMesh | None = None,
     ) -> list["CriticLossContext"]:
-        # Accepted for the `BaseModel.build_loss_ctx_batch` call protocol; unused because
-        # critic loss calibrates per token via the ignore mask below.
+        """Calibrate critic contexts with their full-sample supervision
+        weights.
+
+        Args:
+            loss_ctx_list (list[CriticLossContext]): Contexts of one optimizer step.
+            cu_seq_lens_list (Sequence[torch.IntTensor] | None): Unused; kept for
+                the shared build protocol.
+            sp_mesh (DeviceMesh | None): Unused; kept for the shared build protocol.
+
+        Returns:
+            list[CriticLossContext]: The same contexts with calibrated weights.
+        """
         del cu_seq_lens_list, sp_mesh
         assert len(loss_ctx_list) > 0, "loss_ctx_list can not be empty"
 
-        loss_cfg = loss_ctx_list[0].loss_cfg
         loss_weight_list: list[torch.Tensor] = []
         for loss_ctx in loss_ctx_list:
-            shifted_labels = loss_ctx.loss_kwargs.shifted_labels
-            loss_weight = torch.ones_like(shifted_labels, dtype=torch.float32)
-            loss_weight[shifted_labels == loss_cfg.ignore_idx] = 0.0
-            loss_ctx.loss_kwargs.loss_weight = loss_weight
-            loss_weight_list.append(loss_weight)
+            if loss_ctx.loss_kwargs.loss_weight is None:
+                loss_ctx.loss_kwargs.loss_weight = loss_ctx.loss_kwargs.shifted_labels.ne(
+                    loss_ctx.loss_cfg.ignore_idx
+                ).to(torch.float32)
+            loss_weight_list.append(cast(torch.Tensor, loss_ctx.loss_kwargs.loss_weight))
 
-        rank_denominator = sum(loss_weight.sum() for loss_weight in loss_weight_list)
+        rank_denominator = sum(weight.sum() for weight in loss_weight_list)
         rank_denominator = cast(torch.Tensor, rank_denominator)
         global_denominator = rank_denominator
         if dist.is_initialized():
             dist.all_reduce(global_denominator, op=dist.ReduceOp.SUM)
-
         if global_denominator == 0:
-            global_denominator.add_(1)
+            global_denominator = global_denominator + 1
 
         for loss_ctx in loss_ctx_list:
             loss_ctx._batch_size = len(loss_ctx_list)
             assert loss_ctx.loss_kwargs.loss_weight is not None
-            loss_ctx.loss_kwargs.loss_weight = loss_ctx.loss_kwargs.loss_weight / global_denominator
+            loss_ctx.loss_kwargs.loss_weight /= global_denominator
         return loss_ctx_list
 
     def loss_fn(

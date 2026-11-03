@@ -13,7 +13,7 @@ from xtuner.v1.utils.device import get_device
 # from xtuner.v1.profiler.prober import ProberList
 from .base_loss_ctx import BaseLossConfig, BaseLossContext, BaseLossKwargs
 from .chunk_loss import ChunkLoss
-from .utils import sp_gather, sp_split
+from .utils import sp_split
 
 
 DEVICE = get_device()
@@ -51,28 +51,74 @@ class CELossConfig(BaseLossConfig):
         self,
         data: dict,
         sp_mesh: DeviceMesh | None = None,
+        device: str | torch.device = DEVICE,
     ) -> "CELossContext | None":
-        """Build CELossContext from data dict.
+        """Build CELossContext from full, unsplit data.
+
+        Sample/square weights are computed on the complete samples and only then
+        padded/split, so the returned context is the local shard this rank trains
+        on. The input data is never modified.
 
         Args:
-            data (dict): Data dict containing loss-related fields.
-                Required: shifted_labels
+            data (dict): Data dict containing ``shifted_labels`` and, for
+                sample/square reduction, ``seq_ctx`` with packed boundaries.
             sp_mesh (DeviceMesh | None): Sequence parallel mesh.
+            device (str | torch.device): Device of the returned context.
 
         Returns:
-            CELossContext | None: Built loss context. Returns None if shifted_labels
-                is not present in data dict.
+            CELossContext | None: Built loss context, or None if ``shifted_labels``
+                is absent.
         """
         if "shifted_labels" not in data:
             return None
-        # Extract required fields from data
         shifted_labels = data["shifted_labels"]
-
-        loss_kwargs = CELossKwargs(shifted_labels=shifted_labels).to(DEVICE)
+        loss_weight = self._build_loss_weight(shifted_labels, data.get("seq_ctx"))
+        loss_kwargs = CELossKwargs(shifted_labels=shifted_labels, loss_weight=loss_weight)
         if sp_mesh is not None and sp_mesh.size() > 1:
             loss_kwargs = loss_kwargs.sp_split(sp_mesh)
-        loss_ctx = self.loss_ctx_cls(self, loss_kwargs)
-        return loss_ctx
+        return self.loss_ctx_cls(self, loss_kwargs.to(device))
+
+    def _build_loss_weight(self, shifted_labels: torch.Tensor, seq_ctx) -> torch.Tensor:
+        mask = shifted_labels.ne(self.ignore_idx)
+        if self.loss_reduction == "token":
+            return mask.to(torch.float32)
+        if seq_ctx is None:
+            raise ValueError(f"loss_reduction={self.loss_reduction!r} requires packed seq_ctx boundaries")
+        cu_seq_lens = seq_ctx.cu_seq_lens_k
+        cu_seq_lens_cpu = getattr(seq_ctx, "cu_seq_lens_q_cpu", None)
+        if cu_seq_lens_cpu is not None and cu_seq_lens is getattr(seq_ctx, "cu_seq_lens_q", None):
+            cu_seq_lens = cu_seq_lens_cpu
+        boundaries = cu_seq_lens[1:].to(dtype=torch.long, device=shifted_labels.device)
+        num_tokens = boundaries - cu_seq_lens[:-1].to(dtype=torch.long, device=shifted_labels.device)
+        flat_mask = mask[0].int()
+        num_grad_tokens = torch.zeros_like(boundaries)
+        prev_idx = 0
+        for index, boundary in enumerate(boundaries):
+            num_grad_tokens[index] = flat_mask[prev_idx:boundary].sum()
+            prev_idx = int(boundary)
+        if self.loss_reduction == "sample":
+            per_sample = 1.0 / num_grad_tokens
+        elif self.loss_reduction == "square":
+            per_sample = 1.0 / torch.sqrt(num_grad_tokens.float())
+        else:
+            raise NotImplementedError(self.loss_reduction)
+        loss_weight = per_sample.repeat_interleave(num_tokens).unsqueeze(0)
+        loss_weight = loss_weight.to(shifted_labels.device)
+        if loss_weight.shape[1] < shifted_labels.shape[1]:
+            # Sequence-parallel padding beyond the last packed boundary.
+            pad = torch.zeros(
+                (1, shifted_labels.shape[1] - loss_weight.shape[1]),
+                dtype=loss_weight.dtype,
+                device=loss_weight.device,
+            )
+            loss_weight = torch.cat([loss_weight, pad], dim=1)
+        loss_weight = loss_weight[:, : shifted_labels.shape[1]]
+        loss_weight = loss_weight.masked_fill(~mask, 0.0)
+        if torch.isnan(loss_weight).any() or torch.isinf(loss_weight).any():
+            raise AssertionError(
+                "loss_weight contains NaN or Inf values. Please filter out samples with no valid tokens."
+            )
+        return loss_weight
 
 
 class CELossKwargs(BaseLossKwargs):
@@ -88,10 +134,14 @@ class CELossKwargs(BaseLossKwargs):
 
     def sp_split(self, sp_mesh: DeviceMesh) -> "CELossKwargs":
         self.shifted_labels = sp_split(self.shifted_labels, sp_mesh=sp_mesh, split_dim=1, padding_value=-100)
+        if self.loss_weight is not None:
+            self.loss_weight = sp_split(self.loss_weight, sp_mesh=sp_mesh, split_dim=1, padding_value=0.0)
         return self
 
     def to(self, device: torch.device | str) -> "CELossKwargs":
         self.shifted_labels = self.shifted_labels.to(device)
+        if self.loss_weight is not None:
+            self.loss_weight = self.loss_weight.to(device)
         return self
 
 
@@ -127,52 +177,31 @@ class LMHeadLossContext(BaseLossContext):
         cu_seq_lens_list: Sequence[torch.IntTensor] | None = None,
         sp_mesh: DeviceMesh | None = None,
     ) -> list["CELossContext"]:
+        """Calibrate one optimizer step's contexts with their full-token
+        weights.
+
+        Weights were computed on complete samples by ``CELossConfig.build``; this
+        step only sums them across the step's microbatches and ranks.
+
+        Args:
+            loss_ctx_list (list[CELossContext]): Contexts of one optimizer step.
+            cu_seq_lens_list (Sequence[torch.IntTensor] | None): Unused; kept for
+                the shared build protocol.
+            sp_mesh (DeviceMesh | None): Unused; kept for the shared build protocol.
+
+        Returns:
+            list[CELossContext]: The same contexts with calibrated weights.
+        """
+        del cu_seq_lens_list, sp_mesh
         assert len(loss_ctx_list) > 0, "loss_ctx_list can not be empty"
-        loss_cfg = loss_ctx_list[0].loss_cfg
 
         loss_weight_list: list[torch.Tensor] = []
-        for i, loss_ctx in enumerate(loss_ctx_list):
-            shifted_labels = loss_ctx.loss_kwargs.shifted_labels
-            if loss_cfg.loss_reduction == "token":
-                loss_weight = torch.ones_like(shifted_labels, dtype=torch.float32)
-            else:
-                assert cu_seq_lens_list is not None, "cu_seq_lens_list must be provided for sample or square reduction"
-                cu_seq_lens = cu_seq_lens_list[i].to(shifted_labels.device)
-                boundaries = cu_seq_lens[1:]
-                num_tokens = cu_seq_lens[1:] - cu_seq_lens[:-1]
-
-                if sp_mesh is not None:
-                    # gather shifted_labels from different sp ranks to compute the correct loss weight
-                    shifted_labels = sp_gather(shifted_labels, sp_mesh=sp_mesh, dim=1)
-
-                mask = (shifted_labels != loss_cfg.ignore_idx).int()
-                num_grad_tokens = torch.zeros_like(boundaries, dtype=torch.int32)
-                prev_idx = 0
-                for j, boundary in enumerate(boundaries):
-                    num_grad_tokens[j] = mask[0, prev_idx:boundary].sum()
-                    prev_idx = boundary
-                if loss_cfg.loss_reduction == "sample":
-                    loss_weight = 1.0 / num_grad_tokens
-                elif loss_cfg.loss_reduction == "square":
-                    loss_weight = 1.0 / torch.sqrt(num_grad_tokens.float())
-                else:
-                    raise NotImplementedError(loss_cfg.loss_reduction)
-                loss_weight = loss_weight.repeat_interleave(num_tokens).unsqueeze(0)
-
-                if sp_mesh is not None:
-                    loss_weight = sp_split(loss_weight, sp_mesh=sp_mesh, split_dim=1, padding_value=0.0)
-                    shifted_labels = sp_split(shifted_labels, sp_mesh=sp_mesh, split_dim=1, padding_value=-100)
-
-            loss_weight[shifted_labels == loss_cfg.ignore_idx] = 0.0
-            if torch.isnan(loss_weight).any() or torch.isinf(loss_weight).any():
-                raise AssertionError(
-                    "loss_weight contains NaN or Inf values. Please filter out samples with no valid tokens."
-                )
-            loss_ctx.loss_kwargs.loss_weight = loss_weight
+        for loss_ctx in loss_ctx_list:
+            loss_weight = loss_ctx.loss_kwargs.loss_weight
+            assert loss_weight is not None, "loss_weight must be built before batch calibration"
             loss_weight_list.append(loss_weight)
 
-        # Compute the denominator used in the global calibration of the loss
-        rank_denominator = sum(loss_weight.sum() for loss_weight in loss_weight_list)
+        rank_denominator = sum(weight.sum() for weight in loss_weight_list)
         rank_denominator = cast(torch.Tensor, rank_denominator)
         global_denominator = rank_denominator
         if dist.is_initialized():
