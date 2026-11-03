@@ -1,16 +1,15 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 """Deterministic DSA backward kernel via subclassing the cuDNN CuTe-DSL kernel.
 
-Instead of vendoring the 2300-line ``dsa_bwd_sm90.py`` from the cudnn package, this
-subclass overrides only ``scatter_dkv_atomic`` so each CTA writes its dKV contribution
-into its own slice of a widened FP32 accumulator (plain single-writer atomics per
-address) instead of racing all CTAs on one shared buffer. The driver
-(``cudnn_dsa_det.py``) then reduces the slices in a fixed order. Mechanism follows FA2's
-deterministic backward (split buffer + ordered reduction).
+Instead of vendoring the 2300-line ``dsa_bwd_sm90.py`` from the cudnn package, this subclass overrides only
+``scatter_dkv_atomic`` so each CTA writes its dKV contribution into its own slice of a widened FP32 accumulator (plain
+single-writer atomics per address) instead of racing all CTAs on one shared buffer. The driver (``cudnn_dsa_det.py``)
+then reduces the slices in a fixed order. Mechanism follows FA2's deterministic backward (split buffer + ordered
+reduction).
 
-Fragility note: the override mirrors cudnn 1.28.0's method body; if the cudnn package
-upgrades and changes that method's internals, ``flash_mla_cudnn.py``'s deterministic
-dispatch must fall back (guarded by the import/capability check there).
+Fragility note: the override mirrors cudnn 1.28.0's method body; if the cudnn package upgrades and changes that
+method's internals, the override would silently become dead code — ``cudnn_dsa_det._ensure_det_cudnn_runtime``
+therefore pins the validated cudnn version and raises instead of falling back to the nondeterministic stock path.
 """
 
 import cutlass
@@ -26,13 +25,16 @@ from cutlass import Int32, const_expr
 
 
 class FlashAttentionDSABackwardSm90Det(FlashAttentionDSABackwardSm90):
-    """cuDNN SM90 DSA backward with per-CTA dKV accumulator slices.
+    """CuDNN SM90 DSA backward with per-CTA dKV accumulator slices.
 
-    The driver must set ``_det_slice_size`` (elements per slice, i.e.
-    ``seqlen_k_rounded * head_dim_rounded``) and ``_det_n_splits`` on the instance before
-    ``cute.compile``; they are read at trace time and baked in as constants. The widened
-    accumulator keeps the stock 3D layout with ``n_splits * slice_size`` elements in the
-    last dim, so the stock ``__call__``/transpose paths are unchanged.
+    The driver must set ``_det_slice_size`` (elements per slice, i.e. ``seqlen_k_rounded * head_dim_rounded``) and
+    ``_det_n_splits`` on the instance before ``cute.compile``; they are read at trace time and baked in as constants.
+    The widened accumulator keeps the stock 3D layout with ``n_splits * slice_size`` elements in the last dim, so the
+    stock ``__call__``/transpose paths are unchanged.
+
+    Slice privacy relies on the launch grid being ``(seqlen_q, 1, 1)`` so that ``blockIdx.x`` alone identifies a CTA;
+    the driver (``cudnn_dsa_det.py``) enforces this by rejecting ``qhead_tiles > 1`` and ``seqlen_q > n_splits`` per
+    launch.
     """
 
     _det_slice_size: int = 0
@@ -52,10 +54,12 @@ class FlashAttentionDSABackwardSm90Det(FlashAttentionDSABackwardSm90):
     ):
         """Stock method + one change: target_ptr gains a per-CTA slice offset.
 
-        Every address within a slice still has a single writer (the stock kernel's
-        fragment partition is exclusive and duplicate topk entries accumulate in
-        program order on the same thread), so the per-slice atomics are exact, and the
-        cross-CTA nondeterminism disappears because CTAs no longer share slices.
+        Per-slice atomics are exact accumulations, and the cross-CTA nondeterminism disappears because CTAs no longer
+        share slices. Caveat: duplicate topk entries of one query land in the same CTA (one CTA per query); whether
+        their adds hit the same address from one thread or several depends on the fragment thread mapping, so their
+        intra-CTA order is a scheduling property, not a construction guarantee. It has been bitwise stable across
+        repeated runs (30-repeat probes with duplicate indices), but strictly the guarantee covers cross-CTA ordering
+        only.
         """
         tile_shape = (self.tile_n, self.hdim_chunk)
         cDKV = cute.make_identity_tensor(tile_shape if const_expr(not self.dKV_swapAB) else tile_shape[::-1])

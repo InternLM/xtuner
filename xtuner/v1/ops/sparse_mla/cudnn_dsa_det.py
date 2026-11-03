@@ -30,6 +30,62 @@ torch2cute_dtype_map = {
 }
 
 
+_DET_TESTED_CUDNN_VERSION = "1.28.0"
+_det_runtime_checked = False
+
+# cute.compile results keyed by shape/config, shared by the single-launch and
+# multi-launch drivers (module-level so mypy sees plain dicts).
+_COMPILE_CACHE_PRE: dict = {}
+_COMPILE_CACHE: dict = {}
+_COMPILE_CACHE_POST: dict = {}
+
+
+def _ensure_det_cudnn_runtime() -> None:
+    """Fail loudly if the private-API assumptions of the deterministic fork
+    break.
+
+    The subclass in ``_cudnn_dsa_bwd_det_subclass.py`` mirrors cudnn 1.28.0's ``scatter_dkv_atomic``; a cudnn upgrade
+    that renames or reshapes that method would silently turn the override into dead code and fall back to unordered
+    atomics — losing bitwise repeatability while XTUNER_DETERMINISTIC=true claims otherwise. Version/method mismatches
+    must raise, never fall back to stock.
+    """
+    global _det_runtime_checked
+    if _det_runtime_checked:
+        return
+    import cudnn
+
+    version = getattr(cudnn, "__version__", "unknown")
+    assert version == _DET_TESTED_CUDNN_VERSION, (
+        f"deterministic DSA backward is validated against cudnn {_DET_TESTED_CUDNN_VERSION}, "
+        f"found {version}: the scatter_dkv_atomic override mirrors that version's internals. "
+        "Re-validate the subclass against the new cudnn (see _cudnn_dsa_bwd_det_subclass.py) "
+        "and bump _DET_TESTED_CUDNN_VERSION, or run with XTUNER_DETERMINISTIC=false."
+    )
+    assert hasattr(FlashAttentionDSABackwardSm90Det, "scatter_dkv_atomic") and hasattr(
+        FlashAttentionDSABackwardSm90Det.__mro__[1], "scatter_dkv_atomic"
+    ), "cudnn's FlashAttentionDSABackwardSm90 no longer has scatter_dkv_atomic to override"
+    _det_runtime_checked = True
+
+
+def _check_accum_workspace(n_splits: int, seqlen_k_rounded: int, head_dim_rounded: int, device) -> None:
+    """Clear error instead of a raw CUDA OOM when the sliced accumulator cannot
+    fit.
+
+    The widened FP32 accumulator costs ``4 * n_splits * seqlen_k_rounded * head_dim_rounded`` bytes — one private slice
+    per CTA of a launch (chunk=128 slices at 16K/512-dim is 4 GiB; 512K/576-dim would be 144 GiB).
+    """
+    workspace_bytes = 4 * n_splits * seqlen_k_rounded * head_dim_rounded
+    free_bytes, _ = torch.cuda.mem_get_info(device)
+    if workspace_bytes > free_bytes:
+        raise RuntimeError(
+            f"deterministic DSA backward needs {workspace_bytes / 2**30:.2f} GiB for the per-CTA "
+            f"FP32 accumulator ({n_splits} slices x {seqlen_k_rounded} kv x {head_dim_rounded} dim "
+            f"x 4 bytes) but only {free_bytes / 2**30:.2f} GiB is free. Reduce `chunk` in "
+            "flash_attn_bwd_sm90_multilaunch (fewer slices per launch, proportionally more "
+            "launches) or run with XTUNER_DETERMINISTIC=false."
+        )
+
+
 def flash_attn_bwd_sm90(
     q: torch.Tensor,
     kv: torch.Tensor,  # K=V unified tensor
@@ -40,8 +96,8 @@ def flash_attn_bwd_sm90(
     dq: Optional[torch.Tensor] = None,
     dkv: Optional[torch.Tensor] = None,
     dkv_accum: Optional[torch.Tensor] = None,
-    topk_idxs: torch.Tensor = None,
-    topk_length: torch.Tensor = None,
+    topk_idxs: Optional[torch.Tensor] = None,
+    topk_length: Optional[torch.Tensor] = None,
     current_stream=None,
     zero_accum: bool = True,
     run_postprocess: bool = True,
@@ -74,6 +130,7 @@ def flash_attn_bwd_sm90(
     """
     compute_capability = _get_device_capability()
     assert compute_capability == 9, f"Only SM90, got SM{compute_capability}0"
+    _ensure_det_cudnn_runtime()
 
     total_S_q, num_head, head_dim = q.shape
     total_S_kv = kv.shape[0]
@@ -97,7 +154,7 @@ def flash_attn_bwd_sm90(
     dKV_swapAB = False
     dQ_swapAB = False
 
-    q4, kv4, out4, dout4, lse4 = [maybe_contiguous(t) for t in (q4, kv4, out4, dout4, lse4)]
+    q4, kv4, out4, dout4, lse4 = (maybe_contiguous(t) for t in (q4, kv4, out4, dout4, lse4))
 
     batch_size = 1
     seqlen_q = total_S_q
@@ -116,6 +173,17 @@ def flash_attn_bwd_sm90(
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(head_dim)
     qhead_per_kvhead = num_head // num_head_kv
+
+    # The subclassed kernel derives each CTA's accumulator slice from blockIdx.x
+    # alone, which is unique only when the launch grid is (seqlen_q, 1, 1). The
+    # stock scheduler uses grid.y = num_head_kv * qhead_tiles, so more than one
+    # query-head tile per CTA (qhead_per_kvhead > tile_m) would make CTAs (x, 0)
+    # and (x, 1) silently share slice x and lose bitwise repeatability. Reject
+    # such shapes instead of falling back to the nondeterministic stock path.
+    assert qhead_per_kvhead <= m_block_size, (
+        f"deterministic DSA backward requires qhead_per_kvhead <= {m_block_size} "
+        f"(single query-head tile per CTA), got {qhead_per_kvhead}"
+    )
 
     device = q.device
 
@@ -159,7 +227,19 @@ def flash_attn_bwd_sm90(
         n_splits = int(_os.environ["DET_N_SPLITS"])
     if n_splits_override is not None:
         n_splits = n_splits_override
+    if not only_preprocess:
+        # Invariant: every CTA of this launch owns a private slice, so the slice
+        # offset (blockIdx.x % n_splits) must be unique within the launch. The grid
+        # is (seqlen_q, 1, 1) — one CTA per query — so seqlen_q must not exceed
+        # n_splits; longer sequences must go through flash_attn_bwd_sm90_multilaunch,
+        # which launches at most chunk=n_splits queries at a time.
+        assert seqlen_q <= n_splits, (
+            f"deterministic DSA backward needs one accumulator slice per CTA: this launch has "
+            f"seqlen_q={seqlen_q} CTAs but n_splits={n_splits} slices. "
+            "Use flash_attn_bwd_sm90_multilaunch for longer sequences."
+        )
     if dkv_accum is None:
+        _check_accum_workspace(n_splits, seqlen_k_rounded, head_dim_rounded, device)
         dkv_accum = torch.zeros(
             batch_size,
             num_head_kv,
@@ -182,9 +262,9 @@ def flash_attn_bwd_sm90(
         m_block_size,
         num_threads,
     )
-    if compile_key_pre not in flash_attn_bwd_sm90.compile_cache_pre:
-        o_tensor, do_tensor = [to_cute_tensor(t) for t in (out4, dout4)]
-        dpsum_tensor, lse_log2_tensor = [to_cute_tensor(t) for t in (dpsum, lse_log2)]
+    if compile_key_pre not in _COMPILE_CACHE_PRE:
+        o_tensor, do_tensor = (to_cute_tensor(t) for t in (out4, dout4))
+        dpsum_tensor, lse_log2_tensor = (to_cute_tensor(t) for t in (dpsum, lse_log2))
         lse_tensor = to_cute_tensor(lse4, assumed_align=4)
         attn_sink_tensor = None
         d_sink_tensor = None
@@ -195,7 +275,7 @@ def flash_attn_bwd_sm90(
             m_block_size,
             num_threads=num_threads,
         )
-        flash_attn_bwd_sm90.compile_cache_pre[compile_key_pre] = cute.compile(
+        _COMPILE_CACHE_PRE[compile_key_pre] = cute.compile(
             fa_bwd_pre,
             o_tensor,
             do_tensor,
@@ -211,7 +291,7 @@ def flash_attn_bwd_sm90(
             options="--enable-tvm-ffi",
         )
     if run_preprocess:
-        flash_attn_bwd_sm90.compile_cache_pre[compile_key_pre](
+        _COMPILE_CACHE_PRE[compile_key_pre](
             out4,
             dout4,
             dpsum,
@@ -231,7 +311,7 @@ def flash_attn_bwd_sm90(
     assert topk4 is not None
     assert topk4.dtype == torch.int32
     have_topk_length = tlen4 is not None
-    if have_topk_length:
+    if tlen4 is not None:
         assert tlen4.dtype == torch.int32
     else:
         tlen4 = torch.empty(1, dtype=torch.int32, device=device)
@@ -258,11 +338,11 @@ def flash_attn_bwd_sm90(
         n_splits,
         seqlen_k_rounded * head_dim_rounded,
     )
-    if compile_key not in flash_attn_bwd_sm90.compile_cache:
+    if compile_key not in _COMPILE_CACHE:
         q_tensor = to_cute_tensor(q4)
         kv_tensor = to_cute_tensor(kv4)
         do_tensor = to_cute_tensor(dout4)
-        dpsum_tensor, lse_log2_tensor = [to_cute_tensor(t) for t in (dpsum, lse_log2)]
+        dpsum_tensor, lse_log2_tensor = (to_cute_tensor(t) for t in (dpsum, lse_log2))
         dq_tensor = to_cute_tensor(dq4)
         dkv_accum_tensor = to_cute_tensor(dkv_accum)
         topk_idxs_tensor = to_cute_tensor(topk4)
@@ -287,7 +367,7 @@ def flash_attn_bwd_sm90(
         # Baked in at trace time: slice geometry for the subclassed scatter override.
         fa_bwd_obj._det_slice_size = seqlen_k_rounded * head_dim_rounded
         fa_bwd_obj._det_n_splits = n_splits
-        flash_attn_bwd_sm90.compile_cache[compile_key] = cute.compile(
+        _COMPILE_CACHE[compile_key] = cute.compile(
             fa_bwd_obj,
             q_tensor,
             kv_tensor,
@@ -303,7 +383,7 @@ def flash_attn_bwd_sm90(
             options="--enable-tvm-ffi",
         )
     with torch.cuda.nvtx.range("flash_attn_bwd_sm90_kernel"):
-        flash_attn_bwd_sm90.compile_cache[compile_key](
+        _COMPILE_CACHE[compile_key](
             q4,
             kv4,
             dout4,
@@ -337,7 +417,7 @@ def flash_attn_bwd_sm90(
         num_threads_post,
         N_hdim_chunks,
     )
-    if compile_key_post not in flash_attn_bwd_sm90.compile_cache_post:
+    if compile_key_post not in _COMPILE_CACHE_POST:
         dkv_accum_tensor = to_cute_tensor(dkv_accum_reduced)
         dkv_tensor = to_cute_tensor(dkv4)
 
@@ -349,7 +429,7 @@ def flash_attn_bwd_sm90(
             num_threads=num_threads_post,
             N_hdim_chunks=N_hdim_chunks,
         )
-        flash_attn_bwd_sm90.compile_cache_post[compile_key_post] = cute.compile(
+        _COMPILE_CACHE_POST[compile_key_post] = cute.compile(
             postprocess,
             dkv_accum_tensor,
             dkv_tensor,
@@ -357,7 +437,7 @@ def flash_attn_bwd_sm90(
             current_stream,
             options="--enable-tvm-ffi",
         )
-    flash_attn_bwd_sm90.compile_cache_post[compile_key_post](
+    _COMPILE_CACHE_POST[compile_key_post](
         dkv_accum_reduced,
         dkv4,
         seqlen_k,
@@ -368,11 +448,6 @@ def flash_attn_bwd_sm90(
     return dq, dkv
 
 
-flash_attn_bwd_sm90.compile_cache_pre = {}
-flash_attn_bwd_sm90.compile_cache = {}
-flash_attn_bwd_sm90.compile_cache_post = {}
-
-
 def flash_attn_bwd_sm90_multilaunch(
     q: torch.Tensor,
     kv: torch.Tensor,
@@ -380,7 +455,7 @@ def flash_attn_bwd_sm90_multilaunch(
     dout: torch.Tensor,
     lse: torch.Tensor,
     topk_idxs: torch.Tensor,
-    topk_length: torch.Tensor = None,
+    topk_length: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     chunk: int = 128,
     current_stream=None,
@@ -390,6 +465,15 @@ def flash_attn_bwd_sm90_multilaunch(
     accum slice i; slices persist across launches and launches execute in a
     fixed stream order, so the per-address accumulation order is deterministic.
     A single ordered reduction + postprocess runs at the end.
+
+    Memory contract: the accumulator workspace is `4 * min(chunk, S_q) *
+    round_up(S_k, 64) * round_up(D, 32)` bytes (one full-KV FP32 slice per CTA of
+    a launch) plus one reduced accumulator of `4 * round_up(S_k, 64) *
+    round_up(D, 32)` bytes. That is 4 GiB at the GLM-5.3 CI shape (S_k=16K,
+    D=512) but grows linearly with S_k (144 GiB at S_k=512K, D=576), so long
+    sequences must shrink `chunk` (fewer slices per launch, proportionally more
+    launches) — shapes that still cannot fit raise a clear error via
+    `_check_accum_workspace` instead of a raw CUDA OOM.
     """
     total_S_q, num_head, head_dim = q.shape
     total_S_kv = kv.shape[0]
@@ -402,6 +486,7 @@ def flash_attn_bwd_sm90_multilaunch(
     # run concurrently... they may, but slice ownership is by blockIdx which is
     # unique within the launch, so privacy holds regardless of scheduling).
     n_splits = min(chunk, total_S_q)
+    _check_accum_workspace(n_splits, seqlen_k_rounded, head_dim_rounded, device)
     dkv_accum = torch.zeros(
         1,
         1,
@@ -474,7 +559,7 @@ def flash_attn_bwd_sm90_multilaunch(
     dkv4 = dkv.unsqueeze(0).unsqueeze(2)
 
     compile_key_post = (dtype, hdim_chunk, n_block_size, head_dim, num_threads_post, N_hdim_chunks)
-    if compile_key_post not in flash_attn_bwd_sm90.compile_cache_post:
+    if compile_key_post not in _COMPILE_CACHE_POST:
         dkv_accum_tensor = to_cute_tensor(dkv_accum_reduced)
         dkv_tensor = to_cute_tensor(dkv4)
         postprocess = _FlashAttentionDSABackwardPostprocessSm90(
@@ -485,7 +570,7 @@ def flash_attn_bwd_sm90_multilaunch(
             num_threads=num_threads_post,
             N_hdim_chunks=N_hdim_chunks,
         )
-        flash_attn_bwd_sm90.compile_cache_post[compile_key_post] = cute.compile(
+        _COMPILE_CACHE_POST[compile_key_post] = cute.compile(
             postprocess,
             dkv_accum_tensor,
             dkv_tensor,
@@ -493,7 +578,7 @@ def flash_attn_bwd_sm90_multilaunch(
             current_stream,
             options="--enable-tvm-ffi",
         )
-    flash_attn_bwd_sm90.compile_cache_post[compile_key_post](
+    _COMPILE_CACHE_POST[compile_key_post](
         dkv_accum_reduced,
         dkv4,
         total_S_kv,
