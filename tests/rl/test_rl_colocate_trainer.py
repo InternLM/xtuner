@@ -37,21 +37,16 @@ from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SerializedRayObj
 from xtuner.v1.train.rl_trainer import RLColocateTrainer, RLThroughputBenchmark
 
 
-class _FakeRolloutState:
+class _FakeRolloutState(RolloutState):
     def __init__(self, uid: int):
-        self.id = uid
-        self.rollout_id = str(uid)
-        self.group_id = uid
-        self.session_id = uid
-        self.status = Status.INIT
-        self.finish_reason = None
-        self.seq_staleness = 0
-        self.prompt_ids = [10, 11]
-        self.response_ids = []
-        self.response = None
-        self.reward = None
-        self.extra_fields = {}
-        self.response_model_steps = []
+        super().__init__(
+            rollout_id=uid,
+            group_id=uid,
+            session_id=uid,
+            message=[],
+            status=Status.INIT,
+            prompt_ids=[10, 11],
+        )
 
 
 class _FakeSampler:
@@ -97,7 +92,10 @@ def _build_fake_agent_loop():
             state.response_ids = [1, 2, 3]
             state.response = "ok"
             state.reward = {"score": 1.0}
-            state.response_model_steps = [model_step]
+            state.response_model_steps = [model_step] * 3
+            state.input_ids = [10, 11, 1, 2, 3]
+            state.labels = [-100, -100, 1, 2, 3]
+            state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=None)
         return rollout_states
 
     agent_loop.generate_group = generate_group
@@ -113,7 +111,7 @@ class TestRLColocateTrainer(unittest.TestCase):
 
     def _make_trainer(self, agent_loop_manager, *, total_train_steps: int = 1, sync_weights_interval: int = 1):
         trainer = RLColocateTrainer.__new__(RLColocateTrainer)
-        trainer._rollout_config = SimpleNamespace(weight_transport_type='ipc')
+        trainer._rollout_config = SimpleNamespace(weight_transport_type="ipc")
         trainer.logger = MagicMock()
         trainer._total_train_steps = total_train_steps
         trainer._cur_step = 0
@@ -145,16 +143,13 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer._benchmark_training_tokens = 0
         trainer._save_trajectories = MagicMock()
         trainer._release_trace_sessions = MagicMock(return_value=set())
-        trainer._release_all_trace_sessions = MagicMock()
         trainer._sync_weights_and_save = MagicMock(
             side_effect=lambda train_step, step_timer_dict: train_step % trainer._sync_weights_interval == 0
         )
         trainer._log_step = MagicMock()
 
         trainer.rollout_controller = SimpleNamespace(
-            shutdown_inactive_workers=SimpleNamespace(
-                remote=MagicMock(side_effect=_ray_get_none_ref)
-            ),
+            shutdown_inactive_workers=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),
             offload=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),
             restart_inactive_workers=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),
             onload_weights=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),
@@ -215,8 +210,7 @@ class TestRLColocateTrainer(unittest.TestCase):
 
         trainer.rollout_controller.offload.remote.assert_called_once_with()
         trainer.train_controller.fit.assert_called_once()
-        trainer._release_all_trace_sessions.assert_called_once_with()
-        trainer._release_trace_sessions.assert_not_called()
+        trainer._release_trace_sessions.assert_called_once()
         self.assertEqual(trainer._cur_step, 1)
 
     def test_fit_requires_non_empty_batch_from_manager(self):
@@ -269,7 +263,14 @@ class TestRLColocateTrainer(unittest.TestCase):
 
         async def _produce_batch(batch_size, train_step, *, model_step):
             produce_calls.append((batch_size, train_step, model_step))
-            return ProduceBatchResult(rollout_states=[[_FakeRolloutState(train_step)]])
+            state = _FakeRolloutState(train_step)
+            state.status = Status.COMPLETED
+            state.response_ids = [1, 2, 3]
+            state.response_model_steps = [model_step] * 3
+            state.input_ids = [10, 11, 1, 2, 3]
+            state.labels = [-100, -100, 1, 2, 3]
+            state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=None)
+            return ProduceBatchResult(rollout_states=[[state]])
 
         trainer = self._make_trainer(
             SimpleNamespace(produce_batch=_produce_batch),

@@ -171,8 +171,9 @@ class TestAgentLoopCanonicalizeTrainFields(unittest.TestCase):
         loop = self._make_loop()
         state = self._state(input_ids=[30, 31, 40], labels=[40], logprobs=None)
         loop.canonicalize_train_fields([state])
-        self.assertEqual(state.status, Status.COMPLETED)
-        with self.assertRaisesRegex(ValueError, "labels length mismatch"):
+        self.assertEqual(state.status, Status.FAILED)
+        self.assertIn("Training input_ids and labels must be full and aligned", state.error_msg or "")
+        with self.assertRaisesRegex(ValueError, "COMPLETED"):
             validate_train_group([state], task_name="test")
         loop.tokenizer.assert_not_called()
 
@@ -195,10 +196,11 @@ class TestAgentLoopCanonicalizeTrainFields(unittest.TestCase):
         loop.canonicalize_train_fields([state])
 
         self.assertEqual(state.num_tokens, 5)
-        self.assertEqual(state.extra_fields["train_prompt_length"], 3)
-        self.assertEqual(state.extra_fields["train_response_length"], 3)
-        self.assertEqual(state.extra_fields["supervised_tokens"], 3)
-        self.assertEqual(state.extra_fields["position_layout"], "1d")
+        assert state.train_meta is not None
+        self.assertEqual(state.train_meta.prompt_length, 3)
+        self.assertEqual(state.train_meta.response_length, 3)
+        self.assertEqual(state.train_meta.supervised_tokens, 3)
+        self.assertEqual(state.train_meta.position_layout, "1d")
 
     def test_train_meta_uses_train_prompt_ids_and_mrope_layout(self):
         # VLM 分支 prompt 长度取 train_prompt_ids；3D position_ids 标记 mrope_3d 布局。
@@ -213,8 +215,9 @@ class TestAgentLoopCanonicalizeTrainFields(unittest.TestCase):
         loop.canonicalize_train_fields([state])
 
         self.assertEqual(state.num_tokens, 3)
-        self.assertEqual(state.extra_fields["train_prompt_length"], 2)
-        self.assertEqual(state.extra_fields["position_layout"], "mrope_3d")
+        assert state.train_meta is not None
+        self.assertEqual(state.train_meta.prompt_length, 2)
+        self.assertEqual(state.train_meta.position_layout, "mrope_3d")
 
     def test_train_meta_prompt_length_falls_back_to_unsupervised_count(self):
         # prompt_ids 缺失时 prompt 长度退回 shifted_labels 的非监督位计数（与旧 data_info 口径一致）。
@@ -227,24 +230,26 @@ class TestAgentLoopCanonicalizeTrainFields(unittest.TestCase):
         loop.canonicalize_train_fields([state])
 
         self.assertEqual(state.num_tokens, 3)
-        self.assertEqual(state.extra_fields["train_prompt_length"], 1)
-        self.assertEqual(state.extra_fields["supervised_tokens"], 2)
+        assert state.train_meta is not None
+        self.assertEqual(state.train_meta.prompt_length, 1)
+        self.assertEqual(state.train_meta.supervised_tokens, 2)
 
-    def test_missing_prompt_ids_propagates_construction_error(self):
+    def test_missing_prompt_ids_marks_sample_failed(self):
         loop = self._make_loop()
         state = self._state()
         state.prompt_ids = None
-        with self.assertRaisesRegex(AssertionError, "Prompt ids cannot be None or empty"):
-            loop.canonicalize_train_fields([state])
-        self.assertEqual(state.status, Status.COMPLETED)
+        loop.canonicalize_train_fields([state])
+        self.assertEqual(state.status, Status.FAILED)
+        self.assertIn("Prompt ids cannot be None or empty", state.error_msg or "")
 
-    def test_construction_error_stops_the_group(self):
+    def test_construction_error_marks_only_that_sample(self):
         loop = self._make_loop()
         bad, good = self._state(uid=1), self._state(uid=2)
         bad.prompt_ids = None
-        with self.assertRaises(AssertionError):
-            loop.canonicalize_train_fields([bad, good])
-        self.assertIsNone(good.input_ids)
+        loop.canonicalize_train_fields([bad, good])
+        self.assertEqual(bad.status, Status.FAILED)
+        self.assertIsNotNone(good.input_ids)
+        self.assertEqual(good.status, Status.COMPLETED)
 
 
 class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
@@ -305,9 +310,8 @@ class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
 
                 loop.canonicalize_train_fields([state])
 
-                self.assertEqual(state.status, Status.COMPLETED)
-                with self.assertRaisesRegex(ValueError, "labels length mismatch"):
-                    validate_train_group([state], task_name="test")
+                self.assertEqual(state.status, Status.FAILED)
+                self.assertIn("Training input_ids and labels must be full and aligned", state.error_msg or "")
 
     def test_missing_labels_rejected_at_admission(self):
         for loop_cls in self.AGENTIC_LOOP_CLASSES:
@@ -348,10 +352,11 @@ class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
                 loop.canonicalize_train_fields([state])
 
                 self.assertEqual(state.num_tokens, 4)
-                self.assertEqual(state.extra_fields["train_prompt_length"], 2)
-                self.assertEqual(state.extra_fields["train_response_length"], 2)
-                self.assertEqual(state.extra_fields["supervised_tokens"], 3)
-                self.assertEqual(state.extra_fields["position_layout"], "1d")
+                assert state.train_meta is not None
+                self.assertEqual(state.train_meta.prompt_length, 2)
+                self.assertEqual(state.train_meta.response_length, 2)
+                self.assertEqual(state.train_meta.supervised_tokens, 3)
+                self.assertEqual(state.train_meta.position_layout, "1d")
 
     def test_train_meta_skipped_for_invalid_states(self):
         # FAILED 与无 input_ids 的样本不写轻量统计。
@@ -364,9 +369,9 @@ class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
                 loop.canonicalize_train_fields([failed, eval_state])
 
                 self.assertIsNone(failed.num_tokens)
-                self.assertNotIn("supervised_tokens", failed.extra_fields)
+                self.assertIsNone(failed.train_meta)
                 self.assertIsNone(eval_state.num_tokens)
-                self.assertNotIn("supervised_tokens", eval_state.extra_fields)
+                self.assertIsNone(eval_state.train_meta)
 
     def test_state_without_input_ids_is_skipped(self):
         # eval 态样本显式置空训练字段且 COMPLETED，不能被构造或校验。
@@ -412,8 +417,10 @@ class TestPrepareRolloutItems(unittest.TestCase):
 
     def _prepare(self, controller, data_groups):
         prepared = controller._prepare_rollout_items(data_groups, rollout_idx=0)
-        plan = {"dp_plans": {}, "plan_log": {}}
-        advantages = controller._prepare_advantages(prepared, plan)
+        from xtuner.v1.rl.trainer.pack import PackPlan
+
+        plan = PackPlan(ranks=(), metrics={})
+        advantages = controller._prepare_advantages(prepared)
         return (
             prepared["rollout_items"],
             advantages,
@@ -468,7 +475,7 @@ class TestPrepareRolloutItems(unittest.TestCase):
             if state.logprobs is not None:
                 state.logprobs = [0.0] * len(resolved_prompt_ids) + list(state.logprobs)
         if write_meta:
-            AgentLoop._write_train_meta(None, state)
+            state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
         return state
 
     def test_noncontiguous_session_reuses_original_advantage(self):
@@ -489,7 +496,7 @@ class TestPrepareRolloutItems(unittest.TestCase):
         prepared = controller._prepare_rollout_items([[self._state()]], rollout_idx=0)
         self.assertEqual(controller.advantage_estimator.calls, [])
         self.assertNotIn("advantages", prepared)
-        self.assertEqual(controller._prepare_advantages(prepared, {"dp_plans": {}, "plan_log": {}}), [1.0])
+        self.assertEqual(controller._prepare_advantages(prepared), [1.0])
         self.assertEqual(len(controller.advantage_estimator.calls), 1)
 
     def test_returns_items_with_per_sample_advantages(self):
@@ -589,7 +596,7 @@ class TestPrepareRolloutItems(unittest.TestCase):
         controller = self._build_controller([1.0])
         state = self._state(write_meta=False)
 
-        with self.assertRaisesRegex(ValueError, "canonicalization"):
+        with self.assertRaisesRegex(ValueError, "set_training_fields"):
             self._prepare(controller, [[state]])
 
     def test_use_3d_position_ids_follows_batch_meta(self):
