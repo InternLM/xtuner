@@ -53,7 +53,7 @@ XTuner V1 is a next-generation LLM training engine specifically designed for ult
 
   - **Massive scale:** Supports MoE training up to 1T parameters	
   - **Breakthrough performance:** First to achieve FSDP training throughput that surpasses traditional 3D parallel schemes for MoE models above 200B scale
-  - **Hardware optimization:** Achieves training efficiency on Ascend A3 Supernode that exceeds NVIDIA H800
+  - **Hardware optimization:** Achieves training efficiency on Huawei Ascend A3 Supernode that exceeds NVIDIA H800
 
 
 <div align=center>
@@ -63,7 +63,7 @@ XTuner V1 is a next-generation LLM training engine specifically designed for ult
 
 ## 🔥 Roadmap
 
-XTuner V1 is committed to continuously improving training efficiency for pre-training, instruction fine-tuning, and reinforcement learning of ultra-large MoE models, with special focus on Ascend NPU optimization.
+XTuner V1 is committed to continuously improving training efficiency for pre-training, instruction fine-tuning, and reinforcement learning of ultra-large MoE models, with special focus on Huawei Ascend NPU optimization.
 
 ### 🚀 Training Engine
 
@@ -125,7 +125,7 @@ The development of XTuner V1's training engine has been greatly inspired by and 
 
 - [Torchtitan](https://github.com/pytorch/torchtitan) - A PyTorch native platform for training generative AI models
 - [Deepspeed](https://github.com/deepspeedai/DeepSpeed) - Microsoft's deep learning optimization library	
-- [MindSpeed](https://gitee.com/ascend/MindSpeed) - Ascend's high-performance training acceleration library	
+- [MindSpeed](https://gitee.com/ascend/MindSpeed) - Huawei Ascend's high-performance training acceleration library	
 - [Megatron](https://github.com/NVIDIA/Megatron-LM) - NVIDIA's large-scale transformer training framework
 
 
