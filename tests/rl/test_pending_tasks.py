@@ -38,6 +38,7 @@ class TestPendingTasks(unittest.IsolatedAsyncioTestCase):
             if isinstance(pending_tasks, set):
                 pending_tasks.add(asyncio.create_task(done()))
             else:
+
                 async def spawn_one():
                     return asyncio.create_task(done())
 

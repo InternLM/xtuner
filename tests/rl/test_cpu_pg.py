@@ -1,6 +1,6 @@
-import unittest
 import socket
 import time
+import unittest
 from typing import Dict
 
 import httpx
@@ -14,11 +14,12 @@ GIB = 1024**3
 
 @ray.remote(num_cpus=1)
 class NaiveCPUWorker:
-    def __init__(self, config: Dict, num_cpus = 1):
+    def __init__(self, config: Dict, num_cpus=1):
         self.config = config
         self.num_cpus = num_cpus
         if self.config["worker_type"] == "fake_receiver":
             from fastapi import FastAPI
+
             self.app = FastAPI()
             self.received_data = []
             self.addr = "127.0.0.1"
@@ -28,6 +29,7 @@ class NaiveCPUWorker:
 
     def _setup_receiver(self):
         """Set up the HTTP server for the receiver"""
+
         @self.app.post("/receive")
         async def receive_data(data: dict):
             self.received_data.append(data)
@@ -36,7 +38,7 @@ class NaiveCPUWorker:
     def _set_free_port(self):
         """Get an available port number"""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(('', 0))
+            s.bind(("", 0))
             s.listen(1)
             port = s.getsockname()[1]
         return port
@@ -44,6 +46,7 @@ class NaiveCPUWorker:
     def start_server(self):
         """Start the HTTP server"""
         import threading
+
         import uvicorn
 
         def run_server():
@@ -102,11 +105,7 @@ class TestAutoCPUWorkers(unittest.TestCase):
         # Create a receiver worker
         receiver_config = dict(worker_type="fake_receiver")
 
-        workers_list, pg = AutoCPUWorkers.from_config(
-            NaiveCPUWorker,
-            receiver_config,
-            cpu_config
-        )
+        workers_list, pg = AutoCPUWorkers.from_config(NaiveCPUWorker, receiver_config, cpu_config)
 
         self.assertEqual(len(workers_list), num_workers)
         self.assertIsNotNone(pg)
@@ -138,10 +137,7 @@ class TestAutoCPUWorkers(unittest.TestCase):
         receiver_url = ray.get(receiver_worker.start_server.remote())
 
         # Create sender worker
-        sender_config = dict(
-            worker_type="fake_sender",
-            target_url=receiver_url
-        )
+        sender_config = dict(worker_type="fake_sender", target_url=receiver_url)
         sender_workers = AutoCPUWorkers.from_placement_group(
             NaiveCPUWorker,
             sender_config,
@@ -154,7 +150,7 @@ class TestAutoCPUWorkers(unittest.TestCase):
         test_messages = [
             {"id": 1, "message": "First message"},
             {"id": 2, "message": "Second message"},
-            {"id": 3, "message": "Third message"}
+            {"id": 3, "message": "Third message"},
         ]
 
         for msg in test_messages:
@@ -189,12 +185,8 @@ class TestCPUResourceManager(unittest.TestCase):
         }
 
         def build_summary():
-            registered_cpus = sum(
-                pool.num_workers * pool.num_cpus_per_worker for pool in manager.pools.values()
-            )
-            registered_memory = sum(
-                pool.num_workers * pool.cpu_memory_per_worker for pool in manager.pools.values()
-            )
+            registered_cpus = sum(pool.num_workers * pool.num_cpus_per_worker for pool in manager.pools.values())
+            registered_memory = sum(pool.num_workers * pool.cpu_memory_per_worker for pool in manager.pools.values())
             return {
                 "cluster_cpus": state["external_cpus"],
                 "available_cpus": state["external_cpus"],
@@ -282,5 +274,5 @@ class TestCPUResourceManager(unittest.TestCase):
         self.assertIs(manager.pools["judger"], config)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

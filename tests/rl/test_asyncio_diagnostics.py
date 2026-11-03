@@ -110,4 +110,3 @@ def test_dump_asyncio_tasks_writes_file(monkeypatch, tmp_path):
     assert "reason=unit-test" in content
     assert "loop_id=current" in content
     assert "task_count=" in content
-

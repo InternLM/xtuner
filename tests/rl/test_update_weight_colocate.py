@@ -30,13 +30,15 @@ import requests
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.model import Qwen3VLDense4BConfig
-
 from xtuner.v1.rl.loss import GRPOLossConfig as LossConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.rollout.worker_registry import WorkerLifecycleState
 from xtuner.v1.rl.trainer import (
     TrainingController,
-    TrainingWorker as BaseTrainingWorker,
     WorkerConfig,
+)
+from xtuner.v1.rl.trainer import (
+    TrainingWorker as BaseTrainingWorker,
 )
 from xtuner.v1.rl.utils import (
     AcceleratorResourcesConfig,
@@ -45,7 +47,7 @@ from xtuner.v1.rl.utils import (
     clear_cpu_resource_manager,
     set_cpu_resource_manager,
 )
-from xtuner.v1.rl.rollout.worker_registry import WorkerLifecycleState
+
 
 RL_TRAINER_RAY_GET_TIMEOUT = 3600
 TEST_TEXT_MESSAGES = [{"role": "user", "content": "Hello!"}]
@@ -91,6 +93,7 @@ class TestUpdateWeightColocate(unittest.TestCase):
             os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
         else:
             raise unittest.SkipTest("XTUNER_USE_SGLANG or XTUNER_USE_LMDEPLOY is not set")
+
     @classmethod
     def tearDownClass(cls) -> None:
         del os.environ["XTUNER_USE_FA3"]
@@ -214,7 +217,9 @@ class TestUpdateWeightColocate(unittest.TestCase):
 
     def _check_sglang_weights(self, rollout_controller, action):
         targets = ray.get(rollout_controller.get_weight_update_targets.remote())
-        active_urls = [target.server_url for target in targets if target.lifecycle_state == WorkerLifecycleState.ACTIVE.value]
+        active_urls = [
+            target.server_url for target in targets if target.lifecycle_state == WorkerLifecycleState.ACTIVE.value
+        ]
         self.assertGreater(len(active_urls), 0)
         results = []
         for url in active_urls:
@@ -314,11 +319,11 @@ class TestUpdateWeightColocate(unittest.TestCase):
 
     @unittest.skip("skip sglang parameter-only weight check test until the parameter-check-only patch is applied")
     def test_sglang_colocate_ipc_update_weight(self):
-        train_controller, rollout_controller = self._setup_engines(weight_transport_type='ipc')
+        train_controller, rollout_controller = self._setup_engines(weight_transport_type="ipc")
 
         self._check_sglang_weights(rollout_controller, action="snapshot_parameters")
         self._check_sglang_weights(rollout_controller, action="reset_parameters")
-        
+
         targets = ray.get(rollout_controller.get_weight_update_targets.remote())
         train_controller.bind_rollout_weight_update(
             targets=targets,
@@ -332,14 +337,13 @@ class TestUpdateWeightColocate(unittest.TestCase):
 
         self._check_sglang_weights(rollout_controller, action="compare_parameters")
 
-
     @unittest.skip("skip sglang parameter-only weight check test until the parameter-check-only patch is applied")
     def test_sglang_colocate_checkpoint_engine_update_weight_train_register(self):
         train_controller, rollout_controller = self._setup_engines(weight_transport_type="checkpoint_engine")
 
         self._check_sglang_weights(rollout_controller, action="snapshot_parameters")
         self._check_sglang_weights(rollout_controller, action="reset_parameters")
-        
+
         targets = ray.get(rollout_controller.get_weight_update_targets.remote())
         train_controller.bind_rollout_weight_update(
             targets=targets,
@@ -353,6 +357,7 @@ class TestUpdateWeightColocate(unittest.TestCase):
         train_controller.weight_update(need_register=False, need_update=True)
 
         self._check_sglang_weights(rollout_controller, action="compare_parameters")
+
 
 if __name__ == "__main__":
     unittest.main()

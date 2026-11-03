@@ -95,7 +95,7 @@ class TestQwen35VLMoECheckpointEngineRecoveryE2E(unittest.TestCase):
                 "XTUNER_DETERMINISTIC": "false",
                 "XTUNER_TEST_IMMEDIATE_RECOVERY": "1",
             },
-            unset=("RAY_ADDRESS","PYTORCH_CUDA_ALLOC_CONF"),
+            unset=("RAY_ADDRESS", "PYTORCH_CUDA_ALLOC_CONF"),
         )
         ray.init(address="local", num_cpus=256, num_gpus=8, ignore_reinit_error=True)
 
@@ -192,8 +192,7 @@ class TestQwen35VLMoECheckpointEngineRecoveryE2E(unittest.TestCase):
             logger.info(f"[recovery-test] sync_weights_and_save enter train_step={train_step}")
             weights_synced = original_sync_weights_and_save(train_step, step_timer_dict)
             logger.info(
-                f"[recovery-test] sync_weights_and_save exit train_step={train_step} "
-                f"weights_synced={weights_synced}"
+                f"[recovery-test] sync_weights_and_save exit train_step={train_step} weights_synced={weights_synced}"
             )
             if weights_synced:
                 has_registered_checkpoint = trainer.train_controller.has_registered_weight_checkpoint()
@@ -209,10 +208,7 @@ class TestQwen35VLMoECheckpointEngineRecoveryE2E(unittest.TestCase):
                     if not has_registered_checkpoint:
                         raise AssertionError("Train step 1 did not register a checkpoint-engine checkpoint.")
                     rank_0_state = self._get_rank_0_lifecycle_state(trainer)
-                    logger.info(
-                        f"[recovery-test] set step_1_weight_update_finished "
-                        f"rank0_state={rank_0_state}"
-                    )
+                    logger.info(f"[recovery-test] set step_1_weight_update_finished rank0_state={rank_0_state}")
                     self._step_1_weight_update_finished.set()
             return weights_synced
 

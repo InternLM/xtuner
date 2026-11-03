@@ -1,12 +1,10 @@
-import os
-import unittest
 import socket
+import unittest
+
+import parametrize
 import ray
 
-
-
 from xtuner.v1.rl.utils.ray_utils import find_master_addr_and_port, get_accelerator_ids, get_ray_accelerator
-import parametrize
 
 
 class TestFindMasterAddrAndPort(unittest.TestCase):
@@ -55,7 +53,7 @@ class TestFindMasterAddrAndPort(unittest.TestCase):
         try:
             # 尝试绑定到这个端口 - 这应该成功，因为 find_master_addr_and_port
             # 会在获取端口号后关闭套接字连接
-            test_socket.bind(('', port))
+            test_socket.bind(("", port))
             test_socket.listen(1)
             self.assertTrue(True, "端口可以被绑定，证明它是可用的")
         except OSError as e:
@@ -98,6 +96,5 @@ class TestGetAcceleratorIds(unittest.TestCase):
         self.assertEqual(len(ids), num_accelerators, "GPU IDs 列表不应为空")
 
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 
+
 try:
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 except ImportError:
@@ -59,14 +60,10 @@ def record_span() -> None:
     failure = spans["unit.failure"]
     _emit(
         {
-            "success_attributes": {
-                key: _json_safe(value) for key, value in success.attributes.items()
-            },
+            "success_attributes": {key: _json_safe(value) for key, value in success.attributes.items()},
             "success_events": [event.name for event in success.events],
             "failure_status": failure.status.status_code.name,
-            "failure_attributes": {
-                key: _json_safe(value) for key, value in failure.attributes.items()
-            },
+            "failure_attributes": {key: _json_safe(value) for key, value in failure.attributes.items()},
         }
     )
 
@@ -144,8 +141,7 @@ def nested_span_order() -> None:
             "parent_span_id": f"{parent.context.span_id:016x}",
             "child_parent_span_id": f"{child.parent.span_id:016x}" if child.parent else None,
             "span_name_paths": {
-                name: list(span.attributes.get("xtuner.span_name_path") or [])
-                for name, span in spans.items()
+                name: list(span.attributes.get("xtuner.span_name_path") or []) for name, span in spans.items()
             },
         }
     )

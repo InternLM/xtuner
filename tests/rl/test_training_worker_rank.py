@@ -21,9 +21,9 @@ import torch
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, TeacherTargets
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter, RolloutTeacherConfig
 from xtuner.v1.rl.loss import DistillationLossConfig, GRPOLossConfig
+from xtuner.v1.rl.trainer.actor_worker import ActorWorker
 from xtuner.v1.rl.trainer.pack import RankPlan, RLDataPacker
 from xtuner.v1.rl.trainer.train_batch import TrainBatch, get_train_seq_ctx
-from xtuner.v1.rl.trainer.worker import TrainingWorker
 
 
 def _rollout_distillation_config(loss_config: DistillationLossConfig) -> DistillationConfig:
@@ -501,7 +501,7 @@ class TestConfiguredTeacherLossKeys(unittest.TestCase):
             train_teachers=[object()],
             loss_config=SimpleNamespace(uses_sampled_token_targets=True),
         )
-        worker = TrainingWorker.__new__(TrainingWorker)
+        worker = ActorWorker.__new__(ActorWorker)
         for config, expected in (
             (None, []),
             (topk, ["teacher_logprobs", "target_token_ids"]),

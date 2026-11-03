@@ -1,20 +1,19 @@
-from unittest import TestCase
-import random
 import os
-import parametrize
+import random
 
-from torch.testing._internal.common_distributed import DistributedTestBase
+import parametrize
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from xtuner.v1.rl.loss import GRPOLossConfig, GRPOLossContext, kl_penalty
+from torch.testing._internal.common_distributed import DistributedTestBase
+
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.rl.loss import GRPOLossConfig, GRPOLossContext, kl_penalty
 from xtuner.v1.rl.utils import gather_logprobs
 from xtuner.v1.utils.test_utils import init_data_mesh
 
 
 class TestGRPOLoss(DistributedTestBase):
-    
     @parametrize.parametrize(
         "grad_acc, sp_size, kl_loss_coef, loss_mode, chunk_size, atol, rtol",
         [
@@ -25,7 +24,7 @@ class TestGRPOLoss(DistributedTestBase):
         ],
     )
     def test_grpo_loss(self, grad_acc, sp_size, kl_loss_coef, loss_mode, chunk_size, atol, rtol):
-        device = 'cuda'
+        device = "cuda"
         pg = self.create_pg(device)
 
         dtype = torch.bfloat16
@@ -38,18 +37,18 @@ class TestGRPOLoss(DistributedTestBase):
         emb1 = nn.Embedding(vocab_size, input_dim).to(device=device, dtype=dtype)
         emb2 = nn.Embedding(vocab_size, input_dim).to(device=device, dtype=dtype)
         emb2.weight.data = emb1.weight.data.clone()
-        lm_head1 = nn.Linear(input_dim , vocab_size, bias=False).to(device=device, dtype=dtype)
-        lm_head2 = nn.Linear(input_dim , vocab_size, bias=False).to(device=device, dtype=dtype)
+        lm_head1 = nn.Linear(input_dim, vocab_size, bias=False).to(device=device, dtype=dtype)
+        lm_head2 = nn.Linear(input_dim, vocab_size, bias=False).to(device=device, dtype=dtype)
         lm_head2.weight.data = lm_head1.weight.data.clone()
 
-        noise = torch.randn(emb1.weight.shape, device='cuda', dtype=emb1.weight.dtype) * 0.01
+        noise = torch.randn(emb1.weight.shape, device="cuda", dtype=emb1.weight.dtype) * 0.01
         emb1_old = nn.Embedding(vocab_size, input_dim).to(device=device, dtype=dtype)
         emb1_old.weight.data = emb1.weight.data.clone() + noise
         emb2_old = nn.Embedding(vocab_size, input_dim).to(device=device, dtype=dtype)
         emb2_old.weight.data = emb2.weight.data.clone() + noise
-        lm_head1_old = nn.Linear(input_dim , vocab_size, bias=False).to(device=device, dtype=dtype)
+        lm_head1_old = nn.Linear(input_dim, vocab_size, bias=False).to(device=device, dtype=dtype)
         lm_head1_old.weight.data = lm_head1.weight.data.clone() + noise
-        lm_head2_old = nn.Linear(input_dim , vocab_size, bias=False).to(device=device, dtype=dtype)
+        lm_head2_old = nn.Linear(input_dim, vocab_size, bias=False).to(device=device, dtype=dtype)
         lm_head2_old.weight.data = lm_head2.weight.data.clone() + noise
 
         emb1.train()
@@ -70,8 +69,14 @@ class TestGRPOLoss(DistributedTestBase):
         dp_rank = dp_mesh.get_local_rank()
         sp_rank = sp_mesh.get_local_rank()
         rank = dist.get_rank()
-        prompt_list = [torch.randint(0, vocab_size, (1, random.randint(50, 100)), device=device, dtype=torch.long) for _ in range(dp_size * grad_acc)]
-        response_list = [torch.randint(0, vocab_size, (1, random.randint(500, 1000)), device=device, dtype=torch.long) for _ in range(dp_size * grad_acc)]
+        prompt_list = [
+            torch.randint(0, vocab_size, (1, random.randint(50, 100)), device=device, dtype=torch.long)
+            for _ in range(dp_size * grad_acc)
+        ]
+        response_list = [
+            torch.randint(0, vocab_size, (1, random.randint(500, 1000)), device=device, dtype=torch.long)
+            for _ in range(dp_size * grad_acc)
+        ]
 
         input_ids_list = []
         shifted_labels_list = []
@@ -83,7 +88,7 @@ class TestGRPOLoss(DistributedTestBase):
             input_ids_list.append(input_ids)
             shifted_labels_list.append(shifted_labels)
             advantage_list.append(random.random() * (-1) ** random.randint(0, 1))
-        
+
         # 1 gpu, pack inputs and labels
         input_ids_ref = torch.cat(input_ids_list, dim=1)
         shifted_labels_ref = torch.cat(shifted_labels_list, dim=1)
@@ -91,7 +96,7 @@ class TestGRPOLoss(DistributedTestBase):
         num_tokens = [ids.shape[1] for ids in input_ids_list]
         num_tokens = torch.tensor(num_tokens, dtype=torch.int32, device=device)
         advantages_ref = torch.repeat_interleave(advantages_ref, num_tokens, dim=1)
-        
+
         with torch.no_grad():
             logits_ref = lm_head1_old(emb1_old(input_ids_ref)).float()
             old_logprobs_ref = gather_logprobs(logits_ref, shifted_labels_ref)
@@ -146,9 +151,15 @@ class TestGRPOLoss(DistributedTestBase):
             if sp_size > 1:
                 seq_ctx = seq_ctx.split(sp_mesh)
             seq_ctx_list.append(seq_ctx)
-            loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels_list_rank[iter_idx], "advantages": advantages_list_rank[iter_idx]}, sp_mesh=sp_mesh)
+            loss_ctx = loss_cfg.build(
+                data={
+                    "shifted_labels": shifted_labels_list_rank[iter_idx],
+                    "advantages": advantages_list_rank[iter_idx],
+                },
+                sp_mesh=sp_mesh,
+            )
             loss_ctx_list.append(loss_ctx)
-        
+
         with torch.no_grad():
             for iter_idx in range(grad_acc):
                 seq_ctx = seq_ctx_list[iter_idx]
@@ -158,7 +169,7 @@ class TestGRPOLoss(DistributedTestBase):
                 loss_ctx.loss_kwargs.old_logprobs = old_logprobs
                 if kl_loss_coef > 0:
                     loss_ctx.loss_kwargs.ref_logprobs = old_logprobs.clone()
-        
+
         LossContext = loss_cfg.loss_ctx_cls
         loss_ctx_list = LossContext.build_batches(loss_ctx_list)
 
@@ -175,7 +186,7 @@ class TestGRPOLoss(DistributedTestBase):
         dist.all_reduce(lm_head2.weight.grad, op=dist.ReduceOp.AVG)
         self.assertTrue(torch.allclose(lm_head1.weight.grad, lm_head2.weight.grad, atol=atol, rtol=rtol))
         self.assertTrue(torch.allclose(emb1.weight.grad, emb2.weight.grad, atol=atol, rtol=rtol))
-    
+
     @property
     def world_size(self) -> int:
         return int(os.getenv("XTUNER_TEST_WORLD_SIZE", "8"))

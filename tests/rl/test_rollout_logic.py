@@ -1271,12 +1271,8 @@ class TestRolloutHealthManager(unittest.TestCase):
             rollout_controller=MagicMock(),
             rollout_config=SimpleNamespace(weight_transport_type="checkpoint_engine"),
         )
-        manager._pending_rollout_weight_update_stop_event = SimpleNamespace(
-            wait=MagicMock(side_effect=(False, True))
-        )
-        manager._rollout_resources_available = SimpleNamespace(
-            is_set=MagicMock(side_effect=(True, False))
-        )
+        manager._pending_rollout_weight_update_stop_event = SimpleNamespace(wait=MagicMock(side_effect=(False, True)))
+        manager._rollout_resources_available = SimpleNamespace(is_set=MagicMock(side_effect=(True, False)))
         manager._rollout_weight_update_lock = SimpleNamespace(
             acquire=MagicMock(return_value=True),
             release=MagicMock(),
@@ -1659,6 +1655,7 @@ class TestRolloutHealthManager(unittest.TestCase):
         self.assertEqual(actor.check_health.calls, [()])
         self.assertEqual(actor.offload.calls, [()])
         self.assertEqual(actor.restore_skip_load_weights.calls, [()])
+
 
 class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
     async def test_preprocess_and_postprocess_preserve_response_prefix(self):

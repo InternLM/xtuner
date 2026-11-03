@@ -11,10 +11,13 @@ from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLDense4BConfig
 from xtuner.v1.rl.loss import GRPOLossConfig as LossConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.rollout.worker_registry import WorkerLifecycleState
 from xtuner.v1.rl.trainer import (
     TrainingController,
-    TrainingWorker as BaseTrainingWorker,
     WorkerConfig,
+)
+from xtuner.v1.rl.trainer import (
+    TrainingWorker as BaseTrainingWorker,
 )
 from xtuner.v1.rl.utils import (
     AcceleratorResourcesConfig,
@@ -23,7 +26,7 @@ from xtuner.v1.rl.utils import (
     clear_cpu_resource_manager,
     set_cpu_resource_manager,
 )
-from xtuner.v1.rl.rollout.worker_registry import WorkerLifecycleState
+
 
 RL_TRAINER_RAY_GET_TIMEOUT = 3600
 TEST_TEXT_MESSAGES = [{"role": "user", "content": "Hello!"}]
@@ -53,6 +56,7 @@ LMDEPLOY_GREEDY_SAMPLE_PARAMS = SampleParams(
 )
 MODEL_PATH = os.environ["QWEN3_VL_DENSE_PATH"]
 
+
 class TestUpdateWeightDisaggregated(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -75,13 +79,13 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.worker_log_dir = os.path.join(self.temp_dir.name, "work_dirs")
         self.init_config()
-        self.train_pg = AutoAcceleratorWorkers.build_placement_group(self.train_resources_cfg,
-        name=f"test_update_weight_train_{id(self)}")
-        self.rollout_pg = AutoAcceleratorWorkers.build_placement_group(self.rollout_resources_cfg,
-        name=f"test_update_weight_rollout_{id(self)}")
-        set_cpu_resource_manager(
-            CPUResourceManager(accelerator_placement_groups=[self.train_pg, self.rollout_pg])
+        self.train_pg = AutoAcceleratorWorkers.build_placement_group(
+            self.train_resources_cfg, name=f"test_update_weight_train_{id(self)}"
         )
+        self.rollout_pg = AutoAcceleratorWorkers.build_placement_group(
+            self.rollout_resources_cfg, name=f"test_update_weight_rollout_{id(self)}"
+        )
+        set_cpu_resource_manager(CPUResourceManager(accelerator_placement_groups=[self.train_pg, self.rollout_pg]))
 
     def tearDown(self):
         clear_cpu_resource_manager()
@@ -149,7 +153,9 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
 
     def _check_sglang_weights(self, rollout_controller, action):
         targets = ray.get(rollout_controller.get_weight_update_targets.remote())
-        active_urls = [target.server_url for target in targets if target.lifecycle_state == WorkerLifecycleState.ACTIVE.value]
+        active_urls = [
+            target.server_url for target in targets if target.lifecycle_state == WorkerLifecycleState.ACTIVE.value
+        ]
         self.assertGreater(len(active_urls), 0)
         results = []
         for url in active_urls:
@@ -193,12 +199,10 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
                 }
             },
         )(BaseTrainingWorker)
-        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(
-            TrainingWorker, self.worker_cfg, self.train_pg
-        )
+        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorker, self.worker_cfg, self.train_pg)
         ray.get([worker.test_all_reduce.remote() for worker in train_workers])
         train_controller = TrainingController(workers=train_workers)
-        
+
         self.rollout_cfg.skip_load_weights = False
         self.rollout_cfg.extra_rollout_config = dict(SGLANG_DETERMINISTIC_EXTRA_CONFIG)
         rollout_controller = self.rollout_cfg.build(self.rollout_pg)
@@ -255,7 +259,7 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
     @unittest.skip("skip sglang parameter-only weight check test until the parameter-check-only patch is applied")
     def test_sglang_disaggregated_update_weight_equal_after_reset(self):
         # This test verifies SGLang rollout weight update correctness with a parameter-only check.
-        # The SGLang parameter-only WeightChecker actions are implemented in 
+        # The SGLang parameter-only WeightChecker actions are implemented in
         # https://github.com/PengchengShi00/sglang/commit/05e89d63b5a1a80671b267ff4494ad950b2aba75.
         # Flow: snapshot_parameters -> reset_parameters -> update_weights -> compare_parameters.
         TrainingWorker = ray.remote(
@@ -266,9 +270,7 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
                 }
             },
         )(BaseTrainingWorker)
-        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(
-            TrainingWorker, self.worker_cfg, self.train_pg
-        )
+        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorker, self.worker_cfg, self.train_pg)
         ray.get([worker.test_all_reduce.remote() for worker in train_workers])
         train_controller = TrainingController(workers=train_workers)
 
@@ -300,9 +302,7 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
                 }
             },
         )(BaseTrainingWorker)
-        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(
-            TrainingWorker, self.worker_cfg, self.train_pg
-        )
+        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorker, self.worker_cfg, self.train_pg)
         ray.get([worker.test_all_reduce.remote() for worker in train_workers])
         train_controller = TrainingController(workers=train_workers)
 
@@ -361,6 +361,7 @@ class TestUpdateWeightDisaggregated(unittest.TestCase):
             err_msg="rollout logprobs changed after weight update",
         )
         ray.get(rollout_controller.shutdown.remote(), timeout=60)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,20 +1,17 @@
-from unittest import TestCase
-import random
 import os
-from pydantic import BaseModel, ConfigDict, model_validator
-from typing import TYPE_CHECKING, Literal, Union, Any
-import parametrize
+import random
 
-from torch.testing._internal.common_distributed import DistributedTestBase
+import parametrize
 import torch
 import torch.distributed as dist
-from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 import torch.nn as nn
 import torch.nn.functional as F
-from xtuner.v1.rl.loss import OrealLossConfig, OrealLossContext, kl_penalty
+from torch.testing._internal.common_distributed import DistributedTestBase
+
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.rl.utils import gather_logprobs
 from xtuner.v1.data_proto.utils import unpack_sequence
+from xtuner.v1.rl.loss import OrealLossConfig, OrealLossContext, kl_penalty
+from xtuner.v1.rl.utils import gather_logprobs
 from xtuner.v1.utils.test_utils import init_data_mesh
 
 
@@ -28,7 +25,6 @@ def policy_loss(logprobs, old_logprobs, advantages, loss_weights, cliprange_low,
 
 
 class TestOrealLoss(DistributedTestBase):
-
     @parametrize.parametrize(
         "grad_acc, sp_size, kl_loss_coef, loss_mode, chunk_size, atol, rtol",
         [
@@ -40,7 +36,7 @@ class TestOrealLoss(DistributedTestBase):
         ],
     )
     def test_grpo_loss(self, grad_acc, sp_size, kl_loss_coef, loss_mode, chunk_size, atol, rtol):
-        device = 'cuda'
+        device = "cuda"
         pg = self.create_pg(device)
 
         dtype = torch.bfloat16
@@ -48,27 +44,27 @@ class TestOrealLoss(DistributedTestBase):
         vocab_size = 40
         cliprange_low = 0.2
         cliprange_high = 0.2
-        positive_loss_factor=1.0
-        pos_sft_loss_weight=1.0
-        pos_policy_loss_weight=1.0
-        negative_loss_factor=1.0
+        positive_loss_factor = 1.0
+        pos_sft_loss_weight = 1.0
+        pos_policy_loss_weight = 1.0
+        negative_loss_factor = 1.0
         torch.manual_seed(42)
         random.seed(42)
         emb1 = nn.Embedding(vocab_size, input_dim).to(device=device, dtype=dtype)
         emb2 = nn.Embedding(vocab_size, input_dim).to(device=device, dtype=dtype)
         emb2.weight.data = emb1.weight.data.clone()
-        lm_head1 = nn.Linear(input_dim , vocab_size, bias=False).to(device=device, dtype=dtype)
-        lm_head2 = nn.Linear(input_dim , vocab_size, bias=False).to(device=device, dtype=dtype)
+        lm_head1 = nn.Linear(input_dim, vocab_size, bias=False).to(device=device, dtype=dtype)
+        lm_head2 = nn.Linear(input_dim, vocab_size, bias=False).to(device=device, dtype=dtype)
         lm_head2.weight.data = lm_head1.weight.data.clone()
 
-        noise = torch.randn(emb1.weight.shape, device='cuda', dtype=emb1.weight.dtype) * 0.01
+        noise = torch.randn(emb1.weight.shape, device="cuda", dtype=emb1.weight.dtype) * 0.01
         emb1_old = nn.Embedding(vocab_size, input_dim).to(device=device, dtype=dtype)
         emb1_old.weight.data = emb1.weight.data.clone() + noise
         emb2_old = nn.Embedding(vocab_size, input_dim).to(device=device, dtype=dtype)
         emb2_old.weight.data = emb2.weight.data.clone() + noise
-        lm_head1_old = nn.Linear(input_dim , vocab_size, bias=False).to(device=device, dtype=dtype)
+        lm_head1_old = nn.Linear(input_dim, vocab_size, bias=False).to(device=device, dtype=dtype)
         lm_head1_old.weight.data = lm_head1.weight.data.clone() + noise
-        lm_head2_old = nn.Linear(input_dim , vocab_size, bias=False).to(device=device, dtype=dtype)
+        lm_head2_old = nn.Linear(input_dim, vocab_size, bias=False).to(device=device, dtype=dtype)
         lm_head2_old.weight.data = lm_head2.weight.data.clone() + noise
 
         emb1.train()
@@ -89,8 +85,14 @@ class TestOrealLoss(DistributedTestBase):
         dp_rank = dp_mesh.get_local_rank()
         sp_rank = sp_mesh.get_local_rank()
         rank = dist.get_rank()
-        prompt_list = [torch.randint(0, vocab_size, (1, random.randint(50, 100)), device=device, dtype=torch.long) for _ in range(dp_size * grad_acc)]
-        response_list = [torch.randint(0, vocab_size, (1, random.randint(500, 1000)), device=device, dtype=torch.long) for _ in range(dp_size * grad_acc)]
+        prompt_list = [
+            torch.randint(0, vocab_size, (1, random.randint(50, 100)), device=device, dtype=torch.long)
+            for _ in range(dp_size * grad_acc)
+        ]
+        response_list = [
+            torch.randint(0, vocab_size, (1, random.randint(500, 1000)), device=device, dtype=torch.long)
+            for _ in range(dp_size * grad_acc)
+        ]
 
         input_ids_list = []
         shifted_labels_list = []
@@ -102,7 +104,7 @@ class TestOrealLoss(DistributedTestBase):
             input_ids_list.append(input_ids)
             shifted_labels_list.append(shifted_labels)
             advantage_list.append(random.random() * (-1) ** random.randint(0, 1))
-        
+
         # 1 gpu, pack inputs and labels
         num_tokens = [ids.shape[1] for ids in input_ids_list]
         num_grad_tokens = [(labels >= 0).sum() for labels in shifted_labels_list]
@@ -118,7 +120,7 @@ class TestOrealLoss(DistributedTestBase):
             old_logprobs_ref = gather_logprobs(logits_ref, shifted_labels_ref)
             if kl_loss_coef > 0:
                 ref_logprobs_ref = old_logprobs_ref.clone()
-        
+
         logits_ref = lm_head1(emb1(input_ids_ref)).float()
         sft_loss_ref = F.cross_entropy(
             logits_ref.squeeze(),
@@ -155,10 +157,7 @@ class TestOrealLoss(DistributedTestBase):
                 _pos_policy = policy_loss(
                     _logprobs, _old_logprobs, _judger_advantages, _loss_weights, cliprange_low, cliprange_high
                 )
-                _positive_loss = (
-                    _sft_loss * pos_sft_loss_weight
-                    + _pos_policy * pos_policy_loss_weight
-                )
+                _positive_loss = _sft_loss * pos_sft_loss_weight + _pos_policy * pos_policy_loss_weight
                 _negative_loss = _sft_loss * 0
             else:
                 _positive_loss = _sft_loss * 0
@@ -171,11 +170,13 @@ class TestOrealLoss(DistributedTestBase):
             _loss = _positive_loss + _negative_loss
             if kl_loss_coef > 0:
                 _ref_logprobs = ref_logprobs_ref_list[i][0, -_num_grad_tokens - 1 : -1]
-                _kl_loss_weight = torch.ones_like(_ref_logprobs, dtype=torch.float32) * kl_loss_coef / global_grad_tokens
+                _kl_loss_weight = (
+                    torch.ones_like(_ref_logprobs, dtype=torch.float32) * kl_loss_coef / global_grad_tokens
+                )
                 _kl_loss = kl_penalty(_logprobs, _ref_logprobs, _kl_loss_weight, "low_var_kl")
                 _loss = _loss + _kl_loss
             _losses.append(_loss)
-        
+
         loss_ref = sum(_losses)
         loss_ref.backward()
 
@@ -205,7 +206,7 @@ class TestOrealLoss(DistributedTestBase):
             advantage = advantages_list_rank[iter_idx]
             advantages = torch.tensor([advantage] * length, dtype=torch.float32, device=device).view(1, -1)
             advantages_list_rank[iter_idx] = advantages
-        
+
         seq_ctx_list: list[SequenceContext] = []
         loss_ctx_list: list[OrealLossContext] = []
         for iter_idx in range(grad_acc):
@@ -215,7 +216,10 @@ class TestOrealLoss(DistributedTestBase):
                 seq_ctx = seq_ctx.split(sp_mesh)
             seq_ctx_list.append(seq_ctx)
             loss_ctx = loss_cfg.build(
-                data={"shifted_labels": shifted_labels_list_rank[iter_idx], "advantages": advantages_list_rank[iter_idx]},
+                data={
+                    "shifted_labels": shifted_labels_list_rank[iter_idx],
+                    "advantages": advantages_list_rank[iter_idx],
+                },
                 sp_mesh=sp_mesh,
             )
             loss_ctx_list.append(loss_ctx)
@@ -229,7 +233,7 @@ class TestOrealLoss(DistributedTestBase):
                 loss_ctx.loss_kwargs.old_logprobs = old_logprobs
                 if kl_loss_coef > 0:
                     loss_ctx.loss_kwargs.ref_logprobs = old_logprobs.clone()
-        
+
         LossContext = loss_cfg.loss_ctx_cls
         loss_ctx_list = LossContext.build_batches(loss_ctx_list)
 
@@ -242,7 +246,7 @@ class TestOrealLoss(DistributedTestBase):
             out = loss_ctx.forward(hidden_states, head_weight)
             loss = out[0]
             loss.backward()
-        
+
         dist.all_reduce(emb2.weight.grad, op=dist.ReduceOp.AVG)
         dist.all_reduce(lm_head2.weight.grad, op=dist.ReduceOp.AVG)
         self.assertTrue(torch.allclose(lm_head1.weight.grad, lm_head2.weight.grad, atol=atol, rtol=rtol))

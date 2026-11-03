@@ -14,8 +14,8 @@ from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.model import get_model_config_from_hf
-from xtuner.v1.rl.agent_loop.agent_loop import AgentLoop
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
+from xtuner.v1.rl.agent_loop.agent_loop import AgentLoop
 from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
     SamplerConfig,
