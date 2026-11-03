@@ -519,3 +519,51 @@ class TestSessionGAEDispatch(unittest.TestCase):
             self._controller()._estimate_advantages(
                 {"reward_groups": []}, rollout_items, pack_plan, value_batches, data_replicate_size=1
             )
+
+
+class TestGAEFitSkipsGroupAdvantages(unittest.TestCase):
+    """回归：GAE 模式下 fit 不能对 token estimator 调用 group advantage compute。"""
+
+    def test_segment_gae_fit_does_not_call_group_estimator(self):
+        def _rpc(returns=None):
+            return SimpleNamespace(remote=MagicMock(return_value=returns))
+
+        worker = SimpleNamespace(
+            get_worker_cfg=_rpc(SimpleNamespace(optimizer_steps=1, pack_strategy="legacy", pack_seed=None, pack_extra_buffer_size=0)),
+            get_data_replicate_size=_rpc(1),
+            load_train_batch=_rpc(None),
+            release_train_batch=_rpc(None),
+            switch_role=_rpc(None),
+            critic_collect_values=_rpc(None),
+            critic_fit=_rpc([]),
+            actor_fit=_rpc({}),
+        )
+        state = _state()
+        prepared = {
+            "rollout_items": [state],
+            "reward_groups": [],
+            "batch_attr": {},
+            "cluster_rewards": [],
+            "distillation_reward_observations": [],
+        }
+        controller = TrainingController.__new__(TrainingController)
+        controller.workers = [worker]
+        controller.advantage_estimator = GAEEstimator(reward_scope="segment")
+        controller.distillation = SimpleNamespace(task_adv_weight=1.0)
+        controller.logger = MagicMock()
+        controller._gae_reward_scope = "segment"
+        controller._has_critic = True
+        controller._prepare_advantages = MagicMock(side_effect=AssertionError("must not be called in GAE mode"))
+
+        with (
+            patch.object(controller, "_prepare_rollout_items", return_value=prepared),
+            patch.object(controller, "_build_pack_plan", return_value=PackPlan((RankPlan((0,), (((0,),),)),), {})),
+            patch.object(controller, "_estimate_advantages", return_value=([], None, None, {"mean": 0.0})),
+            patch.object(controller, "_build_trainer_log_info", return_value={}),
+            patch.object(controller, "_critic_log_scalars", return_value={}),
+            patch("xtuner.v1.rl.trainer.controller.ray.put", side_effect=lambda value: value),
+            patch("xtuner.v1.rl.trainer.controller.ray.get", side_effect=lambda value, timeout=None: value),
+        ):
+            controller.fit([[state]], pack_max_length=16, rollout_idx=1)
+
+        controller._prepare_advantages.assert_not_called()

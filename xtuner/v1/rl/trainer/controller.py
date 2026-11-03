@@ -570,7 +570,8 @@ class TrainingController:
         data_replicate_size = ray.get(self.workers[0].get_data_replicate_size.remote())  # type: ignore[attr-defined]
 
         pack_plan = self._build_pack_plan(rollout_items, pack_max_length, worker_cfg, data_replicate_size)
-        sample_advantages = self._prepare_advantages(prepared)
+        # GAE 的标量/ token 目标由 critic 阶段产生，不能对 token estimator 调 group compute。
+        sample_advantages = self._prepare_advantages(prepared) if self._gae_reward_scope is None else []
         segment_gae = self._gae_reward_scope == "segment"
 
         with self._loaded_batch(rollout_items, pack_plan, prepared["batch_attr"], data_replicate_size):
