@@ -1,22 +1,23 @@
-from unittest import TestCase
-import torch
-import torch.nn as nn
-from xtuner.v1.loss.ce_loss import CELossConfig, CELossContext
-from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.utils.test_utils import assert_verbose_allclose
-from xtuner.v1.loss.utils import cal_global_grad_tokens, cal_global_sum_loss_weight, len2weight
-from torch.testing._internal.common_distributed import DistributedTestBase
 import os
-import torch.distributed as dist
-from xtuner.v1.data_proto.utils import pad_to_multiple_of, split_for_sequence_parallel
-from xtuner.v1.utils.test_utils import init_data_mesh
-import parametrize
 from functools import wraps
+from unittest import TestCase
+
+import parametrize
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+from torch.testing._internal.common_distributed import DistributedTestBase
+
+from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.data_proto.utils import pad_to_multiple_of, split_for_sequence_parallel
+from xtuner.v1.loss.ce_loss import CELossConfig, CELossContext
+from xtuner.v1.loss.utils import cal_global_grad_tokens, cal_global_sum_loss_weight, len2weight
+from xtuner.v1.utils.test_utils import assert_verbose_allclose, init_data_mesh
 
 
 class TestCELoss(TestCase):
     def setUp(self) -> None:
-        self.device = 'cuda'  # liger loss must be tested on GPU
+        self.device = "cuda"  # liger loss must be tested on GPU
         self.dtype = torch.bfloat16
         self.input_dim = 2
         self.vocab_size = 4
@@ -53,16 +54,17 @@ class TestCELoss(TestCase):
 
             # Note: input_ids/position_ids/cu_seq_lens_q/max_length_q 等都是假数据
             cu_seq_lens_q = torch.tensor([0, S, 2 * S], device=self.device, dtype=torch.int32)
-            seq_ctx = SequenceContext(input_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
-                                      position_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
-                                      cu_seq_lens_q=cu_seq_lens_q,
-                                      cu_seq_lens_k=cu_seq_lens_q,
-                                      max_length_q=1,
-                                      max_length_k=1,
-                                      device=self.device,
-                                      )
+            seq_ctx = SequenceContext(
+                input_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
+                position_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
+                cu_seq_lens_q=cu_seq_lens_q,
+                cu_seq_lens_k=cu_seq_lens_q,
+                max_length_q=1,
+                max_length_k=1,
+                device=self.device,
+            )
             seq_ctx.to(self.device)
-            data_batch.append({'seq_ctx': seq_ctx, 'shifted_labels': target})
+            data_batch.append({"seq_ctx": seq_ctx, "shifted_labels": target})
 
         global_grad_tokens = cal_global_grad_tokens(targets)
 
@@ -72,9 +74,11 @@ class TestCELoss(TestCase):
         for data in data_batch:
             seq_ctx = data["seq_ctx"]
             seq_ctx_list.append(seq_ctx)
-            loss_ctx = loss_cfg.build(data={"shifted_labels": data["shifted_labels"]}, sp_mesh=None)
+            loss_ctx = loss_cfg.build(data=data, sp_mesh=None)
             loss_ctx_list.append(loss_ctx)
-        loss_ctx_list = CELossContext.build_batches(loss_ctx_list, cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list])
+        loss_ctx_list = CELossContext.build_batches(
+            loss_ctx_list, cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list]
+        )
 
         for i in range(grad_accumulation_steps):
             _tensor = torch.randn(B, S, D, device=self.device, dtype=self.dtype) * 2
@@ -114,18 +118,18 @@ class TestCELoss(TestCase):
     @parametrize.parametrize(
         "loss_reduction, loss_mode, grad_accumulation_steps, chunk_size, atol, rtol",
         [
-            ('square', "eager", 1, -1, 1e-4, 5e-2),
-            ('square', "chunk", 1, 1024, 1e-4, 5e-2),
-            ('square', "chunk", 1, 4096, 1e-4, 5e-2),
-            ('square', "chunk", 1, 14096, 1e-4, 5e-2),
-            ('square', "eager", 4, -1, 1e-4, 5e-2),
-            ('square', "chunk", 4, 1024, 1e-4, 5e-2),
-            ('sample', "eager", 1, -1, 1e-4, 5e-2),
-            ('sample', "chunk", 1, 1024, 1e-4, 5e-2),
-            ('sample', "chunk", 1, 4096, 1e-4, 5e-2),
-            ('sample', "chunk", 1, 14096, 1e-4, 5e-2),
-            ('sample', "eager", 4, -1, 1e-4, 5e-2),
-            ('sample', "chunk", 4, 1024, 1e-4, 5e-2),
+            ("square", "eager", 1, -1, 1e-4, 5e-2),
+            ("square", "chunk", 1, 1024, 1e-4, 5e-2),
+            ("square", "chunk", 1, 4096, 1e-4, 5e-2),
+            ("square", "chunk", 1, 14096, 1e-4, 5e-2),
+            ("square", "eager", 4, -1, 1e-4, 5e-2),
+            ("square", "chunk", 4, 1024, 1e-4, 5e-2),
+            ("sample", "eager", 1, -1, 1e-4, 5e-2),
+            ("sample", "chunk", 1, 1024, 1e-4, 5e-2),
+            ("sample", "chunk", 1, 4096, 1e-4, 5e-2),
+            ("sample", "chunk", 1, 14096, 1e-4, 5e-2),
+            ("sample", "eager", 4, -1, 1e-4, 5e-2),
+            ("sample", "chunk", 4, 1024, 1e-4, 5e-2),
         ],
     )
     def test_other_loss_reduction(self, loss_reduction, loss_mode, grad_accumulation_steps, chunk_size, atol, rtol):
@@ -151,16 +155,17 @@ class TestCELoss(TestCase):
             num_tokens_list.append(num_tokens)
 
             # Note: input_ids/position_ids/max_length_q 等都是假数据
-            seq_ctx = SequenceContext(input_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
-                                      position_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
-                                      cu_seq_lens_q=cu_seq_lens_q,
-                                      cu_seq_lens_k=cu_seq_lens_q,
-                                      max_length_q=1,
-                                      max_length_k=1,
-                                      device=self.device,
-                                      )
+            seq_ctx = SequenceContext(
+                input_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
+                position_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
+                cu_seq_lens_q=cu_seq_lens_q,
+                cu_seq_lens_k=cu_seq_lens_q,
+                max_length_q=1,
+                max_length_k=1,
+                device=self.device,
+            )
             seq_ctx.to(self.device)
-            data_batch.append({'seq_ctx': seq_ctx, 'shifted_labels': target})
+            data_batch.append({"seq_ctx": seq_ctx, "shifted_labels": target})
 
         global_grad_tokens, batch_loss_weights = cal_global_sum_loss_weight(targets, num_tokens_list, loss_reduction)
         for i in range(len(batch_loss_weights)):
@@ -172,9 +177,11 @@ class TestCELoss(TestCase):
         for data in data_batch:
             seq_ctx = data["seq_ctx"]
             seq_ctx_list.append(seq_ctx)
-            loss_ctx = loss_cfg.build(data={"shifted_labels": data["shifted_labels"]}, sp_mesh=None)
+            loss_ctx = loss_cfg.build(data=data, sp_mesh=None)
             loss_ctx_list.append(loss_ctx)
-        loss_ctx_list = CELossContext.build_batches(loss_ctx_list, cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list])
+        loss_ctx_list = CELossContext.build_batches(
+            loss_ctx_list, cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list]
+        )
 
         for i in range(grad_accumulation_steps):
             _tensor = torch.randn(B, S, D, device=self.device, dtype=self.dtype) * 2
@@ -186,7 +193,7 @@ class TestCELoss(TestCase):
             _input2_ = _input2.reshape(1, -1, D)
 
             # GT CE loss
-            torch_ce = nn.CrossEntropyLoss(reduction='none')
+            torch_ce = nn.CrossEntropyLoss(reduction="none")
             logits = self.lm_head1(_input_)
             loss1 = torch_ce(logits.float().view(-1, self.vocab_size), target.view(-1))
             loss1 = loss1 * batch_loss_weights[i]
@@ -229,7 +236,7 @@ def broadcast_weight(lm_head):
 def prepare(fn):
     @wraps(fn)
     def wrapper(self, *args, **kwargs):
-        self.device = 'cuda'  # liger loss must be tested on GPU
+        self.device = "cuda"  # liger loss must be tested on GPU
         self.dtype = torch.bfloat16
         self.input_dim = 2
         self.vocab_size = 4
@@ -246,7 +253,6 @@ def prepare(fn):
 
 
 class TestCELossWithSP(DistributedTestBase):
-
     def create_pg(self, device):
         ret = super().create_pg(device)
         os.environ["LOCAL_RANK"] = str(dist.get_rank())
@@ -265,7 +271,7 @@ class TestCELossWithSP(DistributedTestBase):
     @prepare
     def test_sp_global_loss_reduction(self, loss_mode, sp_size, grad_accumulation_steps, chunk_size, atol, rtol):
         B, S, D = 2, 4097, self.input_dim
-        target = torch.randint(0, D, (B * S,), device='cuda', dtype=torch.long)
+        target = torch.randint(0, D, (B * S,), device="cuda", dtype=torch.long)
         # Assign some random number of elements as ignore_index
         num_elements_to_assign = torch.randint(
             1, B * S // 2, (1,)
@@ -295,22 +301,23 @@ class TestCELossWithSP(DistributedTestBase):
 
         # Note: input_ids/position_ids/cu_seq_lens_q/max_length_q 等都是假数据
         cu_seq_lens_q = torch.tensor([0, S, 2 * S], device=self.device, dtype=torch.int32)
-        seq_ctx = SequenceContext(input_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
-                                  position_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
-                                  cu_seq_lens_q=cu_seq_lens_q,
-                                  cu_seq_lens_k=cu_seq_lens_q,
-                                  max_length_q=1,
-                                  max_length_k=1,
-                                  device=self.device,
-                                  )
+        seq_ctx = SequenceContext(
+            input_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
+            position_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
+            cu_seq_lens_q=cu_seq_lens_q,
+            cu_seq_lens_k=cu_seq_lens_q,
+            max_length_q=1,
+            max_length_k=1,
+            device=self.device,
+        )
         seq_ctx.to(self.device)
 
         loss_cfg = CELossConfig(mode=loss_mode, chunk_size=chunk_size, loss_reduction="token")
         data_mesh = init_data_mesh(self.device, sp_size=sp_size)
-        sp_mesh = data_mesh['sp']
+        sp_mesh = data_mesh["sp"]
         seq_ctx.sequence_parallel_mesh = sp_mesh
         seq_ctx_list = [seq_ctx]
-        loss_ctx = loss_cfg.build(data={"shifted_labels": target}, sp_mesh=sp_mesh)
+        loss_ctx = loss_cfg.build(data={"shifted_labels": target, "seq_ctx": seq_ctx}, sp_mesh=sp_mesh)
         loss_ctx_list = [loss_ctx]
         if sp_size > 1:
             seq_ctx_list[0] = seq_ctx_list[0].split(sequence_parallel_mesh=sp_mesh)
@@ -320,7 +327,7 @@ class TestCELossWithSP(DistributedTestBase):
         if sp_size > 1:
             pad_input = pad_to_multiple_of(_input2_, 0, multiple_of, 1)
             _input2_ = split_for_sequence_parallel(pad_input, dim=1, sp_mesh=sp_mesh)
-        
+
         out = loss_ctx_list[0].forward(_input2_, self.lm_head2.weight)
         loss2 = out[0]
         assert_verbose_allclose(loss1, loss2, atol=atol, rtol=rtol)
@@ -328,19 +335,21 @@ class TestCELossWithSP(DistributedTestBase):
     @parametrize.parametrize(
         "loss_reduction, loss_mode, sp_size, grad_accumulation_steps, chunk_size, atol, rtol",
         [
-            ('square', "eager", 1, 1, -1, 1e-4, 5e-2),
-            ('square', "eager", 2, 1, -1, 1e-4, 5e-2),
-            ('sample', "chunk", 1, 1, 1024, 1e-4, 5e-2),
-            ('sample', "chunk", 2, 1, 4096, 1e-4, 5e-2),
-            ('sample', "eager", 2, 1, -1, 1e-4, 5e-2),
-            ('sample', "chunk", 2, 1, 1024, 1e-4, 5e-2),
-            ('sample', "chunk", 2, 4, 4096, 1e-4, 5e-2),
+            ("square", "eager", 1, 1, -1, 1e-4, 5e-2),
+            ("square", "eager", 2, 1, -1, 1e-4, 5e-2),
+            ("sample", "chunk", 1, 1, 1024, 1e-4, 5e-2),
+            ("sample", "chunk", 2, 1, 4096, 1e-4, 5e-2),
+            ("sample", "eager", 2, 1, -1, 1e-4, 5e-2),
+            ("sample", "chunk", 2, 1, 1024, 1e-4, 5e-2),
+            ("sample", "chunk", 2, 4, 4096, 1e-4, 5e-2),
         ],
     )
     @prepare
-    def test_sp_others_loss_reduction(self, loss_reduction, loss_mode, sp_size, grad_accumulation_steps, chunk_size, atol, rtol):
+    def test_sp_others_loss_reduction(
+        self, loss_reduction, loss_mode, sp_size, grad_accumulation_steps, chunk_size, atol, rtol
+    ):
         B, S, D = 2, 4097, self.input_dim
-        target = torch.randint(0, D, (B * S,), device='cuda', dtype=torch.long)
+        target = torch.randint(0, D, (B * S,), device="cuda", dtype=torch.long)
         # Assign some random number of elements as ignore_index
         num_elements_to_assign = torch.randint(
             1, B * S // 2, (1,)
@@ -374,7 +383,7 @@ class TestCELossWithSP(DistributedTestBase):
         global_sum_loss_weight = loss_weights.sum()
         loss_weights = loss_weights / global_sum_loss_weight
 
-        torch_ce = nn.CrossEntropyLoss(reduction='none')
+        torch_ce = nn.CrossEntropyLoss(reduction="none")
         logits = self.lm_head1(_input_)
         loss1 = torch_ce(logits.float().view(-1, self.vocab_size), target.view(-1))
         loss1 = loss1 * loss_weights
@@ -382,22 +391,23 @@ class TestCELossWithSP(DistributedTestBase):
 
         # Note: input_ids/position_ids/cu_seq_lens_q/max_length_q 等都是假数据
         cu_seq_lens_q = torch.tensor([0, S, 2 * S], device=self.device, dtype=torch.int32)
-        seq_ctx = SequenceContext(input_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
-                                  position_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
-                                  cu_seq_lens_q=cu_seq_lens_q,
-                                  cu_seq_lens_k=cu_seq_lens_q,
-                                  max_length_q=1,
-                                  max_length_k=1,
-                                  device=self.device,
-                                  )
+        seq_ctx = SequenceContext(
+            input_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
+            position_ids=torch.ones((1, 2), device=self.device, dtype=torch.long),
+            cu_seq_lens_q=cu_seq_lens_q,
+            cu_seq_lens_k=cu_seq_lens_q,
+            max_length_q=1,
+            max_length_k=1,
+            device=self.device,
+        )
         seq_ctx.to(self.device)
 
         loss_cfg = CELossConfig(mode=loss_mode, chunk_size=chunk_size, loss_reduction="token")
         data_mesh = init_data_mesh(self.device, sp_size=sp_size)
-        sp_mesh = data_mesh['sp']
+        sp_mesh = data_mesh["sp"]
         seq_ctx.sequence_parallel_mesh = sp_mesh
         seq_ctx_list = [seq_ctx]
-        loss_ctx = loss_cfg.build(data={"shifted_labels": target}, sp_mesh=sp_mesh)
+        loss_ctx = loss_cfg.build(data={"shifted_labels": target, "seq_ctx": seq_ctx}, sp_mesh=sp_mesh)
         loss_ctx_list = [loss_ctx]
         if sp_size > 1:
             seq_ctx_list[0] = seq_ctx_list[0].split(sequence_parallel_mesh=sp_mesh)

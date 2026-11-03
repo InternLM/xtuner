@@ -23,12 +23,28 @@ class LogProbConfig(BaseLossConfig):
     def _loss_kwargs_cls(self) -> type["LogProbKwargs"]:
         return LogProbKwargs
 
-    def build(self, data: dict, sp_mesh: DeviceMesh | None = None) -> "LogProbContext | None":
+    def build(
+        self,
+        data: dict,
+        sp_mesh: DeviceMesh | None = None,
+        device: str | torch.device = DEVICE,
+    ) -> "LogProbContext | None":
+        """Build a log-prob context from full labels.
+
+        Args:
+            data (dict): Data dict containing full ``shifted_labels``.
+            sp_mesh (DeviceMesh | None): Sequence parallel mesh.
+            device (str | torch.device): Device of the returned labels.
+
+        Returns:
+            LogProbContext | None: The local context, or None without labels.
+        """
         if "shifted_labels" not in data:
             return None
         loss_kwargs = LogProbKwargs(shifted_labels=data["shifted_labels"])
         if sp_mesh is not None and sp_mesh.size() > 1:
             loss_kwargs = loss_kwargs.sp_split(sp_mesh)
+        loss_kwargs.shifted_labels = loss_kwargs.shifted_labels.to(device)
         return self.loss_ctx_cls(self, loss_kwargs)
 
 

@@ -662,8 +662,12 @@ class BaseModel(nn.Module):
 
         self._validate_head_checkpoint(Path(hf_path))
         hf_loader = HFCheckpointLoader(hf_path)
-        loaded_keys, unloaded_keys, missing_keys = self._load_params(hf_loader, strict=strict)
-        return self._init_missing_critic_head(hf_loader, loaded_keys, unloaded_keys, missing_keys)
+        # 严格检查与 value head 初始化共用同一次全局 key 判断，避免 rank/路径分叉。
+        head_exceptions = self._head_load_exceptions(hf_loader)
+        loaded_keys, unloaded_keys, missing_keys = self._load_params(
+            hf_loader, strict=strict, head_exceptions=head_exceptions
+        )
+        return self._init_missing_critic_head(head_exceptions[0], loaded_keys, unloaded_keys, missing_keys)
 
     def scale_and_reduce_grad(self):
         return
@@ -756,7 +760,7 @@ class BaseModel(nn.Module):
     @torch.no_grad()
     def _init_missing_critic_head(
         self,
-        hf_loader: HFCheckpointLoader,
+        missing_value_head_keys: set[str],
         loaded_keys: set[str],
         unloaded_keys: set[str],
         missing_keys: set[str],
@@ -779,9 +783,8 @@ class BaseModel(nn.Module):
         Returns:
             The possibly-updated (loaded_keys, unloaded_keys, missing_keys).
         """
-        value_head_keys = self._critic_head_hf_keys()
-        if value_head_keys is None or value_head_keys <= set(hf_loader.weight_map):
-            # 非critic模型,或 checkpoint 已提供完整 value head(不覆盖已加载权重)。
+        if not missing_value_head_keys:
+            # 非 critic 模型，或 checkpoint 已提供完整 value head（不覆盖已加载权重）。
             return loaded_keys, unloaded_keys, missing_keys
 
         lm_head = getattr(self, "lm_head", None)
@@ -804,7 +807,7 @@ class BaseModel(nn.Module):
         # 随机初始化了 ValueHead，对 loaded_keys、unloaded_keys、missing_keys 进行对账
         loaded_keys.add("lm_head.weight")
         unloaded_keys.discard("lm_head.weight")
-        missing_keys -= value_head_keys
+        missing_keys -= missing_value_head_keys
         return loaded_keys, unloaded_keys, missing_keys
 
     def trainable_parameters(self):
@@ -2009,20 +2012,27 @@ class BaseModel(nn.Module):
         if value_head_keys <= present:
             # The critic checkpoint already provides the value head.
             return set(), set()
-        if not (value_head_keys & present):
-            # Actor -> critic: value head fully absent, actor head keys are extra.
-            # NOTE: the hook (not the public mapping) gives the actor-side name.
-            return value_head_keys, set(self._model_hf_keys("lm_head.weight"))
-        # Partial presence stays a strict error.
-        return set(), set()
+        if value_head_keys & present:
+            # Partial presence is never treated as an initializable head.
+            raise RuntimeError("Checkpoint contains only part of the value head")
+        # Actor -> critic: value head fully absent, actor head keys are extra.
+        # NOTE: the hook (not the public mapping) gives the actor-side name.
+        return value_head_keys, set(self._model_hf_keys("lm_head.weight"))
 
-    def _load_params(self, checkpoint_loader: HFCheckpointLoader, strict=True) -> tuple:
+    def _load_params(
+        self,
+        checkpoint_loader: HFCheckpointLoader,
+        strict: bool = True,
+        head_exceptions: tuple[set[str], set[str]] | None = None,
+    ) -> tuple:
         # The load spec (with hf_key_mapping applied) is the single source of truth
         # for the expected HF key set; strict checks and the copy loop below share it.
         present_hf_keys: set[str] = set(checkpoint_loader.weight_map)
         expected_hf_keys: set[str] = {key for spec in self.load_spec_mapping.values() for key in spec.global_hf_keys}
         expected_keys = set(self.state_dict())
-        allowed_missing, allowed_extra = self._head_load_exceptions(checkpoint_loader)
+        if head_exceptions is None:
+            head_exceptions = self._head_load_exceptions(checkpoint_loader)
+        allowed_missing, allowed_extra = head_exceptions
 
         if strict:
             _missing_keys = expected_hf_keys - present_hf_keys - allowed_missing
