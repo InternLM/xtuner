@@ -324,7 +324,11 @@ class SessionServer:
                 worker_req.pop("top_logprobs", None)
                 worker_req["return_logprob"] = False
             worker_req["return_token_ids"] = False
-            worker_req.setdefault("return_routed_experts", True)
+            if self.enable_return_routed_experts:
+                worker_req.setdefault("return_routed_experts", True)
+            else:
+                # Engines started without routed experts reject the flag with HTTP 400.
+                worker_req["return_routed_experts"] = False
             return worker_req
 
         session_id = req_body["session_id"]
@@ -376,7 +380,7 @@ class SessionServer:
         }
         worker_req["input_ids"] = input_ids
         worker_req["return_token_ids"] = True
-        worker_req["return_routed_experts"] = True
+        worker_req["return_routed_experts"] = self.enable_return_routed_experts
         worker_req["return_logprob"] = True
         worker_req["include_stop_str_in_output"] = True
 
