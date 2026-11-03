@@ -51,6 +51,7 @@ from xtuner.v1.rl.utils import (
     CPUResourceManager,
     asyncio_run,
     create_task,
+    free_object_refs,
     set_cpu_resource_manager,
     sort_rollout_state_for_deterministic,
 )
@@ -86,16 +87,6 @@ def _trainer_config_requires_rollout_proxy(cfg: "BaseRLTrainerConfig") -> bool:
     return _agent_loop_manager_requires_rollout_proxy(
         cfg.agent_loop_manager_cfg
     ) or _agent_loop_manager_requires_rollout_proxy(cfg.eval_agent_loop_manager_cfg)
-
-
-# 在使用了 trace_store 情况下，我们不能提前释放 obj ref，而是由 trainer 在消费后统一释放
-# 这样可以确保一拆多情况下正确。判断逻辑和 rollout_proxy 一致。
-def _agent_loop_manager_uses_trace_store(
-    cfg: AgentLoopManagerConfig | DisaggAgentLoopManagerConfig | None,
-) -> bool:
-    # Agent loops that require the rollout proxy currently export train traces
-    # through RolloutTraceStore. Those trace refs are shared across segments.
-    return _agent_loop_manager_requires_rollout_proxy(cfg)
 
 
 def _migrate_manager_is_valid_sample_fn(
@@ -673,8 +664,6 @@ class BaseRLTrainer:
         if cfg.train_worker_cfg.seed is None:
             self.logger.warning(f"RLTrainer seed {cfg.seed} is used as train worker seed.")
             cfg.train_worker_cfg.seed = cfg.seed
-        if _agent_loop_manager_uses_trace_store(cfg.agent_loop_manager_cfg):
-            cfg.train_worker_cfg.free_rollout_routed_experts_in_worker = False
         cfg.train_worker_cfg.load_from = cfg.load_from
         cfg.train_worker_cfg.log_dir = log_dir
         cfg.train_worker_cfg.train_teacher_manager_config = self._distillation.train_teacher_manager_config
@@ -907,24 +896,32 @@ class BaseRLTrainer:
         )
         return set(released_session_ids)
 
-    def _release_all_trace_sessions(self) -> None:
-        from xtuner.v1.rl.rollout.trace_store import get_existing_store
+    def _release_train_batch_resources(self, train_batch: list[list[RolloutState]]) -> None:
+        """Release the consumed batch's trace sessions and remaining remote
+        refs.
 
-        store = get_existing_store()
-        if store is None:
-            return
+        Trace-owned routed-expert refs are released with their session; everything
+        else (ordinary routed refs and pixels) is freed once, deduplicated.
 
-        self.logger.info("Release all sessions and free associated resources")
-        ray.get(store.release_all.remote())
-        keys = ray.get(store.list_sessions.remote())
-        # A leftover session key should stay visible without crashing fit()
-        # during teardown.
-        if keys:
-            self.logger.warning(f"Trace store keys not released after release_all: {keys}")
+        Args:
+            train_batch (list[list[RolloutState]]): The batch that was fully consumed.
 
-    def _release_trace_sessions_after_train_batch(self, train_batch: list[list[RolloutState]]) -> None:
-        """Release training traces when no concurrent rollout owner exists."""
-        self._release_all_trace_sessions()
+        Returns:
+            None
+        """
+        released_sessions = self._release_trace_sessions(_trace_session_ids(train_batch))
+        refs: list[ray.ObjectRef] = []
+        for group in train_batch:
+            for state in group:
+                pixels = state.mm_info.get("pixel_values") if state.mm_info is not None else None
+                trace_released = state.session_id is not None and str(state.session_id) in released_sessions
+                routed = None if trace_released else state.routed_experts
+                for value in (pixels, routed):
+                    if isinstance(value, ray.ObjectRef):
+                        refs.append(value)
+                    elif isinstance(value, (list, tuple)):
+                        refs.extend(item for item in value if isinstance(item, ray.ObjectRef))
+        free_object_refs(refs)
 
     def _prepare_train_batch(
         self,
@@ -1028,7 +1025,7 @@ class BaseRLTrainer:
 
         data_info["invalid_train_groups"] = dropped_groups
         data_info["invalid_train_samples"] = dropped_samples
-        self._release_trace_sessions_after_train_batch(train_batch)
+        self._release_train_batch_resources(train_batch)
 
         return {
             "data_info": data_info,
@@ -1744,10 +1741,6 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             self._resume_from_checkpoint(self._load_checkpoint_cfg.checkpoint_path)
 
         self._cpu_resource_manager.log_registered_summary()
-
-    def _release_trace_sessions_after_train_batch(self, train_batch: list[list[RolloutState]]) -> None:
-        """Release only consumed traces while the background producer runs."""
-        self._release_trace_sessions(_trace_session_ids(train_batch))
 
     def _build_disaggregated_placement_groups(
         self,

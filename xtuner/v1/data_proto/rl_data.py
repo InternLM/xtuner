@@ -285,7 +285,7 @@ class RolloutState(BaseModel):
             None
         """
         if self.input_ids is None or self.labels is None or self.train_meta is None:
-            raise ValueError("Training fields and train_meta must be present")
+            raise ValueError("Training input_ids, labels and train_meta must be present")
         expected = self._build_train_meta(
             input_ids=self.input_ids,
             labels=self.labels,
@@ -551,7 +551,7 @@ def _calculate_effective_response_mask(
     *,
     current_train_step: int,
     token_stale_threshold: int,
-) -> list[int]:
+) -> list[bool]:
     """Calculate the effective response mask of one rollout state without
     mutating it.
 
@@ -578,16 +578,15 @@ def _calculate_effective_response_mask(
     offset = len(labels) - len(response_ids)
     # semantic_mask: labels 中非 -100 的监督位；token_staleness_mask: 逐 token 新鲜度
     # （语义洞位的 staleness 值无意义，乘上 semantic_mask 后自然归零）。
-    semantic_mask = [int(label != -100) for label in labels[offset:]]
+    semantic_mask = [label != -100 for label in labels[offset:]]
     token_staleness_mask = [
-        int(calculate_seq_staleness(response_model_step, current_train_step) < token_stale_threshold)
+        calculate_seq_staleness(response_model_step, current_train_step) < token_stale_threshold
         for response_model_step in response_model_steps
     ]
-    effective_mask = [
-        semantic_mask_value * token_staleness_mask_value
+    return [
+        semantic_mask_value and token_staleness_mask_value
         for semantic_mask_value, token_staleness_mask_value in zip(semantic_mask, token_staleness_mask)
     ]
-    return effective_mask
 
 
 def calculate_group_effective_response_masks(
@@ -595,7 +594,7 @@ def calculate_group_effective_response_masks(
     *,
     current_train_step: int,
     token_stale_threshold: int | None,
-) -> list[list[int] | None]:
+) -> list[list[bool] | None]:
     """Calculate one group's effective response masks under the token-staleness
     policy.
 
@@ -617,7 +616,7 @@ def calculate_group_effective_response_masks(
     if token_stale_threshold is None:
         return [None] * len(group)
 
-    masks: list[list[int] | None] = []
+    masks: list[list[bool] | None] = []
     for item in group:
         if item.labels is None or not item.response_ids or len(item.labels) < len(item.response_ids):
             masks.append(None)
@@ -652,50 +651,24 @@ def validate_rollout_group(group: list[RolloutState], *, task_name: str) -> None
 
 
 def validate_train_group(group: list[RolloutState], *, task_name: str) -> None:
-    """Check a completed group's full fields immediately before training.
+    """Check a completed group's fields immediately before training.
 
-    Raise ValueError so the training boundary can discard the entire group. This function does not fill source versions
-    or modify labels or metadata.
+    Group-level conditions stay here; each sample's training-field consistency is
+    owned by ``RolloutState.validate_training``. Raise ValueError so the training
+    boundary can discard the entire group.
+
+    Args:
+        group (list[RolloutState]): Rollout group selected for training.
+        task_name (str): Task name used for error attribution.
+
+    Returns:
+        None
     """
     if not group or any(not isinstance(state, RolloutState) or state.status != Status.COMPLETED for state in group):
         raise ValueError(f"task={task_name!r}: training requires a nonempty COMPLETED rollout group")
     for state in group:
         context = f"task={task_name!r}, group_id={state.group_id}, rollout_id={state.rollout_id}"
-        input_ids = state.input_ids
-        if input_ids is None or len(input_ids) < 2:
-            length = None if input_ids is None else len(input_ids)
-            raise ValueError(f"{context}: input_ids must contain at least 2 tokens, got {length}")
-        for field in ("labels", "logprobs"):
-            value = getattr(state, field)
-            if field == "logprobs" and value is None:
-                continue
-            length = None if value is None else len(value)
-            if length != len(input_ids):
-                raise ValueError(f"{context}: {field} length mismatch: {length}, expected input_ids={len(input_ids)}")
-        labels = state.labels
-        assert labels is not None
-        response_ids = state.response_ids or []
-        version_length = len(state.response_model_steps or [])
-        if version_length != len(response_ids):
-            raise ValueError(
-                f"{context}: response_model_steps length={version_length}, expected response_ids={len(response_ids)}"
-            )
-        position_ids = state.position_ids
-        expected = {
-            "train_response_length": len(response_ids),
-            "supervised_tokens": sum(label != -100 for label in labels[1:]),
-            "position_layout": "mrope_3d" if position_ids is not None and position_ids.ndim == 3 else "1d",
-            "has_rollout_logprobs": state.logprobs is not None,
-            "has_routed_experts": state.routed_experts is not None,
-        }
-        if state.num_tokens != len(input_ids) - 1:
-            raise ValueError(
-                f"{context}: num_tokens={state.num_tokens}, expected={len(input_ids) - 1}; missing or stale train meta"
-            )
-        prompt_length = state.extra_fields.get("train_prompt_length")
-        if not isinstance(prompt_length, int) or prompt_length < 0:
-            raise ValueError(f"{context}: missing or invalid train_prompt_length={prompt_length}")
-        for key, value in expected.items():
-            actual = state.extra_fields.get(key)
-            if actual != value:
-                raise ValueError(f"{context}: train meta {key}={actual!r}, expected={value!r}")
+        try:
+            state.validate_training()
+        except ValueError as exc:
+            raise ValueError(f"{context}: {exc}") from exc

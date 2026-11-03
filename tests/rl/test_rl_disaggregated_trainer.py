@@ -31,7 +31,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.rl.agent_loop.agent_loop import AgentLoop
 from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerStatus,
     ProduceBatchResult,
@@ -54,7 +53,7 @@ def make_train_state(session_id=None):
         input_ids=[1, 2],
         labels=[-100, 2],
     )
-    AgentLoop._write_train_meta(None, state)
+    state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
     return state
 
 
@@ -154,7 +153,6 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._save_trajectories = MagicMock()
         trainer._save_eval_trajectories = MagicMock()
         trainer._release_trace_sessions = MagicMock(return_value=set())
-        trainer._release_all_trace_sessions = MagicMock()
         trainer._log_step = MagicMock()
         trainer._maybe_save_checkpoint = AsyncMock()
         trainer._maybe_save_hf = MagicMock()
@@ -411,7 +409,6 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         asyncio.run(trainer._run_initial_evaluate())
 
         trainer._release_trace_sessions.assert_called_once_with(["initial-eval"])
-        trainer._release_all_trace_sessions.assert_not_called()
 
     def test_fit_observes_background_producer_failure_before_training_waited_batch(self):
         # 后台 producer 异常是终止性失败；前台 get_batch 还在等待时必须立刻暴露，不能先训练随后才失败。

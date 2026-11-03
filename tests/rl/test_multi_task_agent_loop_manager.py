@@ -16,7 +16,6 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.rl.agent_loop.agent_loop import AgentLoop
 from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import (
     AgentLoopManager,
     AgentLoopManagerConfig,
@@ -333,7 +332,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             response_model_steps=[0, 4],
             status=Status.COMPLETED,
         )
-        AgentLoop._write_train_meta(None, state)
+        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
         strategy = _FakeProduceStrategy(token_stale_threshold=4)
         replay_buffer = _FakeReplayBuffer(
             rollout_states_by_task={"task": [[state]]},
@@ -373,7 +372,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             logprobs=[0.0, -0.1],
             status=Status.COMPLETED,
         )
-        AgentLoop._write_train_meta(None, state)
+        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
         strategy = _FakeProduceStrategy(token_stale_threshold=4)
         manager = AgentLoopManager(
             task_runners=[
@@ -415,7 +414,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             labels=[-100, -100, 30, -100, 40],
             status=Status.COMPLETED,
         )
-        AgentLoop._write_train_meta(None, state)
+        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
         strategy = _FakeProduceStrategy(token_stale_threshold=4)
         manager = AgentLoopManager(
             task_runners=[
@@ -455,7 +454,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             status=Status.COMPLETED,
         )
         state.response_model_steps = [0, 0, 0]
-        AgentLoop._write_train_meta(None, state)
+        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
         manager = AgentLoopManager(
             task_runners=[
                 _TaskRunner(

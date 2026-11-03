@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, runtime_checkable
 
 import ray
 import tqdm
@@ -622,10 +622,8 @@ async def take_train_batch(
             for item, mask in zip(group, effective_masks):
                 if mask is None:
                     continue
-                labels = cast(list[int], item.labels)
-                offset = len(labels) - len(mask)
-                labels[offset:] = [label if mask_value else -100 for label, mask_value in zip(labels[offset:], mask)]
-                item.extra_fields["supervised_tokens"] = sum(label != -100 for label in labels[1:])
+                # mask 策略留在 manager；标签与监督计数由 RolloutState 一起维护。
+                item.apply_response_mask(mask)
 
     if hasattr(progress, "mark_consumed"):
         progress.mark_consumed(consumed_counts)
