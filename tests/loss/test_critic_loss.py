@@ -22,6 +22,7 @@ from xtuner.v1.loss.critic_loss import CriticLossConfig, CriticLossContext, Crit
 from xtuner.v1.loss.utils import sp_split
 from xtuner.v1.utils.test_utils import init_data_mesh
 
+
 CLIPRANGE_VALUE = 0.2
 HIDDEN_SIZE = 8
 IGNORE_IDX = -100
@@ -177,16 +178,19 @@ def _run_sp(kind: str, datas: list[dict], device: str, mesh) -> tuple[torch.Tens
     ctx_list = []
     hidden_shards = []
     for data in datas:
-        loss_kwargs = CriticLossKwargs(
-            shifted_labels=data["shifted_labels"].to(device),
-            returns=data["returns"].to(device),
-            old_values=data["old_values"].to(device) if kind == "clipped" else None,
+        loss_ctx = loss_cfg.build(
+            data={
+                "shifted_labels": data["shifted_labels"],
+                "returns": data["returns"],
+                "old_values": data["old_values"] if kind == "clipped" else None,
+            },
+            sp_mesh=mesh,
+            device=device,
         )
-        loss_kwargs.sp_split(mesh)
         hidden_shard = sp_split(data["hidden"].to(device), sp_mesh=mesh, split_dim=1, padding_value=0.0)
         hidden_shard.requires_grad_(True)
         hidden_shards.append(hidden_shard)
-        ctx_list.append(CriticLossContext(loss_cfg, loss_kwargs))
+        ctx_list.append(loss_ctx)
 
     ctx_list = CriticLossContext.build_batches(ctx_list)
 
