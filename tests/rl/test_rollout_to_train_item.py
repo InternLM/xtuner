@@ -1,17 +1,17 @@
-"""TrainingWorker rollout-to-train-item 转换的 contract 测试。
+"""TrainBatch rollout-to-CPU-sample contract tests.
 
-``TrainingWorker._convert_rollout_items_to_train_items`` 是 RolloutState -> (seq_ctx, loss_inputs)
-的唯一入口：shift、scalar advantage 逐监督位广播、rollout logprob shift、position 布局统一、
-seq_ctx 构造、teacher target 对齐与 CPU per-item loss_inputs 构建都在这一步完成。本文件只测该
-纯转换逻辑，不启动 Ray、模型或 rollout backend。
+``TrainBatch`` is the only RolloutState -> CPU training data entry: it shifts
+labels/logprobs once, broadcasts scalar advantages or installs token rows, unifies
+the position layout, builds the seq_ctx and aligns teacher targets. Materialization
+then concatenates and pads one pack. This file exercises that public API only; no
+Ray, model or rollout backend is started.
 
-当前测试点：
-- 文本样本：input_ids 去尾、shifted_labels、rollout_logprobs shift 与形状对齐。
-- scalar advantage 广播：prompt 占位与 labels=-100 的语义洞位为 0，监督位为 group advantage。
-- use_3d_position_ids=True 时文本样本广播出三轴 MRoPE 位置；False 时保持 1D。
-- VLM 样本：prompt 段 3D position 续写 response、mm_info/pixel_values 透传、routed_experts 挂到 seq_ctx。
-- 蒸馏：rollout teacher target 对齐结果进入 loss_inputs（sampled 无 target_token_ids，topk 有）。
-- token advantage 与 shifted labels 等长，语义洞与 prompt 不参与监督。
+Covered behavior:
+- text samples: input_ids tail drop, shifted labels, shifted rollout logprobs.
+- scalar advantage broadcast and token-row installation with masking.
+- use_3d_position_ids broadcast and 1D default.
+- VLM position extension, mm_info passthrough and routed_experts attachment.
+- distillation teacher targets (sampled vs top-k).
 """
 
 import unittest
@@ -22,26 +22,49 @@ import torch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, TeacherTargets
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter, RolloutTeacherConfig
-from xtuner.v1.rl.loss import DistillationLossConfig, GRPOLossConfig
-from xtuner.v1.rl.trainer.worker import TrainBatchAttr, TrainingWorker
+from xtuner.v1.rl.loss import DistillationLossConfig
+from xtuner.v1.rl.trainer.pack import RankPlan
+from xtuner.v1.rl.trainer.train_batch import TrainBatch
 
 
-def _batch_attr(use_3d: bool) -> TrainBatchAttr:
+def _batch_attr(use_3d: bool, pack_loss_keys: list[str] | None = None):
     return {
         "rollout_idx": 0,
         "use_3d_position_ids": use_3d,
-        "pack_loss_keys": [],
+        "pack_loss_keys": pack_loss_keys or [],
         "has_routed_experts": False,
     }
 
 
-class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
-    def _make_worker(self, distillation: DistillationTrainerAdapter | None = None) -> TrainingWorker:
-        # 生产契约：蒸馏开启时 train_worker_cfg.loss_cfg 即 distillation_config.loss_config。
-        worker = TrainingWorker.__new__(TrainingWorker)
-        worker.config = SimpleNamespace(loss_cfg=GRPOLossConfig(policy_loss_cfg={"loss_type": "vanilla"}))
-        worker._distillation = distillation if distillation is not None else DistillationTrainerAdapter(None)
-        return worker
+def _model_cfg():
+    return SimpleNamespace(n_routed_experts=0, num_hidden_layers=1, num_experts_per_tok=1)
+
+
+class TestTrainBatchContract(unittest.TestCase):
+    def _make_batch(
+        self,
+        states: list[RolloutState],
+        *,
+        use_3d: bool = False,
+        pack_max_length: int | None = None,
+        pack_loss_keys: list[str] | None = None,
+        distillation: DistillationTrainerAdapter | None = None,
+        teacher_loss_keys: list[str] | None = None,
+        distillation_config: DistillationConfig | None = None,
+    ) -> TrainBatch:
+        adapter = distillation if distillation is not None else DistillationTrainerAdapter(None)
+        if pack_max_length is None:
+            pack_max_length = sum(len(state.labels or []) - 1 for state in states)
+        return TrainBatch(
+            states,
+            RankPlan(global_indices=tuple(range(len(states))), steps=((tuple(range(len(states))),),)),
+            _batch_attr(use_3d, pack_loss_keys),  # type: ignore[arg-type]
+            adapter,
+            pack_max_length=pack_max_length,
+            model_cfg=_model_cfg(),  # type: ignore[arg-type]
+            teacher_loss_keys=teacher_loss_keys or [],
+            distillation_config=distillation_config,
+        )
 
     def _state(
         self,
@@ -101,66 +124,58 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             state.logprobs = [0.0] * len(resolved_prompt_ids) + list(state.logprobs)
         return state
 
-    def test_text_path_builds_shifted_rl_train_item(self):
-        worker = self._make_worker()
+    def test_text_path_builds_shifted_train_sample(self):
         state = self._state(
             response_ids=[20, 21, 22],
             logprobs=[0.1, 0.2, 0.3],
             supervised_mask=[1, 0, 1],
         )
+        batch = self._make_batch([state], pack_loss_keys=["rollout_logprobs"])
+        batch.install_advantages([1.5])
+        batch.require_targets("actor")
 
-        items = worker._convert_rollout_items_to_train_items([state], [1.5], _batch_attr(False))
-
-        self.assertEqual(len(items), 1)
-        seq_ctx = items[0]["seq_ctx"]
-        loss_kwargs = SimpleNamespace(**items[0]["loss_inputs"])
+        pack = batch.materialize((0,))
+        seq_ctx = pack.full_data["seq_ctx"]
         self.assertEqual(seq_ctx.input_ids.tolist(), [[10, 11, 12, 20, 21]])
-        self.assertEqual(loss_kwargs.shifted_labels.tolist(), [[-100, -100, 20, -100, 22]])
+        self.assertEqual(pack.full_data["shifted_labels"].tolist(), [[-100, -100, 20, -100, 22]])
         torch.testing.assert_close(
-            loss_kwargs.advantages,
+            pack.full_data["advantages"],
             torch.tensor([[0.0, 0.0, 1.5, 0.0, 1.5]], dtype=torch.float32),
         )
         torch.testing.assert_close(
-            loss_kwargs.rollout_logprobs,
+            pack.full_data["rollout_logprobs"],
             torch.tensor([[0.0, 0.0, 0.1, 0.2, 0.3]], dtype=torch.float32),
         )
-        self.assertIsNone(getattr(loss_kwargs, "teacher_logprobs", None))
-        self.assertIsNone(getattr(loss_kwargs, "target_token_ids", None))
-        self.assertIsNone(getattr(loss_kwargs, "teacher_indices", None))
-        for tensor in (loss_kwargs.shifted_labels, loss_kwargs.advantages, loss_kwargs.rollout_logprobs):
-            self.assertEqual(tensor.shape[1], seq_ctx.input_ids.shape[1])
+        self.assertEqual(pack.lengths, (5,))
+        for key in ("shifted_labels", "advantages", "rollout_logprobs"):
+            self.assertEqual(pack.full_data[key].shape[1], seq_ctx.input_ids.shape[1])
 
     def test_advantages_follow_each_sample_scalar(self):
-        worker = self._make_worker()
         first = self._state(uid=1, response_ids=[20, 21], supervised_mask=[1, 1])
         second = self._state(uid=2, response_ids=[30, 31], supervised_mask=[1, 0])
+        batch = self._make_batch([first, second], pack_max_length=4)
+        batch.install_advantages([1.5, -2.0])
 
-        items = worker._convert_rollout_items_to_train_items([first, second], [1.5, -2.0], _batch_attr(False))
-
+        first_pack = batch.materialize((0,))
+        second_pack = batch.materialize((1,))
         torch.testing.assert_close(
-            items[0]["loss_inputs"].get("advantages"),
-            torch.tensor([[0.0, 0.0, 1.5, 1.5]], dtype=torch.float32),
+            first_pack.full_data["advantages"], torch.tensor([[0.0, 0.0, 1.5, 1.5]], dtype=torch.float32)
         )
         torch.testing.assert_close(
-            items[1]["loss_inputs"].get("advantages"),
-            torch.tensor([[0.0, 0.0, -2.0, 0.0]], dtype=torch.float32),
+            second_pack.full_data["advantages"], torch.tensor([[0.0, 0.0, -2.0, 0.0]], dtype=torch.float32)
         )
 
     def test_text_positions_stay_1d_without_3d_flag(self):
-        worker = self._make_worker()
-        state = self._state(response_ids=[20, 21])
+        batch = self._make_batch([self._state(response_ids=[20, 21])])
+        pack = batch.materialize((0,))
 
-        items = worker._convert_rollout_items_to_train_items([state], [0.0], _batch_attr(False))
-
-        torch.testing.assert_close(items[0]["seq_ctx"].position_ids, torch.arange(4).reshape(1, -1))
+        torch.testing.assert_close(pack.full_data["seq_ctx"].position_ids, torch.arange(4).reshape(1, -1))
 
     def test_text_positions_broadcast_to_3d_in_mixed_batches(self):
-        worker = self._make_worker()
-        state = self._state(response_ids=[20, 21])
+        batch = self._make_batch([self._state(response_ids=[20, 21])], use_3d=True)
+        pack = batch.materialize((0,))
 
-        items = worker._convert_rollout_items_to_train_items([state], [0.0], _batch_attr(True))
-
-        position_ids = items[0]["seq_ctx"].position_ids
+        position_ids = pack.full_data["seq_ctx"].position_ids
         self.assertEqual(tuple(position_ids.shape), (3, 1, 4))
         torch.testing.assert_close(
             position_ids,
@@ -168,7 +183,6 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
         )
 
     def test_vlm_position_extension_and_multimodal_passthrough(self):
-        worker = self._make_worker()
         pixel_values = np.ones((1, 2, 3), dtype=np.float32)
         image_grid_thw = np.array([[1, 2, 3]], dtype=np.int32)
         routed_experts = np.array([[1, 2], [3, 4]])
@@ -179,36 +193,34 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             mm_info={"pixel_values": pixel_values, "image_grid_thw": image_grid_thw},
             routed_experts=routed_experts,
         )
+        batch = self._make_batch([state], use_3d=True)
+        pack = batch.materialize((0,))
 
-        items = worker._convert_rollout_items_to_train_items([state], [0.25], _batch_attr(True))
-
-        seq_ctx = items[0]["seq_ctx"]
+        seq_ctx = pack.full_data["seq_ctx"]
         self.assertEqual(seq_ctx.input_ids.tolist(), [[100, 101, 102]])
         self.assertEqual(tuple(seq_ctx.position_ids.shape), (3, 1, 3))
-        self.assertIs(seq_ctx.pixel_values, pixel_values)
+        np.testing.assert_array_equal(seq_ctx.pixel_values[0], pixel_values)
         self.assertEqual(seq_ctx.image_grid_thw.tolist(), [[1, 2, 3]])
-        self.assertIs(seq_ctx.rollout_routed_experts, routed_experts)
+        np.testing.assert_array_equal(seq_ctx.rollout_routed_experts[0], routed_experts)
 
-    def _enable_rollout_distillation(self, worker: TrainingWorker, loss_config: DistillationLossConfig) -> None:
-        worker._distillation = DistillationTrainerAdapter(
-            DistillationConfig(
-                loss_config=loss_config,
-                teachers=[RolloutTeacherConfig(name="teacher", endpoints=["http://teacher"])],
-                data_source_teacher_map={"agent_math": "teacher"},
-            )
+    def _distillation(
+        self, loss_config: DistillationLossConfig
+    ) -> tuple[DistillationTrainerAdapter, DistillationConfig]:
+        config = DistillationConfig(
+            loss_config=loss_config,
+            teachers=[RolloutTeacherConfig(name="teacher", endpoints=["http://teacher"])],
+            data_source_teacher_map={"agent_math": "teacher"},
         )
-        worker.config.loss_cfg = loss_config
+        return DistillationTrainerAdapter(config), config
 
-    def test_topk_teacher_targets_land_in_loss_inputs(self):
-        worker = self._make_worker()
-        self._enable_rollout_distillation(
-            worker,
+    def test_topk_teacher_targets_land_in_pack_fields(self):
+        adapter, config = self._distillation(
             DistillationLossConfig(
                 policy_loss_cfg={"loss_type": "vanilla"},
                 loss_mode="forward_kl_topk",
                 use_policy_gradient=False,
                 top_k=2,
-            ),
+            )
         )
         state = self._state(
             input_ids=[10, 11, 20, 21, 22],
@@ -218,29 +230,31 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             teacher_logprobs=[[-0.5, -0.6], [-0.7, -0.8], [-0.9, -1.0]],
             extra_fields={"origin_data_source": "agent_math"},
         )
+        batch = self._make_batch(
+            [state],
+            distillation=adapter,
+            teacher_loss_keys=["teacher_logprobs", "target_token_ids"],
+            distillation_config=config,
+        )
+        pack = batch.materialize((0,))
 
-        items = worker._convert_rollout_items_to_train_items([state], [0.0], _batch_attr(False))
-
-        loss_kwargs = SimpleNamespace(**items[0]["loss_inputs"])
-        self.assertEqual(loss_kwargs.shifted_labels.tolist(), [[-100, 20, -100, 22]])
+        self.assertEqual(pack.full_data["shifted_labels"].tolist(), [[-100, 20, -100, 22]])
         self.assertEqual(
-            loss_kwargs.target_token_ids.tolist(),
+            pack.full_data["target_token_ids"].tolist(),
             [[[0, 0], [100, 101], [102, 103], [104, 105]]],
         )
         torch.testing.assert_close(
-            loss_kwargs.teacher_logprobs,
+            pack.full_data["teacher_logprobs"],
             torch.tensor([[[0.0, 0.0], [-0.5, -0.6], [-0.7, -0.8], [-0.9, -1.0]]], dtype=torch.float32),
         )
 
     def test_sampled_teacher_targets_omit_target_token_ids(self):
-        worker = self._make_worker()
-        self._enable_rollout_distillation(
-            worker,
+        adapter, config = self._distillation(
             DistillationLossConfig(
                 policy_loss_cfg={"loss_type": "vanilla"},
                 loss_mode="k1",
                 use_policy_gradient=True,
-            ),
+            )
         )
         state = self._state(
             response_ids=[20, 21],
@@ -249,26 +263,68 @@ class TestConvertRolloutItemsToTrainItems(unittest.TestCase):
             teacher_logprobs=[-0.7, -0.9],
             extra_fields={"origin_data_source": "agent_math"},
         )
+        batch = self._make_batch(
+            [state],
+            distillation=adapter,
+            teacher_loss_keys=["teacher_logprobs"],
+            distillation_config=config,
+        )
+        pack = batch.materialize((0,))
 
-        items = worker._convert_rollout_items_to_train_items([state], [0.0], _batch_attr(False))
-
-        loss_kwargs = SimpleNamespace(**items[0]["loss_inputs"])
-        self.assertIsNone(getattr(loss_kwargs, "target_token_ids", None))
+        self.assertNotIn("target_token_ids", pack.full_data)
         torch.testing.assert_close(
-            loss_kwargs.teacher_logprobs,
+            pack.full_data["teacher_logprobs"],
             torch.tensor([[0.0, 0.0, -0.7, -0.9]], dtype=torch.float32),
         )
 
     def test_token_advantages_mask_prompt_and_semantic_holes(self):
-        worker = self._make_worker()
+        from xtuner.v1.rl.trainer.pack import TokenBatchProto
+
         state = self._state(supervised_mask=[1, 0, 1])
-        items = worker._convert_rollout_items_to_train_items([state], [[1, 2, 3, 4, 5]], _batch_attr(False))
-        torch.testing.assert_close(items[0]["loss_inputs"]["advantages"], torch.tensor([[0.0, 0.0, 3.0, 0.0, 5.0]]))
+        batch = self._make_batch([state])
+        batch.install_advantages(TokenBatchProto.concat([torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0])]))
+
+        pack = batch.materialize((0,))
+        torch.testing.assert_close(pack.full_data["advantages"], torch.tensor([[0.0, 0.0, 3.0, 0.0, 5.0]]))
 
     def test_token_advantages_require_shifted_length(self):
-        worker = self._make_worker()
+        from xtuner.v1.rl.trainer.pack import TokenBatchProto
+
+        batch = self._make_batch([self._state()])
         with self.assertRaisesRegex(ValueError, "Token advantage length mismatch"):
-            worker._convert_rollout_items_to_train_items([self._state()], [[1.0]], _batch_attr(False))
+            batch.install_advantages(TokenBatchProto.concat([torch.tensor([1.0])]))
+
+    def test_empty_pack_materializes_as_padding(self):
+        batch = self._make_batch([self._state()], pack_max_length=8)
+        batch.install_advantages([1.0])
+        pack = batch.materialize(())
+
+        self.assertEqual(pack.indices, ())
+        self.assertEqual(pack.lengths, ())
+        self.assertEqual(pack.full_data["shifted_labels"].tolist(), [[-100] * 8])
+        torch.testing.assert_close(pack.full_data["advantages"], torch.zeros(1, 8))
+
+    def test_pack_pads_loss_fields_and_seq_ctx_together(self):
+        batch = self._make_batch([self._state(response_ids=[20, 21])], pack_max_length=8)
+        batch.install_advantages([1.0])
+        pack = batch.materialize((0,))
+
+        self.assertEqual(pack.full_data["seq_ctx"].input_ids.shape[1], 8)
+        self.assertEqual(pack.full_data["shifted_labels"].shape[1], 8)
+        self.assertEqual(pack.full_data["advantages"].shape[1], 8)
+
+    def test_unpack_rows_restores_sample_rows(self):
+        first = self._state(uid=1, response_ids=[20, 21])
+        second = self._state(uid=2, response_ids=[30, 31, 32])
+        batch = self._make_batch([first, second])
+        pack = batch.materialize((0, 1))
+        full_rows = torch.arange(5, dtype=torch.float32).reshape(1, -1)
+
+        rows = batch.unpack_rows(pack, full_rows)
+
+        self.assertEqual([index for index, _ in rows], [0, 1])
+        torch.testing.assert_close(rows[0][1], torch.tensor([[0.0, 1.0, 2.0, 3.0]]))
+        torch.testing.assert_close(rows[1][1], torch.tensor([[4.0]]))
 
 
 if __name__ == "__main__":

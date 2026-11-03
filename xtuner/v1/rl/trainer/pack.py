@@ -1,7 +1,11 @@
+from __future__ import annotations
+
 import math
 import random
+import time
 from collections.abc import Sequence
-from typing import Literal, TypeAlias
+from dataclasses import dataclass
+from typing import Literal, NamedTuple, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -17,6 +21,111 @@ DPRankPackIndices: TypeAlias = list[OptimizerStepPackIndices]
 PackedDataIndices: TypeAlias = list[DPRankPackIndices]
 
 _BALANCE_DEFAULT_SEED = 42
+
+
+class TokenBatchProto(NamedTuple):
+    """Ragged per-sample 1D token rows packed as one flat tensor for Ray
+    transfer.
+
+    ``data`` concatenates every sample's row (float32, CPU); ``lengths[i]`` gives
+    sample i's row length. One tensor crosses Ray instead of a list of tensors.
+
+    Example:
+        >>> rows = [torch.tensor([1.0, 2.0]), torch.tensor([3.0])]
+        >>> proto = TokenBatchProto.concat(rows)
+        >>> proto.data
+        tensor([1., 2., 3.])
+        >>> proto.lengths
+        tensor([2, 1], dtype=torch.int32)
+        >>> proto.chunk()
+        [tensor([1., 2.]), tensor([3.])]
+    """
+
+    data: torch.Tensor
+    lengths: torch.Tensor
+
+    @staticmethod
+    def concat(rows) -> TokenBatchProto:
+        """``list[torch.Tensor]`` -> ``TokenBatchProto``.
+
+        Args:
+            rows: One 1D tensor per sample.
+
+        Returns:
+            TokenBatchProto: The packed flat rows.
+        """
+        if not rows:
+            return TokenBatchProto(torch.empty(0, dtype=torch.float32), torch.empty(0, dtype=torch.int32))
+        for index, row in enumerate(rows):
+            if row.ndim != 1:
+                raise ValueError(
+                    f"concat requires a 1D tensor per sample, got shape {tuple(row.shape)} at index {index}"
+                )
+        flat = [row.detach().reshape(-1).to(dtype=torch.float32, device="cpu").contiguous() for row in rows]
+        lengths = torch.tensor([row.numel() for row in flat], dtype=torch.int32)
+        data = flat[0] if len(flat) == 1 else torch.cat(flat)
+        return TokenBatchProto(data, lengths)
+
+    def chunk(self) -> list[torch.Tensor]:
+        """Split into one 1D tensor per sample.
+
+        Returns:
+            list[torch.Tensor]: The per-sample rows.
+        """
+        if int(self.lengths.numel()) == 0:
+            return []
+        return list(self.data.split(tuple(int(length) for length in self.lengths)))
+
+
+@dataclass(frozen=True)
+class RankPlan:
+    """One DP rank's local training plan.
+
+    Args:
+        global_indices (tuple[int, ...]): Local sample index -> global sample index.
+        steps (tuple): Step -> pack -> local sample indices.
+    """
+
+    global_indices: tuple[int, ...]
+    steps: tuple
+
+
+@dataclass(frozen=True)
+class PackPlan:
+    """Index-only packing plan with global mapping and packing metrics.
+
+    Args:
+        ranks (tuple[RankPlan, ...]): One plan per DP rank.
+        metrics (dict[str, float]): Packing statistics for step logging.
+    """
+
+    ranks: tuple[RankPlan, ...]
+    metrics: dict[str, float]
+
+    def restore_rows(self, rows_by_dp: list[TokenBatchProto]) -> list[torch.Tensor]:
+        """Map one payload per DP rank back to global sample order.
+
+        Args:
+            rows_by_dp (list[TokenBatchProto]): Exactly one payload per DP rank.
+
+        Returns:
+            list[torch.Tensor]: Rows in global sample order.
+        """
+        if len(rows_by_dp) != len(self.ranks):
+            raise ValueError("Expected exactly one payload per DP rank")
+        size = sum(len(rank.global_indices) for rank in self.ranks)
+        result: list[torch.Tensor | None] = [None] * size
+        for rank, payload in zip(self.ranks, rows_by_dp):
+            rows = payload.chunk()
+            if len(rows) != len(rank.global_indices):
+                raise ValueError("Transport rows do not match RankPlan")
+            for global_index, row in zip(rank.global_indices, rows):
+                if result[global_index] is not None:
+                    raise ValueError("Duplicate sample in plan")
+                result[global_index] = row
+        if any(row is None for row in result):
+            raise ValueError("Incomplete sample coverage")
+        return cast(list[torch.Tensor], result)
 
 
 def get_greedy_pack_infos(data_indices: Sequence[int], num_tokens: Sequence[int], target: int) -> list[PackIndices]:
@@ -133,6 +242,42 @@ class RLDataPacker:
         packed_data_indices = self._impl(data_indices, data_lengths)
         padding_tokens = self._count_padding_tokens(packed_data_indices, data_lengths)
         return packed_data_indices, padding_tokens
+
+    def plan(self, data_lengths: Sequence[int]) -> PackPlan:
+        """Build the per-rank plan with global mapping and packing metrics.
+
+        Args:
+            data_lengths (Sequence[int]): Training token length of every sample.
+
+        Returns:
+            PackPlan: One ``RankPlan`` per DP rank plus packing statistics.
+        """
+        plan_begin = time.perf_counter()
+        packed_plan, padding_tokens = self.pack(data_lengths)
+        ranks: list[RankPlan] = []
+        for dp_plan in packed_plan:
+            global_indices = tuple(sorted({index for step in dp_plan for pack in step for index in pack}))
+            global_to_local = {global_index: local_index for local_index, global_index in enumerate(global_indices)}
+            ranks.append(
+                RankPlan(
+                    global_indices=global_indices,
+                    steps=tuple(
+                        tuple(tuple(global_to_local[index] for index in pack) for pack in step) for step in dp_plan
+                    ),
+                )
+            )
+        real_tokens = sum(data_lengths)
+        total_packs = sum(len(step) for dp_plan in packed_plan for step in dp_plan)
+        total_tokens = real_tokens + padding_tokens
+        metrics = {
+            "packing/real_tokens": float(real_tokens),
+            "packing/padding_tokens": float(padding_tokens),
+            "packing/efficiency": real_tokens / total_tokens if total_tokens > 0 else 0.0,
+            "packing/num_packs": float(total_packs),
+            "packing/num_optimizer_steps": float(len(packed_plan[0])) if packed_plan else 0.0,
+            "packing/plan_time_s": time.perf_counter() - plan_begin,
+        }
+        return PackPlan(tuple(ranks), metrics)
 
     def _legacy_pack(self, data_indices: list[int], data_lengths: Sequence[int]) -> PackedDataIndices:
         if not XTUNER_DETERMINISTIC:
