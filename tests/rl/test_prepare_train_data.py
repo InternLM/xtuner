@@ -274,7 +274,7 @@ class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
                 loop.canonicalize_train_fields([state])
 
                 self.assertEqual(state.status, Status.FAILED)
-                self.assertIn("labels length mismatch", state.error_msg)
+                self.assertIn("Training input_ids and labels must be full and aligned", state.error_msg)
 
     def test_logprobs_length_mismatch_marks_sample_failed(self):
         for loop_cls in self.AGENTIC_LOOP_CLASSES:
@@ -289,7 +289,7 @@ class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
                 loop.canonicalize_train_fields([state])
 
                 self.assertEqual(state.status, Status.FAILED)
-                self.assertIn("logprobs length mismatch", state.error_msg)
+                self.assertIn("Full rollout logprobs must align with full input_ids", state.error_msg)
 
     def test_state_without_input_ids_is_skipped(self):
         # eval 态样本显式置空训练字段且 COMPLETED，不能被构造或校验。

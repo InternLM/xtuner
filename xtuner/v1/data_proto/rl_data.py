@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 
@@ -109,6 +110,25 @@ class TeacherTargets(BaseModel):
         return self
 
 
+@dataclass(frozen=True)
+class TrainMeta:
+    """Lightweight training summary owned and published by ``RolloutState``.
+
+    ``num_tokens`` stays a ``RolloutState`` field (the single shifted training length);
+    this record only carries prompt/response shape, supervision count, layout and
+    presence flags. It is a plain frozen dataclass so Ray/debug snapshots can rebuild it
+    with ``dataclasses.replace``.
+    """
+
+    prompt_length: int
+    response_length: int
+    supervised_tokens: int  # count(full labels[1:] != -100)
+    position_layout: Literal["1d", "mrope_3d"]
+    has_rollout_logprobs: bool
+    has_routed_experts: bool
+    segment_index: int | None
+
+
 class RolloutState(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
@@ -148,6 +168,8 @@ class RolloutState(BaseModel):
 
     input_ids: list[int] | None = None
     labels: list[int] | None = None
+    # 训练字段的唯一摘要；只有 set_training_fields / apply_response_mask / reset_response 维护它。
+    train_meta: TrainMeta | None = None
 
     #  --- Judger 输出 ---
     reward: dict[str, Any] | None = None
@@ -169,6 +191,148 @@ class RolloutState(BaseModel):
             self.rollout_id = self.uid
         else:
             self.uid = self.rollout_id
+
+    def set_training_fields(self, *, input_ids: list[int], labels: list[int], logprobs: list[float] | None) -> None:
+        """Validate and publish the full, unshifted training fields.
+
+        Args:
+            input_ids (list[int]): Full training sequence.
+            labels (list[int]): Per-position targets, aligned with ``input_ids``.
+            logprobs (list[float] | None): Full rollout logprobs, aligned with ``input_ids``.
+
+        Returns:
+            None
+        """
+        # 复制轻量 token lists，避免调用方随后修改别名污染已发布字段。
+        ids = list(input_ids)
+        target_labels = list(labels)
+        full_logprobs = list(logprobs) if logprobs is not None else None
+        meta = self._build_train_meta(input_ids=ids, labels=target_labels, logprobs=full_logprobs)
+        # 验证成功后才赋值：训练字段、训练长度和摘要一起发布。
+        self.input_ids = ids
+        self.labels = target_labels
+        self.logprobs = full_logprobs
+        self.num_tokens = len(ids) - 1
+        self.train_meta = meta
+
+    def apply_response_mask(self, effective_mask: list[bool]) -> None:
+        """Bake one effective response mask into ``labels``.
+
+        The mask aligns with ``response_ids``; positions that are not kept become ignore
+        tokens. Length, prompt length and existing semantic holes are preserved.
+
+        Args:
+            effective_mask (list[bool]): Per-response-token keep mask.
+
+        Returns:
+            None
+        """
+        if self.labels is None or self.train_meta is None:
+            raise ValueError("Training fields must be published before applying a response mask")
+        if len(effective_mask) != len(self.response_ids or []):
+            raise ValueError("Response mask must align with response_ids")
+        labels = list(self.labels)
+        start = len(labels) - len(effective_mask)
+        for index, keep in enumerate(effective_mask):
+            if not keep:
+                labels[start + index] = -100
+        self.labels = labels
+        self.train_meta = replace(self.train_meta, supervised_tokens=sum(label != -100 for label in labels[1:]))
+        # 不重新推导 prompt_length：缺失显式 prompt 时，mask 后的非监督位计数会变大。
+
+    def reset_response(self) -> None:
+        """Invalidate the response and its training products before
+        regeneration.
+
+        Retry/expiry policy stays with the caller; this method only clears this sample.
+
+        Returns:
+            None
+        """
+        routed_experts = self.routed_experts
+        if routed_experts is not None:
+            from ray import ObjectRef
+
+            from xtuner.v1.rl.utils.ray_utils import free_object_refs
+
+            if isinstance(routed_experts, (ObjectRef, list)):
+                free_object_refs(routed_experts)
+        self.routed_experts = None
+        prompt_ids = self.prompt_ids
+        self.tokens = list(prompt_ids) if prompt_ids is not None else None
+        self.response = ""
+        self.response_ids = []
+        self.logprobs = []
+        self.teacher_targets = None
+        self.finish_reason = None
+        self.response_model_steps = []
+        self.reward = None
+        self.error_msg = None
+        # input_ids/labels 是上一轮 canonicalize 的产物，必须一并清掉，否则重生成后
+        # 基类 canonicalize 见 input_ids 非空会跳过重建，留下跨轮错位的训练字段。
+        self.input_ids = None
+        self.labels = None
+        self.num_tokens = None
+        self.train_meta = None
+        # 保留 prompt / multimodal 上下文；不在此选择 status 或改 partial-rollout 策略。
+
+    def validate_training(self) -> None:
+        """Check this sample's training fields against its published summary.
+
+        Read-only: it neither repairs data nor changes group status.
+
+        Returns:
+            None
+        """
+        if self.input_ids is None or self.labels is None or self.train_meta is None:
+            raise ValueError("Training fields and train_meta must be present")
+        expected = self._build_train_meta(
+            input_ids=self.input_ids,
+            labels=self.labels,
+            logprobs=self.logprobs,
+            prompt_length=self.train_meta.prompt_length,
+        )
+        if self.num_tokens != len(self.input_ids) - 1 or self.train_meta != expected:
+            raise ValueError("Training fields and metadata are inconsistent")
+        if len(self.response_model_steps or []) != len(self.response_ids or []):
+            raise ValueError(
+                f"response_model_steps length={len(self.response_model_steps or [])}, "
+                f"expected response_ids={len(self.response_ids or [])}"
+            )
+
+    def _build_train_meta(
+        self,
+        *,
+        input_ids: list[int],
+        labels: list[int],
+        logprobs: list[float] | None,
+        prompt_length: int | None = None,
+    ) -> TrainMeta:
+        if len(input_ids) < 2 or len(input_ids) != len(labels):
+            raise ValueError("Training input_ids and labels must be full and aligned")
+        if logprobs is not None and len(logprobs) != len(input_ids):
+            raise ValueError("Full rollout logprobs must align with full input_ids")
+        response_length = len(self.response_ids or [])
+        if response_length > len(labels):
+            raise ValueError("Response suffix exceeds full labels")
+        kept = sum(label != -100 for label in labels[1:])
+        if prompt_length is None:
+            # prompt_len 统计原始输入 prompt 长度（VLM 的 prompt 在 train_prompt_ids）；
+            # prompt_ids 缺失时退回 shifted_labels 的非监督位计数。
+            prompt_ids = self.extra_fields.get("train_prompt_ids") or self.prompt_ids
+            prompt_length = len(prompt_ids) if prompt_ids else len(input_ids) - 1 - kept
+        if prompt_length < 0:
+            raise ValueError("prompt_length must be nonnegative")
+        position_ids = self.position_ids
+        return TrainMeta(
+            prompt_length=prompt_length,
+            response_length=response_length,
+            supervised_tokens=kept,
+            position_layout="mrope_3d" if position_ids is not None and position_ids.ndim == 3 else "1d",
+            has_rollout_logprobs=logprobs is not None,
+            has_routed_experts=self.routed_experts is not None,
+            segment_index=self.extra_fields.get("agent_trace_segment_index"),
+        )
 
 
 def free_rollout_state_refs(rollout_state: RolloutState) -> None:
@@ -255,34 +419,6 @@ def update_status_from_finish_reason(finish_reason: str | None) -> Status:
     else:
         logger.error(f"finish_reason '{finish_reason}' is unknown, setting status to FAILED.")
         return Status.FAILED
-
-
-def reset_rollout_response(rollout_state: RolloutState) -> RolloutState:
-    routed_experts = getattr(rollout_state, "routed_experts", None)
-    if routed_experts is not None:
-        from ray import ObjectRef
-
-        from xtuner.v1.rl.utils.ray_utils import free_object_refs
-
-        if isinstance(routed_experts, (ObjectRef, list)):
-            free_object_refs(routed_experts)
-        rollout_state.routed_experts = None
-    prompt_ids = getattr(rollout_state, "prompt_ids", None)
-    rollout_state.tokens = list(prompt_ids) if prompt_ids is not None else None
-    rollout_state.response = ""
-    rollout_state.response_ids = []
-    # input_ids/labels 也是上一轮 canonicalize 的产物，必须一并清掉，
-    # 否则重生成后基类 canonicalize 见 input_ids 非空会跳过重建，留下跨轮错位的训练字段。
-    rollout_state.input_ids = None
-    rollout_state.labels = None
-    rollout_state.logprobs = []
-    rollout_state.teacher_targets = None
-    rollout_state.routed_experts = None
-    rollout_state.finish_reason = None
-    rollout_state.response_model_steps = []
-    rollout_state.reward = None
-    rollout_state.error_msg = None
-    return rollout_state
 
 
 def is_valid_for_training(group_data_items: list[RolloutState], logger) -> bool:

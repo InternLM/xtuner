@@ -177,12 +177,11 @@ class AgentInLocalhostLoop(AgentLoop):
             if state.status != Status.COMPLETED or state.input_ids is None:
                 continue
             try:
+                # 该 loop 已从 trace store 组装完整全序列；统一入口负责校验并发布 TrainMeta。
                 labels = state.labels
-                if labels is None or len(labels) != len(state.input_ids):
-                    expected = 0 if labels is None else len(labels)
-                    raise ValueError(f"labels length mismatch: {expected} vs {len(state.input_ids)}")
-                if state.logprobs is not None and len(state.logprobs) != len(state.input_ids):
-                    raise ValueError(f"logprobs length mismatch: {len(state.logprobs)} vs {len(state.input_ids)}")
+                if labels is None:
+                    raise ValueError("Training input_ids and labels must be full and aligned")
+                state.set_training_fields(input_ids=state.input_ids, labels=labels, logprobs=state.logprobs)
             except Exception as exc:
                 self.logger.error(f"Canonicalize train fields failed for rollout_id={state.rollout_id}: {exc}")
                 state.status = Status.FAILED
