@@ -1,5 +1,7 @@
 # Framework anchors: where to inspect and probe
 
+_Last verified against commit `cdd90e24`; re-verify symbols and call orders whenever the branch moves._
+
 Start with **shared framework code** for data collation, sequence context, loss normalization,
 gradient-norm accounting, optimizer/scheduler order and logging, then trace the active model's overrides.
 These entry points may move or be bypassed by a different recipe, model or revision; confirm the actual

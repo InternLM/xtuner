@@ -191,6 +191,16 @@ independent, or counting non-independent localization as a blind-test pass.
   execution error; descriptive exit `0` is not a pass. A scalar criterion pass is not a training-parity verdict.
 - `--plot` is optional and requires matplotlib; run from the repository root. Self-test without training:
   `python3 .claude/skills/align-automodel-xtuner-text/scripts/test_compare_step_metrics.py`.
+
+**Behavior changes in this version** (older invocations may now fail loudly):
+- Criterion mode requires `--expected-updates START:END` and full coverage on both sides.
+- Empty or duplicate `--metrics` names are errors.
+- Invalid JSONL lines raise an error instead of being skipped — pre-filter tracker logs that may mix
+  non-JSON lines (progress bars, banners) instead of relying on silent skipping.
+- Non-finite requested metric values are input errors in **both** criterion and descriptive modes.
+- Duplicate steps default to error unless `--on-duplicate first|last` is chosen explicitly.
+- CSV columns are fixed by the requested metrics, not by the first row's contents.
+
 - Deliver the result with [the report template](references/report-template.md).
 
 ## Report
