@@ -16,7 +16,6 @@ from xtuner.v1.data_proto.rl_data import (
     calculate_group_effective_response_masks,
     get_group_status,
     refresh_seq_staleness,
-    reset_rollout_response,
     update_sample_version,
 )
 from xtuner.v1.data_proto.utils import calculate_seq_staleness
@@ -500,7 +499,7 @@ class ReplayBuffer:
             for item, expired in zip(group, expired_mask):
                 if expired:
                     item.status = Status.EXPIRED
-                    reset_rollout_response(item)
+                    item.reset_response()
         else:
             for item in group:
                 item.status = Status.EXPIRED

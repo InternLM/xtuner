@@ -10,7 +10,6 @@ from pydantic import ValidationError
 from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     calculate_group_effective_response_masks,
-    reset_rollout_response,
 )
 from xtuner.v1.rl.agent_loop_manager import (
     AsyncProduceStrategyConfig,
@@ -122,7 +121,8 @@ class TestTokenStalenessMask(unittest.TestCase):
     def test_rerolled_state_uses_token_staleness_only(self):
         # 重 roll 后 canonicalize 重建训练字段：response 段全部受监督时，
         # 有效掩码只由 token staleness 决定。
-        state = reset_rollout_response(self._state(response_model_steps=[0, 4]))
+        state = self._state(response_model_steps=[0, 4])
+        state.reset_response()
         state.response_ids = [3, 4]
         state.response_model_steps = [4, 4]
         state.labels = [-100, -100, 3, 4]
@@ -142,7 +142,7 @@ class TestTokenStalenessMask(unittest.TestCase):
         state = self._state(response_model_steps=[0, 4])
         state.input_ids = [1, 2, 3, 4]
 
-        reset_rollout_response(state)
+        state.reset_response()
 
         self.assertIsNone(state.input_ids)
         self.assertIsNone(state.labels)
@@ -268,8 +268,7 @@ class TestTokenStalenessMask(unittest.TestCase):
                 continue
             offset = len(item.labels) - len(mask)
             item.labels[offset:] = [
-                label if mask_value else -100
-                for label, mask_value in zip(item.labels[offset:], mask)
+                label if mask_value else -100 for label, mask_value in zip(item.labels[offset:], mask)
             ]
         return masks
 
