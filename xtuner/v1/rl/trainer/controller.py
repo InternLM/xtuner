@@ -1,19 +1,19 @@
 from __future__ import annotations
 
 import os
-import time
-from typing import TYPE_CHECKING, Any, Literal, Sequence, TypedDict, cast
+import sys
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, Iterator, Literal, Sequence, TypedDict, cast
 
 import ray
 import torch
 
 from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.rl.distillation import DistillationTrainerAdapter
-from xtuner.v1.rl.utils import free_object_refs
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import get_logger
 
-from .pack import DPRankPackIndices, RLDataPacker
+from .pack import PackPlan, RLDataPacker
 from .worker import TrainBatchAttr, TrainingWorker, WorkerConfig, WorkerLogItem
 
 
@@ -21,30 +21,6 @@ if TYPE_CHECKING:
     from xtuner.v1.rl.advantage.base import AdvantageEstimator
 
 TRAIN_RAY_GET_TIMEOUT = os.getenv("XTUNER_TRAIN_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
-
-
-class _DPRankDispatch(TypedDict):
-    """Per-DP-rank payload of one training batch, before the Ray upload in
-    ``fit``."""
-
-    plan: DPRankPackIndices
-    advantages: list[float | list[float]]
-    rollout_items: list[RolloutState]
-
-
-class _DPRankPlan(TypedDict):
-    """Global sample mapping and local pack indices for one DP rank."""
-
-    global_indices: list[int]
-    plan: DPRankPackIndices
-
-
-class _PackPlan(TypedDict):
-    """Index-only layout and packing metrics, independent of training
-    targets."""
-
-    dp_plans: dict[int, _DPRankPlan]
-    plan_log: dict[str, float]
 
 
 class _GroupRewardInfo(TypedDict):
@@ -90,27 +66,6 @@ def _summarize_process_group_results(results: list[dict[str, Any]]) -> str:
     if result_errors:
         summary += f", errors={len(result_errors)}, first_error={result_errors[0]}"
     return summary
-
-
-def _state_uses_3d_position_ids(state: RolloutState) -> bool:
-    layout = state.extra_fields.get("position_layout")
-    if layout is not None:
-        return layout == "mrope_3d"
-    return state.position_ids is not None and state.position_ids.ndim == 3
-
-
-def _state_has_rollout_logprobs(state: RolloutState) -> bool:
-    flag = state.extra_fields.get("has_rollout_logprobs")
-    if flag is None:
-        return state.logprobs is not None
-    return bool(flag)
-
-
-def _state_has_routed_experts(state: RolloutState) -> bool:
-    flag = state.extra_fields.get("has_routed_experts")
-    if flag is None:
-        return state.routed_experts is not None
-    return bool(flag)
 
 
 class TrainingController:
@@ -178,7 +133,7 @@ class TrainingController:
             return [float(cluster_advantages[index].item()) if index is not None else 0.0 for index in cluster_indices]
         return [0.0] * len(cluster_indices)
 
-    def _prepare_advantages(self, prepared: _PreparedBatch, pack_plan: _PackPlan) -> list[float] | list[list[float]]:
+    def _prepare_advantages(self, prepared: _PreparedBatch) -> list[float] | list[list[float]]:
         """Prepare targets after packing indices are fixed, without changing
         sample order or placing targets inside the plan."""
         advantages: list[float] = []
@@ -191,7 +146,7 @@ class TrainingController:
     def _build_trainer_log_info(
         self,
         prepared: _PreparedBatch,
-        pack_plan: _PackPlan,
+        pack_plan: PackPlan,
         log_infos: list[WorkerLogItem],
         advantages: Sequence[float | list[float]],
         raw_rewards_sum: float = 0.0,
@@ -205,7 +160,7 @@ class TrainingController:
 
         Args:
             prepared (_PreparedBatch): Output of ``_prepare_rollout_items``.
-            pack_plan (_PackPlan): Output of ``_build_pack_plan``.
+            pack_plan (PackPlan): Output of ``_build_pack_plan``.
             log_infos (list[WorkerLogItem]): Per-worker training logs of the batch.
             advantages: Final scalar or token advantages in global sample order.
             raw_rewards_sum (float): Producer-side raw reward sum used by ``raw_rewards/mean``.
@@ -222,14 +177,16 @@ class TrainingController:
         for state, advantage in zip(prepared["rollout_items"], advantages):
             # Advantage metrics count one entry per supervised position, matching the
             # per-position advantage layout built by the worker conversion.
-            supervised_positions = int(state.extra_fields["supervised_tokens"])
+            meta = state.train_meta
+            assert meta is not None
+            supervised_positions = meta.supervised_tokens
             if isinstance(advantage, list):
                 labels = state.labels
                 assert labels is not None
                 advantages_list.extend(value for value, label in zip(advantage, labels[1:]) if label != -100)
             else:
                 advantages_list.extend([advantage] * supervised_positions)
-            prompt_len_list.append(int(state.extra_fields["train_prompt_length"]))
+            prompt_len_list.append(int(meta.prompt_length))
             response_len_list.append(supervised_positions)
             turns = state.extra_fields.get("agent_tool_turns")
             if isinstance(turns, int):
@@ -271,7 +228,7 @@ class TrainingController:
             info_dict["tool_turns/mean"] = tool_turns_t.mean().item()
             info_dict["tool_turns/min"] = float(tool_turns_t.min().item())
             info_dict["tool_turns/max"] = float(tool_turns_t.max().item())
-        info_dict.update(pack_plan["plan_log"])
+        info_dict.update(pack_plan.metrics)
         # WorkerLogItem is a TypedDict; dynamic-key reads below need a plain dict view.
         worker_logs = cast(list[dict[str, Any]], log_infos)
         for key, target_key in (
@@ -323,20 +280,15 @@ class TrainingController:
             )
             for state in group:
                 rollout_items.append(state)
-                use_3d_position_ids = use_3d_position_ids or _state_uses_3d_position_ids(state)
-                has_rollout_logprobs = has_rollout_logprobs or _state_has_rollout_logprobs(state)
-                has_routed_experts = has_routed_experts or _state_has_routed_experts(state)
-                # 只读 AgentLoop 规范化时写入的轻量 meta 字段（AgentLoop canonicalization），不触碰
-                # input_ids/labels 等重载荷；meta 缺失说明样本未过 canonicalize，直接 fail fast。
-                if (
-                    state.extra_fields.get("supervised_tokens") is None
-                    or state.extra_fields.get("train_prompt_length") is None
-                    or state.num_tokens is None
-                ):
+                meta = state.train_meta
+                if meta is None or state.num_tokens is None:
                     raise ValueError(
-                        "Rollout state is missing the train meta fields written by AgentLoop canonicalization: "
+                        "Rollout state is missing the train meta written by RolloutState.set_training_fields: "
                         f"rollout_id={state.rollout_id}"
                     )
+                use_3d_position_ids = use_3d_position_ids or meta.position_layout == "mrope_3d"
+                has_rollout_logprobs = has_rollout_logprobs or meta.has_rollout_logprobs
+                has_routed_experts = has_routed_experts or meta.has_routed_experts
 
         return {
             "rollout_items": rollout_items,
@@ -357,7 +309,7 @@ class TrainingController:
         pack_max_length: int,
         worker_cfg: WorkerConfig,
         data_replicate_size: int,
-    ) -> _PackPlan:
+    ) -> PackPlan:
         """Build an index-only per-DP-rank plan without training targets.
 
         Args:
@@ -367,19 +319,15 @@ class TrainingController:
             data_replicate_size (int): Number of workers holding one data replica.
 
         Returns:
-            _PackPlan: Global sample indices and local pack indices per DP rank,
-            plus packing metrics. Payload assembly happens separately, once the
-            algorithm has produced its training targets.
+            PackPlan: One local plan per DP rank plus packing metrics.
         """
-        plan_begin = time.perf_counter()
         lengths = []
-        real_tokens = 0
         for state in rollout_items:
             assert state.num_tokens is not None, (
-                f"Rollout state is missing num_tokens written by AgentLoop canonicalization: rollout_id={state.rollout_id}"
+                f"Rollout state is missing num_tokens written by RolloutState.set_training_fields: "
+                f"rollout_id={state.rollout_id}"
             )
             lengths.append(state.num_tokens)
-            real_tokens += state.num_tokens
         data_packer = RLDataPacker(
             pack_max_length=pack_max_length,
             world_size=len(self.workers),
@@ -389,52 +337,62 @@ class TrainingController:
             pack_seed=worker_cfg.pack_seed,
             pack_extra_buffer_size=worker_cfg.pack_extra_buffer_size,
         )
-        packed_plan, padding_tokens = data_packer.pack(lengths)
+        return data_packer.plan(lengths)
 
-        dp_plans: dict[int, _DPRankPlan] = {}
-        for dp_rank, dp_plan in enumerate(packed_plan):
-            global_indices = sorted({index for step in dp_plan for pack in step for index in pack})
-            global_to_local = {global_index: local_index for local_index, global_index in enumerate(global_indices)}
-            dp_plans[dp_rank] = {
-                "plan": [[[global_to_local[index] for index in pack] for pack in step] for step in dp_plan],
-                "global_indices": global_indices,
-            }
-        total_packs = sum(len(step) for dp_plan in packed_plan for step in dp_plan)
-        total_tokens = real_tokens + padding_tokens
-        plan_log = {
-            "packing/real_tokens": float(real_tokens),
-            "packing/padding_tokens": float(padding_tokens),
-            "packing/efficiency": real_tokens / total_tokens if total_tokens > 0 else 0.0,
-            "packing/num_packs": float(total_packs),
-            "packing/num_optimizer_steps": float(len(packed_plan[0])),
-            "packing/plan_time_s": time.perf_counter() - plan_begin,
-        }
-        return {"dp_plans": dp_plans, "plan_log": plan_log}
-
-    def _build_dispatches(
+    @contextmanager
+    def _loaded_batch(
         self,
         rollout_items: list[RolloutState],
-        advantages: Sequence[float | list[float]],
-        pack_plan: _PackPlan,
-    ) -> dict[int, _DPRankDispatch]:
-        """Attach states and training targets to an already fixed sample
-        mapping."""
-        if len(rollout_items) != len(advantages):
-            raise ValueError(f"rollout_items and advantages lengths differ: {len(rollout_items)} vs {len(advantages)}")
-        for state, advantage in zip(rollout_items, advantages):
-            if isinstance(advantage, list) and len(advantage) != state.num_tokens:
-                raise ValueError(
-                    f"Token advantage length mismatch for rollout_id={state.rollout_id}: "
-                    f"{len(advantage)} vs num_tokens={state.num_tokens}"
+        pack_plan: PackPlan,
+        batch_attr: TrainBatchAttr,
+        data_replicate_size: int,
+    ) -> Iterator[None]:
+        """Load one local batch per worker and release it on every exit path.
+
+        Remote pixel/routed refs stay owned by the trainer and are only released
+        after a successful ``fit``.
+
+        Args:
+            rollout_items (list[RolloutState]): Flat states in training order.
+            pack_plan (PackPlan): Controller-side packing plan.
+            batch_attr (TrainBatchAttr): Batch-level attributes shared by workers.
+            data_replicate_size (int): Number of workers holding one data replica.
+
+        Yields:
+            None
+        """
+        refs_by_dp: list[list[ray.ObjectRef]] = []
+        try:
+            # Nested in a list so Ray does not dereference it before the worker
+            # fetches it; replicas of one DP rank share the ref.
+            refs_by_dp = [
+                [ray.put([rollout_items[index] for index in rank.global_indices])] for rank in pack_plan.ranks
+            ]
+            load_handles = []
+            for worker_idx, worker in enumerate(self.workers):
+                dp_rank = worker_idx // data_replicate_size
+                load_handles.append(
+                    worker.load_train_batch.remote(  # type: ignore[attr-defined]
+                        refs_by_dp[dp_rank],
+                        pack_plan.ranks[dp_rank],
+                        batch_attr,
+                    )
                 )
-        return {
-            dp_rank: {
-                "plan": dp_plan["plan"],
-                "rollout_items": [rollout_items[index] for index in dp_plan["global_indices"]],
-                "advantages": [advantages[index] for index in dp_plan["global_indices"]],
-            }
-            for dp_rank, dp_plan in pack_plan["dp_plans"].items()
-        }
+            ray.get(load_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+            yield
+        finally:
+            original_error = sys.exception()
+            try:
+                ray.get(
+                    [worker.release_train_batch.remote() for worker in self.workers],  # type: ignore[attr-defined]
+                    timeout=TRAIN_RAY_GET_TIMEOUT,
+                )
+            except Exception as cleanup_error:
+                self.logger.warning(f"Failed to release cached training batch: {cleanup_error}")
+                if original_error is None:
+                    raise
+            finally:
+                refs_by_dp.clear()
 
     def fit(
         self,
@@ -453,39 +411,15 @@ class TrainingController:
         data_replicate_size = ray.get(self.workers[0].get_data_replicate_size.remote())  # type: ignore[attr-defined]
 
         pack_plan = self._build_pack_plan(rollout_items, pack_max_length, worker_cfg, data_replicate_size)
+        advantages = self._prepare_advantages(prepared)
 
-        # Pixel-value object refs must stay alive until every worker has consumed the
-        # dispatch, so the finally clause releases them on both the success and the
-        # failure path.
-        handles: list[ray.ObjectRef] = []
-        try:
-            advantages = self._prepare_advantages(prepared, pack_plan)
-            dp_dispatches = self._build_dispatches(rollout_items, advantages, pack_plan)
-            # Nested in a list so Ray does not dereference it before TrainingWorker.fit
-            # explicitly fetches it; one DP rank's replicas share the ref.
-            item_refs_by_dp = {
-                dp_rank: [ray.put(dispatch["rollout_items"])] for dp_rank, dispatch in dp_dispatches.items()
-            }
+        with self._loaded_batch(rollout_items, pack_plan, prepared["batch_attr"], data_replicate_size):
+            handles = []
             for worker_idx, worker in enumerate(self.workers):
-                dp_rank = worker_idx // data_replicate_size
-                dp_dispatch = dp_dispatches[dp_rank]
-                handles.append(
-                    worker.fit.remote(  # type: ignore[attr-defined]
-                        rollout_item_refs=item_refs_by_dp[dp_rank],
-                        advantages=dp_dispatch["advantages"],
-                        pack_plan=dp_dispatch["plan"],
-                        batch_attr=prepared["batch_attr"],
-                    )
-                )
+                rank = pack_plan.ranks[worker_idx // data_replicate_size]
+                local_advantages = [advantages[index] for index in rank.global_indices]
+                handles.append(worker.fit.remote(local_advantages))  # type: ignore[attr-defined]
             log_infos = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
-        finally:
-            free_pixel_value_refs: list[ray.ObjectRef] = []
-            for state in rollout_items:
-                pixel_values = state.mm_info.get("pixel_values") if state.mm_info is not None else None
-                if pixel_values is not None:
-                    free_pixel_value_refs.extend(pixel_values)
-            if free_pixel_value_refs:
-                free_object_refs(free_pixel_value_refs)
         del rollout_items
 
         data_info = self._build_trainer_log_info(

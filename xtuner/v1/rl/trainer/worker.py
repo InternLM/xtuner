@@ -21,7 +21,6 @@ if TYPE_CHECKING:
 
     from xtuner.v1.rl.advantage.base import AdvantageEstimator
 
-import numpy as np
 import ray
 import torch
 import torch.distributed as dist
@@ -34,7 +33,6 @@ from typing_extensions import NotRequired
 from transformers import AutoTokenizer
 from xtuner.v1.config.fsdp import FSDPConfig
 from xtuner.v1.config.optim import LRConfig, OptimConfig
-from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.dataloader import Dataloader
@@ -75,92 +73,12 @@ from xtuner.v1.utils.fsdp import release_deferred_fsdp_all_gathers
 from xtuner.v1.utils.nccl_process_group import resume_nccl_process_groups, suspend_nccl_process_groups
 
 from ..rollout_is import merge_rollout_is_metrics
-from .pack import DPRankPackIndices
+from .pack import RankPlan
+from .train_batch import TrainBatch, iter_cpu_packs, resolve_pack_refs
 
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
-_UINT16_CAPACITY = 1 << 16
-
-
-def get_train_seq_ctx(
-    input_ids: torch.LongTensor,
-    position_ids: np.ndarray | None = None,
-    multimodal_train_info: dict | None = None,
-) -> SequenceContext:
-    """Build a CPU ``SequenceContext`` for one training sample.
-
-    Args:
-        input_ids (torch.LongTensor): Model input tokens with shape ``(1, seq_len)``.
-        position_ids (np.ndarray | None): Optional position ids. A 3D array triggers
-            the VLM MRoPE layout; a prompt-only position segment is extended to cover
-            the whole input.
-        multimodal_train_info (dict | None): Optional multimodal payload with
-            ``pixel_values``, ``image_grid_thw`` and ``num_img_tokens``.
-
-    Returns:
-        SequenceContext: The CPU sequence context of the sample.
-    """
-    seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
-    position_ids = _to_cpu_tensor(position_ids, dtype=torch.long)
-    if position_ids is not None and len(position_ids.shape) == 3:
-        # Match get_rope_index_3: response text continues from a single global
-        # max(T, H, W), not per-axis maxima. Per-axis max diverges when the
-        # prompt ends on image tokens (T≈0 while H/W are large). The extension
-        # length is derived from the position deficit so samples whose positions
-        # already cover the whole input (full-sequence agentic samples) need no
-        # extra shape information.
-        num_extend = input_ids.size(-1) - position_ids.size(-1)
-        if num_extend > 0:
-            max_value = position_ids.amax()
-            response_position_ids = (
-                (torch.arange(1, num_extend + 1, device=position_ids.device, dtype=position_ids.dtype) + max_value)
-                .view(1, 1, -1)
-                .expand(3, 1, -1)
-            )
-            position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
-        seq_ctx.position_ids = position_ids  # type: ignore[assignment]
-        assert position_ids.size(-1) == input_ids.size(-1)
-
-    if multimodal_train_info:
-        seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
-        seq_ctx.image_grid_thw = _to_cpu_tensor(multimodal_train_info.get("image_grid_thw"), dtype=torch.long)
-        num_img_tokens = multimodal_train_info.get("num_img_tokens")
-        if num_img_tokens is not None:
-            seq_ctx.num_img_tokens = [num_img_tokens]
-    return seq_ctx
-
-
-def _to_cpu_tensor(value: np.ndarray | None, *, dtype: torch.dtype | None = None) -> torch.Tensor | None:
-    if value is None:
-        return None
-    assert isinstance(value, np.ndarray), f"Expected np.ndarray, got {type(value)}"
-    return torch.as_tensor(value, dtype=dtype, device="cpu")
-
-
-def _rollout_routed_experts_storage_dtype(n_routed_experts: int) -> torch.dtype:
-    """Choose a compact lossless dtype for stored routed-expert IDs."""
-    if n_routed_experts <= _UINT16_CAPACITY:
-        return torch.uint16
-    return torch.long
-
-
-def _as_rollout_routed_experts_tensor(
-    rollout_routed_experts: np.ndarray,
-    *,
-    n_routed_experts: int,
-) -> torch.Tensor:
-    """Convert finalized routed-expert IDs to their CPU storage dtype."""
-    storage_dtype = _rollout_routed_experts_storage_dtype(n_routed_experts)
-    if storage_dtype == torch.uint16 and rollout_routed_experts.dtype != np.uint16:
-        if rollout_routed_experts.size > 0:
-            min_expert_id = rollout_routed_experts.min()
-            max_expert_id = rollout_routed_experts.max()
-            if min_expert_id < 0 or max_expert_id >= _UINT16_CAPACITY:
-                raise ValueError(
-                    f"Routed-expert IDs cannot be represented as uint16: min={min_expert_id}, max={max_expert_id}"
-                )
-    return torch.as_tensor(rollout_routed_experts, dtype=storage_dtype)
 
 
 def calculate_entropy(
@@ -261,7 +179,6 @@ class WorkerConfig(BaseModel):
     profile_step: list[int] | int | None = None  # 1-based global RL train_step ids to profile.
     profile_time: bool = True
     profile_memory: bool = False
-    free_rollout_routed_experts_in_worker: bool = True  # 默认不需要用户配置
     offload_rollout_routed_experts: bool = False
     offload_old_logprobs: bool = False
     train_teacher_manager_config: TrainTeacherManagerConfig | None = None
@@ -445,6 +362,11 @@ class TrainingWorker(SingleAcceleratorWorker):
             config=self.config,
             engine=self._engine,
         )
+
+        # 唯一的 worker-local 训练批次；角色只通过参数借用，不另建样本缓存。
+        self._batch: TrainBatch | None = None
+        self._batch_conversion_time_s = 0.0
+        self._pack_time_s = 0.0
 
     @ray_method
     def suspend_train_nccl_process_groups(self) -> dict[str, object]:
@@ -654,96 +576,25 @@ class TrainingWorker(SingleAcceleratorWorker):
             self._engine.put_model_to_device(DEVICE)
             self._engine.put_optimizer_to_device(DEVICE)
 
-    def _add_rollout_routed_experts(
-        self, seq_ctx: SequenceContext, rollout_routed_experts: torch.Tensor | list[torch.Tensor | ray.ObjectRef]
-    ):
-        language_cfg = (
-            self.config.model_cfg.text_config
-            if isinstance(self.config.model_cfg, BaseComposeConfig)
-            else self.config.model_cfg
+    def _configured_teacher_loss_keys(self) -> list[str]:
+        distillation_config = self.config.distillation_config
+        if distillation_config is None:
+            return []
+        keys: list[str] = []
+        if distillation_config.rollout_teachers:
+            keys.append("teacher_logprobs")
+            if not distillation_config.loss_config.uses_sampled_token_targets:
+                keys.append("target_token_ids")
+        if distillation_config.train_teachers:
+            keys.append("teacher_indices")
+        return keys
+
+    def _resolve_pack_refs(self, seq_ctx: SequenceContext) -> None:
+        resolve_pack_refs(
+            seq_ctx,
+            model_cfg=self.config.model_cfg,
+            pack_max_length=self.config.pack_max_length,
         )
-        storage_dtype = _rollout_routed_experts_storage_dtype(language_cfg.n_routed_experts)
-
-        to_free_routed_expert_refs: list[ray.ObjectRef] = []
-        if isinstance(rollout_routed_experts, list):
-            # list[n,l,e]
-            out_rollout_routed_expert = []
-            for rollout_routed_expert in rollout_routed_experts:
-                if isinstance(rollout_routed_expert, torch.Tensor):
-                    rollout_routed_experts_tensor = torch.randint(
-                        low=0,
-                        high=language_cfg.n_routed_experts,
-                        size=(
-                            rollout_routed_expert.size(0),
-                            language_cfg.num_hidden_layers,
-                            language_cfg.num_experts_per_tok,
-                        ),
-                        dtype=storage_dtype,
-                    )
-                    out_rollout_routed_expert.append(rollout_routed_experts_tensor)
-                else:
-                    rollout_routed_expert_refs = rollout_routed_expert
-                    if isinstance(rollout_routed_expert_refs, ray.ObjectRef):
-                        rollout_routed_expert = ray.get(rollout_routed_expert_refs)
-                    elif isinstance(rollout_routed_expert_refs, list):
-                        _rollout_routed_expert = []
-                        _rollout_routed_expert_refs = rollout_routed_expert_refs
-                        for rollout_routed_expert_ref in rollout_routed_expert_refs:
-                            rollout_routed_expert = ray.get(rollout_routed_expert_ref)  # np
-                            _rollout_routed_expert.append(rollout_routed_expert)
-                        rollout_routed_expert = np.concatenate(_rollout_routed_expert, axis=0)[1:, ...]
-                        rollout_routed_expert_refs = _rollout_routed_expert_refs
-                    else:
-                        raise ValueError(
-                            f"Invalid rollout_routed_expert_refs type: {type(rollout_routed_expert_refs)}"
-                        )
-                    # Some agent loops export routed-expert refs from the rollout trace store.
-                    # Those refs may be shared by multiple trainable segments and replicated
-                    # train workers, so they must be released by the trainer after all workers
-                    # finish consuming the batch.
-                    if self.config.free_rollout_routed_experts_in_worker:
-                        if self.sp_mesh is None or self.sp_mesh.size() == 1:
-                            ray.internal.free(rollout_routed_expert_refs, local_only=False)
-                        else:
-                            if self.sp_mesh.get_local_rank() == 0:
-                                # only free once of sp mesh
-                                to_free_routed_expert_refs.append(rollout_routed_expert_refs)
-                    rollout_routed_expert = _as_rollout_routed_experts_tensor(
-                        rollout_routed_expert,
-                        n_routed_experts=language_cfg.n_routed_experts,
-                    )
-                    rollout_routed_expert = rollout_routed_expert.reshape(
-                        -1, language_cfg.num_hidden_layers, language_cfg.num_experts_per_tok
-                    )
-                    out_rollout_routed_expert.append(rollout_routed_expert)
-
-            seq_ctx.rollout_routed_experts = torch.cat(out_rollout_routed_expert, dim=0)  # max_len,l,e
-        else:
-            assert isinstance(rollout_routed_experts, torch.Tensor), (
-                f"padding experts should be a dummy tensor, bug got {type(rollout_routed_experts)}"
-            )
-            rollout_routed_experts_tensor = torch.randint(
-                low=0,
-                high=language_cfg.n_routed_experts,
-                size=(
-                    self.config.pack_max_length,
-                    language_cfg.num_hidden_layers,
-                    language_cfg.num_experts_per_tok,
-                ),
-                dtype=storage_dtype,
-            )
-            seq_ctx.rollout_routed_experts = rollout_routed_experts_tensor
-
-        assert seq_ctx.input_ids is not None, "input_ids is None"
-        assert seq_ctx.rollout_routed_experts.size(0) == seq_ctx.input_ids.size(1), (
-            f"rollout_routed_experts.size(0) {seq_ctx.rollout_routed_experts.size(0)} != input_ids.size(1) {seq_ctx.input_ids.size(1)}"
-        )
-
-        if self.config.free_rollout_routed_experts_in_worker and self.sp_mesh is not None and self.sp_mesh.size() > 1:
-            dist.barrier()
-            for free_routed_expert_refs in to_free_routed_expert_refs:
-                ray.internal.free(free_routed_expert_refs, local_only=False)
-            del to_free_routed_expert_refs
 
     @contextmanager
     def _maybe_profiling(self, global_train_step: int, phase: str):
@@ -765,284 +616,83 @@ class TrainingWorker(SingleAcceleratorWorker):
                 stack.enter_context(profiling_memory(memory_dir))
             yield
 
-    def _convert_rollout_items_to_train_items(
-        self,
-        rollout_items: list[RolloutState],
-        advantages: Sequence[float | list[float]],
-        batch_attr: TrainBatchAttr,
-    ) -> list[_TrainItem]:
-        """Convert unshifted states into CPU items in unchanged sample order.
-
-        Apply input_ids[:-1], labels[1:] and logprobs[1:] once. Broadcast scalar advantages or use aligned token
-        targets; mask unsupervised positions. Prepare position, multimodal and teacher inputs without building a loss
-        context or applying the plan. Final pack contexts are built by packing.
-        """
-        return [
-            self._convert_one_rollout_state(state, advantage, batch_attr["use_3d_position_ids"])
-            for state, advantage in zip(rollout_items, advantages)
-        ]
-
-    def _convert_one_rollout_state(
-        self,
-        state: RolloutState,
-        advantage_val: float | list[float],
-        use_3d_position_ids: bool,
-    ) -> _TrainItem:
-        input_ids = cast(list[int], state.input_ids)
-        labels = cast(list[int], state.labels)
-        shifted_labels = labels[1:]
-
-        input_ids_t = cast(torch.LongTensor, torch.tensor(input_ids[:-1], dtype=torch.int64).unsqueeze(0))
-        shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
-
-        rollout_logprobs: torch.Tensor | None = None
-        if state.logprobs is not None:
-            rollout_logprobs = torch.tensor(state.logprobs[1:], dtype=torch.float32).unsqueeze(0)
-
-        if isinstance(advantage_val, list):
-            if len(advantage_val) != len(shifted_labels):
-                raise ValueError(
-                    f"Token advantage length mismatch for rollout_id={state.rollout_id}: "
-                    f"{len(advantage_val)} vs shifted_labels={len(shifted_labels)}"
-                )
-            token_advantages = [value if label != -100 else 0.0 for value, label in zip(advantage_val, shifted_labels)]
-        else:
-            token_advantages = [advantage_val if label != -100 else 0.0 for label in shifted_labels]
-        advantages = torch.tensor([token_advantages], dtype=torch.float32)
-
-        position_ids = state.position_ids
-        if use_3d_position_ids and (position_ids is None or position_ids.ndim != 3):
-            seq_len = input_ids_t.size(-1)
-            text_position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, 1, -1)
-            # Mixed batches use three-axis MRoPE position IDs. Repeat the normal text
-            # positions on every axis so text samples have the same rank as the VLM
-            # samples when their sequence contexts are packed together.
-            position_ids = np.broadcast_to(text_position_ids, (3, 1, seq_len)).copy()
-        multimodal_train_info = cast(dict | None, state.mm_info)
-        seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, multimodal_train_info)
-        seq_ctx.rollout_routed_experts = state.routed_experts  # type: ignore[assignment] # n,layer*expert
-
-        loss_inputs: dict[str, torch.Tensor | None] = {
-            "shifted_labels": shifted_labels_t,
-            "advantages": advantages,
-            "rollout_logprobs": rollout_logprobs,
-        }
-        loss_inputs.update(self._distillation.rollout_teacher_targets(state, shifted_labels=shifted_labels))
-
-        return {"seq_ctx": seq_ctx, "loss_inputs": loss_inputs}
-
     @ray_method
-    def fit(
+    def load_train_batch(
         self,
         rollout_item_refs: list[ray.ObjectRef],
-        advantages: Sequence[float | list[float]],
-        pack_plan: DPRankPackIndices,
+        rank_plan: RankPlan,
         batch_attr: TrainBatchAttr,
-    ) -> WorkerLogItem:
-        """Train one rollout batch from the controller's packed per-DP plan.
+    ) -> None:
+        """Install one local training batch; the only data entry point.
 
         Args:
-            rollout_item_refs (list[ray.ObjectRef]): Nested per-DP object refs; element
-                zero wraps this DP rank's ``RolloutState`` list and is shared by all
-                data replicas of the rank.
-            advantages: Scalar or shifted-token advantages per rollout state, aligned with
-                the dereferenced state list.
-            pack_plan (DPRankPackIndices): Local ``[optimizer_step][pack][sample]`` plan
-                whose indices address the dereferenced state list.
-            batch_attr (TrainBatchAttr): Batch-level attributes derived by the
-                controller; uniform across all workers of the batch.
+            rollout_item_refs (list[ray.ObjectRef]): Nested ref whose element zero wraps
+                this DP rank's ``RolloutState`` list, shared by all replicas.
+            rank_plan (RankPlan): Local pack indices addressing the states.
+            batch_attr (TrainBatchAttr): Batch-level attributes derived by the controller.
+
+        Returns:
+            None
+        """
+        rollout_items = ray.get(rollout_item_refs[0])
+        conversion_begin = time.perf_counter()
+        self._batch = TrainBatch(
+            rollout_items,
+            rank_plan,
+            batch_attr,
+            self._distillation,
+            pack_max_length=self.config.pack_max_length,
+            model_cfg=self.config.model_cfg,
+            teacher_loss_keys=self._configured_teacher_loss_keys(),
+            distillation_config=self.config.distillation_config,
+        )
+        self._batch_conversion_time_s = time.perf_counter() - conversion_begin
+
+    @ray_method
+    def release_train_batch(self) -> None:
+        """Release the worker-local batch; remote refs stay owned by the
+        trainer.
+
+        Safe to call when nothing is loaded.
+
+        Returns:
+            None
+        """
+        if self._batch is not None:
+            self._batch.close()
+            self._batch = None
+
+    @ray_method
+    def fit(self, advantages: Sequence[float | list[float]]) -> WorkerLogItem:
+        """Train one loaded rollout batch with the controller's advantages.
+
+        Args:
+            advantages (Sequence[float | list[float]]): Scalar or shifted-token
+                advantages aligned with the local sample order.
 
         Returns:
             WorkerLogItem: Training metrics of one rollout batch.
         """
         # NOTE: sglang会清除logger handle, 重新创建
         self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
-        convert_begin = time.perf_counter()
-        rollout_items = ray.get(rollout_item_refs[0])
-        train_items = self._convert_rollout_items_to_train_items(rollout_items, advantages, batch_attr)
-        conversion_time_s = time.perf_counter() - convert_begin
-        del rollout_items, advantages, rollout_item_refs
-
-        pack_begin = time.perf_counter()
-        step_batches = self._pack_train_items(train_items, pack_plan, batch_attr)
-        pack_time_s = time.perf_counter() - pack_begin
-        del train_items, pack_plan
-
-        worker_log_item = self._fit(step_batches, batch_attr["rollout_idx"])
-        worker_log_item["packing_conversion_time_s"] = conversion_time_s
-        worker_log_item["packing_pack_time_s"] = pack_time_s
+        if self._batch is None:
+            raise RuntimeError("training batch is not loaded; call load_train_batch before fit")
+        self._batch.install_advantages(cast(list[float], list(advantages)))
+        self._batch.require_targets("actor")
+        rollout_idx = self._batch.attrs["rollout_idx"]
+        worker_log_item = self._fit(self._batch, rollout_idx)
+        worker_log_item.setdefault("packing_conversion_time_s", self._batch_conversion_time_s)
+        worker_log_item.setdefault("packing_pack_time_s", self._pack_time_s)
         return worker_log_item
-
-    def _pack_train_items(
-        self,
-        items: list[_TrainItem],
-        plan: DPRankPackIndices,
-        batch_attr: TrainBatchAttr,
-    ) -> list[list[tuple[SequenceContext, BaseRLLossContext]]]:
-        """Materialize local [optimizer_step][pack][sample_index] plans on CPU.
-
-        Indices address items. Concatenate and pad sequence/loss tensors to pack_max_length, including empty all-
-        padding packs. Batch and teacher configuration define required extra fields on every pack. Build one loss
-        context per final pack; do not shift again or recompute advantages. Return [optimizer_step][pack]
-        (SequenceContext, loss context) pairs. Device transfer and SP splitting happen later in _fit.
-        """
-        template_keys = list(batch_attr["pack_loss_keys"])
-        for key in self._configured_teacher_loss_keys():
-            if key not in template_keys:
-                template_keys.append(key)
-
-        step_batches: list[list[tuple[SequenceContext, BaseRLLossContext]]] = []
-        for step_plan in plan:
-            step_batches.append(
-                [
-                    self._pack_one_batch(
-                        [items[index] for index in pack],
-                        template_keys=template_keys,
-                        use_3d_position_ids=batch_attr["use_3d_position_ids"],
-                        has_routed_experts=batch_attr["has_routed_experts"],
-                    )
-                    for pack in step_plan
-                ]
-            )
-        return step_batches
-
-    def _configured_teacher_loss_keys(self) -> list[str]:
-        distillation_config = self.config.distillation_config
-        if distillation_config is None:
-            return []
-        keys: list[str] = []
-        if distillation_config.rollout_teachers:
-            keys.append("teacher_logprobs")
-            if not distillation_config.loss_config.uses_sampled_token_targets:
-                keys.append("target_token_ids")
-        if distillation_config.train_teachers:
-            keys.append("teacher_indices")
-        return keys
-
-    def _pack_one_batch(
-        self,
-        pack_items: list[_TrainItem],
-        template_keys: list[str],
-        use_3d_position_ids: bool,
-        has_routed_experts: bool,
-    ) -> tuple[SequenceContext, BaseRLLossContext]:
-        real_tokens = 0
-        for item in pack_items:
-            input_ids = item["seq_ctx"].input_ids
-            assert input_ids is not None, "Packed seq_ctx.input_ids must not be None"
-            real_tokens += input_ids.shape[1]
-        padding_len = self.config.pack_max_length - real_tokens
-        assert padding_len >= 0, f"Pack tokens {real_tokens} exceed pack_max_length {self.config.pack_max_length}"
-
-        if pack_items:
-            loss_inputs_list = [item["loss_inputs"] for item in pack_items]
-            loss_inputs: dict[str, torch.Tensor | None] = {
-                "shifted_labels": torch.cat(
-                    [cast(torch.Tensor, inputs["shifted_labels"]) for inputs in loss_inputs_list], dim=1
-                ),
-                "advantages": torch.cat(
-                    [cast(torch.Tensor, inputs["advantages"]) for inputs in loss_inputs_list], dim=1
-                ),
-            }
-            for key in template_keys:
-                values = [inputs.get(key) for inputs in loss_inputs_list]
-                present = [value is not None for value in values]
-                if not all(present):
-                    raise ValueError(f"Required pack field {key} must be present on every sample: {present}")
-                loss_inputs[key] = torch.cat([cast(torch.Tensor, value) for value in values], dim=1)
-            if padding_len > 0:
-                for key, tensor in loss_inputs.items():
-                    assert tensor is not None
-                    loss_inputs[key] = torch.cat([tensor, self._pack_padding_loss_input(key, padding_len)], dim=1)
-        else:
-            # Scheduling-only padding slot: the whole pack materializes as padding.
-            loss_inputs = {
-                "shifted_labels": self._pack_padding_loss_input("shifted_labels", padding_len),
-                "advantages": self._pack_padding_loss_input("advantages", padding_len),
-            }
-            for key in template_keys:
-                loss_inputs[key] = self._pack_padding_loss_input(key, padding_len)
-
-        seq_ctx_list = [item["seq_ctx"] for item in pack_items]
-        if padding_len > 0:
-            seq_ctx_list.append(
-                self._pack_padding_seq_ctx(
-                    padding_len,
-                    use_3d_position_ids=use_3d_position_ids,
-                    has_routed_experts=has_routed_experts,
-                )
-            )
-        seq_ctx = SequenceContext.cat(seq_ctx_list)
-
-        assert seq_ctx.input_ids is not None
-        seq_len = seq_ctx.input_ids.shape[1]
-        for key, tensor in loss_inputs.items():
-            tensor_len = None if tensor is None else tensor.shape[1]
-            assert tensor_len == seq_len, f"{key}: {tensor_len} vs {seq_len}"
-
-        # Build the loss context on CPU; `_fit` transfers it to the accelerator and
-        # applies the optional sequence-parallel split, mirroring the seq_ctx lifecycle.
-        loss_ctx = self.config.loss_cfg.build(data=loss_inputs, device="cpu")
-        assert loss_ctx is not None
-        return seq_ctx, loss_ctx
-
-    def _pack_padding_loss_input(self, key: str, padding_len: int) -> torch.Tensor:
-        if key == "shifted_labels":
-            return torch.full((1, padding_len), -100, dtype=torch.long)
-        if key == "advantages":
-            return torch.zeros(1, padding_len, dtype=torch.float32)
-        if key == "rollout_logprobs":
-            return torch.zeros(1, padding_len, dtype=torch.float32)
-        if key == "teacher_indices":
-            return torch.full((1, padding_len), -1, dtype=torch.long)
-        if key in ("teacher_logprobs", "target_token_ids"):
-            distillation_config = self.config.distillation_config
-            assert distillation_config is not None, f"Padding {key} requires distillation_config"
-            if key == "teacher_logprobs" and distillation_config.loss_config.uses_sampled_token_targets:
-                return torch.zeros(1, padding_len, dtype=torch.float32)
-            top_k = distillation_config.loss_config.top_k
-            assert top_k is not None, f"Padding {key} requires loss_config.top_k"
-            if key == "teacher_logprobs":
-                return torch.zeros(1, padding_len, top_k, dtype=torch.float32)
-            return torch.zeros(1, padding_len, top_k, dtype=torch.long)
-        raise ValueError(f"Unknown pack loss input key: {key}")
-
-    def _pack_padding_seq_ctx(
-        self,
-        padding_len: int,
-        use_3d_position_ids: bool,
-        has_routed_experts: bool,
-    ) -> SequenceContext:
-        # Reduce the attn calculation time by using multiple short sequence packs
-        pad_tokens = tuple(torch.zeros(1, 1024, dtype=torch.long) for _ in range(padding_len // 1024))
-        if padding_len % 1024 > 0:
-            pad_tokens = pad_tokens + (torch.zeros(1, padding_len % 1024, dtype=torch.long),)
-        pad_seq_ctx = SequenceContext.from_input_ids(pad_tokens, device="cpu")  # type: ignore[arg-type]
-        pad_seq_ctx.num_padding = padding_len
-        if use_3d_position_ids:
-            _position_ids_list = []
-            for pad_token in pad_tokens:
-                _position_ids = torch.arange(pad_token.size(-1)).view(1, 1, -1).expand(3, 1, -1)
-                _position_ids_list.append(_position_ids)
-            pad_seq_ctx.position_ids = torch.cat(_position_ids_list, dim=-1)  # type: ignore[assignment]
-        if has_routed_experts:
-            language_cfg = (
-                self.config.model_cfg.text_config
-                if isinstance(self.config.model_cfg, BaseComposeConfig)
-                else self.config.model_cfg
-            )
-            pad_seq_ctx.rollout_routed_experts = torch.randint(
-                low=0, high=language_cfg.n_routed_experts, size=(padding_len, 1, 1)
-            )
-        return pad_seq_ctx
 
     def _fit(
         self,
-        step_batches: list[list[tuple[SequenceContext, BaseRLLossContext]]],
+        batch: TrainBatch,
         rollout_idx: int,
     ) -> WorkerLogItem:
         loss_cfg: BaseRLLossConfig = self.config.loss_cfg
-        num_optimizer_steps = len(step_batches)
+        step_packs = batch.plan.steps
+        num_optimizer_steps = len(step_packs)
         assert num_optimizer_steps <= self._optimizer_steps, (
             f"Pack plan optimizer steps {num_optimizer_steps} exceed configured "
             f"optimizer_steps {self._optimizer_steps}"
@@ -1052,44 +702,22 @@ class TrainingWorker(SingleAcceleratorWorker):
                 f"Optimizer only steps {num_optimizer_steps} times because pack plan steps "
                 f"{num_optimizer_steps} < optimizer_steps {self._optimizer_steps}."
             )
-        packs_per_step = [len(step_data_batches) for step_data_batches in step_batches]
-        flat_data_batches = [data for step_data_batches in step_batches for data in step_data_batches]
-        del step_batches
+        packs_per_step = [len(step_data_batches) for step_data_batches in step_packs]
+        flat_packs = tuple(pack for step in step_packs for pack in step)
 
-        # Update seq_ctx: resolve pixel_values and rollout_routed_experts, then move to the
-        # accelerator and split for sequence parallelism. loss_ctx follows the same lifecycle:
-        # it was built on CPU during packing and is only transferred and split here. MTP
-        # contexts must be built on the full (pre-split) labels of the split seq_ctx.
+        # 每个 pack 单独从 TrainBatch 物化：CPU 序列、refs 解析、H2D 与 SP split 一次完成，
+        # 再把 loss context 建在 CPU 后搬到设备。各阶段共用同一 pack 顺序，collective 对称。
         seq_ctx_list: list[SequenceContext] = []
         loss_ctx_list: list[BaseRLLossContext] = []
         mtp_loss_ctx_list: list[list[MTPLossContext]] = []
         prepare_inputs_begin = time.perf_counter()
-        for data in flat_data_batches:
-            seq_ctx, loss_ctx = data
-            # update seq_ctx
-            pixel_values = seq_ctx.pixel_values
-            if pixel_values is not None:
-                if not isinstance(pixel_values, np.ndarray):
-                    assert isinstance(pixel_values, list), (
-                        f"pixel_values should be list of tensor, got {type(pixel_values)}"
-                    )
-                    pixel_values = ray.get(list(pixel_values))
-                    pixel_values = [torch.as_tensor(pixel_value) for pixel_value in pixel_values]
-                    pixel_values = torch.cat(pixel_values, dim=0)
-                    seq_ctx.pixel_values = pixel_values
-                else:
-                    raise NotImplementedError("The case where pixel_values is a numpy array is not implemented yet.")
-
-            rollout_routed_experts = seq_ctx.rollout_routed_experts
-            if rollout_routed_experts is not None:
-                self._add_rollout_routed_experts(seq_ctx, rollout_routed_experts)
-
-            seq_ctx.offload_rollout_routed_experts = self.config.offload_rollout_routed_experts
-            seq_ctx = seq_ctx.to(DEVICE)
+        for full_pack in iter_cpu_packs(batch, flat_packs, self._resolve_pack_refs):
+            seq_ctx = full_pack.full_data["seq_ctx"].copy().to(DEVICE)
             if self.sp_mesh.size() > 1:
                 seq_ctx = seq_ctx.split(self.sp_mesh)
 
-            # update loss_ctx
+            loss_ctx = loss_cfg.build(data=full_pack.full_data, device="cpu")
+            assert loss_ctx is not None
             loss_kwargs = loss_ctx.loss_kwargs
             loss_kwargs.to(DEVICE)
             if self.mtp_config is not None:
@@ -1116,12 +744,8 @@ class TrainingWorker(SingleAcceleratorWorker):
 
             seq_ctx_list.append(seq_ctx)
             loss_ctx_list.append(loss_ctx)
-        self.logger.debug(
-            f"Rank{self.rank} Rollout {rollout_idx} prepare_inputs elapsed="
-            f"{time.perf_counter() - prepare_inputs_begin:.4f}s"
-        )
-
-        del flat_data_batches
+        self._pack_time_s = time.perf_counter() - prepare_inputs_begin
+        self.logger.debug(f"Rank{self.rank} Rollout {rollout_idx} prepare_inputs elapsed={self._pack_time_s:.4f}s")
 
         # When sp_mesh.size() > 1, get the sp_split shifted_labels and rollout_logprobs
         shifted_labels_list = [loss_ctx.loss_kwargs.shifted_labels for loss_ctx in loss_ctx_list]

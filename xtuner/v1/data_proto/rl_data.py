@@ -287,7 +287,7 @@ class RolloutState(BaseModel):
             None
         """
         if self.input_ids is None or self.labels is None or self.train_meta is None:
-            raise ValueError("Training fields and train_meta must be present")
+            raise ValueError("Training input_ids, labels and train_meta must be present")
         expected = self._build_train_meta(
             input_ids=self.input_ids,
             labels=self.labels,
@@ -518,7 +518,7 @@ def _calculate_effective_response_mask(
     *,
     current_train_step: int,
     token_stale_threshold: int,
-) -> list[int]:
+) -> list[bool]:
     """Calculate the effective response mask of one rollout state without
     mutating it.
 
@@ -545,16 +545,15 @@ def _calculate_effective_response_mask(
     offset = len(labels) - len(response_ids)
     # semantic_mask: labels 中非 -100 的监督位；token_staleness_mask: 逐 token 新鲜度
     # （语义洞位的 staleness 值无意义，乘上 semantic_mask 后自然归零）。
-    semantic_mask = [int(label != -100) for label in labels[offset:]]
+    semantic_mask = [label != -100 for label in labels[offset:]]
     token_staleness_mask = [
-        int(calculate_seq_staleness(response_model_step, current_train_step) < token_stale_threshold)
+        calculate_seq_staleness(response_model_step, current_train_step) < token_stale_threshold
         for response_model_step in response_model_steps
     ]
-    effective_mask = [
-        semantic_mask_value * token_staleness_mask_value
+    return [
+        semantic_mask_value and token_staleness_mask_value
         for semantic_mask_value, token_staleness_mask_value in zip(semantic_mask, token_staleness_mask)
     ]
-    return effective_mask
 
 
 def calculate_group_effective_response_masks(
@@ -562,7 +561,7 @@ def calculate_group_effective_response_masks(
     *,
     current_train_step: int,
     token_stale_threshold: int | None,
-) -> list[list[int] | None]:
+) -> list[list[bool] | None]:
     """Calculate one group's effective response masks under the token-staleness
     policy.
 
@@ -584,7 +583,7 @@ def calculate_group_effective_response_masks(
     if token_stale_threshold is None:
         return [None] * len(group)
 
-    masks: list[list[int] | None] = []
+    masks: list[list[bool] | None] = []
     for item in group:
         if item.labels is None or not item.response_ids or len(item.labels) < len(item.response_ids):
             masks.append(None)
@@ -619,10 +618,18 @@ def validate_rollout_group(group: list[RolloutState], *, task_name: str) -> None
 
 
 def validate_train_group(group: list[RolloutState], *, task_name: str) -> None:
-    """Check a completed group's full fields immediately before training.
+    """Check a completed group's fields immediately before training.
 
-    Raise ValueError so the training boundary can discard the entire group. This function does not fill source versions
-    or modify labels or metadata.
+    Group-level conditions stay here; each sample's training-field consistency is
+    owned by ``RolloutState.validate_training``. Raise ValueError so the training
+    boundary can discard the entire group.
+
+    Args:
+        group (list[RolloutState]): Rollout group selected for training.
+        task_name (str): Task name used for error attribution.
+
+    Returns:
+        None
     """
     if not group or any(not isinstance(state, RolloutState) or state.status != Status.COMPLETED for state in group):
         raise ValueError(f"task={task_name!r}: training requires a nonempty COMPLETED rollout group")
@@ -666,4 +673,7 @@ def validate_train_group(group: list[RolloutState], *, task_name: str) -> None:
             actual = state.extra_fields.get(key)
             if actual != value:
                 raise ValueError(f"{context}: train meta {key}={actual!r}, expected={value!r}")
-        state.validate_training()
+        try:
+            state.validate_training()
+        except ValueError as exc:
+            raise ValueError(f"{context}: {exc}") from exc
