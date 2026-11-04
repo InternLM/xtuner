@@ -299,7 +299,8 @@ class BaseRLLossContext(CELossContext):
                     f"rollout_is_weights {rollout_is_weights.size(1)} vs shifted_labels {shifted_labels.size(1)}"
                 )
 
-        shifted_labels[~rollout_is_mask.bool()] = -100  # update loss mask
+        # Out-of-place update: the full source labels handed to build() are never mutated.
+        self.loss_kwargs.shifted_labels = shifted_labels.masked_fill(~rollout_is_mask.bool(), self.loss_cfg.ignore_idx)
 
         self.loss_kwargs.is_weights = rollout_is_weights
         return mismatch_metrics, rollout_is_metrics
