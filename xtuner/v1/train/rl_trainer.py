@@ -17,7 +17,7 @@ from typing_extensions import Literal, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1._writer import get_writer
-from xtuner.v1.data_proto.rl_data import RolloutState, is_valid_for_training
+from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop_manager import (
@@ -1180,7 +1180,8 @@ class BaseRLTrainer:
         valid_groups = []
 
         for group in data_groups:
-            if not is_valid_for_training(group, self.logger):
+            # 日志需要兼容 recovered/debug 状态；canonical 训练契约由 controller 单独校验。
+            if any(item.status in {Status.ABORTED, Status.FILTERED, Status.FAILED} for item in group):
                 continue
             valid_groups.append(group)
             for data in group:
@@ -1230,8 +1231,12 @@ class BaseRLTrainer:
                         "label": ground_truth,
                         "response": response,
                         "reward": reward,
-                        "prompt_len": data.num_tokens,
-                        "response_len": len(response_ids),
+                        "prompt_len": (
+                            data.train_meta.prompt_length if data.train_meta is not None else data.num_tokens
+                        ),
+                        "response_len": (
+                            data.train_meta.response_length if data.train_meta is not None else len(response_ids)
+                        ),
                         "reward_payload": data.reward,
                         "agent": {
                             "name": data.extra_fields.get("agent_name"),
@@ -1299,8 +1304,12 @@ class BaseRLTrainer:
                         "status": data.status.value if hasattr(data.status, "value") else str(data.status),
                         "prompt": data.message,
                         "response": data.response or "",
-                        "prompt_len": data.num_tokens,
-                        "response_len": len(response_ids),
+                        "prompt_len": (
+                            data.train_meta.prompt_length if data.train_meta is not None else data.num_tokens
+                        ),
+                        "response_len": (
+                            data.train_meta.response_length if data.train_meta is not None else len(response_ids)
+                        ),
                         "label": ground_truth,
                         "reward": reward,
                         "reward_payload": data.reward or {"score": reward},

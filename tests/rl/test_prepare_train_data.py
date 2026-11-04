@@ -21,8 +21,10 @@ rollout backend：
   与输入位置逐一对齐（regression: advantage 曾比 input_ids 长 1 导致 pack 后整体错位）。
 """
 
+import asyncio
 import sys
 import unittest
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
 
@@ -31,13 +33,22 @@ import torch
 
 from xtuner.v1.data_proto.rl_data import (
     RolloutState,
+    SampleParams,
     Status,
     TeacherTargets,
 )
 from xtuner.v1.datasets.mllm_tokenize_fn.qwenvl_rope2d import get_rope_index_3
-from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter, RolloutTeacherConfig
+from xtuner.v1.rl.agent_loop_manager.produce_utils import take_train_batch
+from xtuner.v1.rl.distillation import (
+    DistillationConfig,
+    DistillationTrainerAdapter,
+    RolloutTeacherConfig,
+    RolloutTeacherScorer,
+)
 from xtuner.v1.rl.loss import DistillationLossConfig
+from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.trainer.controller import TrainingController, get_train_seq_ctx
+
 
 # localhost/sandbox loop 模块顶层导入 lagent；测试环境不依赖其真实实现。
 # rate_limiter 必须整路径 stub：父级 MagicMock 没有 __path__，子模块 from-import 无法透传。
@@ -189,6 +200,17 @@ class TestAgentLoopCanonicalizeTrainFields(unittest.TestCase):
         self.assertEqual(state.status, Status.FAILED)
         self.assertIn("canonicalize_train_fields failed", state.error_msg)
         loop.logger.error.assert_called_once()
+
+    def test_empty_response_marks_sample_failed(self):
+        for response_ids in ([20, 21], []):
+            with self.subTest(response_ids=response_ids):
+                loop = self._make_loop()
+                state = self._state(response="", response_ids=response_ids)
+
+                loop.canonicalize_train_fields([state])
+
+                self.assertEqual(state.status, Status.FAILED)
+                self.assertIn("response must be non-empty", state.error_msg)
 
     def test_failure_is_isolated_within_group(self):
         loop = self._make_loop()
@@ -352,6 +374,7 @@ class TestConvertRolloutGroups(unittest.TestCase):
         labels: list[int] | None = None,
         teacher_tokens: list[int] | list[list[int]] | None = None,
         teacher_logprobs: list[float] | list[list[float]] | None = None,
+        publish_training: bool = True,
     ) -> RolloutState:
         resolved_prompt_ids = prompt_ids if prompt_ids is not None else [10, 11, 12]
         resolved_response_ids = response_ids if response_ids is not None else [20, 21, 22]
@@ -372,6 +395,7 @@ class TestConvertRolloutGroups(unittest.TestCase):
             extra_fields=extra_fields or {},
             input_ids=input_ids,
             labels=labels,
+            response_model_steps=[1] * len(resolved_response_ids),
             teacher_targets=(
                 TeacherTargets(
                     kind="topk" if teacher_tokens and isinstance(teacher_tokens[0], list) else "sampled",
@@ -382,20 +406,21 @@ class TestConvertRolloutGroups(unittest.TestCase):
                 else None
             ),
         )
-        if input_ids is not None:
-            # agentic 全序列样本由 trace store 直接提供字段，按原样返回。
-            return state
-        # prompt+response 样本：模拟 loop 侧 canonicalize 后的最终形态（语义洞直接烙在 labels）。
-        resp_ids = list(resolved_response_ids)
-        state.input_ids = list(resolved_prompt_ids) + resp_ids
-        if supervised_mask is None:
-            state.labels = [-100] * len(resolved_prompt_ids) + resp_ids
-        else:
-            state.labels = [-100] * len(resolved_prompt_ids) + [
-                resp_id if flag else -100 for resp_id, flag in zip(resp_ids, supervised_mask)
-            ]
-        if state.logprobs is not None:
-            state.logprobs = [0.0] * len(resolved_prompt_ids) + list(state.logprobs)
+        if input_ids is None:
+            # prompt+response 样本：模拟 loop 侧 canonicalize 后的最终形态（语义洞直接烙在 labels）。
+            resp_ids = list(resolved_response_ids)
+            state.input_ids = list(resolved_prompt_ids) + resp_ids
+            if supervised_mask is None:
+                state.labels = [-100] * len(resolved_prompt_ids) + resp_ids
+            else:
+                state.labels = [-100] * len(resolved_prompt_ids) + [
+                    resp_id if flag else -100 for resp_id, flag in zip(resp_ids, supervised_mask)
+                ]
+            if state.logprobs is not None:
+                state.logprobs = [0.0] * len(resolved_prompt_ids) + list(state.logprobs)
+        if publish_training:
+            assert state.input_ids is not None and state.labels is not None
+            state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
         return state
 
     @staticmethod
@@ -451,7 +476,7 @@ class TestConvertRolloutGroups(unittest.TestCase):
         self.assertEqual(info["training_samples"], 1)
         self.assertEqual(info["training_tokens"], 5)
         self.assertEqual(info["rewards/mean"], 1.0)
-        # response_len 从 labels 监督位推导（labels 是唯一监督载体）：语义洞不计入。
+        # response_len 从 TrainMeta.supervised_tokens 读取，语义洞不计入。
         self.assertEqual(info["response_len/mean"], 2.0)
         self.assertEqual(info["prompt_len/mean"], 3.0)
 
@@ -728,6 +753,31 @@ class TestConvertRolloutGroups(unittest.TestCase):
         self.assertNotIn("target_token_ids", data_batches[0])
         self.assertNotIn("target_token_ids", data_batches[1])
 
+    def test_canonical_training_contract_is_required(self):
+        controller = self._build_controller([1.0])
+        valid = self._state()
+        data_batches, info = self._convert(controller, [[valid]])
+        self.assertEqual(len(data_batches), 1)
+        self.assertEqual(info["training_samples"], 1)
+
+        noncanonical = RolloutState(
+            rollout_id=2,
+            group_id=2,
+            message=[],
+            prompt_ids=[10, 11],
+            response="response",
+            response_ids=[20, 21],
+            response_model_steps=[1, 1],
+            reward={"score": 1.0},
+            status=Status.COMPLETED,
+        )
+        missing_meta = self._state(publish_training=False)
+        for state in (noncanonical, missing_meta):
+            with self.subTest(state=state):
+                data_batches, info = self._convert(controller, [[state]])
+                self.assertEqual(data_batches, [])
+                self.assertEqual(info["training_samples"], 0)
+
     def test_invalid_group_is_skipped(self):
         # FAILED/FILTERED/ABORTED group 不能进入训练 batch，也不能贡献训练样本数。
         controller = self._build_controller([1.0])
@@ -769,6 +819,7 @@ class TestConvertRolloutGroups(unittest.TestCase):
             input_ids=[30, 31, 40, 41, 42],
             labels=[-100, -100, 40, 41, 42],
             logprobs=[0.0, -0.1, -0.2, -0.3],
+            publish_training=False,
         )
 
         data_batches, info = self._convert(controller, [[state]])
@@ -783,6 +834,61 @@ class TestConvertRolloutGroups(unittest.TestCase):
 
         with self.assertRaises(AssertionError):
             self._convert(controller, [[state]], pack_max_length=4)
+
+    def test_generate_staleness_and_controller_contract(self):
+        async def run():
+            loop = _PromptResponseLoop.__new__(_PromptResponseLoop)
+            loop.logger = MagicMock()
+            loop.tokenizer = MagicMock()
+            loop.sample_params = SampleParams()
+            loop.judger = None
+            loop.enable_batch_judge = False
+            loop.is_valid_sample_fn = None
+            loop._teacher_scorer = RolloutTeacherScorer.disabled()
+            state = RolloutState(
+                rollout_id=1,
+                group_id=1,
+                message=[],
+                prompt_ids=[10, 11],
+                response="ok",
+                response_ids=[20, 21],
+                response_model_steps=[0, 4],
+                logprobs=[-0.1, -0.2],
+                reward={"score": 1.0},
+                status=Status.COMPLETED,
+            )
+
+            group = await loop.generate_group([state])
+            replay_buffer = SyncReplayBufferConfig().build()
+            await replay_buffer.put(group, "task", model_step=4, current_train_step=None)
+            progress = MagicMock()
+            progress.consume_raw_rewards.return_value = (0.0, 0)
+            progress.consume_produced.return_value = (0, 0)
+            progress.consume_produce_time.return_value = 0.0
+            progress.consume_discarded.return_value = (0, 0)
+            produce_result = await take_train_batch(
+                task_runners=[SimpleNamespace(task_name="task", token_stale_threshold=4)],
+                replay_buffer=replay_buffer,
+                logger=MagicMock(),
+                manager_name="contract-test",
+                task_batch_sizes={"task": 1},
+                progress=progress,
+                current_train_step=5,
+            )
+
+            self.assertEqual(state.labels, [-100, -100, -100, 21])
+            self.assertEqual(state.train_meta.supervised_tokens, 1)
+            state.validate_training()
+            controller = self._build_controller([1.5])
+            data_batches, info = self._convert(controller, produce_result.rollout_states)
+            self.assertEqual(data_batches[0]["seq_ctx"].input_ids.tolist(), [[10, 11, 20]])
+            self.assertEqual(data_batches[0]["shifted_labels"].tolist(), [[-100, -100, 21]])
+            self.assertEqual(data_batches[0]["advantage"], [0.0, 0.0, 1.5])
+            self.assertEqual(info["prompt_len/mean"], 2.0)
+            self.assertEqual(info["response_len/mean"], 1.0)
+            self.assertEqual(info["training_tokens"], 3)
+
+        asyncio.run(run())
 
 
 class TestConvertRolloutGroupsPackAlignment(unittest.TestCase):
@@ -831,6 +937,7 @@ class TestConvertRolloutGroupsPackAlignment(unittest.TestCase):
             response="ok",
             reward={"score": reward},
             status=Status.COMPLETED,
+            response_model_steps=[1] * len(response_ids),
         )
         # 模拟 loop 侧 canonicalize 后的最终形态（语义洞直接烙在 labels）。
         state.input_ids = list(prompt_ids) + list(response_ids)
@@ -838,6 +945,7 @@ class TestConvertRolloutGroupsPackAlignment(unittest.TestCase):
             resp_id if flag else -100 for resp_id, flag in zip(response_ids, supervised_mask)
         ]
         state.logprobs = [0.0] * len(prompt_ids) + list(logprobs)
+        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
         return state
 
     @staticmethod

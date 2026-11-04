@@ -131,8 +131,11 @@ class TestApplyResponseMask(unittest.TestCase):
     def test_mask_does_not_restore_semantic_holes(self):
         # 语义洞（非 staleness）在 mask 为 True 时也保持 -100。
         state = self._published()
-        state.labels = [-100, -100, 20, -100, 22]
-        state.train_meta = state._build_train_meta(input_ids=[10, 11, 20, 21, 22], labels=state.labels, logprobs=None)
+        state.set_training_fields(
+            input_ids=[10, 11, 20, 21, 22],
+            labels=[-100, -100, 20, -100, 22],
+            logprobs=None,
+        )
         state.apply_response_mask([True, True, True])
 
         self.assertEqual(state.labels, [-100, -100, 20, -100, 22])
