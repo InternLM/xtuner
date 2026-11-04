@@ -10,7 +10,7 @@ from xtuner.v1.module.attention.gated_deltanet import FusedRMSNormGated, GatedDe
 from xtuner.v1.module.attention.mha import MultiHeadAttention
 from xtuner.v1.module.attention.mla import MultiLatentAttention
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEGate, MoEMLP
-from xtuner.v1.module.head import LMHead, ValueHead
+from xtuner.v1.module.head import LMHead
 from xtuner.v1.module.linear.linear import _Linear
 from xtuner.v1.module.rms_norm.rms_norm import RMSNorm
 from xtuner.v1.module.rope.rope import FourierEmbedding, Qwen3VLTextRotaryEmbedding, RotaryEmbedding
@@ -54,7 +54,7 @@ def register_prober_list(model: nn.Module):
         elif isinstance(module, MoEBlock):
             wrapped = ProberList.wrap_moe_block_forward(module.forward, name)
             module.forward = types.MethodType(wrapped, module)  # type: ignore
-        elif isinstance(module, (LMHead, ValueHead)):
+        elif isinstance(module, LMHead):
             wrapped = ProberList.wrap_lm_head_forward(module.forward, name)
             module.forward = types.MethodType(wrapped, module)  # type: ignore
 

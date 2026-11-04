@@ -65,7 +65,7 @@ class Dense(BaseModel):
         self.embed_tokens = self.build_embeddings(config)
 
         # Make sure it works properly when not using fsdp
-        if config.tie_word_embeddings:
+        if config.tie_head:
             self.lm_head.weight = self.embed_tokens.weight
 
         # TODO(@yehaochen): 把这两行移除 _maybe_compile_layers 要把 compile 相关的 setting 放到 fsdp_config 之外

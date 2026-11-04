@@ -27,7 +27,7 @@ class LogProbConfig(BaseLossConfig):
         self,
         data: dict,
         sp_mesh: DeviceMesh | None = None,
-        device: str | torch.device = DEVICE,
+        device: str | torch.device | None = None,
     ) -> "LogProbContext | None":
         """Build a log-prob context from full labels.
 
@@ -41,6 +41,8 @@ class LogProbConfig(BaseLossConfig):
         """
         if "shifted_labels" not in data:
             return None
+        if device is None:
+            device = DEVICE
         loss_kwargs = LogProbKwargs(shifted_labels=data["shifted_labels"])
         if sp_mesh is not None and sp_mesh.size() > 1:
             loss_kwargs = loss_kwargs.sp_split(sp_mesh)
@@ -124,8 +126,13 @@ class TopKLogProbConfig(BaseLossConfig):
     def _loss_kwargs_cls(self) -> type[BaseLossKwargs]:
         return BaseLossKwargs
 
-    def build(self, data: dict, sp_mesh: DeviceMesh | None = None) -> "TopKLogProbContext":
-        del data, sp_mesh
+    def build(
+        self,
+        data: dict,
+        sp_mesh: DeviceMesh | None = None,
+        device: torch.device | str | None = None,
+    ) -> "TopKLogProbContext":
+        del data, sp_mesh, device
         return self.loss_ctx_cls(self, self._loss_kwargs_cls())
 
 

@@ -117,18 +117,23 @@ class BaseLossConfig(BaseModel):
         self,
         data: dict,
         sp_mesh: "DeviceMesh | None" = None,
+        device: torch.device | str | None = None,
     ) -> "BaseLossContext | None":
-        """Build loss context from data dict.
+        """Build a local loss context from complete, unsplit data.
 
-        Subclasses should extract required fields from data dict and construct loss_kwargs.
+        Subclasses extract their required fields, compute full-sample weights,
+        then split the loss kwargs for sequence parallelism before moving them
+        to the target device. ``build_batches`` only calibrates weights across
+        the optimizer step; it must not split the inputs again.
 
         Args:
-            data (dict): Data dict containing all possible loss-related fields.
-                Different loss configs extract different fields as needed.
+            data (dict): Complete data dict containing all loss-related fields.
             sp_mesh (DeviceMesh | None): Sequence parallel mesh.
+            device (torch.device | str | None): Target device for tensor loss
+                kwargs. ``None`` resolves the implementation's current default device.
 
         Returns:
-            BaseLossContext: Built loss context.
+            BaseLossContext: The local loss context for this rank.
         """
         ...
 

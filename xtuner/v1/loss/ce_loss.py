@@ -51,7 +51,7 @@ class CELossConfig(BaseLossConfig):
         self,
         data: dict,
         sp_mesh: DeviceMesh | None = None,
-        device: str | torch.device = DEVICE,
+        device: str | torch.device | None = None,
     ) -> "CELossContext | None":
         """Build CELossContext from full, unsplit data.
 
@@ -71,6 +71,8 @@ class CELossConfig(BaseLossConfig):
         """
         if "shifted_labels" not in data:
             return None
+        if device is None:
+            device = DEVICE
         shifted_labels = data["shifted_labels"]
         loss_weight = self._build_loss_weight(shifted_labels, data.get("seq_ctx"))
         loss_kwargs = CELossKwargs(shifted_labels=shifted_labels, loss_weight=loss_weight)

@@ -55,7 +55,7 @@ class CriticLossConfig(BaseLossConfig):
         self,
         data: dict,
         sp_mesh: DeviceMesh | None = None,
-        device: str | torch.device = DEVICE,
+        device: str | torch.device | None = None,
     ) -> "CriticLossContext | None":
         """Build critic loss context from data dict.
 
@@ -76,6 +76,8 @@ class CriticLossConfig(BaseLossConfig):
         """
         if "shifted_labels" not in data or "returns" not in data:
             return None
+        if device is None:
+            device = DEVICE
 
         shifted_labels = data["shifted_labels"]
         returns = data["returns"]
