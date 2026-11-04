@@ -98,6 +98,8 @@ def _resolve_routed_experts(expert_keys: List[Any], session_id: str) -> List[Any
 class TokenizedSegment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    request_id: str | None = None
+    model_step: int | None = None
     text: str
     token_ids: List[int]
     labels: List[int] | None = Field(default=None, repr=False)
@@ -173,6 +175,10 @@ class Trie:
                 node = node.children[key]
                 break
 
+        if node.value is not None and (getattr(node.value, "request_id", None) is not None or
+                                       getattr(value, "request_id", None) is not None):
+            raise ValueError(f"Conflicting trace write: old_request_id={getattr(node.value, 'request_id', None)} "
+                             f"new_request_id={getattr(value, 'request_id', None)}")
         node.value = value
 
     def search(self, text: str, filter_none: bool = False) -> Tuple[str, List["TreeNode"]]:
@@ -402,6 +408,8 @@ class RolloutTraceStore:
             )
         trace: dict[str, Any] = {"input_ids": [], "labels": [], "logprobs": []}
         expert_keys: list[Any] = []
+        response_model_steps = []
+        request_ids = []
         for node in nodes:
             node_val = node.value
             if not isinstance(node_val, TokenizedSegment):
@@ -412,7 +420,13 @@ class RolloutTraceStore:
             trace["labels"].extend(node_val.labels)
             trace["logprobs"].extend(node_val.logprobs)
             expert_keys.append(node_val.expert_key)
+            response_model_steps.extend(node_val.model_step for label in node_val.labels if label != -100)
+            if node_val.request_id is not None and node_val.request_id not in request_ids:
+                request_ids.append(node_val.request_id)
         trace["routed_experts"] = _resolve_routed_experts(expert_keys, session_id)
+        if request_ids:
+            trace["response_model_steps"] = response_model_steps
+            trace["request_ids"] = request_ids
         return trace
 
     def get_objects(self, keys: list[str]) -> list[ray.ObjectRef]:
