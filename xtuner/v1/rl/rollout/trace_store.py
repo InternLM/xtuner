@@ -141,12 +141,12 @@ class Trie:
         """Get all keys (i.e., strings) stored in the Trie."""
         result = []
 
-        stack: List[Tuple[TreeNode, Tuple[str, ...]]] = [(self.root, ())]
+        stack: List[Tuple[TreeNode, str]] = [(self.root, "")]
         while stack:
             node, path = stack.pop()
             if node.value is not None:
-                result.append("".join(path))
-            stack.extend((child, (*path, token)) for token, child in reversed(list(node.children.items())))
+                result.append(path)
+            stack.extend((child, path + token) for token, child in reversed(list(node.children.items())))
         return result
 
     def insert(self, key: str, value: Any) -> None:

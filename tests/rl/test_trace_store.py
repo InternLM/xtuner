@@ -28,24 +28,27 @@ class TestDeepTrie(unittest.TestCase):
         self.assertEqual(free.call_count, count)
         self.assertEqual([call.args[0] for call in free.call_args_list], list(range(count, 0, -1)))
         self.assertEqual(trie.keys(), [])
+        self.assertEqual(trie.root.children, {})
         trie.release()
 
     def test_partial_release_preserves_branch_values_and_key_order(self) -> None:
         trie = Trie()
-        for key in ("a", "ab", "abc", "ax", "z"):
+        self.assertEqual(trie.keys(), [])
+        trie.release()
+        for key in ("z", "", "a", "ab", "abc", "ax"):
             trie.insert(key, key)
-        self.assertEqual(trie.keys(), ["a", "ab", "abc", "ax", "z"])
+        self.assertEqual(trie.keys(), ["", "z", "a", "ab", "abc", "ax"])
         with patch.object(trace_store_module, "_free_ray_refs") as free:
             trie.release("ab")
         free.assert_called_once_with("ab")
-        self.assertEqual(trie.keys(), ["a", "abc", "ax", "z"])
+        self.assertEqual(trie.keys(), ["", "z", "a", "abc", "ax"])
         with patch.object(trace_store_module, "_free_ray_refs"):
             trie.release("abc")
-        self.assertEqual(trie.keys(), ["a", "ax", "z"])
+        self.assertEqual(trie.keys(), ["", "z", "a", "ax"])
         self.assertNotIn("b", trie.root.children["a"].children)
         with patch.object(trace_store_module, "_free_ray_refs") as free:
             trie.release()
-        self.assertEqual([call.args[0] for call in free.call_args_list], ["ax", "a", "z"])
+        self.assertEqual([call.args[0] for call in free.call_args_list], ["z", "ax", "a", ""])
         self.assertEqual(trie.keys(), [])
         trie.insert("new", "new")
         self.assertEqual(trie.keys(), ["new"])
