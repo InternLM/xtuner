@@ -297,21 +297,47 @@ class TestTrajectoryLogging(unittest.TestCase):
         self.assertIsNone(row["agent"]["segment_count"])
         self.assertIsNone(row["agent"]["artifacts"])
 
-    def test_invalid_train_group_is_not_written(self):
-        data = self._make_rollout(
+    def test_invalid_train_group_is_filtered_before_saving(self):
+        # 行为：非法组在进入轨迹保存前由 _prepare_train_batch 过滤——
+        # 它原地裁剪 train_batch，落盘层不再重复检查（防御职责上移一层）。
+        bad = self._make_rollout(
             rollout_id=20,
             session_id=123,
             reward=1.0,
             artifacts={"large_blob": "discarded"},
             status=Status.FAILED,
         )
-        trajectory_path = self.output_dir / "train_rollout_1.jsonl"
+        good = self._make_rollout(
+            rollout_id=21,
+            session_id=124,
+            reward=2.0,
+            artifacts=None,
+            status=Status.COMPLETED,
+        )
+        # COMPLETED 样本还需通过结构校验与 train meta 校验（正常由 agent_loop
+        # 的 _write_train_meta 写入）才会被保留。
+        good.input_ids = [1, 2, 3]
+        good.labels = [-100, 2, 3]
+        good.response_model_steps = [0, 0]  # 与 response_ids 等长（版本数校验）
+        good.num_tokens = 2  # len(input_ids) - 1
+        good.extra_fields.update(
+            {
+                "train_prompt_length": 1,
+                "train_response_length": 2,
+                "supervised_tokens": 2,  # labels[1:] 中非 -100 的个数
+                "position_layout": "1d",
+                "has_rollout_logprobs": False,
+                "has_routed_experts": False,
+            }
+        )
+        batch = [[bad], [good]]
 
-        self.trainer._save_trajectories([[data]], trajectory_path)
+        dropped_groups, dropped_samples = self.trainer._prepare_train_batch(batch, train_step=1)
 
-        objects = self._load_jsonl(trajectory_path)
-        self.assertEqual(objects[0]["total_len"], 0)
-        self.assertEqual(len(objects), 1)
+        self.assertEqual(dropped_groups, 1)
+        self.assertEqual(dropped_samples, 1)
+        self.assertEqual(len(batch), 1)
+        self.assertEqual(batch[0][0].rollout_id, 21)
 
 
 if __name__ == "__main__":
