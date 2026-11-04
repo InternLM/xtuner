@@ -1,4 +1,5 @@
 import asyncio
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -8,6 +9,8 @@ import ray
 from xtuner.v1.rl.rollout import trace_store as trace_store_module
 from xtuner.v1.rl.rollout.trace_store import (
     RolloutTraceStore,
+    TreeNode,
+    Trie,
     _free_ray_refs,
     get_existing_store,
     release_and_discard_rollout_groups,
@@ -111,3 +114,60 @@ class TestRolloutTraceStore(unittest.TestCase):
             _free_ray_refs({"outer": [({"inner": object_ref},)]})
 
         free.assert_called_once_with([object_ref], local_only=False)
+
+
+class TestTraceTrie(unittest.TestCase):
+    def test_keys_handles_a_trace_deeper_than_the_recursion_limit(self) -> None:
+        trie, nodes = self._deep_trie()
+        keys = trie.keys()
+        self.assertEqual(keys, ["x" * (i + 1) for i in range(len(nodes))])
+
+    def test_release_handles_a_trace_deeper_than_the_recursion_limit(self) -> None:
+        trie, nodes = self._deep_trie()
+        freed = []
+        with patch.object(trace_store_module, "_free_ray_refs", side_effect=freed.append):
+            trie.release()
+            trie.release()
+        self.assertEqual(freed, list(reversed(range(len(nodes)))))
+        self.assertFalse(trie.root.children)
+        self.assertTrue(all(node.value is None and not node.children and node.parent is None for node in nodes))
+        trie.insert("new", "new-value")
+        self.assertEqual(trie.keys(), ["new"])
+
+    def test_branch_order_and_partial_release_are_preserved(self) -> None:
+        trie = Trie()
+        for key in ("", "a", "ab", "ac", "z"):
+            trie.insert(key, key)
+        self.assertEqual(trie.keys(), ["", "a", "ab", "ac", "z"])
+        freed = []
+        with patch.object(trace_store_module, "_free_ray_refs", side_effect=freed.append):
+            trie.release("a")
+            self.assertEqual(trie.keys(), ["", "ab", "ac", "z"])
+            trie.release("missing")
+            trie.release("ab")
+            self.assertEqual(trie.keys(), ["", "ac", "z"])
+            trie.release()
+        self.assertEqual(freed, ["a", "ab", "ac", "z", ""])
+        self.assertEqual(trie.keys(), [])
+
+    def test_empty_tree_can_be_released_repeatedly(self) -> None:
+        trie = Trie()
+        with patch.object(trace_store_module, "_free_ray_refs") as free:
+            trie.release()
+            trie.release()
+        free.assert_not_called()
+        self.assertEqual(trie.keys(), [])
+
+    @staticmethod
+    def _deep_trie() -> tuple[Trie, list[TreeNode]]:
+        trie = Trie()
+        node = trie.root
+        nodes = []
+        # Incremental conversation prefixes form this chain. Construct it
+        # directly to avoid quadratic insert time in the test fixture.
+        for i in range(max(3000, sys.getrecursionlimit() + 100)):
+            child = TreeNode(value=i, parent=node)
+            node.children["x"] = child
+            node = child
+            nodes.append(node)
+        return trie, nodes

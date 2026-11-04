@@ -141,13 +141,14 @@ class Trie:
         """Get all keys (i.e., strings) stored in the Trie."""
         result = []
 
-        def _collect(node: TreeNode, path: List[str]):
+        # Long agent sessions can have more nodes than Python's recursion limit.
+        # Keep the insertion-order DFS used by the recursive implementation.
+        stack = [(self.root, "")]
+        while stack:
+            node, prefix = stack.pop()
             if node.value is not None:
-                result.append("".join(path))
-            for token, child in node.children.items():
-                _collect(child, path + [token])
-
-        _collect(self.root, [])
+                result.append(prefix)
+            stack.extend((child, prefix + token) for token, child in reversed(node.children.items()))
         return result
 
     def insert(self, key: str, value: Any) -> None:
@@ -220,16 +221,20 @@ class Trie:
                 If None, releases the entire tree.
         """
 
-        def _free_subtree(node: TreeNode):
-            for child in node.children.values():
-                _free_subtree(child)
-            if node.value is not None:
-                _free_ray_refs(node.value)
-                node.value = None
-            node.children.clear()
-
         if key is None:
-            _free_subtree(self.root)
+            # Explicit post-order traversal avoids stack overflow for long traces.
+            stack = [(self.root, False)]
+            while stack:
+                node, visited = stack.pop()
+                if not visited:
+                    stack.append((node, True))
+                    stack.extend((child, False) for child in reversed(node.children.values()))
+                    continue
+                if node.value is not None:
+                    _free_ray_refs(node.value)
+                    node.value = None
+                node.children.clear()
+                node.parent = None
             return
 
         node = self.root
