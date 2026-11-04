@@ -19,7 +19,8 @@ class ChunkLoss(torch.autograd.Function):
             raise NotImplementedError("head_bias is not supported in ChunkLoss")
 
         device = hidden_states.device
-        accumulated_loss = torch.tensor(0.0, device=device)
+        # A CPU scalar copied to CUDA would synchronize the host before the chunk loop.
+        accumulated_loss = torch.zeros((), device=device)
         grad_inputs = torch.empty_like(hidden_states)
         weight_requires_grad = head_weight.requires_grad
         grad_weight = torch.zeros_like(head_weight) if weight_requires_grad else None
@@ -68,9 +69,9 @@ class ChunkLoss(torch.autograd.Function):
     def backward(ctx, *grad_output):
         grad_input = ctx.saved_tensors[0]
         grad_weight = ctx.saved_tensors[1] if ctx.weight_requires_grad else None
-        if torch.ne(grad_output[0], torch.tensor(1.0, device=grad_output[0].device)):
-            grad_input = grad_input * grad_output[0]
-            if grad_weight is not None:
-                grad_weight = grad_weight * grad_output[0]
+        # A Python condition on the CUDA scalar would synchronize the host.
+        grad_input = grad_input * grad_output[0]
+        if grad_weight is not None:
+            grad_weight = grad_weight * grad_output[0]
 
         return grad_input, grad_weight, None, None, None, None

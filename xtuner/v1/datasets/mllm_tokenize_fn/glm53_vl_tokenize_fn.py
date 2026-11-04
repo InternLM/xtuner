@@ -27,13 +27,17 @@ from typing import Any, Literal
 import numpy as np
 import torch
 from PIL import Image
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from transformers import AutoProcessor
 from transformers.models.glm5_next.image_processing_glm5_next import smart_resize as image_smart_resize
 from transformers.models.glm5_next.video_processing_glm5_next import smart_resize as video_smart_resize
 from transformers.video_utils import VideoMetadata
-from xtuner.v1.data_proto.messages.glm53_chat import _tokenize_with_loss_mask, render_glm53_chat
+from xtuner.v1.data_proto.messages.glm53_chat import (
+    _tokenize_with_loss_mask,
+    glm53_media_messages,
+    render_glm53_chat,
+)
 from xtuner.v1.utils import get_logger
 
 from ..data_item import CacheItem, Glm53VLDataItem
@@ -42,10 +46,12 @@ from .base_mllm_tokenize_fn import (
     BaseMLLMTokenizeFnConfig,
     BaseMLLMTokenizeFunction,
     OSSLoaderConfig,
+    collect_image_video_paths_and_extra,
     get_image_path,
     load_image,
 )
-from .qwen3_vl_utils import Qwen3VLOSSLoader, pil_loader
+from .image_data_uri import is_data_uri, load_image_data_uri
+from .qwen3_vl_utils import Qwen3VLOSSLoader, pil_loader, sort_frames
 
 
 logger = get_logger()
@@ -88,13 +94,12 @@ def _read_video_frames(video_path: str, frame_indices: list[int]) -> list[Image.
     """Read specific frames from a video directory (numbered image files) or a
     real video file.
 
-    Real video decoding uses ``decord`` directly rather than the qwen3_vl helpers: those assume
-    qwen's merge-paired timestamp convention (``len(frames_indices) == len(timestamps) * 2``),
-    which doesn't match GLM-5.3-Flash's own timestamp derivation (``VideoMetadata.timestamps``,
-    computed from ``fps`` + ``frames_indices`` alone).
+    Real video decoding uses ``decord`` directly rather than the qwen3_vl helpers: those assume qwen's merge-paired
+    timestamp convention (``len(frames_indices) == len(timestamps) * 2``), which doesn't match GLM-5.3-Flash's own
+    timestamp derivation (``VideoMetadata.timestamps``, computed from ``fps`` + ``frames_indices`` alone).
     """
     if os.path.isdir(video_path):
-        files = sorted(os.listdir(video_path))
+        files = sort_frames(os.listdir(video_path))
         return [Image.open(os.path.join(video_path, files[i])).convert("RGB") for i in frame_indices]
 
     from decord import VideoReader
@@ -104,25 +109,59 @@ def _read_video_frames(video_path: str, frame_indices: list[int]) -> list[Image.
     return [Image.fromarray(frame) for frame in frames]
 
 
-def _expand_marker(text: str, loss_mask: list[bool], marker: str, expansions: list[str]) -> tuple[str, list[bool]]:
-    """Replace each (in-order) occurrence of ``marker`` with its expansion;
-    expansions carry no loss."""
+def _expand_marker(
+    text: str,
+    loss_mask: list[bool],
+    marker: str,
+    expansions: list[str],
+    literal_spans: list[tuple[int, int]] | None = None,
+    *,
+    data_name: str | None = None,
+    data_id: Any = None,
+) -> tuple[str, list[bool]]:
+    """Expand template markers without loss, skipping literals and updating
+    their character spans in place."""
     text_parts: list[str] = []
     mask_parts: list[list[bool]] = []
-    for expansion in expansions:
-        idx = text.index(marker)
-        text_parts.append(text[:idx])
-        mask_parts.append(loss_mask[:idx])
+    replacements: list[tuple[int, int]] = []
+    spans = literal_spans if literal_spans is not None else []
+    cursor = span_index = 0
+    for expansion_index, expansion in enumerate(expansions, start=1):
+        idx = text.find(marker, cursor)
+        while idx >= 0:
+            while span_index < len(spans) and spans[span_index][1] <= idx:
+                span_index += 1
+            if span_index == len(spans) or spans[span_index][0] >= idx + len(marker):
+                break
+            idx = text.find(marker, idx + len(marker))
+        if idx < 0:
+            raise RuntimeError(
+                f"Media marker/payload mismatch: no non-literal {marker!r} remains for "
+                f"expansion {expansion_index}/{len(expansions)}, data_name: {data_name!r}, data_id: {data_id!r}."
+            )
+        text_parts.append(text[cursor:idx])
+        mask_parts.append(loss_mask[cursor:idx])
         text_parts.append(expansion)
         mask_parts.append([False] * len(expansion))
-        text = text[idx + len(marker) :]
-        loss_mask = loss_mask[idx + len(marker) :]
-    text_parts.append(text)
-    mask_parts.append(loss_mask)
+        cursor = idx + len(marker)
+        replacements.append((cursor, len(expansion) - len(marker)))
+    text_parts.append(text[cursor:])
+    mask_parts.append(loss_mask[cursor:])
+    if literal_spans is not None:
+        shifted_spans: list[tuple[int, int]] = []
+        shift = replacement_index = 0
+        for start, end in spans:
+            while replacement_index < len(replacements) and replacements[replacement_index][0] <= start:
+                shift += replacements[replacement_index][1]
+                replacement_index += 1
+            shifted_spans.append((start + shift, end + shift))
+        literal_spans[:] = shifted_spans
     return "".join(text_parts), [flag for chunk in mask_parts for flag in chunk]
 
 
 class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
+    allow_all_roles = True
+
     def __init__(
         self,
         tokenizer,
@@ -139,6 +178,7 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         add_generation_prompt: bool = False,
         enable_thinking: bool = True,
         reasoning_effort: Literal["low", "high", "max"] = "max",
+        clear_thinking: bool = False,
         tokenizer_hash: str | None = None,
         hash: str | None = None,
         debug: bool = False,
@@ -180,6 +220,14 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         self.add_generation_prompt = add_generation_prompt
         self.enable_thinking = enable_thinking
         self.reasoning_effort = reasoning_effort
+        # 训练入口（本类与 text 侧的 Glm53ChatMessages.tokenize）暂不开放 clear_thinking=True：
+        # 需要该语义的数据应由用户侧拆成多条样本（每条只有结尾轮算 loss）。config → fn → render
+        # 的接线和 hash 覆盖保留，开放时无需再动 hash，当前先以断言守住取值。
+        assert clear_thinking is False, (
+            "Glm53VLTokenizeFunction only supports clear_thinking=False; prepare clear-thinking "
+            "data by splitting turns into separate samples instead."
+        )
+        self.clear_thinking = clear_thinking
         self.system_message = system_message
         self.data_name = os.path.basename(anno_name)
 
@@ -188,14 +236,22 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         # missing entry means stale lengths survive a config change (packer budgets by old lengths
         # while runtime truncates by new ones). max_length is read from the local variable because
         # super().__init__ (which stores it as self.max_length) runs after this string is built.
+        # clear_thinking 必须在 hash 里：它把历史轮的 reasoning 文本从渲染中剥掉，num_tokens
+        # 随参数取值变化（实测 153 → 136 字符的对话级差异），不只是改 loss。
         _hash_str = (
             f"{self.image_processor.min_image_tokens}_{self.image_processor.max_image_tokens}_"
             f"{self.video_processor.fps}_{self.video_processor.max_frames}_{self.merge_unit}_"
             f"processor_path:{processor_path}_llm_pack_weight:{llm_pack_weight}_"
             f"visual_pack_weight:{visual_pack_weight}_max_length:{max_length}_"
             f"system_message:{system_message}_add_generation_prompt:{add_generation_prompt}_"
-            f"enable_thinking:{enable_thinking}_reasoning_effort:{reasoning_effort}"
+            f"enable_thinking:{enable_thinking}_reasoning_effort:{reasoning_effort}_"
+            f"clear_thinking:{clear_thinking}_literal_added_tokens_v2"
         )
+        if hash is not None:
+            logger.warning(
+                "GLM-5.3 VL literal-token encoding uses an explicit hash: change it and rebuild "
+                "preprocessing/packing caches to apply the fix."
+            )
 
         super().__init__(
             tokenizer,
@@ -212,7 +268,18 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
     # ---- shared render/expand/tokenize, called by both cache and runtime paths ----
 
-    def _render_base(self, data_item: dict) -> tuple[str, list[bool]]:
+    def _collect_media(self, item: dict):
+        # 渲染器为结构化 tool 输出（{"id": ..., "output": [...]} 条目）里嵌套的媒体同样发射
+        # placeholder marker，而基类收集器只看每条消息 content 的直接列表项，嵌套媒体会出现
+        # "渲染出 marker、却没有对应 payload" 的错配。glm53_media_messages 按渲染 marker 顺序
+        # 把所有媒体 part（含嵌套 output 内的）拉平成合成 user 消息，保证位置式配对不错位。
+        return collect_image_video_paths_and_extra(
+            glm53_media_messages(item["messages"]), allow_all_roles=self.allow_all_roles
+        )
+
+    def _render_base(
+        self, data_item: dict, literal_spans: list[tuple[int, int]] | None = None
+    ) -> tuple[str, list[bool]]:
         messages = list(data_item["messages"])
         if self.system_message is not None and (not messages or messages[0].get("role") != "system"):
             messages = [{"role": "system", "content": self.system_message}, *messages]
@@ -222,10 +289,14 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             add_generation_prompt=self.add_generation_prompt,
             enable_thinking=self.enable_thinking,
             reasoning_effort=self.reasoning_effort,
+            clear_thinking=self.clear_thinking,
+            _literal_spans=literal_spans,
         )
 
-    def _finalize(self, text: str, loss_mask: list[bool]) -> tuple[list[int], list[int], list[int]]:
-        input_ids, labels = _tokenize_with_loss_mask(self.tokenizer, text, loss_mask)
+    def _finalize(
+        self, text: str, loss_mask: list[bool], literal_spans: list[tuple[int, int]] | None = None
+    ) -> tuple[list[int], list[int], list[int]]:
+        input_ids, labels = _tokenize_with_loss_mask(self.tokenizer, text, loss_mask, literal_spans)
         mm_token_type_ids = self.processor.create_mm_token_type_ids([input_ids])[0]
         return input_ids, labels, mm_token_type_ids
 
@@ -247,37 +318,76 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
     def calc_num_tokens_multi_modal_get_item(self, data_item: dict) -> CacheItem:
         grids = [self._predict_image_grid(w, h) for w, h in self._image_wh_list]
-        text, loss_mask = self._render_base(data_item)
+        literal_spans: list[tuple[int, int]] = []
+        text, loss_mask = self._render_base(data_item, literal_spans)
         image_inputs = {"image_grid_thw": torch.tensor(grids)}
         expansions = [self.processor.replace_image_token(image_inputs, i) for i in range(len(grids))]
-        text, loss_mask = _expand_marker(text, loss_mask, _IMAGE_MARKER, expansions)
-        input_ids, labels = _tokenize_with_loss_mask(self.tokenizer, text, loss_mask)
+        text, loss_mask = _expand_marker(
+            text,
+            loss_mask,
+            _IMAGE_MARKER,
+            expansions,
+            literal_spans,
+            data_name=self.data_name,
+            data_id=data_item.get("id"),
+        )
+        input_ids, labels = _tokenize_with_loss_mask(self.tokenizer, text, loss_mask, literal_spans)
         input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
         num_img_tokens = [grid_h * grid_w for _, grid_h, grid_w in grids]
         return self._cache_item(input_ids, num_img_tokens, data_item)
 
     def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> Glm53VLDataItem:
-        images = []
+        # Process each image before loading the next one so full-resolution PIL images
+        # do not accumulate alongside the processed tensors. Preserve the media order
+        # when concatenating the per-image processor outputs.
+        pixel_values_list = []
+        image_grid_list = []
         for image_file in self._image_path:
-            image_path_ = get_image_path(image_file, media_root)
-            if self.oss_loader is not None and "s3://" in image_path_:
-                img_str = self.oss_loader.client.get(image_path_)
-                image = pil_loader(img_str)
+            # 按 Data Format Types（V0.5 Agent）§7.1-7.2：嵌入图片使用
+            # data:image/<subtype>;base64,<payload>（整体称为 data URI）。
+            # base64 图片直接内存解码，绕过 media_root / OSS；裸 base64 仍走引用路径，
+            # 仅严格以小写 data: 开头时进入此分支；该分支内格式错误不回退到引用路径。
+            if is_data_uri(image_file):
+                image = load_image_data_uri(image_file)
             else:
-                assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
-                image = load_image(image_path_)
+                image_path_ = get_image_path(image_file, media_root)
+                if self.oss_loader is not None and "s3://" in image_path_:
+                    img_str = self.oss_loader.client.get(image_path_)
+                    image = pil_loader(img_str)
+                else:
+                    assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
+                    image = load_image(image_path_)
             image = apply_exif_orientation(image)
-            images.append(image)
+            processed_i = self.image_processor(images=[image], return_tensors="pt")
+            pixel_values_list.append(processed_i["pixel_values"])
+            image_grid_list.append(processed_i["image_grid_thw"])
+            del image, processed_i
 
-        processed = self.image_processor(images=images, return_tensors="pt")
-        pixel_values = processed["pixel_values"]
-        image_grid_thw = processed["image_grid_thw"]
+        # A single-image sample already holds the processor's final tensor; reuse it
+        # instead of paying a full torch.cat copy of every patch.
+        if len(pixel_values_list) == 1:
+            pixel_values = pixel_values_list[0]
+            image_grid_thw = image_grid_list[0]
+        else:
+            pixel_values = torch.cat(pixel_values_list, dim=0)
+            image_grid_thw = torch.cat(image_grid_list, dim=0)
+        num_images = len(pixel_values_list)
+        del pixel_values_list, image_grid_list
 
-        text, loss_mask = self._render_base(data_item)
+        literal_spans: list[tuple[int, int]] = []
+        text, loss_mask = self._render_base(data_item, literal_spans)
         image_inputs = {"image_grid_thw": image_grid_thw}
         expansions = [self.processor.replace_image_token(image_inputs, i) for i in range(image_grid_thw.shape[0])]
-        text, loss_mask = _expand_marker(text, loss_mask, _IMAGE_MARKER, expansions)
-        input_ids, labels, mm_token_type_ids = self._finalize(text, loss_mask)
+        text, loss_mask = _expand_marker(
+            text,
+            loss_mask,
+            _IMAGE_MARKER,
+            expansions,
+            literal_spans,
+            data_name=self.data_name,
+            data_id=data_item.get("id"),
+        )
+        input_ids, labels, mm_token_type_ids = self._finalize(text, loss_mask, literal_spans)
 
         num_img_tokens = (image_grid_thw[:, 1] * image_grid_thw[:, 2]).tolist()
         # Truncation must never cut a visual span in half; assert-and-drop mirrors the existing
@@ -296,7 +406,7 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             input_ids=input_ids,
             labels=labels,
             num_tokens=len(input_ids),
-            num_imgs=[len(images)],
+            num_imgs=[num_images],
             num_img_tokens=num_img_tokens,
             pixel_values=pixel_values,
             image_grid_thw=image_grid_thw,
@@ -342,10 +452,13 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
         return sampled.tolist(), (grid_t, grid_h, grid_w)
 
     def calc_num_tokens_video_get_item(self, data_item: dict) -> CacheItem:
-        assert len(self._video_extra_info_list) == len(self._video_path), (
-            "GLM-5.3-Flash video cache prediction requires origin_video_length/origin_fps "
-            f"metadata for every video, data_name: {self.data_name}."
-        )
+        if len(self._video_extra_info_list) != len(self._video_path):
+            # 单条样本缺视频元数据属脏数据；RuntimeError 由 __call__ 转成警告+丢弃（cache），
+            # 不能用 assert——cache worker 进程里 AssertionError 逃逸会杀死 worker 并挂住主进程。
+            raise RuntimeError(
+                "GLM-5.3-Flash video cache prediction requires origin_video_length/origin_fps "
+                f"metadata for every video, data_name: {self.data_name}."
+            )
         grids: list[list[int]] = []
         metadata_list = []
         for video_file, (width, height), extra in zip(
@@ -356,11 +469,20 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             metadata_list.append(VideoMetadata(total_num_frames=num_frames, fps=fps, frames_indices=sampled))
             grids.append(list(grid))
 
-        text, loss_mask = self._render_base(data_item)
+        literal_spans: list[tuple[int, int]] = []
+        text, loss_mask = self._render_base(data_item, literal_spans)
         video_inputs = {"video_grid_thw": torch.tensor(grids), "video_metadata": metadata_list}
         expansions = [self.processor.replace_video_token(video_inputs, i) for i in range(len(grids))]
-        text, loss_mask = _expand_marker(text, loss_mask, _VIDEO_MARKER, expansions)
-        input_ids, labels = _tokenize_with_loss_mask(self.tokenizer, text, loss_mask)
+        text, loss_mask = _expand_marker(
+            text,
+            loss_mask,
+            _VIDEO_MARKER,
+            expansions,
+            literal_spans,
+            data_name=self.data_name,
+            data_id=data_item.get("id"),
+        )
+        input_ids, labels = _tokenize_with_loss_mask(self.tokenizer, text, loss_mask, literal_spans)
         input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
 
         num_img_tokens: list[int] = []
@@ -395,14 +517,28 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
             grid_list.append(out["video_grid_thw"][0])
             metadata_list.append(metadata)
 
-        pixel_values_videos = torch.cat(pixel_values_list, dim=0)
+        # A single-video sample already holds the processor's final tensor; reuse it
+        # instead of paying a full torch.cat copy of every patch.
+        if len(pixel_values_list) == 1:
+            pixel_values_videos = pixel_values_list[0]
+        else:
+            pixel_values_videos = torch.cat(pixel_values_list, dim=0)
         video_grid_thw = torch.stack(grid_list)
 
-        text, loss_mask = self._render_base(data_item)
+        literal_spans: list[tuple[int, int]] = []
+        text, loss_mask = self._render_base(data_item, literal_spans)
         video_inputs = {"video_grid_thw": video_grid_thw, "video_metadata": metadata_list}
         expansions = [self.processor.replace_video_token(video_inputs, i) for i in range(video_grid_thw.shape[0])]
-        text, loss_mask = _expand_marker(text, loss_mask, _VIDEO_MARKER, expansions)
-        input_ids, labels, mm_token_type_ids = self._finalize(text, loss_mask)
+        text, loss_mask = _expand_marker(
+            text,
+            loss_mask,
+            _VIDEO_MARKER,
+            expansions,
+            literal_spans,
+            data_name=self.data_name,
+            data_id=data_item.get("id"),
+        )
+        input_ids, labels, mm_token_type_ids = self._finalize(text, loss_mask, literal_spans)
 
         num_img_tokens: list[int] = []
         for grid_t, grid_h, grid_w in video_grid_thw.tolist():
@@ -430,17 +566,31 @@ class Glm53VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
     # ---- pure text ----
 
+    def _check_no_literal_visual_tokens(self, input_ids: list[int]) -> None:
+        # Literal spellings are now ordinary BPE. A pure-text sample must still never
+        # carry an actual visual placeholder ID into a mixed pack.
+        n_literal = input_ids.count(self.processor.image_token_id)
+        if n_literal > 0:
+            raise RuntimeError(
+                f"GLM-5.3-Flash pure-text sample contains {n_literal} literal visual placeholder "
+                f"token(s) (e.g. '<|image|>' in text), data_name: {self.data_name}."
+            )
+
     def calc_num_tokens_pure_text_get_item(self, data_item) -> CacheItem:
-        text, loss_mask = self._render_base(data_item)
-        input_ids, labels = _tokenize_with_loss_mask(self.tokenizer, text, loss_mask)
+        literal_spans: list[tuple[int, int]] = []
+        text, loss_mask = self._render_base(data_item, literal_spans)
+        input_ids, labels = _tokenize_with_loss_mask(self.tokenizer, text, loss_mask, literal_spans)
         input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
+        self._check_no_literal_visual_tokens(input_ids)
         return {"num_tokens": len(input_ids), "num_img_tokens": [0]}
 
     def pure_text_get_item(self, data_item: dict) -> Glm53VLDataItem:
-        text, loss_mask = self._render_base(data_item)
-        input_ids, labels, mm_token_type_ids = self._finalize(text, loss_mask)
+        literal_spans: list[tuple[int, int]] = []
+        text, loss_mask = self._render_base(data_item, literal_spans)
+        input_ids, labels, mm_token_type_ids = self._finalize(text, loss_mask, literal_spans)
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
         mm_token_type_ids = mm_token_type_ids[: len(input_ids)]
+        self._check_no_literal_visual_tokens(input_ids)
         return Glm53VLDataItem(
             input_ids=input_ids,
             labels=labels,
@@ -469,14 +619,18 @@ class Glm53VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     # construction raise at validation time; defaulted here to the name the renderer implements.
     chat_template: str = "glm5.3"
     processor_path: str
-    min_pixels: int | None = None
-    max_pixels: int | None = None
+    # 非正的像素上限曾在构造期放行、到每张图的 HF smart_resize 才抛 ValueError——落在
+    # _DIRTY_DATA_ERRORS 里被 cache 当成单条脏样本静默丢弃，所有图片样本无声消失。配置错误
+    # 必须在构造期暴露，靠这里拦住，不靠每样本的丢弃通道。
+    min_pixels: int | None = Field(default=None, gt=0)
+    max_pixels: int | None = Field(default=None, gt=0)
     oss_loader_cfg: OSSLoaderConfig | None = None
     fps: float | None = None
     max_frames: int | None = None
     add_generation_prompt: bool = False
     enable_thinking: bool = True
     reasoning_effort: Literal["low", "high", "max"] = "max"
+    clear_thinking: bool = False
     visual_pack_weight: float = 1.0
 
     def build(
@@ -498,6 +652,7 @@ class Glm53VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             add_generation_prompt=self.add_generation_prompt,
             enable_thinking=self.enable_thinking,
             reasoning_effort=self.reasoning_effort,
+            clear_thinking=self.clear_thinking,
             tokenizer_hash=tokenizer_hash,
             hash=self.hash,
             debug=self.debug,

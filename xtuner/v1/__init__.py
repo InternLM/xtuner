@@ -1,5 +1,24 @@
 import os
+from pathlib import Path
 from typing import Any, cast
+
+
+# Set cache paths before importing Triton, TileLang, or CuTe DSL: each may read
+# its environment once during import. A stable shared root lets later jobs reuse
+# compiled graphs and kernels across processes and nodes.
+if compile_cache_dir := os.getenv("XTUNER_COMPILE_CACHE_DIR"):
+    cache_root = Path(compile_cache_dir).expanduser().resolve()
+    cache_root.mkdir(parents=True, exist_ok=True)
+    for name, directory in (
+        ("TORCHINDUCTOR_CACHE_DIR", "torchinductor"),
+        ("TRITON_CACHE_DIR", "triton"),
+        ("TILELANG_CACHE_DIR", "tilelang"),
+        ("CUTE_DSL_CACHE_DIR", "cute_dsl"),
+        ("CUDA_CACHE_PATH", "cuda"),
+    ):
+        os.environ.setdefault(name, str(cache_root / directory))
+    os.environ.setdefault("TORCHINDUCTOR_FX_GRAPH_CACHE", "1")
+    os.environ.setdefault("TORCHINDUCTOR_AUTOGRAD_CACHE", "1")
 
 
 def _patch_triton_autotune_for_determinism() -> None:

@@ -680,36 +680,34 @@ class BaseModel(nn.Module):
 
                 for hf_name in hf_name_list:
                     if any(re.search(p, hf_name) for p in patterns):  # type: ignore
+                        # FP32-ignored params must be world-wide replicas so
+                        # scale_and_reduce_grad / grad-norm cover every FSDP rank.
+                        # MoE may have already placed them on an EP-only (or EP x
+                        # expert-TP) mesh; normalize that layout here.
                         if isinstance(param, DTensor):
-                            # Case 1: Already on the target world mesh, e.g. an FP32
-                            # replica with [Replicate(), Replicate()] on an FSDP x EP
-                            # mesh. Preserve all existing placements on this mesh.
-                            if param.device_mesh == self.world_mesh:
+                            # Already DTensor(world_mesh, all Replicate) → no-op
+                            # (idempotent under MoE's layer-then-root _fully_shard).
+                            if param.device_mesh == self.world_mesh and all(
+                                isinstance(placement, Replicate) for placement in param.placements
+                            ):
                                 ignored_params.add(param)
                                 break
-
-                            # Case 2: On another mesh with a non-Replicate placement.
-                            # For Shard, to_local() returns only a parameter shard;
-                            # for Partial, it returns a value pending reduction.
-                            # Neither can be replicated as the full parameter.
-                            # Preserve these layouts; converting them is outside this fix.
-                            if any(not placement.is_replicate() for placement in param.placements):
-                                ignored_params.add(param)
-                                break
-
-                        # Case 3: A plain Tensor/Parameter becomes replicated across
-                        # every dimension of the target world mesh.
-                        #
-                        # Case 4: A fully replicated DTensor on another mesh, e.g.
-                        # the EP (or EP x expert-TP) submesh used by MoE initialization.
-                        # If that submesh covers fewer ranks, include the missing
-                        # FSDP rows so their FP32 gradients also synchronize.
-                        # If it already covers all ranks, normalize the mesh layout
-                        # without expanding the actual replica set.
-                        # Each rank holds the full parameter, so to_local().detach()
-                        # supplies a local leaf for rebuilding the DTensor. The
-                        # replacement remains ignored by FSDP.
-                        local_param = param.to_local().detach() if isinstance(param, DTensor) else param
+                            # Any non-replicate placement → fail closed. Gathering
+                            # shards is outside this path's responsibility.
+                            if any(not isinstance(placement, Replicate) for placement in param.placements):
+                                raise ValueError(
+                                    f"FP32-ignored parameter {full_name} has non-replicate "
+                                    f"placements {tuple(param.placements)} on mesh "
+                                    f"{param.device_mesh}; cannot rematerialize as a "
+                                    f"world-wide replica without gathering shards."
+                                )
+                            # Fully-replicated DTensor on another mesh → rematerialize
+                            # via to_local() (local already holds the full value; never gather).
+                            local_param = param.to_local().detach()
+                        else:
+                            # Plain tensor → rematerialize onto world_mesh as all Replicate.
+                            local_param = param
+                        assert self.world_mesh is not None
                         dist_param = nn.Parameter(
                             distribute_tensor(
                                 local_param, self.world_mesh, [Replicate() for _ in range(self.world_mesh.ndim)]
@@ -2127,13 +2125,15 @@ class BaseModel(nn.Module):
             self._compile_overwrite(target, option)
 
     def _mark_dynamic(self, seq_ctx: SequenceContext, dim=0):
-        """`cu_seq_lens_q` and `cu_seq_lens_k` are dynamic shapes in each
-        fwd/bwd pass.
+        """Packed offsets on GPU and their optional CPU source change shape in
+        each fwd/bwd pass.
 
         Mark them as dynamic explicitly to avoid recompilation.
         """
         torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_q, dim)
         torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_k, dim)
+        if seq_ctx.cu_seq_lens_q_cpu is not None and seq_ctx.cu_seq_lens_q_cpu is not seq_ctx.cu_seq_lens_q:
+            torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_q_cpu, dim)
 
     def _init_world_mesh(self):
         device = DEVICE

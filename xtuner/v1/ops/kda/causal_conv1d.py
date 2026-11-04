@@ -29,7 +29,8 @@ LIBRARY_NAME = "xtuner_kda"
 @torch.library.custom_op(
     f"{LIBRARY_NAME}::causal_conv1d_fwd",
     mutates_args=(),
-    schema="(Tensor x, Tensor weight, Tensor? bias, str? activation, Tensor? cu_seqlens) -> Tensor",
+    schema="(Tensor x, Tensor weight, Tensor? bias, str? activation, Tensor? cu_seqlens, "
+    "Tensor? cu_seqlens_cpu) -> Tensor",
 )
 def causal_conv1d_fwd(
     x: torch.Tensor,
@@ -37,6 +38,7 @@ def causal_conv1d_fwd(
     bias: torch.Tensor | None,
     activation: str | None,
     cu_seqlens: torch.Tensor | None,
+    cu_seqlens_cpu: torch.Tensor | None,
 ) -> torch.Tensor:
     # Keep the established low-precision forward even when FSDP preserves an
     # FP32 master here so its gradient can be reduced without an earlier cast.
@@ -49,6 +51,7 @@ def causal_conv1d_fwd(
         output_final_state=False,
         activation=activation,
         cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
     )
     return y
 
@@ -60,6 +63,7 @@ def _causal_conv1d_fwd_fake(
     bias: torch.Tensor | None,
     activation: str | None,
     cu_seqlens: torch.Tensor | None,
+    cu_seqlens_cpu: torch.Tensor | None,
 ) -> torch.Tensor:
     return torch.empty_like(x)
 
@@ -67,7 +71,8 @@ def _causal_conv1d_fwd_fake(
 @torch.library.custom_op(
     f"{LIBRARY_NAME}::causal_conv1d_bwd",
     mutates_args=(),
-    schema="(Tensor x, Tensor dy, Tensor weight, Tensor? bias, str? activation, Tensor? cu_seqlens) "
+    schema="(Tensor x, Tensor dy, Tensor weight, Tensor? bias, str? activation, Tensor? cu_seqlens, "
+    "Tensor? cu_seqlens_cpu) "
     "-> (Tensor, Tensor, Tensor?)",
 )
 def causal_conv1d_bwd(
@@ -77,6 +82,7 @@ def causal_conv1d_bwd(
     bias: torch.Tensor | None,
     activation: str | None,
     cu_seqlens: torch.Tensor | None,
+    cu_seqlens_cpu: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     # FLA casts dw/db to the supplied parameter dtype after its FP32 sum. Use
     # the forward's rounded values, represented in the original parameter
@@ -91,6 +97,7 @@ def causal_conv1d_bwd(
         initial_state=None,
         activation=activation,
         cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
     )
     return dx, dw, db
 
@@ -103,6 +110,7 @@ def _causal_conv1d_bwd_fake(
     bias: torch.Tensor | None,
     activation: str | None,
     cu_seqlens: torch.Tensor | None,
+    cu_seqlens_cpu: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     return (
         torch.empty_like(x),
@@ -121,18 +129,21 @@ class CausalConv1dFunction(torch.autograd.Function):
         bias: torch.Tensor | None,
         activation: str | None,
         cu_seqlens: torch.Tensor | None,
+        cu_seqlens_cpu: torch.Tensor | None,
     ) -> torch.Tensor:
-        y = torch.ops.xtuner_kda.causal_conv1d_fwd(x, weight, bias, activation, cu_seqlens)
-        ctx.save_for_backward(x, weight, bias, cu_seqlens)
+        y = torch.ops.xtuner_kda.causal_conv1d_fwd(x, weight, bias, activation, cu_seqlens, cu_seqlens_cpu)
+        ctx.save_for_backward(x, weight, bias, cu_seqlens, cu_seqlens_cpu)
         ctx.activation = activation
         return y
 
     @staticmethod
     @input_guard
     def backward(ctx, dy: torch.Tensor):
-        x, weight, bias, cu_seqlens = ctx.saved_tensors
-        dx, dw, db = torch.ops.xtuner_kda.causal_conv1d_bwd(x, dy, weight, bias, ctx.activation, cu_seqlens)
-        return dx, dw, db, None, None
+        x, weight, bias, cu_seqlens, cu_seqlens_cpu = ctx.saved_tensors
+        dx, dw, db = torch.ops.xtuner_kda.causal_conv1d_bwd(
+            x, dy, weight, bias, ctx.activation, cu_seqlens, cu_seqlens_cpu
+        )
+        return dx, dw, db, None, None, None
 
 
 def causal_conv1d(
@@ -142,6 +153,7 @@ def causal_conv1d(
     activation: str | None = None,
     cu_seqlens: torch.Tensor | None = None,
     *,
+    cu_seqlens_cpu: torch.Tensor | None = None,
     backend: str = "triton",
     residual: torch.Tensor | None = None,
     initial_state: torch.Tensor | None = None,
@@ -159,6 +171,7 @@ def causal_conv1d(
         activation (str | None): ``"silu"``/``"swish"`` or ``None``.
         cu_seqlens (torch.Tensor | None): Packed-sequence offsets, so the convolution never reads
             across a document boundary.
+        cu_seqlens_cpu (torch.Tensor | None): Matching CPU offsets for FLA's chunk table.
         backend (str): Only ``"triton"`` is supported.
         residual (torch.Tensor | None): Must be ``None``.
         initial_state (torch.Tensor | None): Must be ``None``.
@@ -184,4 +197,4 @@ def causal_conv1d(
             "xtuner's compile-friendly causal_conv1d does not support 'output_final_state'; use "
             "fla.modules.conv.causal_conv1d directly."
         )
-    return CausalConv1dFunction.apply(x, weight, bias, activation, cu_seqlens), None
+    return CausalConv1dFunction.apply(x, weight, bias, activation, cu_seqlens, cu_seqlens_cpu), None

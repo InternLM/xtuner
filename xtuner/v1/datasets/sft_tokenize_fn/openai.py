@@ -35,6 +35,11 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
         self._hash = hash
         self._tokenizer_hash = tokenizer_hash
         self.max_length = max_length
+        if chat_template in {"glm5.2", "glm5.3"} and hash is not None:
+            logger.warning(
+                "GLM text SFT uses an explicit hash: change it and rebuild preprocessing/packing caches "
+                "to apply the literal-token and structured-reasoning fixes."
+            )
         super().__init__(tokenizer)
 
     @with_proxy_attention_flops
@@ -90,6 +95,9 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
                 + hashlib.sha256(inspect.getsource(self.__class__.__init__).encode()).hexdigest()[:16]
             )
 
+            if self.chat_template_name in {"glm5.2", "glm5.3"}:
+                # Renderer changes are not included in the entry-point source hash.
+                _source_hash += "_literal_added_tokens_v2"
             self._hash = f"{_tokenizer_hash}_{_template_hash}_{_source_hash}"
         else:
             assert isinstance(self._hash, str), (

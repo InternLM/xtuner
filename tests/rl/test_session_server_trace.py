@@ -1,7 +1,7 @@
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from aiohttp import ClientConnectionResetError, web
 from aiohttp.test_utils import TestClient, TestServer
@@ -11,6 +11,31 @@ from xtuner.v1.rl.rollout.session_server import SessionServer
 
 
 class TestSessionServerTraceHandling(unittest.IsolatedAsyncioTestCase):
+    async def test_raw_anthropic_tokens_keep_output_tool_schema(self):
+        server = SessionServer.__new__(SessionServer)
+        server.tokenizer = Mock()
+        server.tokenizer.apply_chat_template.return_value = "rendered tool prompt"
+        server.tokenizer.encode.return_value = [11, 12, 13]
+        server.stop_word = "<eos>"
+        server.store = SimpleNamespace(search=SimpleNamespace(remote=AsyncMock(return_value=("", []))))
+        request = {
+            "model": "test-model",
+            "session_id": "tools-session",
+            "system": "Use the provided tools.",
+            "messages": [{"role": "user", "content": "Run pwd"}],
+            "tools": [{"name": "Bash", "input_schema": {"type": "object", "properties": {}}}],
+            "tool_choice": {"type": "tool", "name": "Bash"},
+            "max_tokens": 128,
+        }
+        forwarded = await server.on_request(request, session_server_module.FMT_ANTHROPIC)
+        self.assertEqual(forwarded["input_ids"], [11, 12, 13])
+        self.assertEqual(forwarded["messages"], [])
+        self.assertNotIn("system", forwarded)
+        self.assertEqual(forwarded["tools"], request["tools"])
+        self.assertEqual(forwarded["tool_choice"], request["tool_choice"])
+        self.assertTrue(forwarded["return_logprob"])
+        self.assertEqual(request["messages"], [{"role": "user", "content": "Run pwd"}])
+
     async def asyncSetUp(self):
         self.upstream_status = 200
         self.upstream_body = b'{"choices":[{"message":{"role":"assistant","content":"ok"}}]}'

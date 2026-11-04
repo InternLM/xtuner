@@ -22,12 +22,15 @@ TestKDAFLASequenceParallel / TestKDAFLASequenceParallel4 / TestKDAFLASequencePar
     test_layout_validation_and_inference_offsets          分片校验与 inference offsets
 """
 
+import importlib
 import inspect
 import math
 from copy import deepcopy
 
+import parametrize
 import pytest
 import torch
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
 from torch.testing._internal.common_distributed import DistributedTestBase
 from torch.utils.checkpoint import checkpoint
@@ -312,15 +315,69 @@ class TestKDAModuleParity:
         expected = torch.cat([out1, out2], dim=1)
         torch.testing.assert_close(packed_out, expected, atol=1e-4, rtol=1e-4)
 
-
-class TestKDASequenceParallel(DistributedTestBase):
     @pytest.mark.gpu
-    def test_packed_backward_and_compiled_match_non_sp(self, device="cuda"):
-        """Ulysses preserves local input gradients and head-sliced parameter gradients."""
-        self.create_pg(device)
-        mesh = init_data_mesh(device, self.world_size)["sp"]
-        rank = mesh.get_local_rank()
-        total, local_length = 512, 512 // self.world_size
+    def test_cpu_packed_offsets_preserve_output_and_gradients(self):
+        torch.manual_seed(20261015)
+        module = _build_xtuner_kda().cuda().train()
+        ids = tuple(torch.zeros(1, length, dtype=torch.long) for length in (31, 66, 95))
+        cpu_context = SequenceContext.from_input_ids(ids, device="cpu").to("cuda")
+        gpu_context = SequenceContext(
+            input_ids=cpu_context.input_ids,
+            cu_seq_lens_q=cpu_context.cu_seq_lens_q,
+            cu_seq_lens_k=cpu_context.cu_seq_lens_k,
+            max_length_q=cpu_context.max_length_q,
+            max_length_k=cpu_context.max_length_k,
+            position_ids=cpu_context.position_ids,
+            device="cuda",
+        )
+        assert cpu_context.cu_seq_lens_q_cpu is not None
+        assert gpu_context.cu_seq_lens_q_cpu is None
+        hidden = torch.randn(1, 192, 64, device="cuda")
+        upstream = torch.randn_like(hidden)
+        results = []
+        for context in (gpu_context, cpu_context):
+            module.zero_grad(set_to_none=True)
+            x = hidden.detach().clone().requires_grad_()
+            output = module(x, context)["projected_output"]
+            output.backward(upstream)
+            results.append(
+                (
+                    output.detach().clone(),
+                    x.grad.detach().clone(),
+                    {name: p.grad.detach().clone() for name, p in module.named_parameters()},
+                )
+            )
+        expected, actual = results
+        torch.testing.assert_close(actual[0], expected[0], atol=1e-4, rtol=1e-4)
+        torch.testing.assert_close(actual[1], expected[1], atol=1e-4, rtol=1e-4)
+        for name in expected[2]:
+            torch.testing.assert_close(actual[2][name], expected[2][name], atol=1e-4, rtol=1e-4)
+
+
+def _check_ulysses_packed_parity(mesh: DeviceMesh, *, triton_pack: bool, token_major: bool) -> None:
+    """Compare Ulysses outputs and gradients with each DP replica's non-SP
+    reference.
+
+    Args:
+        mesh: CUDA device mesh with axes [dp, sp]. Full inputs and upstream
+            gradients have shape [1, global_tokens, hidden]; SP shards the token
+            axis into contiguous [1, local_tokens, hidden] tensors. Data is
+            replicated within SP, but distinct across DP replicas.
+        triton_pack: Value of the all-to-all module's Triton pack flag.
+        token_major: Value of the all-to-all module's token-major flag.
+    """
+    a2a_module = importlib.import_module("xtuner.v1.ops.comm.all_to_all")
+    original_pack = a2a_module._A2A_TRITON_PACK
+    original_token_major = a2a_module._A2A_TOKEN_MAJOR
+    sp_mesh, dp_mesh = mesh["sp"], mesh["dp"]
+    rank, dp_rank = sp_mesh.get_local_rank(), mesh.get_local_rank("dp")
+    sp_size, dp_size = sp_mesh.size(), dp_mesh.size()
+    device = mesh.device_type
+    total, local_length = 512, 512 // sp_size
+    try:
+        a2a_module._A2A_TRITON_PACK = triton_pack
+        a2a_module._A2A_TOKEN_MAJOR = token_major
+        torch._dynamo.reset()
         for dtype in (torch.float32, torch.bfloat16):
             for lengths in ([total], [local_length - 2, 5, total - local_length - 3]):
                 for compiled in (False, True):
@@ -341,18 +398,32 @@ class TestKDASequenceParallel(DistributedTestBase):
                     context = SequenceContext.from_input_ids(
                         tuple(torch.zeros(1, length, dtype=torch.long) for length in lengths), device=device
                     )
-                    local_context = context.copy().split(mesh)
+                    local_context = context.copy().split(sp_mesh)
+                    assert local_context.sp_rank == rank
+                    torch.manual_seed(1234 + dp_rank)
                     hidden = torch.randn(1, total, 64, device=device, dtype=dtype, requires_grad=True)
-                    local_hidden = hidden.detach()[:, rank * local_length : (rank + 1) * local_length].clone()
-                    local_hidden.requires_grad_()
+                    torch.manual_seed(5678 + dp_rank)
+                    upstream = torch.randn_like(hidden)
+                    if dp_size > 1:
+                        # Check actual data, not just the seeds: a WORLD collective must not
+                        # accidentally pass because both DP replicas use the same objective.
+                        for name, data in (("hidden", hidden.detach()), ("upstream", upstream)):
+                            sp_data = [torch.empty_like(data) for _ in range(sp_size)]
+                            torch.distributed.all_gather(sp_data, data, group=sp_mesh.get_group())
+                            assert all(torch.equal(data, peer) for peer in sp_data), f"SP differs: {name}"
+                            dp_data = [torch.empty_like(data) for _ in range(dp_size)]
+                            torch.distributed.all_gather(dp_data, data, group=dp_mesh.get_group())
+                            assert all(
+                                not torch.equal(data, peer) for index, peer in enumerate(dp_data) if index != dp_rank
+                            ), f"DP replicas share {name}"
+                    selection = slice(rank * local_length, (rank + 1) * local_length)
+                    local_hidden = hidden.detach()[:, selection].clone().requires_grad_()
                     expected = reference(hidden, context)["projected_output"]
                     actual = runner(local_hidden, local_context)["projected_output"]
-                    selection = slice(rank * local_length, (rank + 1) * local_length)
                     _assert_fla_sp_parity(actual, expected[:, selection], dtype, "Ulysses output")
-                    torch.manual_seed(5678)
-                    upstream = torch.randn_like(expected)
                     expected.backward(upstream)
                     actual.backward(upstream[:, selection].contiguous())
+                    assert local_hidden.grad is not None and hidden.grad is not None
                     _assert_fla_sp_parity(
                         local_hidden.grad, hidden.grad[:, selection], dtype, "Ulysses input gradient"
                     )
@@ -360,11 +431,33 @@ class TestKDASequenceParallel(DistributedTestBase):
                         target = reference.get_parameter(name).grad
                         assert parameter.grad is not None and target is not None, name
                         if "conv1d" in name or name in ("A_log", "dt_bias"):
-                            size = parameter.shape[0] // self.world_size
+                            size = parameter.shape[0] // sp_size
                             part = slice(rank * size, (rank + 1) * size)
                             _assert_fla_sp_parity(parameter.grad[part], target[part], dtype, name + " head slice")
-                        torch.distributed.all_reduce(parameter.grad, group=mesh.get_group())
+                        torch.distributed.all_reduce(parameter.grad, group=sp_mesh.get_group())
                         _assert_fla_sp_parity(parameter.grad, target, dtype, "Ulysses " + name)
+    finally:
+        a2a_module._A2A_TRITON_PACK = original_pack
+        a2a_module._A2A_TOKEN_MAJOR = original_token_major
+        torch._dynamo.reset()
+
+
+class TestKDASequenceParallel(DistributedTestBase):
+    @parametrize.parametrize("triton_pack,token_major", [(False, False), (False, True), (True, False), (True, True)])
+    @pytest.mark.gpu
+    def test_packed_backward_and_compiled_match_non_sp(
+        self, triton_pack: bool, token_major: bool, device: str = "cuda"
+    ) -> None:
+        """Preserve local input gradients and head-sliced parameter gradients.
+
+        Args:
+            triton_pack: Enable the Triton communication pack.
+            token_major: Enable token-major KDA redistribution.
+            device: CUDA device type for the distributed test.
+        """
+        self.create_pg(device)
+        mesh = init_data_mesh(device, self.world_size)
+        _check_ulysses_packed_parity(mesh, triton_pack=triton_pack, token_major=token_major)
 
     @pytest.mark.gpu
     def test_forward_for_sp_matches_non_sp(self, device="cuda"):
@@ -407,6 +500,118 @@ class TestKDASequenceParallel(DistributedTestBase):
     @property
     def world_size(self) -> int:
         return 2
+
+
+class TestKDASequenceParallelDP2SP2(DistributedTestBase):
+    """Keep Ulysses communication and gradient reduction inside each SP
+    subgroup."""
+
+    @parametrize.parametrize("triton_pack,token_major", [(False, False), (False, True), (True, False), (True, True)])
+    @pytest.mark.gpu
+    def test_packed_backward_and_compiled_match_non_sp(
+        self, triton_pack: bool, token_major: bool, device: str = "cuda"
+    ) -> None:
+        """Compare two distinct DP objectives against independent non-SP
+        references.
+
+        Args:
+            triton_pack: Enable the Triton communication pack.
+            token_major: Enable token-major KDA redistribution.
+            device: CUDA device type for the distributed test.
+        """
+        self.create_pg(device)
+        mesh = init_device_mesh("cuda", (2, 2), mesh_dim_names=("dp", "sp"))
+        sp_mesh = mesh["sp"]
+        dp_rank, sp_rank = mesh.get_local_rank("dp"), sp_mesh.get_local_rank()
+        assert torch.distributed.get_world_size() == 4
+        assert sp_mesh.size() == mesh["dp"].size() == 2
+        sp_members = torch.distributed.get_process_group_ranks(sp_mesh.get_group())
+        assert sp_members == [2 * dp_rank, 2 * dp_rank + 1]
+        assert sp_members[sp_rank] == torch.distributed.get_rank()
+        assert torch.distributed.get_process_group_ranks(mesh["dp"].get_group()) == [sp_rank, sp_rank + 2]
+        _check_ulysses_packed_parity(mesh, triton_pack=triton_pack, token_major=token_major)
+
+    @property
+    def world_size(self) -> int:
+        """Return the rank count for the DP2 x SP2 topology."""
+        return 4
+
+
+class TestKDAUlyssesSequenceParallel8(DistributedTestBase):
+    @pytest.mark.gpu
+    def test_cpu_offsets_survive_sp_padding_and_match_non_sp(self, device="cuda"):
+        self.create_pg(device)
+        mesh = init_data_mesh(device, self.world_size)["sp"]
+        rank = mesh.get_local_rank()
+        torch.manual_seed(20261015)
+        module = _build_xtuner_kda(hidden_size=128, num_heads=8).to(device).train()
+        for parameter in module.parameters():
+            torch.distributed.broadcast(parameter.data, src=0)
+        reference = deepcopy(module)
+
+        lengths = (63, 65, 381)
+        context = (
+            SequenceContext.from_input_ids(
+                tuple(torch.zeros(1, length, dtype=torch.long) for length in lengths), device="cpu"
+            )
+            .to(device)
+            .split(mesh)
+        )
+        assert context.cu_seq_lens_q_cpu is not None
+        assert context.cu_seq_lens_q_cpu.tolist() == [0, 63, 128, 509, 512]
+        torch.testing.assert_close(context.cu_seq_lens_q.cpu(), context.cu_seq_lens_q_cpu, atol=0, rtol=0)
+        torch.testing.assert_close(context.copy().cu_seq_lens_q_cpu, context.cu_seq_lens_q_cpu, atol=0, rtol=0)
+        padded_offsets = torch.tensor([0, 63, 128, 509], dtype=torch.int32)
+        padded_context = (
+            SequenceContext(
+                input_ids=torch.zeros(1, 509, dtype=torch.long),
+                cu_seq_lens_q=padded_offsets,
+                cu_seq_lens_k=padded_offsets,
+                max_length_q=381,
+                max_length_k=381,
+                num_padding=3,
+                device="cpu",
+            )
+            .to(device)
+            .split(mesh)
+        )
+        assert padded_context.cu_seq_lens_q_cpu.tolist() == [0, 63, 128, 512]
+        torch.testing.assert_close(
+            padded_context.cu_seq_lens_q.cpu(), padded_context.cu_seq_lens_q_cpu, atol=0, rtol=0
+        )
+
+        full_context = SequenceContext(
+            input_ids=torch.zeros(1, 512, dtype=torch.long, device=device),
+            cu_seq_lens_q=context.cu_seq_lens_q,
+            cu_seq_lens_k=context.cu_seq_lens_k,
+            max_length_q=context.max_length_q,
+            max_length_k=context.max_length_k,
+            num_padding=3,
+            position_ids=torch.zeros(1, 512, dtype=torch.long, device=device),
+            device=device,
+        )
+        full_hidden = torch.randn(1, 512, 128, device=device)
+        torch.distributed.broadcast(full_hidden, src=0)
+        full_hidden.requires_grad_()
+        local_slice = slice(rank * 64, (rank + 1) * 64)
+        local_hidden = full_hidden.detach()[:, local_slice].clone().requires_grad_()
+        expected = reference(full_hidden, full_context)["projected_output"]
+        actual = module(local_hidden, context)["projected_output"]
+        _assert_fla_sp_parity(actual, expected[:, local_slice], full_hidden.dtype, "SP8 output")
+
+        upstream = torch.randn_like(expected)
+        torch.distributed.broadcast(upstream, src=0)
+        expected.backward(upstream)
+        actual.backward(upstream[:, local_slice].contiguous())
+        _assert_fla_sp_parity(local_hidden.grad, full_hidden.grad[:, local_slice], full_hidden.dtype, "SP8 input grad")
+        for name, parameter in module.named_parameters():
+            assert parameter.grad is not None
+            torch.distributed.all_reduce(parameter.grad, group=mesh.get_group())
+            _assert_fla_sp_parity(parameter.grad, reference.get_parameter(name).grad, full_hidden.dtype, name)
+
+    @property
+    def world_size(self) -> int:
+        return 8
 
 
 @pytest.mark.gpu
@@ -604,7 +809,9 @@ class TestKDAFLASequenceParallel(DistributedTestBase):
                         if compile_module:
                             torch._dynamo.reset()
                         plain_module = torch.compile(module, fullgraph=True) if compile_module else module
-                        forward_module = torch.compile(replay_module, fullgraph=True) if compile_module else replay_module
+                        forward_module = (
+                            torch.compile(replay_module, fullgraph=True) if compile_module else replay_module
+                        )
                         checkpointed = apply_activation_checkpointing(forward_module)
                         hidden = torch.randn(1, local_length, 64, device=device, dtype=dtype, requires_grad=True)
                         replay_hidden = hidden.detach().clone().requires_grad_()

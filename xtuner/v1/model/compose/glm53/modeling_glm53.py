@@ -98,6 +98,13 @@ class Glm53ForConditionalGeneration(BaseComposeModel):
         global order before each modality takes its slice. Every count check compares *global*
         totals, so a corrupted sample is caught identically with and without SP.
         """
+        # 在 SP gather 前检查本 rank 的 token / 模态标记分片，避免落入底层布尔索引异常。
+        if mm_token_type_ids.shape != inputs_embeds.shape[:-1]:
+            raise ValueError(
+                f"mm_token_type_ids shape {tuple(mm_token_type_ids.shape)} != token shape "
+                f"{tuple(inputs_embeds.shape[:-1])}; pack lost modality alignment "
+                "(see SequenceContext.cat / split)"
+            )
         sp_size = sequence_parallel_mesh.size() if sequence_parallel_mesh is not None else 1
         if sp_size > 1:
             assert sequence_parallel_mesh is not None
@@ -193,7 +200,14 @@ class Glm53ForConditionalGeneration(BaseComposeModel):
             pixel_values.append(seq_ctx.pixel_values_videos)  # type: ignore[arg-type]
             grid_thw.append(flat_grid_thw)
             num_features[2] = int((flat_grid_thw.prod(-1) // merge_unit).sum().item())
-        features = self.get_visual_features(torch.cat(pixel_values), torch.cat(grid_thw), sp_mesh)
+        # A single-modality pack (the common case) already holds the final tensor; reuse it
+        # instead of paying a full torch.cat copy of every patch. Reuse shares storage with the
+        # pack/dataset source, so the tower path must stay read-only: any in-place op on the media
+        # tensor would silently corrupt the dataset. Pinned by
+        # test_image_only_pack_feeds_tower_without_copy.
+        flat_pixel_values = pixel_values[0] if len(pixel_values) == 1 else torch.cat(pixel_values)
+        flat_grid_thw = grid_thw[0] if len(grid_thw) == 1 else torch.cat(grid_thw)
+        features = self.get_visual_features(flat_pixel_values, flat_grid_thw, sp_mesh)
         return self._splice(inputs_embeds, mm_token_type_ids, features, num_features, sp_mesh)
 
     def forward(

@@ -289,17 +289,17 @@ def ns_line_2(A: Tensor, alpha: float, beta: float, *, out: Tensor | None = None
 
 
 # @torch.compile(dynamic=False, fullgraph=True)
-def newton_schulz_triton(G: Tensor, epsilon: float = 1e-7, num_experts: int = 1):
-    """Triton implementation of Newton-Schulz iteration.
+def newton_schulz_triton(G: Tensor, epsilon: float = 1e-7):
+    """Triton Newton-Schulz over independent matrices in ``G``.
 
-    Unified implementation for both regular matrices and MoE expert matrices.
-    Uses reshape to (num_experts, M, N) to handle both cases with the same code path.
+    Same layout contract as :func:`zeropower_via_newtonschulz5`:
 
-    Args:
-        G: Input tensor to orthogonalize. Shape: (num_experts * M, N) for MoE,
-           or (M, N) for regular matrices.
-        epsilon: Small value to avoid division by zero.
-        num_experts: Number of experts for MoE models. Default 1 for regular matrices.
+    - 2D ``[rows, cols]``: one matrix
+    - 3D ``[batch, rows, cols]``: a batch of independent matrices
+
+    The Triton kernels / ``baddbmm`` path operate on a leading batch dim, so a
+    2D input is temporarily viewed as ``[1, rows, cols]`` inside this function
+    only; the returned tensor matches the input rank.
     """
     # Newton-Schulz constants
     ns_consts = [
@@ -310,26 +310,25 @@ def newton_schulz_triton(G: Tensor, epsilon: float = 1e-7, num_experts: int = 1)
         (2.8366, -3.0525, 1.2012),
     ]
 
-    X = G.to(dtype=torch.bfloat16)
-    original_shape = X.shape
+    squeeze_batch = False
+    if G.ndim == 2:
+        G = G.unsqueeze(0)
+        squeeze_batch = True
 
-    # Unified reshape: (num_experts * M, N) -> (num_experts, M, N)
-    # For num_experts=1, this is (M, N) -> (1, M, N), adding a batch dim
-    N = X.size(-1)
-    X = X.view(num_experts, -1, N)
+    X = G.to(dtype=torch.bfloat16)
+    batch = X.size(0)
 
     # Transpose if rows > cols for numerical stability
     need_transpose = X.size(-2) > X.size(-1)
     if need_transpose:
         X = X.mT
 
-    # Normalize each expert matrix independently
-    # norm shape: (num_experts, 1, 1) - each expert has its own normalization factor
+    # Normalize each batch matrix independently
     X = X / (X.norm(dim=(-2, -1), keepdim=True) + epsilon)
 
     # Allocate buffers for 3D tensors
     X = X.contiguous()
-    A = torch.empty((num_experts, X.size(-2), X.size(-2)), device=X.device, dtype=X.dtype)
+    A = torch.empty((batch, X.size(-2), X.size(-2)), device=X.device, dtype=X.dtype)
     B = torch.empty_like(A)
     C = torch.empty_like(X)
 
@@ -343,7 +342,6 @@ def newton_schulz_triton(G: Tensor, epsilon: float = 1e-7, num_experts: int = 1)
     if need_transpose:
         X = X.mT
 
-    # Reshape back to original shape
-    X = X.reshape(original_shape)
-
+    if squeeze_batch:
+        X = X.squeeze(0)
     return X

@@ -113,7 +113,11 @@ dataloader_config = DataloaderConfig(
 lr = float(os.environ.get("LR", "1e-6"))
 optimizer = os.environ.get("OPTIMIZER", "adamw").lower()
 if optimizer == "muon":
-    optim_cfg = MuonConfig(lr=lr)
+    optim_cfg = MuonConfig(
+        lr=lr,
+        clip_grad_mode="all",
+        lm_head_lr=lr / (model_cfg.text_config.hidden_size**0.5),
+    )
 elif optimizer == "adamw":
     optim_cfg = AdamWConfig(
         lr=lr,

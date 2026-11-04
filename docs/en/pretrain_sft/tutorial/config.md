@@ -10,6 +10,17 @@ Before officially introducing the configuration file, let's review the previous 
 python xtuner/v1/train/cli/sft.py --help
 ```
 
+For training with `torch.compile` or JIT kernels, set a shared compilation cache before launch. Later jobs with the same environment and configuration can reuse PyTorch Inductor, Triton, TileLang, CuTe DSL, and CUDA driver caches. The first run still builds them.
+
+```{code-block} bash
+export XTUNER_COMPILE_CACHE_DIR=/path/to/shared/compile_cache
+torchrun --nproc-per-node 8 xtuner/v1/train/cli/sft.py --config config.py
+```
+
+Set this variable before importing XTuner. Existing `TORCHINDUCTOR_CACHE_DIR`, `TRITON_CACHE_DIR`, `TILELANG_CACHE_DIR`, `CUTE_DSL_CACHE_DIR`, and `CUDA_CACHE_PATH` settings take precedence. Use a new cache directory after changing the compiler or GPU environment.
+
+When the shared cache lives on a remote filesystem, local mode keeps compiler reads and writes on a node-local directory during training; it activates automatically whenever `XTUNER_COMPILE_CACHE_DIR` is set. Each node's local rank 0 warms `/tmp/xtuner-compile-cache` from the shared cache before XTuner is imported, and the nodes' new artifacts are merged back into the shared cache by global rank 0 after training finishes. The shared cache is kept in a namespace subdirectory derived from the compiler versions and GPU architecture. A compiler cache variable explicitly set outside the node-local directory is rejected, so no compiler can silently keep writing remotely. Jobs sharing one node or cache root must not run concurrently.
+
 ```{hint}
 :class: margin
 If you think the training entry doesn't suit your needs? You can also DIY it yourself.

@@ -56,7 +56,7 @@ def test_conv_rejects_unsupported_backend(monkeypatch, backend):
         causal_conv1d(torch.zeros(1, 2, 1), torch.zeros(1, 1), backend=backend)
 
 
-@pytest.mark.parametrize("option", ["backned", "cu_seqlens_cpu", "chunk_indices", "seq_idx"])
+@pytest.mark.parametrize("option", ["backned", "chunk_indices", "seq_idx"])
 def test_conv_rejects_unknown_options(monkeypatch, option):
     monkeypatch.setattr(CausalConv1dFunction, "apply", lambda *args: pytest.fail("Kernel must not run"))
     with pytest.raises(TypeError, match=option):
