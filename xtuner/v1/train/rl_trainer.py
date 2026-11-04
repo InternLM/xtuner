@@ -651,6 +651,25 @@ class RLDisaggregatedTrainerConfig(BaseRLTrainerConfig):
     train_resources: AcceleratorResourcesConfig
     rollout_resources: AcceleratorResourcesConfig
 
+    @model_validator(mode="after")
+    def _validate_turn_resume(self):
+        enabled = self.rollout_config.turn_resume_wait_timeout is not None
+        manager_enabled = self.agent_loop_manager_cfg.turn_resume_drain_timeout is not None
+        if enabled != manager_enabled:
+            raise ValueError("turn-resume requires both request gates and Agent pause policy")
+        if enabled:
+            if self.enable_evaluate or self.enable_initial_evaluate or self.eval_agent_loop_manager_cfg is not None:
+                raise ValueError("turn-resume first version rejects every online evaluation entrypoint")
+            if self.rollout_config.health_check_failure_threshold != 0:
+                raise ValueError("turn-resume requires fixed topology: disable automatic worker recovery")
+            tasks = self.agent_loop_manager_cfg.tasks
+            for task in tasks if isinstance(tasks, list) else [tasks]:
+                if not getattr(task.agent_loop_config, "require_turn_provenance", False):
+                    raise ValueError("Agent turn-resume requires complete request provenance and MoE routes")
+                if getattr(task.produce_strategy_config, "enable_partial_rollout", False):
+                    raise ValueError("Complete-turn pause cannot use token partial rollout")
+        return self
+
     def build(self) -> "RLDisaggregatedTrainer":
         return RLDisaggregatedTrainer(self)
 

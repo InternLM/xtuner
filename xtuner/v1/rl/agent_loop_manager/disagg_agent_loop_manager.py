@@ -41,6 +41,7 @@ from .produce_utils import (
     task_checkpoint_path,
 )
 from .sampler import Sampler, SamplerConfig
+from .agent_turn_pause_policy import AgentTurnPausePolicy, DrainPendingPausePolicy
 
 
 if TYPE_CHECKING:
@@ -67,6 +68,8 @@ class DisaggAgentLoopManagerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     tasks: list[DisaggTaskSpecConfig] | DisaggTaskSpecConfig
+    turn_resume_drain_timeout: float | None = Field(default=None, gt=0)
+    turn_resume_freeze_timeout: float = Field(default=60, gt=0)
 
     def build(
         self,
@@ -112,6 +115,9 @@ class DisaggAgentLoopManagerConfig(BaseModel):
             )
 
         return DisaggAgentLoopManager(
+            pause_policy=(AgentTurnPausePolicy(freeze_timeout=self.turn_resume_freeze_timeout,
+                                               drain_timeout=self.turn_resume_drain_timeout)
+                          if self.turn_resume_drain_timeout is not None else DrainPendingPausePolicy()),
             task_runners=task_runners,
             replay_buffer=replay_buffer,
             rollout_controller=rollout_controller,
@@ -174,12 +180,16 @@ class DisaggAgentLoopManager:
         replay_buffer: ReplayBuffer,
         rollout_controller: RolloutController,
         logger=None,
+        pause_policy=None,
     ):
         if not task_runners:
             raise ValueError("DisaggAgentLoopManager requires at least one task runner.")
         if sum(task.weight for task in task_runners) <= 0:
             raise ValueError("At least one task weight must be positive for DisaggAgentLoopManager.")
 
+        self._pause_policy = pause_policy or DrainPendingPausePolicy()
+        for task in task_runners:
+            task.produce_strategy.pending_cleanup = self._pause_policy.pending_cleanup
         self.task_runners = task_runners
         self.replay_buffer = replay_buffer
         self._rollout_controller = rollout_controller
@@ -264,7 +274,7 @@ class DisaggAgentLoopManager:
         # 非共卡显式刹车；共卡没有 public pause。
         self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
         self._update_event.set()
-        await self._rollout_controller.pause_generation.remote()  # type: ignore[attr-defined]
+        await self._pause_policy.pause(self._rollout_controller)
 
         pause_time_s = 0.0
         for task in self.task_runners:
@@ -290,7 +300,7 @@ class DisaggAgentLoopManager:
     async def continue_produce(self, model_step: int) -> None:
         # 与 pause_produce 成对：同步/评测完成后，用新 model_step 恢复后台 producer。
         self._model_step = model_step
-        await self._rollout_controller.continue_generation.remote()  # type: ignore[attr-defined]
+        await self._pause_policy.resume(self._rollout_controller, model_step)
         self._status = AgentLoopManagerStatus.NORMAL
         self._update_event.clear()
 

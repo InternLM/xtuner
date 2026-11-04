@@ -361,6 +361,7 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         )
         self.tail_batch_trigger_size = tail_batch_trigger_size
         self._pending_tasks = _PendingTasks()
+        self.pending_cleanup = pause_pending_tasks
 
     def is_model_expired(self, train_step: int, model_step: int) -> bool:
         staleness = calculate_seq_staleness(model_step, train_step)
@@ -370,7 +371,7 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         return self._pending_tasks.count()
 
     async def pause_produce(self, ctx: DisaggProduceContext) -> float:
-        return await pause_pending_tasks(
+        return await self.pending_cleanup(
             pending_tasks=self._pending_tasks,
             ctx=ctx,
             put_claimed_task=lambda task: ctx.put_generated_group(task.result()),
