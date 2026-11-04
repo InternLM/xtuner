@@ -422,27 +422,8 @@ def update_status_from_finish_reason(finish_reason: str | None) -> Status:
 
 
 def is_valid_for_training(group_data_items: list[RolloutState], logger) -> bool:
-    """Checks if a group of rollout states is valid for a training step.
-
-    Args:
-        group_data_items (list[RolloutState]): A list of RolloutState objects.
-        logger (logging.Logger): Logger used to report the invalid reason.
-
-    Returns:
-        bool: True if the group is valid, False otherwise.
-
-    NOTE: Why this check is needed:
-    - For system fault tolerance, this check is performed at rollout / dataflow
-      time, but we still do it here to ensure training data integrity.
-    - 'filtered'/'failed': These items are fundamentally broken or incomplete and
-      should not be used for training.
-    - 'aborted': These items represent rollouts that were stopped
-      prematurely. Using such partial data could lead the model to learn
-      undesirable behaviors (e.g., stopping generation too early).
-    - Empty response/response_ids: The model's generated response is the core
-      of the training data for RL algorithms like PPO. If the response is
-      missing, there is nothing to compute rewards on or to train the model with.
-    """
+    """Check group status and the canonical training contract of every
+    state."""
     is_abort = any(item.status == Status.ABORTED for item in group_data_items)
     is_filtered = any(item.status == Status.FILTERED for item in group_data_items)
     is_failed = any(item.status == Status.FAILED for item in group_data_items)
@@ -452,28 +433,10 @@ def is_valid_for_training(group_data_items: list[RolloutState], logger) -> bool:
         )
         return False
     for item in group_data_items:
-        if item.input_ids is not None:
-            input_ids_valid = len(item.input_ids) > 1
-            labels_valid = item.labels is not None and len(item.labels) == len(item.input_ids)
-            logprobs_valid = item.logprobs is None or len(item.logprobs) == len(item.input_ids)
-            if not input_ids_valid or not labels_valid or not logprobs_valid:
-                logger.warning(
-                    "Invalid dataflow item found during training: input_ids, labels, and logprobs lengths mismatch."
-                )
-                return False
-            continue
-
-        response_valid = item.response is not None and len(item.response) > 0
-        ids_valid = item.response_ids is not None and len(item.response_ids) > 0
-        if not ids_valid:
-            # NOTE: `response_ids` is the critical field for token-in-token-out mode, so we ensure it's not empty.
-            logger.warning(
-                "Invalid dataflow item found during training: no response or response_ids and skip this item."
-            )
-            return False
-        if not response_valid:
-            # NOTE: check valid response string for judger inputs
-            logger.warning("Invalid dataflow item found during training: empty response string and skip this item.")
+        try:
+            item.validate_training()
+        except ValueError as exc:
+            logger.warning(f"Invalid canonical training state for rollout_id={item.rollout_id}: {exc}")
             return False
     return True
 

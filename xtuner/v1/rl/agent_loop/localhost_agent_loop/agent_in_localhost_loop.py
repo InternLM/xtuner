@@ -156,36 +156,11 @@ class AgentInLocalhostLoop(AgentLoop):
         return self.canonicalize_train_fields(samples)
 
     def canonicalize_train_fields(self, group: list[RolloutState]) -> list[RolloutState]:
-        """Validate the canonical training fields of one localhost agentic
-        rollout group.
-
-        This loop fills ``input_ids``/``labels``/``logprobs`` from the trace store as one
-        unshifted full sequence, so there is nothing left to assemble. Canonicalization
-        only re-checks the unified convention (``labels`` present and of equal length,
-        ``logprobs`` either ``None`` or of equal length) and marks a violating sample
-        ``Status.FAILED`` instead of raising into the producer. States without
-        ``input_ids`` (eval-mode states) carry no training fields and are skipped.
-
-        Args:
-            group (list[RolloutState]): One group of rollout states after generation,
-                judging, and filtering.
-
-        Returns:
-            list[RolloutState]: The same group with validated training fields.
-        """
-        for state in group:
-            if state.status != Status.COMPLETED or state.input_ids is None:
-                continue
-            try:
-                # 该 loop 已从 trace store 组装完整全序列；统一入口负责校验并发布 TrainMeta。
-                labels = state.labels
-                if labels is None:
-                    raise ValueError("Training input_ids and labels must be full and aligned")
-                state.set_training_fields(input_ids=state.input_ids, labels=labels, logprobs=state.logprobs)
-            except Exception as exc:
-                self.logger.error(f"Canonicalize train fields failed for rollout_id={state.rollout_id}: {exc}")
-                state.status = Status.FAILED
-                state.error_msg = f"canonicalize_train_fields failed: {exc}"
+        """Validate trace-backed full sequences and skip eval-only states."""
+        full_sequence_states = [
+            state for state in group if state.status == Status.COMPLETED and state.input_ids is not None
+        ]
+        super().canonicalize_train_fields(full_sequence_states)
         return group
 
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:

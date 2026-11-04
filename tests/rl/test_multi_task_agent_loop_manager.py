@@ -324,6 +324,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             response_model_steps=[0, 4],
             status=Status.COMPLETED,
         )
+        state.set_training_fields(input_ids=[1, 2, 3, 4], labels=[-100, -100, 3, 4], logprobs=None)
         strategy = _FakeProduceStrategy(token_stale_threshold=4)
         replay_buffer = _FakeReplayBuffer(
             rollout_states_by_task={"task": [[state]]},
@@ -346,7 +347,10 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
         result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
 
-        self.assertEqual(result.rollout_states[0][0].labels, [-100, -100, -100, 4])
+        trained_state = result.rollout_states[0][0]
+        self.assertEqual(trained_state.labels, [-100, -100, -100, 4])
+        self.assertEqual(trained_state.train_meta.supervised_tokens, 1)
+        trained_state.validate_training()
         self.assertEqual(replay_buffer.task_token_stale_threshold_calls, [{"task": 4}])
 
     async def test_take_train_batch_skips_states_without_response_ids(self):
@@ -360,6 +364,8 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             logprobs=[0.0, -0.1],
             status=Status.COMPLETED,
         )
+        assert state.input_ids is not None and state.labels is not None
+        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
         strategy = _FakeProduceStrategy(token_stale_threshold=4)
         manager = AgentLoopManager(
             task_runners=[
@@ -398,6 +404,8 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             labels=[-100, -100, 30, -100, 40],
             status=Status.COMPLETED,
         )
+        assert state.input_ids is not None and state.labels is not None
+        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
         strategy = _FakeProduceStrategy(token_stale_threshold=4)
         manager = AgentLoopManager(
             task_runners=[
@@ -419,7 +427,10 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
         result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
 
-        self.assertEqual(result.rollout_states[0][0].labels, [-100, -100, -100, -100, 40])
+        trained_state = result.rollout_states[0][0]
+        self.assertEqual(trained_state.labels, [-100, -100, -100, -100, 40])
+        self.assertEqual(trained_state.train_meta.supervised_tokens, 1)
+        trained_state.validate_training()
 
     async def test_take_train_batch_sync_path_leaves_labels_untouched(self):
         # 同步路径（无 token staleness）零操作：labels 在生成期已是最终态（语义洞已烙入）。
@@ -429,10 +440,12 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             message=[{"role": "user", "content": "prompt"}],
             prompt_ids=[1, 2],
             response_ids=[3, 4, 5],
+            response_model_steps=[4, 4, 4],
             input_ids=[1, 2, 3, 4, 5],
             labels=[-100, -100, 4, 5, -100],
             status=Status.COMPLETED,
         )
+        state.set_training_fields(input_ids=[1, 2, 3, 4, 5], labels=[-100, -100, 4, 5, -100], logprobs=None)
         manager = AgentLoopManager(
             task_runners=[
                 _TaskRunner(

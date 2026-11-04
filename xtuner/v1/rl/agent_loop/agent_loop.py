@@ -293,10 +293,8 @@ class AgentLoop(ABC):
         ``j`` and the train controller applies the one-position shift at conversion time.
         Samples that already carry ``input_ids`` satisfy the convention and are left
         untouched. Non-completed samples are skipped. Failures mark the single sample as
-        ``Status.FAILED`` instead of raising into the producer. Loops that assemble their
-        own full sequences (e.g. the agentic localhost/sandbox loops) override this
-        method with their own loop-specific implementation instead of relying on this
-        default.
+        ``Status.FAILED`` instead of raising into the producer. Agentic loops that only
+        need to select their full-sequence states reuse this default validation.
 
         Args:
             group (list[RolloutState]): One group of rollout states after generation,
@@ -310,6 +308,8 @@ class AgentLoop(ABC):
                 continue
             try:
                 if state.input_ids is None:
+                    if not state.response:
+                        raise ValueError("response must be non-empty")
                     is_vlm_model = "train_prompt_ids" in state.extra_fields
                     if is_vlm_model:
                         # TODO(hha): VLM, 不好的设计，后续要去掉
@@ -332,6 +332,8 @@ class AgentLoop(ABC):
                         response_ids = (
                             self.tokenizer(state.response, return_tensors="pt")["input_ids"].flatten().tolist()
                         )
+                    if not response_ids:
+                        raise ValueError("response_ids must be non-empty")
                     # 归一化写回：Tensor 展平为 list、tokenizer 兜底结果也落到 response_ids，后续消费者零分支。
                     state.response_ids = response_ids
 
@@ -346,7 +348,8 @@ class AgentLoop(ABC):
                     state.input_ids = list(prompt_ids) + response_ids
                     state.labels = [-100] * len(prompt_ids) + list(response_ids)
                 # 训练字段与摘要只通过 state 入口发布；已组装的全序列样本也在这里校验并生成 TrainMeta。
-                assert state.input_ids is not None and state.labels is not None
+                if state.input_ids is None or state.labels is None:
+                    raise ValueError("Training input_ids and labels must be full and aligned")
                 state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
             except Exception as exc:
                 self.logger.error(f"Canonicalize train fields failed for rollout_id={state.rollout_id}: {exc}")

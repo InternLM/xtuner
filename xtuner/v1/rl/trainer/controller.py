@@ -380,7 +380,7 @@ class TrainingController:
             statistics dictionary.
         """
         has_3d_position = any(
-            state.position_ids is not None and state.position_ids.ndim == 3
+            state.train_meta is not None and state.train_meta.position_layout == "mrope_3d"
             for group in rollout_groups
             for state in group
         )
@@ -502,6 +502,8 @@ class TrainingController:
             tuple[ColateItem, _SampleObservation]: The packable training item and the per-sample
             metrics observed during conversion.
         """
+        train_meta = state.train_meta
+        assert train_meta is not None and state.num_tokens is not None
         input_ids = state.input_ids
         labels = state.labels
         assert input_ids is not None and labels is not None and len(input_ids) == len(labels), (
@@ -514,7 +516,8 @@ class TrainingController:
         shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
         rollout_logprobs: torch.Tensor | None = None
-        if state.logprobs is not None:
+        if train_meta.has_rollout_logprobs:
+            assert state.logprobs is not None
             assert len(state.logprobs) == input_len, f"{len(state.logprobs)} vs {input_len}, data: {state}"
             rollout_logprobs = torch.tensor(state.logprobs[1:], dtype=torch.float32).unsqueeze(0)
             assert rollout_logprobs.size() == shifted_labels_t.size(), (
@@ -525,13 +528,6 @@ class TrainingController:
         # Prompt positions predict prompt tokens whose shifted labels are -100, so their
         # advantage is 0; the last entry of response_ids (EOS) is only a label, never an input.
         actual_advantages = [0.0 if label == -100 else advantage_val for label in shifted_labels]
-
-        # prompt_len 统计原始输入 prompt 长度（VLM 的 prompt 在 train_prompt_ids）；
-        # response_len 统计 LLM 生成的 token 数（labels 非 -100 的监督位）。环境/工具
-        # 插入的语义洞不计入两者；prompt_ids 缺失时 prompt_len 退回洞计数。
-        prompt_ids = state.extra_fields.get("train_prompt_ids") or state.prompt_ids
-        prompt_len = len(prompt_ids) if prompt_ids else sum(label == -100 for label in shifted_labels)
-        response_len = sum(label != -100 for label in shifted_labels)
 
         position_ids = state.position_ids
         if has_3d_position and (position_ids is None or position_ids.ndim != 3):
@@ -559,10 +555,10 @@ class TrainingController:
         turns = state.extra_fields.get("agent_tool_turns")
         observation: _SampleObservation = {
             "advantage": advantage_val,
-            "supervised_positions": response_len,
-            "prompt_len": prompt_len,
+            "supervised_positions": train_meta.supervised_tokens,
+            "prompt_len": train_meta.prompt_length,
             "tool_turns": turns if isinstance(turns, int) else None,
-            "training_tokens": input_len - 1,
+            "training_tokens": state.num_tokens,
         }
         return data_dict, observation
 

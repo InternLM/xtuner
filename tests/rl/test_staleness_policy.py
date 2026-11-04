@@ -125,7 +125,9 @@ class TestTokenStalenessMask(unittest.TestCase):
         state.reset_response()
         state.response_ids = [3, 4]
         state.response_model_steps = [4, 4]
+        state.input_ids = [1, 2, 3, 4]
         state.labels = [-100, -100, 3, 4]
+        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=None)
 
         masks = self._calc_and_bake(
             [state],
@@ -160,6 +162,7 @@ class TestTokenStalenessMask(unittest.TestCase):
             input_ids=[1, 2, 30, -1, 40, -1, 32],
             labels=[-100, -100, 30, -100, 40, -100, 32],
         )
+        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=None)
 
         masks = self._calc_and_bake(
             [state],
@@ -183,6 +186,7 @@ class TestTokenStalenessMask(unittest.TestCase):
             input_ids=[1, 2, 30, -1, 40, -1, 32],
             labels=[-100, -100, 30, -100, 40, -100, 32],
         )
+        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=None)
 
         masks = self._calc_and_bake(
             [state],
@@ -205,6 +209,7 @@ class TestTokenStalenessMask(unittest.TestCase):
             input_ids=[1, 2, 30, -1, 40, -1, 32],
             labels=[-100, -100, 30, -100, 40, -100, 32],
         )
+        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=None)
 
         masks = self._calc_and_bake(
             [state],
@@ -224,8 +229,10 @@ class TestTokenStalenessMask(unittest.TestCase):
             message=[{"role": "user", "content": "prompt"}],
             response_ids=[3, 4],
             response_model_steps=[0, 4],
+            input_ids=[3, 4],
             labels=[3, 4],
         )
+        state.set_training_fields(input_ids=[3, 4], labels=[3, 4], logprobs=None)
 
         masks = self._calc_and_bake(
             [state],
@@ -241,6 +248,9 @@ class TestTokenStalenessMask(unittest.TestCase):
         canonical = self._state(response_model_steps=[0, 4], labels=[-100, -100, 3, -100])
         canonical.input_ids = [1, 2, 3, 4]
         canonical.logprobs = [0.0, 0.0, -0.1, -0.2]
+        canonical.set_training_fields(
+            input_ids=canonical.input_ids, labels=canonical.labels, logprobs=canonical.logprobs
+        )
 
         masks = self._calc_and_bake(
             [canonical],
@@ -264,12 +274,9 @@ class TestTokenStalenessMask(unittest.TestCase):
             token_stale_threshold=token_stale_threshold,
         )
         for item, mask in zip(group, masks):
-            if mask is None:
-                continue
-            offset = len(item.labels) - len(mask)
-            item.labels[offset:] = [
-                label if mask_value else -100 for label, mask_value in zip(item.labels[offset:], mask)
-            ]
+            if mask is not None:
+                item.apply_response_mask([bool(value) for value in mask])
+                item.validate_training()
         return masks
 
     @staticmethod
@@ -287,7 +294,9 @@ class TestTokenStalenessMask(unittest.TestCase):
             response_model_steps=response_model_steps,
         )
         # prompt+response 形态：response_ids 是序列的连续尾段，labels 为全序列监督。
+        state.input_ids = [1, 2, 3, 4]
         state.labels = labels if labels is not None else [-100, -100, 3, 4]
+        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=None)
         return state
 
 
