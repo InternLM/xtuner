@@ -8,7 +8,7 @@ pack materialization round-trip. The training worker only holds a
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterator, Literal, cast
+from typing import TYPE_CHECKING, Iterator, Literal, Sequence, cast
 
 import numpy as np
 import ray
@@ -338,7 +338,7 @@ class TrainBatch:
 
 def iter_cpu_packs(
     batch: TrainBatch,
-    indices: tuple[tuple[int, ...], ...],
+    indices: Sequence[Sequence[int]],
     resolve_refs,
 ) -> Iterator[FullPack]:
     """Materialize packs one at a time, resolving each pack's refs before
@@ -346,14 +346,14 @@ def iter_cpu_packs(
 
     Args:
         batch (TrainBatch): Batch holding the CPU samples.
-        indices (tuple[tuple[int, ...], ...]): Local sample indices per pack.
+        indices (Sequence[Sequence[int]]): Local sample indices per pack.
         resolve_refs: Callback that materializes object refs on the pack's ``seq_ctx``.
 
     Yields:
         FullPack: The current pack.
     """
     for pack_indices in indices:
-        pack = batch.materialize(pack_indices)
+        pack = batch.materialize(tuple(pack_indices))
         resolve_refs(pack.full_data["seq_ctx"])
         yield pack
 
@@ -403,6 +403,26 @@ def get_train_seq_ctx(
     return seq_ctx
 
 
+def resolve_mm_inputs(seq_ctx: SequenceContext) -> None:
+    """Materialize multimodal pixel-value object refs into one CPU tensor.
+
+    Args:
+        seq_ctx (SequenceContext): Packed CPU context whose pixel refs are resolved.
+
+    Returns:
+        None
+    """
+    pixel_values = seq_ctx.pixel_values
+    if pixel_values is None:
+        return
+    if isinstance(pixel_values, np.ndarray):
+        raise NotImplementedError("The case where pixel_values is a numpy array is not implemented yet.")
+    assert isinstance(pixel_values, list), f"pixel_values should be list of tensor, got {type(pixel_values)}"
+    pixel_values = ray.get(list(pixel_values))
+    pixel_values = [torch.as_tensor(pixel_value) for pixel_value in pixel_values]
+    seq_ctx.pixel_values = torch.cat(pixel_values, dim=0)
+
+
 def resolve_pack_refs(
     seq_ctx: SequenceContext,
     *,
@@ -422,14 +442,7 @@ def resolve_pack_refs(
     Returns:
         None
     """
-    pixel_values = seq_ctx.pixel_values
-    if pixel_values is not None:
-        if isinstance(pixel_values, np.ndarray):
-            raise NotImplementedError("The case where pixel_values is a numpy array is not implemented yet.")
-        assert isinstance(pixel_values, list), f"pixel_values should be list of tensor, got {type(pixel_values)}"
-        pixel_values = ray.get(list(pixel_values))
-        pixel_values = [torch.as_tensor(pixel_value) for pixel_value in pixel_values]
-        seq_ctx.pixel_values = torch.cat(pixel_values, dim=0)
+    resolve_mm_inputs(seq_ctx)
 
     rollout_routed_experts = seq_ctx.rollout_routed_experts
     if rollout_routed_experts is None:

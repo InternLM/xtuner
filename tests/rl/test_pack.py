@@ -242,6 +242,17 @@ class TestRLDataPacker(unittest.TestCase):
         total_packs = sum(len(packs) for rank in plan for packs in rank)
         self.assertEqual(padding, total_packs * self.PACK_MAX_LENGTH - sum(lengths))
 
+    def test_lpt_strategy_invariants(self):
+        lengths = [10, 8, 6, 30, 12, 4, 7, 20, 2, 9, 15, 3]
+        packer = self._make_packer(world_size=2, optimizer_steps=2, pack_strategy="lpt")
+
+        plan, padding = packer.pack(lengths)
+
+        self._assert_plan_invariants(plan, lengths, optimizer_steps=2)
+        total_packs = sum(len(packs) for rank in plan for packs in rank)
+        self.assertEqual(padding, total_packs * self.PACK_MAX_LENGTH - sum(lengths))
+        self.assertEqual(total_packs % 2, 0)
+
     def test_native_strategy_invariants(self):
         lengths = [10, 8, 6, 30, 12, 4, 7]
         packer = self._make_packer(world_size=4, optimizer_steps=1, pack_strategy="native")
