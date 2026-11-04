@@ -254,7 +254,8 @@ class ProduceBatchResult:
 
 
 def derive_window_means(scalars: dict[str, float]) -> dict[str, float]:
-    """Derive ``<name>_mean`` entries from ``<name>_sum``/``<name>_count`` pairs.
+    """Derive ``<name>_mean`` entries from ``<name>_sum``/``<name>_count``
+    pairs.
 
     Args:
         scalars (dict[str, float]): Window scalars carrying ``<name>_sum`` and
