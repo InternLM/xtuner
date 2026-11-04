@@ -319,17 +319,7 @@ class TestTrajectoryLogging(unittest.TestCase):
         good.input_ids = [1, 2, 3]
         good.labels = [-100, 2, 3]
         good.response_model_steps = [0, 0]  # 与 response_ids 等长（版本数校验）
-        good.num_tokens = 2  # len(input_ids) - 1
-        good.extra_fields.update(
-            {
-                "train_prompt_length": 1,
-                "train_response_length": 2,
-                "supervised_tokens": 2,  # labels[1:] 中非 -100 的个数
-                "position_layout": "1d",
-                "has_rollout_logprobs": False,
-                "has_routed_experts": False,
-            }
-        )
+        good.set_training_fields(input_ids=good.input_ids, labels=good.labels, logprobs=None)
         batch = [[bad], [good]]
 
         dropped_groups, dropped_samples = self.trainer._prepare_train_batch(batch, train_step=1)

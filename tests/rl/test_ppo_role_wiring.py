@@ -47,7 +47,7 @@ from xtuner.v1.rl.advantage import GAEAdvantageConfig, GAEEstimator
 from xtuner.v1.rl.advantage.gae import action_gae, terminal_rewards
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.rl.trainer.critic_worker import CriticWorker, CriticWorkerConfig
-from xtuner.v1.rl.trainer.pack import TokenBatchProto
+from xtuner.v1.rl.trainer.pack import PackPlan, RankPlan, TokenBatchProto
 from xtuner.v1.rl.trainer.schedule import build_lr_scheduler, partition_indices, pass_order
 from xtuner.v1.rl.trainer.worker import TrainingWorker, TrainSample, requires_role
 from xtuner.v1.train.trainer import LoadCheckpointConfig
@@ -447,13 +447,13 @@ class TestSessionGAEDispatch(unittest.TestCase):
             _state(uid=3, rollout_id=13, labels=[12, 13, 14, 15], reward={"score": -1.0}),
         ]
         dense_values = [[0.1, 0.2], [0.3], [0.4, 0.5], [0.6, 0.7, 0.8]]
-        pack_plan = {
-            "dp_plans": {
-                0: {"global_indices": [2, 0], "plan": [[[0, 1]]]},
-                1: {"global_indices": [3, 1], "plan": [[[0, 1]]]},
-            },
-            "plan_log": {},
-        }
+        pack_plan = PackPlan(
+            ranks=(
+                RankPlan(global_indices=(2, 0), steps=(((0, 1),),)),
+                RankPlan(global_indices=(3, 1), steps=(((0, 1),),)),
+            ),
+            metrics={},
+        )
         decoy = TokenBatchProto.concat([torch.tensor([9.9, 9.9])])
         value_batches = [
             TokenBatchProto.concat(
@@ -496,7 +496,7 @@ class TestSessionGAEDispatch(unittest.TestCase):
     def test_session_gae_rejects_value_count_mismatch(self):
         # 行为：values 行数与样本数不匹配时拒绝
         rollout_items = [_state(uid=0, rollout_id=10, labels=[-100, 5, 6], reward={"score": 1.0})]
-        pack_plan = {"dp_plans": {0: {"global_indices": [0], "plan": [[[0]]]}}, "plan_log": {}}
+        pack_plan = PackPlan(ranks=(RankPlan(global_indices=(0,), steps=(((0,),),)),), metrics={})
         # Rank 0 reports two local value rows for one packed sample.
         value_batches = [
             TokenBatchProto.concat([torch.tensor([0.1, 0.2]), torch.tensor([0.3, 0.4])]),
@@ -513,9 +513,57 @@ class TestSessionGAEDispatch(unittest.TestCase):
             _state(uid=0, rollout_id=10, labels=[-100, 5], reward={"score": 1.0}),
             _state(uid=1, rollout_id=11, labels=[6, 7], reward={"score": 1.0}),
         ]
-        pack_plan = {"dp_plans": {0: {"global_indices": [0], "plan": [[[0]]]}}, "plan_log": {}}
+        pack_plan = PackPlan(ranks=(RankPlan(global_indices=(0,), steps=(((0,),),)),), metrics={})
         value_batches = [TokenBatchProto.concat([torch.tensor([0.1, 0.2])])]
         with self.assertRaisesRegex(RuntimeError, "do not cover every training sample"):
             self._controller()._estimate_advantages(
                 {"reward_groups": []}, rollout_items, pack_plan, value_batches, data_replicate_size=1
             )
+
+
+class TestGAEFitSkipsGroupAdvantages(unittest.TestCase):
+    """回归：GAE 模式下 fit 不能对 token estimator 调用 group advantage compute。"""
+
+    def test_segment_gae_fit_does_not_call_group_estimator(self):
+        def _rpc(returns=None):
+            return SimpleNamespace(remote=MagicMock(return_value=returns))
+
+        worker = SimpleNamespace(
+            get_worker_cfg=_rpc(SimpleNamespace(optimizer_steps=1, pack_strategy="legacy", pack_seed=None, pack_extra_buffer_size=0)),
+            get_data_replicate_size=_rpc(1),
+            load_train_batch=_rpc(None),
+            release_train_batch=_rpc(None),
+            switch_role=_rpc(None),
+            critic_collect_values=_rpc(None),
+            critic_fit=_rpc([]),
+            actor_fit=_rpc({}),
+        )
+        state = _state()
+        prepared = {
+            "rollout_items": [state],
+            "reward_groups": [],
+            "batch_attr": {},
+            "cluster_rewards": [],
+            "distillation_reward_observations": [],
+        }
+        controller = TrainingController.__new__(TrainingController)
+        controller.workers = [worker]
+        controller.advantage_estimator = GAEEstimator(reward_scope="segment")
+        controller.distillation = SimpleNamespace(task_adv_weight=1.0)
+        controller.logger = MagicMock()
+        controller._gae_reward_scope = "segment"
+        controller._has_critic = True
+        controller._prepare_advantages = MagicMock(side_effect=AssertionError("must not be called in GAE mode"))
+
+        with (
+            patch.object(controller, "_prepare_rollout_items", return_value=prepared),
+            patch.object(controller, "_build_pack_plan", return_value=PackPlan((RankPlan((0,), (((0,),),)),), {})),
+            patch.object(controller, "_estimate_advantages", return_value=([], None, None, {"mean": 0.0})),
+            patch.object(controller, "_build_trainer_log_info", return_value={}),
+            patch.object(controller, "_critic_log_scalars", return_value={}),
+            patch("xtuner.v1.rl.trainer.controller.ray.put", side_effect=lambda value: value),
+            patch("xtuner.v1.rl.trainer.controller.ray.get", side_effect=lambda value, timeout=None: value),
+        ):
+            controller.fit([[state]], pack_max_length=16, rollout_idx=1)
+
+        controller._prepare_advantages.assert_not_called()
