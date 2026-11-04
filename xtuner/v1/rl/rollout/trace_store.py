@@ -143,13 +143,12 @@ class Trie:
         """Get all keys (i.e., strings) stored in the Trie."""
         result = []
 
-        def _collect(node: TreeNode, path: List[str]):
+        stack = [(self.root, "")]
+        while stack:
+            node, key = stack.pop()
             if node.value is not None:
-                result.append("".join(path))
-            for token, child in node.children.items():
-                _collect(child, path + [token])
-
-        _collect(self.root, [])
+                result.append(key)
+            stack.extend((child, key + token) for token, child in reversed(list(node.children.items())))
         return result
 
     def insert(self, key: str, value: Any) -> None:
@@ -216,8 +215,7 @@ class Trie:
         return "".join(key_path), matched_nodes
 
     def release(self, key: str | None = None):
-        """Release nodes and free associated resources (e.g. Ray objects) for a
-        given key.
+        """Drop trace ownership; exported and sibling route references remain valid.
 
         If the key is None, the entire Trie is released. Prunes empty branches bottom-up.
 
@@ -226,16 +224,15 @@ class Trie:
                 If None, releases the entire tree.
         """
 
-        def _free_subtree(node: TreeNode):
-            for child in node.children.values():
-                _free_subtree(child)
-            if node.value is not None:
-                _free_ray_refs(node.value)
-                node.value = None
-            node.children.clear()
-
         if key is None:
-            _free_subtree(self.root)
+            # Drop only this store's ownership. Borrowers retain live R3 refs.
+            stack = [self.root]
+            while stack:
+                node = stack.pop()
+                stack.extend(node.children.values())
+                node.value = None
+                node.children.clear()
+                node.parent = None
             return
 
         node = self.root
@@ -254,7 +251,6 @@ class Trie:
                 return
 
         if node.value is not None:
-            _free_ray_refs(node.value)
             node.value = None
 
         for parent, token in reversed(path):
