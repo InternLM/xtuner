@@ -49,6 +49,9 @@ if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
     from xtuner.v1.rl.advantage.base import AdvantageEstimator, TokenAdvantageEstimator
+    from xtuner.v1.rl.advantage.stats import TokenStats
+
+    from .pack import TokenBatchProto
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
@@ -374,8 +377,8 @@ class TrainingWorker(SingleAcceleratorWorker):
         return self.batch
 
     @ray_method
-    def install_advantages(self, payload: list[float] | Any) -> None:
-        """Install group/scalar or token-row advantages into the local batch.
+    def set_advantages(self, payload: list[float] | TokenBatchProto) -> None:
+        """Set group/scalar or token-row advantages on the local batch.
 
         Args:
             payload (list[float] | TokenBatchProto): Scalar or token rows per local sample.
@@ -383,11 +386,11 @@ class TrainingWorker(SingleAcceleratorWorker):
         Returns:
             None
         """
-        self._require_batch().install_advantages(payload)
+        self._require_batch().set_advantages(payload)
 
     @ray_method
-    def install_ppo_targets(self, payload: Any) -> None:
-        """Install a pair of complete advantage/return rows per local sample.
+    def set_ppo_targets(self, payload: tuple[TokenBatchProto, TokenBatchProto]) -> None:
+        """Set a pair of complete advantage/return rows per local sample.
 
         Args:
             payload: ``(TokenBatchProto, TokenBatchProto)`` for this DP rank.
@@ -395,7 +398,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         Returns:
             None
         """
-        self._require_batch().install_ppo_targets(*payload)
+        self._require_batch().set_ppo_targets(*payload)
 
     @ray_method
     def actor_fit(self) -> WorkerLogItem:
@@ -408,7 +411,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         return self.actor.fit(self._require_batch())
 
     @ray_method
-    def critic_collect_values(self, return_values: bool) -> Any:
+    def critic_collect_values(self, return_values: bool) -> TokenBatchProto | None:
         """Forward the critic over the installed batch.
 
         Args:
@@ -423,8 +426,8 @@ class TrainingWorker(SingleAcceleratorWorker):
         return self.critic.collect_values(self._require_batch(), return_values=return_values)
 
     @ray_method
-    def critic_compute_segment_targets(self, estimator: Any, contribute: bool) -> Any:
-        """Compute and install segment GAE targets on the installed batch.
+    def critic_compute_segment_targets(self, estimator: TokenAdvantageEstimator, contribute: bool) -> TokenStats:
+        """Compute and set segment GAE targets on the installed batch.
 
         Args:
             estimator (TokenAdvantageEstimator): Segment GAE estimator.

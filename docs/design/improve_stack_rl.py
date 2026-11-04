@@ -16,19 +16,21 @@ FullPack / TrainMeta / ActorSnapshot 等是数据记录，不是新的管理层�
 
 from __future__ import annotations
 
+import sys
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from functools import partial
-import sys
 from typing import TYPE_CHECKING, Iterator, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+
 if TYPE_CHECKING:
     from pathlib import Path
+
     from torch import Tensor
-    from xtuner.v1.data_proto.sequence_context import SequenceContext
+
     from xtuner.v1.rl.distillation.train_teacher_manager import TrainTeacherTimings
     from xtuner.v1.rl.trainer.pack import TokenBatchProto
 
@@ -322,19 +324,19 @@ class TrainBatch:
             offset += length
         return output
 
-    def install_advantages(self, payload: list[float] | TokenBatchProto) -> None:
+    def set_advantages(self, payload: list[float] | TokenBatchProto) -> None:
         """[S2] scalar 广播或 token rows；先校验全批再写，统一无效位置为 0。"""
         rows = EXISTING_EXPAND_AND_VALIDATE_ROWS(payload, self._samples)
         for sample, row in zip(self._samples, rows):
             sample.fields["advantages"] = row.masked_fill(sample.fields["shifted_labels"].eq(-100), 0)
 
-    def install_old_values(self, rows: list[Tensor]) -> None:
+    def set_old_values(self, rows: list[Tensor]) -> None:
         """[S4 扩展] 全部样本的完整冻结值；不允许 fit 内临时补前向。"""
         EXISTING_VALIDATE_FULL_ROWS(rows, self._samples)
         for sample, row in zip(self._samples, rows):
             sample.fields["old_values"] = row.detach().float().cpu()
 
-    def install_ppo_targets(self, advantages: TokenBatchProto, returns: TokenBatchProto) -> None:
+    def set_ppo_targets(self, advantages: TokenBatchProto, returns: TokenBatchProto) -> None:
         """[S4 扩展] 两份全量校验成功后再安装，returns 不掩码/归一化。"""
         adv, ret = advantages.chunk(), returns.chunk()
         EXISTING_VALIDATE_FULL_ROWS(adv, self._samples)
@@ -843,7 +845,7 @@ class CriticWorker(RoleWorker):
             for sample_id, value in batch.unpack_rows(pack, full):
                 rows[sample_id] = value
             # 空 pack 同样 forward/gather，unpack 返回 []。
-        batch.install_old_values(rows)       # 每个 replica 都有完整值，不仅代表 rank
+        batch.set_old_values(rows)       # 每个 replica 都有完整值，不仅代表 rank
         return TokenBatchProto.concat([row.flatten() for row in rows]) if return_values else None
 
     def compute_segment_targets(self, batch, estimator, *, contribute: bool):
@@ -861,7 +863,7 @@ class CriticWorker(RoleWorker):
                 dist.all_reduce(moments, op=dist.ReduceOp.SUM)  # 空 DP 也先参与
             adv = normalize_with_moments([adv], [trajectory["mask"]], moments.cpu())[0]
         adv_rows, ret_rows = EXISTING_SPLIT_TRAJECTORY_ROWS(adv, ret, trajectory["cu_seq_lens"])
-        batch.install_ppo_targets(TokenBatchProto.concat(adv_rows), TokenBatchProto.concat(ret_rows))
+        batch.set_ppo_targets(TokenBatchProto.concat(adv_rows), TokenBatchProto.concat(ret_rows))
         # 空代表 count=0，min/max 不贡献；非代表不向 Controller 重复贡献统计。
         return TokenStats.from_masked(adv, trajectory["mask"]) if contribute else TokenStats.empty()
 
@@ -995,7 +997,7 @@ class TrainingController:
                 TokenBatchProto.concat([returns[i] for i in rank.global_indices]),
             )))
         ray.get([
-            worker.install_ppo_targets.remote(targets_by_dp[self.topology.dp_rank(i)])
+            worker.set_ppo_targets.remote(targets_by_dp[self.topology.dp_rank(i)])
             for i, worker in enumerate(self.workers)
         ])
         return TokenStats.merge([
@@ -1080,9 +1082,9 @@ class TrainingWorker(SingleAcceleratorWorker):
     def critic_compute_segment_targets(self, estimator, contribute):
         return self.critic.compute_segment_targets(self.batch, estimator, contribute=contribute)
 
-    def install_ppo_targets(self, payload):
+    def set_ppo_targets(self, payload):
         # Ray 顶层 ObjectRef 自动解引用；batch 内成对校验与安装。
-        self.batch.install_ppo_targets(*payload)
+        self.batch.set_ppo_targets(*payload)
 
     def release_train_batch(self):
         """[S2，S4 复用] 幂等本地释放；不 free 别的 replica 可能使用的 refs。"""
@@ -1131,16 +1133,14 @@ class RoleWorker(ABC):
         return self.engine.put_optimizer_to_device("cpu")
 
     def _train_update(self, items):
-        self.attempted_updates += 1
+        self._global_train_step += 1
         train_step_info = self.engine.train_step(items)
         grad_norm = self.engine.clip_grad_norm()
         # [S4 engine 小扩展] 返回真实是否应用更新，删除 schedule.py 镜像 skip 条件。
         # 保留 engine 原 skip/zero_grad 语义；审计所有调用方再改返回契约。
         applied = self.engine.step_optimizer(grad_norm=grad_norm)
-        if applied:
-            self.completed_updates += 1
-            if self.lr_scheduler is not None:
-                self.lr_scheduler.step()
+        if applied and self.lr_scheduler is not None:
+            self.lr_scheduler.step()
         # 保留既有 _train_optimizer_steps 的指标解析、loss_cfg.finalize_metrics、
         # grad_norm/显存记录和日志输出；这里的 EXISTING_* 表示省略的原代码，不新增转发 helper。
         return EXISTING_ROLE_STEP_LOG(self, train_step_info, grad_norm)
@@ -1150,8 +1150,7 @@ class RoleWorker(ABC):
         self.engine.save_dcp(path, save_optimizer=save_optimizer)
         if self.rank == 0:
             torch.save({
-                "attempted_updates": self.attempted_updates,
-                "completed_updates": self.completed_updates,
+                "global_train_step": self._global_train_step,
                 "scheduler": self.lr_scheduler.state_dict() if self.lr_scheduler is not None else None,
                 # LambdaLR.state_dict 不保存闭包参数；必须一起保存调度的定义。
                 "scheduler_config": {"lr_cfg": self.config.lr_cfg.model_dump(),
@@ -1171,8 +1170,7 @@ class RoleWorker(ABC):
             if state.get("scheduler_config") != expected:
                 raise ValueError("Scheduler configuration changed; explicitly choose load_scheduler=False")
             self.lr_scheduler.load_state_dict(state["scheduler"])
-        self.attempted_updates = state["attempted_updates"]
-        self.completed_updates = state["completed_updates"]
+        self._global_train_step = state["global_train_step"]
         if self.lr_scheduler is not None:
             lrs = self.lr_scheduler.get_last_lr() if cfg.load_scheduler else initial_lrs
             for group, lr in zip(self.engine.optimizer.param_groups, lrs):

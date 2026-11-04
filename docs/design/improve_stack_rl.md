@@ -89,8 +89,8 @@ graph TD
 | 构造：states + local plan + batch attrs | 验证、一次 shift、CPU 样本、teacher targets、只保存 refs | S2 |
 | `materialize(pack) -> FullPack` | seq/字段同一顺序，完整 CPU 拼接，pack padding，MRoPE 与 routed padding | S2 |
 | `unpack_rows(pack, full_rows)` | 裁 pack padding、按完整样本长度逆映射，不按 action mask 压缩 | S2 |
-| `install_advantages(scalars_or_rows)` | GRPO 标量广播、长度验证、无效位置置零 | S2 |
-| `install_old_values(rows)` / `install_ppo_targets(adv, ret)` | 冻结旧 value、完整覆盖、成对目标安装，returns 不归一化 | S4 扩展 |
+| `set_advantages(scalars_or_rows)` | GRPO 标量广播、长度验证、无效位置置零 | S2 |
+| `set_old_values(rows)` / `set_ppo_targets(adv, ret)` | 冻结旧 value、完整覆盖、成对目标安装，returns 不归一化 | S4 扩展 |
 | `require_targets(role)` | 进入训练前一次确认完整目标；空 DP 仍允许参与 padding/collective | S2 actor；S4 扩展 critic |
 | `close()` | 清本地样本、目标、物化缓存；不对共享 refs 强制 free | S2；S4 增加目标清理 |
 
@@ -233,7 +233,7 @@ IS mask 只作用于主 actor context，out-of-place 更新；MTP 从原始完�
 
 ### 3.7 S4：角色、更新计划与 checkpoint 的唯一 owner
 
-**Files / Problem。** `worker.py:401,846` 的 role 切换与 actor-only offload/onload 有不同语义；`critic_worker.py:311` 的 `optimizer_steps` 只作上限检查，`num_passes` 在 per-pass=None 路径不展开；`role_worker.py:291,462` 持有训练计数/scheduler，但续训还需要跨 host/trainer 理解。
+**Files / Problem。** `worker.py:401,846` 的 role 切换与 actor-only offload/onload 有不同语义；`critic_worker.py:311` 的 `optimizer_steps` 只作上限检查，`num_passes` 在 per-pass=None 路径不展开；`role_worker.py:291,462` 持有全局训练步号/scheduler，但续训还需要跨 host/trainer 理解。
 
 **类关系（S4；批次封装依赖 S2）。** 保留一层组合、一层继承：`TrainingWorker` 是 Ray 进程宿主，持有同进程的 `ActorWorker` 与可选 `CriticWorker`；后两者继承 `RoleWorker`。四个名称暂时保留，避免仅为命名扩大修改。
 
@@ -267,9 +267,9 @@ flowchart TD
 
 **Solution B：更新计划。** S2 PackPlan 拥有 actor 默认 step 分组；S4 critic 只拥有自己的多 pass 规则。删除 critic 的重复 `optimizer_steps` 和 `optimizer_steps_per_pass=None` 特例，只保留 `num_passes`（pass 重复次数）与默认 1 的 `optimizer_steps_per_pass`（每个 pass 的 update 上限）：每个 pass 都摊平本地 packs，首轮保持 pack 顺序、后续 pass 用 `pass_order` 洗牌，再由 `partition_indices` 切成至多 `optimizer_steps_per_pass` 次 optimizer update；所有 DP 保持同样 update/pack 数。`optimizer_steps_per_pass=1` 表示该 pass 的全部 packs 一次 update，不是每个 pack 一次。每轮旧 values 固定；全局监督数为零才共同跳过 update。
 
-该修订删除的是 `per_pass=None` 时“沿用 actor 分组并忽略 `num_passes`”的隐式语义，必须单独验证更新数与梯度，不能宣称完全不改数值。仓库内两个 recipe 显式设置 `optimizer_steps_per_pass=8`，`rl_ppo_gsm8k` example 的 actor plan 只有 1 步，现有配置行为不变；外部配置若只写 `optimizer_steps` 而未写 `optimizer_steps_per_pass`，update 次数会从 plan 步数变为每 pass 1 次，迁移时须显式补上。scheduler 仍按成功 optimizer update 前进，记录 attempted/successful 两种计数，`scheduler_steps = total_steps × num_passes × optimizer_steps_per_pass` 成为唯一口径。S4 对 engine 做一个小扩展：`step_optimizer` 返回实际是否应用更新，删除 `schedule.py` 对 skip 条件的重复推断；现有返回值是 grad_norm，实施时必须审计并迁移所有读取返回值的调用方。**保留当前 scheduler 默认值**；若将 critic 的 1e6 改成 None，那是训练策略变更，应单独讨论，不夹带在重构中。
+该修订删除的是 `per_pass=None` 时“沿用 actor 分组并忽略 `num_passes`”的隐式语义，必须单独验证更新数与梯度，不能宣称完全不改数值。仓库内两个 recipe 显式设置 `optimizer_steps_per_pass=8`，`rl_ppo_gsm8k` example 的 actor plan 只有 1 步，现有配置行为不变；外部配置若只写 `optimizer_steps` 而未写 `optimizer_steps_per_pass`，update 次数会从 plan 步数变为每 pass 1 次，迁移时须显式补上。scheduler 仍按成功 optimizer update 前进，只保留全局训练步号，不重复记录 attempted/successful 计数，`scheduler_steps = total_steps × num_passes × optimizer_steps_per_pass` 成为唯一口径。S4 对 engine 做一个小扩展：`step_optimizer` 返回实际是否应用更新，删除 `schedule.py` 对 skip 条件的重复推断；现有返回值是 grad_norm，实施时必须审计并迁移所有读取返回值的调用方。**保留当前 scheduler 默认值**；若将 critic 的 1e6 改成 None，那是训练策略变更，应单独讨论，不夹带在重构中。
 
-**Solution C：续训。** RoleWorker.save/resume 包含 engine weights/optimizer、scheduler、训练计数及恢复所需 RNG；ActorWorker 另保存 SFT dataloader 状态。host 只管统一的 `actor/critic` 目录；RLTrainer 继续管理 rollout/replay/训练步与完成标记。只在批次完成的既有保存点发布 checkpoint，不把 mid-batch snapshot 放入续训协议。
+**Solution C：续训。** RoleWorker.save/resume 包含 engine weights/optimizer、scheduler、全局训练步号及恢复所需 RNG；ActorWorker 另保存 SFT dataloader 状态。host 只管统一的 `actor/critic` 目录；RLTrainer 继续管理 rollout/replay/训练步与完成标记。只在批次完成的既有保存点发布 checkpoint，不把 mid-batch snapshot 放入续训协议。
 
 resume 在新构造的 role 上执行：`load_scheduler=False` 使用新配置的初始调度，`True` 恢复成功 update 进度，并校验当前调度配置与保存的 `lr_cfg/scheduler_steps` 一致。LambdaLR state_dict 不保存 lambda 闭包，不能只恢复 step 就声称未来 LR 一致。最终 optimizer LR 必须与所选 scheduler 一致，不受 optimizer args 加载开关意外覆盖。新格式要求 role_state 完整，不增加缺失文件或计数的回退，也不能拿 rollout step 推断 optimizer step。RNG 若由现有 engine/trainer 保存，保留唯一 owner，由 host 协调，不重复保存后互相覆盖。HF 导出是模型产物，继续与完整续训分离；更新上层产物发现路径。
 

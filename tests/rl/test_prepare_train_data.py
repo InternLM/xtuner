@@ -420,9 +420,10 @@ class TestPrepareRolloutItems(unittest.TestCase):
         controller.task_adv_weight = task_adv_weight
         controller.distillation = DistillationTrainerAdapter(None)
         controller.logger = MagicMock()
+        controller._has_critic = False
         controller.workers = [
             SimpleNamespace(
-                install_advantages=SimpleNamespace(remote=MagicMock(return_value=None)),
+                set_advantages=SimpleNamespace(remote=MagicMock(return_value=None)),
                 get_data_replicate_size=SimpleNamespace(remote=MagicMock(return_value=1)),
             )
         ]
@@ -520,6 +521,14 @@ class TestPrepareRolloutItems(unittest.TestCase):
         with patch("xtuner.v1.rl.trainer.controller.ray.get", side_effect=lambda value, timeout=None: value):
             self.assertEqual(controller._prepare_group_targets(prepared, self._plan(1)), [1.0])
         self.assertEqual(len(controller.advantage_estimator.calls), 1)
+
+    def test_critic_batch_requires_target_padding_fields(self):
+        controller = self._build_controller([1.0])
+        controller._has_critic = True
+
+        prepared = controller._prepare_rollout_items([[self._state()]], rollout_idx=0)
+
+        self.assertEqual(prepared["batch_attr"]["pack_loss_keys"], ["returns", "old_values"])
 
     def test_returns_items_with_per_sample_advantages(self):
         # controller 只做调度准备：states 原样透传，advantage 逐样本对齐，不构造训练张量。

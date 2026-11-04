@@ -131,7 +131,7 @@ class TestTrainBatchContract(unittest.TestCase):
             supervised_mask=[1, 0, 1],
         )
         batch = self._make_batch([state], pack_loss_keys=["rollout_logprobs"])
-        batch.install_advantages([1.5])
+        batch.set_advantages([1.5])
         batch.require_targets("actor")
 
         pack = batch.materialize((0,))
@@ -154,7 +154,7 @@ class TestTrainBatchContract(unittest.TestCase):
         first = self._state(uid=1, response_ids=[20, 21], supervised_mask=[1, 1])
         second = self._state(uid=2, response_ids=[30, 31], supervised_mask=[1, 0])
         batch = self._make_batch([first, second], pack_max_length=4)
-        batch.install_advantages([1.5, -2.0])
+        batch.set_advantages([1.5, -2.0])
 
         first_pack = batch.materialize((0,))
         second_pack = batch.materialize((1,))
@@ -282,7 +282,7 @@ class TestTrainBatchContract(unittest.TestCase):
 
         state = self._state(supervised_mask=[1, 0, 1])
         batch = self._make_batch([state])
-        batch.install_advantages(TokenBatchProto.concat([torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0])]))
+        batch.set_advantages(TokenBatchProto.concat([torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0])]))
 
         pack = batch.materialize((0,))
         torch.testing.assert_close(pack.full_data["advantages"], torch.tensor([[0.0, 0.0, 3.0, 0.0, 5.0]]))
@@ -292,11 +292,11 @@ class TestTrainBatchContract(unittest.TestCase):
 
         batch = self._make_batch([self._state()])
         with self.assertRaisesRegex(ValueError, "Token advantage length mismatch"):
-            batch.install_advantages(TokenBatchProto.concat([torch.tensor([1.0])]))
+            batch.set_advantages(TokenBatchProto.concat([torch.tensor([1.0])]))
 
     def test_empty_pack_materializes_as_padding(self):
         batch = self._make_batch([self._state()], pack_max_length=8)
-        batch.install_advantages([1.0])
+        batch.set_advantages([1.0])
         pack = batch.materialize(())
 
         self.assertEqual(pack.indices, ())
@@ -306,7 +306,7 @@ class TestTrainBatchContract(unittest.TestCase):
 
     def test_pack_pads_loss_fields_and_seq_ctx_together(self):
         batch = self._make_batch([self._state(response_ids=[20, 21])], pack_max_length=8)
-        batch.install_advantages([1.0])
+        batch.set_advantages([1.0])
         pack = batch.materialize((0,))
 
         self.assertEqual(pack.full_data["seq_ctx"].input_ids.shape[1], 8)

@@ -92,44 +92,6 @@ def action_gae(
     return flat_advantages
 
 
-def normalize_actor_advantages(
-    advantages: Sequence[Sequence[float]],
-    masks: Sequence[Sequence[bool]],
-    eps: float = 1e-8,
-) -> list[list[float]]:
-    """Normalize actor advantages with population moments over the full batch.
-
-    The controller already holds every sample, so these moments are the global statistic an all-reduce would produce.
-    Critic returns are left unchanged. Masked positions become zero.
-    """
-    flat_values: list[float] = []
-    flat_mask: list[bool] = []
-    for sample_advantages, sample_mask in zip(advantages, masks):
-        if len(sample_advantages) != len(sample_mask):
-            raise ValueError(
-                f"advantage length {len(sample_advantages)} does not match mask length {len(sample_mask)}"
-            )
-        flat_values.extend(float(value) for value in sample_advantages)
-        flat_mask.extend(bool(value) for value in sample_mask)
-    values = torch.tensor(flat_values, dtype=torch.float32)
-    valid_mask = torch.tensor(flat_mask, dtype=torch.bool)
-    valid_values = values.masked_select(valid_mask)
-    count = int(valid_mask.sum().item())
-    if count == 0:
-        normalized = torch.zeros_like(values)
-    else:
-        mean = valid_values.sum() / count
-        variance = torch.clamp(valid_values.square().sum() / count - mean.square(), min=0.0)
-        normalized = torch.where(valid_mask, (values - mean) / (variance.sqrt() + eps), 0.0)
-    cursor = 0
-    result: list[list[float]] = []
-    for sample_advantages in advantages:
-        width = len(sample_advantages)
-        result.append(normalized[cursor : cursor + width].tolist())
-        cursor += width
-    return result
-
-
 def normalize_with_moments(
     advantages: Sequence[torch.Tensor],
     masks: Sequence[torch.Tensor],

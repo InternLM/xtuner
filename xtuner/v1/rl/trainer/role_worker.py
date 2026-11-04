@@ -92,8 +92,6 @@ class RoleWorker(ABC):
         self._model_on_device = True
         self._optimizer_on_device = True
         self._global_train_step = 0
-        self.attempted_updates = 0
-        self.completed_updates = 0
 
     @property
     def model_on_device(self) -> bool:
@@ -201,8 +199,7 @@ class RoleWorker(ABC):
         if self.rank == 0:
             torch.save(
                 {
-                    "attempted_updates": self.attempted_updates,
-                    "completed_updates": self.completed_updates,
+                    "global_train_step": self._global_train_step,
                     "scheduler": self.lr_scheduler.state_dict() if self.lr_scheduler is not None else None,
                     # LambdaLR.state_dict does not store the lambda closure; persist its definition too.
                     "scheduler_config": self._scheduler_config(),
@@ -236,8 +233,7 @@ class RoleWorker(ABC):
             if state["scheduler_config"] != self._scheduler_config():
                 raise ValueError("Scheduler configuration changed; explicitly choose load_scheduler=False")
             self.lr_scheduler.load_state_dict(state["scheduler"])
-        self.attempted_updates = state["attempted_updates"]
-        self.completed_updates = state["completed_updates"]
+        self._global_train_step = state["global_train_step"]
         if self.lr_scheduler is not None:
             lrs = cast(list[float], self.lr_scheduler.get_last_lr() if cfg.load_scheduler else initial_lrs)
             for group, lr in zip(self.engine.optimizer.param_groups, lrs):
@@ -305,7 +301,6 @@ class RoleWorker(ABC):
         """
         self._global_train_step += 1
         global_train_step = self._global_train_step
-        self.attempted_updates += 1
 
         # Make max_memory/reserved_memory below this step's peak instead of the
         # process-lifetime peak (~2us, no sync).
@@ -314,10 +309,8 @@ class RoleWorker(ABC):
             train_step_info = self.engine.train_step(data_batches=items)
         grad_norm = self.engine.clip_grad_norm()
         applied = self.engine.step_optimizer(grad_norm)
-        if applied:
-            self.completed_updates += 1
-            if self.lr_scheduler is not None:
-                self.lr_scheduler.step()
+        if applied and self.lr_scheduler is not None:
+            self.lr_scheduler.step()
 
         engine_logs_info = dict(train_step_info.pop("logs_info"))  # type: ignore[misc]
         engine_extra_info = train_step_info.pop("extra_info")  # type: ignore[misc]

@@ -14,7 +14,7 @@ from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.loss.utils import sp_gather
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig
-from xtuner.v1.rl.advantage.gae import DecoupledGAEEstimator, GAEEstimator, normalize_with_moments
+from xtuner.v1.rl.advantage.gae import normalize_with_moments
 from xtuner.v1.rl.advantage.stats import TokenStats
 from xtuner.v1.rl.loss import CriticLossConfig
 from xtuner.v1.utils import get_device
@@ -150,7 +150,7 @@ class CriticWorker(RoleWorker):
         if any(row is None for row in rows):
             raise RuntimeError("pack plan did not cover every local sample")
         resolved = [cast(torch.Tensor, row) for row in rows]
-        batch.install_old_values(resolved)
+        batch.set_old_values(resolved)
         return TokenBatchProto.concat([row.flatten() for row in resolved]) if return_values else None
 
     def compute_segment_targets(
@@ -173,7 +173,6 @@ class CriticWorker(RoleWorker):
         Returns:
             TokenStats: Normalized action-token statistics (empty for non-representatives).
         """
-        assert isinstance(estimator, (GAEEstimator, DecoupledGAEEstimator))
         trajectory = batch.trajectory_data()
         advantages, returns = estimator.compute_segment_gae(**trajectory)
         mask = trajectory["mask"]
@@ -193,7 +192,7 @@ class CriticWorker(RoleWorker):
         lengths = (trajectory["cu_seq_lens"][1:] - trajectory["cu_seq_lens"][:-1]).tolist()
         advantage_rows = list(advantages.split(lengths)) if sum(lengths) else []
         return_rows = list(returns.split(lengths)) if sum(lengths) else []
-        batch.install_ppo_targets(
+        batch.set_ppo_targets(
             TokenBatchProto.concat(advantage_rows),
             TokenBatchProto.concat(return_rows),
         )
