@@ -67,6 +67,32 @@ def test_cat_preserves_image_video_order():
     torch.testing.assert_close(packed.video_grid_thw, torch.cat([video.video_grid_thw for video in videos]))
 
 
+def test_cat_reuses_single_source_media_bitwise_unchanged():
+    # 单来源 merge 复用源张量（与 #2239 的 collator 契约一致）：同一存储、
+    # cat 后源保持 bitwise 不变（下游只读约定）；grid 同样复用。
+    image = make_context(3, [0, 1, 0])
+    image.pixel_values = torch.randn(4, 3)
+    image.image_grid_thw = torch.tensor([[1, 2, 2]])
+    before = image.pixel_values.clone()
+
+    packed = SequenceContext.cat([image])
+
+    assert packed.pixel_values is image.pixel_values
+    assert packed.image_grid_thw is image.image_grid_thw
+    assert torch.equal(image.pixel_values, before)
+
+
+def test_cat_reuses_single_source_video_media():
+    video = make_context(4, [0, 2, 2, 0])
+    video.pixel_values_videos = torch.randn(6, 3)
+    video.video_grid_thw = torch.tensor([[2, 2, 2]])
+
+    packed = SequenceContext.cat([video])
+
+    assert packed.pixel_values_videos is video.pixel_values_videos
+    assert packed.video_grid_thw is video.video_grid_thw
+
+
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
 def test_cat_preserves_modality_dtype_device_and_inputs(dtype: torch.dtype) -> None:
     image = make_context(3, [0, 1, 0])

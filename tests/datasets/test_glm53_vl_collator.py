@@ -63,6 +63,45 @@ class TestSharedCollatorsStillWork:
         assert seq_ctx.pixel_values.shape == (4, 8)
         assert seq_ctx.num_img_tokens == [[4]]
 
+    def test_qwen3_vl_collator_reuses_single_media_bitwise_unchanged(self):
+        # qwen3_vl 单媒体 pack 与 glm53 相同的复用：直接返回源张量（同一存储），
+        # collate 全程源保持 bitwise 不变（下游只读约定）。
+        item = _text_item(4)
+        item["pixel_values"] = torch.randn(4, 8)
+        item["image_grid_thw"] = torch.tensor([[1, 2, 2]])
+        item["num_img_tokens"] = [4]
+        item["num_imgs"] = [1]
+        before = item["pixel_values"].clone()
+        result = qwen3_vl_sft_collator([[item]], pack_max_length=16, padding_token_idx=0)
+        seq_ctx = result[0]["seq_ctx"]
+        assert seq_ctx.pixel_values is item["pixel_values"]
+        assert seq_ctx.image_grid_thw is item["image_grid_thw"]
+        assert torch.equal(item["pixel_values"], before)
+
+    def test_qwen3_vl_collator_multi_item_pack_still_concatenates(self):
+        # 多 item pack 语义不变：真 cat、新缓冲、数值与顺序一致。
+        item_a = _text_item(4)
+        item_a.update(
+            pixel_values=torch.randn(4, 8),
+            image_grid_thw=torch.tensor([[1, 2, 2]]),
+            num_img_tokens=[4],
+            num_imgs=[1],
+        )
+        item_b = _text_item(4)
+        item_b.update(
+            pixel_values=torch.randn(2, 8),
+            image_grid_thw=torch.tensor([[1, 1, 2]]),
+            num_img_tokens=[2],
+            num_imgs=[1],
+        )
+        result = qwen3_vl_sft_collator([[item_a, item_b]], pack_max_length=16, padding_token_idx=0)
+        seq_ctx = result[0]["seq_ctx"]
+        expected = torch.cat([item_a["pixel_values"], item_b["pixel_values"]], dim=0)
+        assert torch.equal(seq_ctx.pixel_values, expected)
+        assert seq_ctx.pixel_values.data_ptr() != item_a["pixel_values"].data_ptr()
+        assert seq_ctx.pixel_values.data_ptr() != item_b["pixel_values"].data_ptr()
+        assert seq_ctx.image_grid_thw.shape[0] == 2
+
     def test_intern_s1_collator_still_carries_media(self):
         # intern_s1 同上。
         item = _text_item(4)
