@@ -1,26 +1,13 @@
 from __future__ import annotations
 
-import contextlib
-import json
 import os
 import time
-from contextlib import contextmanager
+from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
-from typing import (
-    TYPE_CHECKING,
-    Iterable,
-    Literal,
-    Sequence,
-    TypedDict,
-    cast,
-)
+from typing import TYPE_CHECKING, Any, Callable, Literal, TypedDict, cast
 
-
-if TYPE_CHECKING:
-    from ray.util.placement_group import PlacementGroup
-
-    from xtuner.v1.rl.advantage.base import AdvantageEstimator
-
+import numpy as np
 import ray
 import torch
 import torch.distributed as dist
@@ -30,35 +17,21 @@ from ray.actor import ActorClass, ActorProxy
 from torch.distributed.device_mesh import init_device_mesh
 from typing_extensions import NotRequired
 
-from transformers import AutoTokenizer
 from xtuner.v1.config.fsdp import FSDPConfig
 from xtuner.v1.config.optim import LRConfig, OptimConfig
+from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import DataloaderConfig
-from xtuner.v1.datasets.dataloader import Dataloader
-from xtuner.v1.engine.train_engine import TrainEngine, TrainStepInfo
-from xtuner.v1.loss import BaseLossContext, CELossConfig, LogProbConfig
-from xtuner.v1.loss.ce_loss import CELossContext, LMHeadLossContext
-from xtuner.v1.loss.mtp_loss import MTPLossConfig, MTPLossContext
-from xtuner.v1.model.base import ModelItem, TransformerConfig
+from xtuner.v1.loss import CELossConfig
+from xtuner.v1.model.base import TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig
-from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
-from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.rl.distillation import (
     DistillationConfig,
     DistillationTrainerAdapter,
-    TrainTeacherManager,
     TrainTeacherManagerConfig,
-    TrainTeacherTimings,
 )
-from xtuner.v1.rl.loss import (
-    BaseRLLossConfig,
-    BaseRLLossContext,
-    kl_penalty,
-)
-from xtuner.v1.rl.model_utils import build_frozen_model
+from xtuner.v1.rl.loss import BaseRLLossConfig
 from xtuner.v1.rl.utils import SingleAcceleratorWorker
-from xtuner.v1.rl.weight_update import WeightUpdater
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
@@ -69,35 +42,98 @@ from xtuner.v1.utils import (
     ray_method,
     set_deterministic,
 )
-from xtuner.v1.utils.fsdp import release_deferred_fsdp_all_gathers
 from xtuner.v1.utils.nccl_process_group import resume_nccl_process_groups, suspend_nccl_process_groups
 
-from ..rollout_is import merge_rollout_is_metrics
-from .pack import RankPlan
-from .train_batch import TrainBatch, iter_cpu_packs, resolve_pack_refs
+from .actor_worker import ActorWorker
+from .critic_worker import CriticWorker, CriticWorkerConfig
+from .pack import DPRankPackIndices, TokenBatchProto
+from .role_worker import RoleName
 
+
+if TYPE_CHECKING:
+    from ray.util.placement_group import PlacementGroup
+
+    from xtuner.v1.rl.advantage.base import AdvantageEstimator
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
 
-def calculate_entropy(
-    shifted_labels_list: Sequence[torch.Tensor],
-    old_logprobs_list: Sequence[torch.Tensor | None],
-    global_grad_tokens: torch.Tensor,
-) -> torch.Tensor | None:
-    if len(old_logprobs_list) == 0 or old_logprobs_list[0] is None:
+def get_train_seq_ctx(
+    input_ids: torch.LongTensor,
+    position_ids: np.ndarray | None = None,
+    multimodal_train_info: dict | None = None,
+) -> SequenceContext:
+    """Build a CPU ``SequenceContext`` for one training sample.
+
+    Args:
+        input_ids (torch.LongTensor): Model input tokens with shape ``(1, seq_len)``.
+        position_ids (np.ndarray | None): Optional position ids. A 3D array triggers
+            the VLM MRoPE layout; a prompt-only position segment is extended to cover
+            the whole input.
+        multimodal_train_info (dict | None): Optional multimodal payload with
+            ``pixel_values``, ``image_grid_thw`` and ``num_img_tokens``.
+
+    Returns:
+        SequenceContext: The CPU sequence context of the sample.
+    """
+    seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
+    position_ids = _to_cpu_tensor(position_ids, dtype=torch.long)
+    if position_ids is not None and len(position_ids.shape) == 3:
+        # Match get_rope_index_3: response text continues from a single global
+        # max(T, H, W), not per-axis maxima. Per-axis max diverges when the
+        # prompt ends on image tokens (T≈0 while H/W are large). The extension
+        # length is derived from the position deficit so samples whose positions
+        # already cover the whole input (full-sequence agentic samples) need no
+        # extra shape information.
+        num_extend = input_ids.size(-1) - position_ids.size(-1)
+        if num_extend > 0:
+            max_value = position_ids.amax()
+            response_position_ids = (
+                (torch.arange(1, num_extend + 1, device=position_ids.device, dtype=position_ids.dtype) + max_value)
+                .view(1, 1, -1)
+                .expand(3, 1, -1)
+            )
+            position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
+        seq_ctx.position_ids = position_ids  # type: ignore[assignment]
+        assert position_ids.size(-1) == input_ids.size(-1)
+
+    if multimodal_train_info:
+        seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
+        seq_ctx.image_grid_thw = _to_cpu_tensor(multimodal_train_info.get("image_grid_thw"), dtype=torch.long)
+        num_img_tokens = multimodal_train_info.get("num_img_tokens")
+        if num_img_tokens is not None:
+            seq_ctx.num_img_tokens = [num_img_tokens]
+    return seq_ctx
+
+
+def _to_cpu_tensor(value: np.ndarray | None, *, dtype: torch.dtype | None = None) -> torch.Tensor | None:
+    if value is None:
         return None
-    sum_entropy: torch.Tensor | None = None
-    for i, shifted_labels in enumerate(shifted_labels_list):
-        mask = shifted_labels != -100
-        assert old_logprobs_list[i] is not None
-        entropy = -(cast(torch.Tensor, old_logprobs_list[i]) * mask).sum()
-        sum_entropy = entropy if sum_entropy is None else sum_entropy + entropy
-    sum_entropy = cast(torch.Tensor, sum_entropy)
-    dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
-    avg_sum_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else torch.tensor(0.0)
-    return avg_sum_entropy
+    assert isinstance(value, np.ndarray), f"Expected np.ndarray, got {type(value)}"
+    return torch.as_tensor(value, dtype=dtype, device="cpu")
+
+
+def requires_role(role: RoleName):
+    """Decorate a worker RPC so it only runs when ``role`` is currently on the
+    GPU.
+
+    Example: ``@requires_role("actor")`` on ``actor_fit`` makes the call fail
+    fast when the critic is resident instead of training on the wrong engine.
+    """
+
+    def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(fn)
+        def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+            if role not in self._roles():
+                raise RuntimeError(f"{fn.__name__}: role {role!r} is not configured on this worker")
+            if self._current_role != role:
+                raise RuntimeError(f"{fn.__name__}: requires active role {role!r}, current is {self._current_role!r}")
+            return fn(self, *args, **kwargs)
+
+        return wrapper
+
+    return deco
 
 
 class WorkerConfig(BaseModel):
@@ -109,7 +145,8 @@ class WorkerConfig(BaseModel):
     Args:
         model_cfg (TransformerConfig): Model architecture configuration.
         optim_cfg (OptimConfig): Optimizer configuration for training.
-        loss_cfg (BaseRLLossConfig): Policy RL loss configuration.
+        loss_cfg (BaseRLLossConfig): Policy RL loss. Critic value loss belongs
+            on ``critic_cfg``.
         lr_cfg (LRConfig): Learning rate scheduler configuration.
         fsdp_cfg (FSDPConfig): Fully Sharded Data Parallel configuration.
         load_from (str | Path): Path to load the main model from.
@@ -125,18 +162,20 @@ class WorkerConfig(BaseModel):
             updated weights to rollout workers. Defaults to 0.5.
         seed (int | None): Training worker random seed. When None, the RL
             trainer seed is used. Defaults to None.
-        pack_strategy (Literal["legacy", "greedy", "balance", "native"]): Index-only
+        pack_strategy (Literal["legacy", "greedy", "balance", "native", "lpt"]): Index-only
             packing strategy used by the controller-side packer. ``legacy`` exactly
             reproduces the previous greedy pack, interleaved DP allocation and
-            optimizer-step grouping. Defaults to "legacy".
+            optimizer-step grouping. ``lpt`` reproduces the baseline longest-processing-time
+            packer. Defaults to "legacy".
         pack_extra_buffer_size (int): Candidate buffer used by greedy chunk packing;
             zero disables gap filling. Defaults to 1000.
         pack_seed (int | None): Random seed for length-grouped packing strategies such
             as "balance". Defaults to None.
         offload_rollout_routed_experts (bool): Keep rollout routed experts on
             CPU and move each layer's slice to device during forward. Defaults to False.
-        offload_old_logprobs (bool): Keep actor old log probabilities on CPU between
-            metric computation and the optimizer step. Defaults to False.
+        critic_cfg (CriticWorkerConfig | None): Attached critic configuration.
+            The critic reuses this worker's FSDP and sequence-parallel topology;
+            do not configure those fields on the critic itself.
 
     **Examples:**
 
@@ -165,6 +204,7 @@ class WorkerConfig(BaseModel):
     fsdp_cfg: FSDPConfig
     load_from: str | Path  # TODO: 把 actor 和 ref 配置分离
     optimizer_steps: int = 1
+    scheduler_steps: int | None = None
     sp_size: int = 1
     pack_max_length: int
     ref_load_from: str | Path | None = None
@@ -172,15 +212,15 @@ class WorkerConfig(BaseModel):
     log_dir: str | Path | None = None
     update_weight_bucket_size_in_gb: float = 0.5  # 512MB
     seed: None | int = None  # if None, use RLTrainer seed
-    pack_strategy: Literal["legacy", "greedy", "balance", "native"] = "legacy"
+    pack_strategy: Literal["legacy", "greedy", "balance", "native", "lpt"] = "legacy"
     pack_extra_buffer_size: int = Field(default=1000, ge=0)
     pack_seed: int | None = None
     distillation_config: DistillationConfig | None = None
     profile_step: list[int] | int | None = None  # 1-based global RL train_step ids to profile.
     profile_time: bool = True
     profile_memory: bool = False
+    free_rollout_routed_experts_in_worker: bool = True  # 默认不需要用户配置
     offload_rollout_routed_experts: bool = False
-    offload_old_logprobs: bool = False
     train_teacher_manager_config: TrainTeacherManagerConfig | None = None
 
     # sft config
@@ -188,6 +228,10 @@ class WorkerConfig(BaseModel):
     sft_global_batch_size: int = -1
     rollout_steps_per_sft: int = 1
     sft_loss_cfg: CELossConfig = CELossConfig()
+
+    # The critic is hosted in this actor process. A configured critic selects
+    # the critic training flow; GAE is selected by the advantage estimator.
+    critic_cfg: CriticWorkerConfig | None = None
 
     def build(
         self,
@@ -212,11 +256,13 @@ class WorkerConfig(BaseModel):
         )(TrainingWorker)
         train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorkerCls, self, placement_group)
         ray.wait([w.ready.remote() for w in train_workers])
-        return TrainingController(
+        controller = TrainingController(
             workers=train_workers,
             advantage_estimator=advantage_estimator,
             distillation=distillation,
+            has_critic=self.critic_cfg is not None,
         )
+        return controller
 
 
 class TrainBatchAttr(TypedDict):
@@ -243,14 +289,6 @@ class TrainBatchAttr(TypedDict):
     has_routed_experts: bool
 
 
-class _TrainItem(TypedDict):
-    """CPU sample input and loss tensors, before any training context is
-    built."""
-
-    seq_ctx: SequenceContext
-    loss_inputs: dict[str, torch.Tensor | None]
-
-
 class WorkerTrainLogItem(TypedDict, total=False):
     step_consumed_tokens: int
     efficient_attn_ratio: float
@@ -272,10 +310,32 @@ class WorkerLogItem(TypedDict):
     packing_pack_time_s: NotRequired[float]
 
 
+@dataclass
+class TrainSample:
+    """Training tensors for one rollout sample, shared by the actor and the
+    critic.
+
+    ``values``, ``returns``, and ``advantages`` start as ``None`` and are filled by later stages.
+    GRPO leaves ``values`` and ``returns`` as ``None``.
+    """
+
+    seq_ctx: SequenceContext
+    shifted_labels: torch.Tensor
+    rollout_logprobs: torch.Tensor | None
+    teacher_targets: dict[str, torch.Tensor]
+    # Optional terminal score. Only worker-local GAE reads it; GRPO receives its final
+    # advantages from the controller.
+    reward_score: float | None = None
+
+    values: torch.Tensor | None = None  # per-token critic values, written when the critic collects values
+    returns: torch.Tensor | None = None  # GAE returns, written when the critic fits
+    advantages: torch.Tensor | None = None  # per-token row written when the actor builds the loss
+
+
 class TrainingWorker(SingleAcceleratorWorker):
-    _SAVE_WEIGHTS_DIR = "weights"
-    _SAVE_SFT_DATALOADER_DIR = "sft_dataloader"
-    _SAVE_SFT_TRAIN_STATE_PATH = "sft_train_state.json"
+    """The only object holding Ray resources: process group, data/sp meshes,
+    the batch cache, and the pack primitives. At most one role resides on the
+    GPU at any time. The only seq-side API is ``pack_seq_ctx``."""
 
     def __init__(
         self,
@@ -291,7 +351,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
         self.rank = rank
 
-        # TODO: add lr scheduler
         log_dir = worker_cfg.log_dir
         self.log_dir = None
         if log_dir is not None:
@@ -303,70 +362,402 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._set_deterministic()
         self._set_random_seed(worker_cfg.seed)
 
+        # Batch cache: the whole TrainSample list, resident for the batch's lifetime.
+        self._cached_samples: list[TrainSample] | None = None
+        self._cached_pack_plan: DPRankPackIndices | None = None
+        self._cached_batch_attr: TrainBatchAttr | None = None
+
         self.data_mesh = self._init_data_mesh(sp_size=worker_cfg.sp_size)
         self.sp_mesh = self.data_mesh["sp"]
 
-        self._init_sft(worker_cfg)
-
+        # torch.compile is gated by fsdp_cfg.torch_compile; normalize the role
+        # model configs once, before the roles build their engines.
+        role_model_cfgs = [worker_cfg.model_cfg]
+        if worker_cfg.critic_cfg is not None:
+            role_model_cfgs.append(worker_cfg.critic_cfg.model_cfg)
         if not worker_cfg.fsdp_cfg.torch_compile:
-            worker_cfg.model_cfg.compile_cfg = False
-        self._engine = self._build_engine(worker_cfg)
+            for model_cfg in role_model_cfgs:
+                model_cfg.compile_cfg = False
 
-        self._has_ref = False
-        if worker_cfg.loss_cfg.use_kl_loss:
-            self._has_ref = True
-            if worker_cfg.ref_load_from is None:
-                worker_cfg.ref_load_from = worker_cfg.load_from
-            self._ref_model = build_frozen_model(
-                worker_cfg.model_cfg, worker_cfg.ref_load_from, worker_cfg.ref_model_fsdp_cfg
+        # Roles are built in-process; the actor engine steps aside while the
+        # critic engine is built so peak memory stays at one resident model.
+        self.actor = ActorWorker(worker_cfg, host=self)
+        self.critic: CriticWorker | None = None
+        if worker_cfg.critic_cfg is not None:
+            self.actor.offload()
+            DEVICE_MODULE.empty_cache()
+            try:
+                self.critic = CriticWorker(worker_cfg.critic_cfg, host=self)
+                self.critic.offload()
+            finally:
+                DEVICE_MODULE.empty_cache()
+                self.actor.onload()
+        self._current_role: RoleName | None = "actor"
+
+    def _roles(self) -> dict[str, Any]:
+        return {role.role_name: role for role in (self.actor, self.critic) if role is not None}
+
+    @ray_method
+    def switch_role(self, role: RoleName | None) -> None:
+        """Idempotently make ``role`` the sole GPU resident; None = all
+        offloaded (colocation yields to rollout).
+
+        Declarative "ensure state", no history branching: offload every other role, onload the target, and let the
+        granular onload/offload methods decide (via the residency flag / engine guards) whether anything actually
+        moves.
+        """
+        roles = self._roles()
+        if role is not None and role not in roles:
+            raise KeyError(f"role is not registered: {role}")
+        if self._current_role is not None and self._current_role != role:
+            roles[self._current_role].offload()
+        if role is not None:
+            roles[role].onload()
+        self._current_role = role
+
+    @ray_method
+    def load_train_batch(
+        self,
+        rollout_item_refs: list[ray.ObjectRef],
+        pack_plan: DPRankPackIndices,
+        batch_attr: TrainBatchAttr,
+    ) -> None:
+        """The only data entry point into the worker; holds no role/loss
+        concepts: one ``ray.get`` -> the full ``TrainSample`` cache (seq side +
+        static token fields, the base copy shared by both roles) + the pack
+        plan (index-only) + batch_attr. ``pixel_values`` / routed experts
+        stay in ref form in the cache and are resolved per pack.
+        """
+        rollout_items: list[RolloutState] = ray.get(rollout_item_refs[0])
+        self._cached_samples = [
+            self._get_train_sample(state, batch_attr["use_3d_position_ids"]) for state in rollout_items
+        ]
+        del rollout_items
+        self._cached_pack_plan = pack_plan
+        self._cached_batch_attr = batch_attr
+
+    @ray_method
+    def release_train_batch(self) -> None:
+        """Actor fit releases on its own; the controller broadcasts this in its
+        ``finally`` as a fallback (critic failure path).
+
+        Safe to call when nothing is cached.
+        """
+        self._cached_samples = None
+        self._cached_pack_plan = None
+        self._cached_batch_attr = None
+
+    @property
+    def cached_samples(self) -> list[TrainSample] | None:
+        """Samples cached by ``load_train_batch``, or ``None`` when no batch is
+        loaded."""
+        return self._cached_samples
+
+    def get_cached_batch(self) -> tuple[list[TrainSample], DPRankPackIndices, TrainBatchAttr]:
+        """Return the samples, the pack plan, and the batch attributes cached
+        by ``load_train_batch``.
+
+        Roles read this cache. Raises when the batch has not been loaded.
+
+        Returns:
+            tuple[list[TrainSample], DPRankPackIndices, TrainBatchAttr]: The cached
+                samples, pack plan, and batch attributes.
+        """
+        samples = self._cached_samples
+        pack_plan = self._cached_pack_plan
+        batch_attr = self._cached_batch_attr
+        if samples is None or pack_plan is None or batch_attr is None:
+            raise RuntimeError("training batch is not loaded; call load_train_batch before training")
+        return samples, pack_plan, batch_attr
+
+    def _get_train_sample(self, state: RolloutState, use_3d_position_ids: bool) -> TrainSample:
+        """Convert one rollout state into a ``TrainSample``.
+
+        Drops the last input id and shifts labels and logprobs onto the prediction
+        positions. ``values``, ``returns``, and ``advantages`` stay unset.
+        """
+        input_ids = cast(list[int], state.input_ids)
+        labels = cast(list[int], state.labels)
+        shifted_labels = labels[1:]
+
+        input_ids_t = cast(torch.LongTensor, torch.tensor(input_ids[:-1], dtype=torch.int64).unsqueeze(0))
+        shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
+
+        rollout_logprobs: torch.Tensor | None = None
+        if state.logprobs is not None:
+            rollout_logprobs = torch.tensor(state.logprobs[1:], dtype=torch.float32).unsqueeze(0)
+
+        position_ids = state.position_ids
+        if use_3d_position_ids and (position_ids is None or position_ids.ndim != 3):
+            seq_len = input_ids_t.size(-1)
+            text_position_ids = np.arange(seq_len, dtype=np.int64).reshape(1, 1, -1)
+            # Mixed batches use three-axis MRoPE position IDs. Repeat the normal text
+            # positions on every axis so text samples have the same rank as the VLM
+            # samples when their sequence contexts are packed together.
+            position_ids = np.broadcast_to(text_position_ids, (3, 1, seq_len)).copy()
+        multimodal_train_info = cast(dict | None, state.mm_info)
+        seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, multimodal_train_info)
+        seq_ctx.rollout_routed_experts = state.routed_experts  # type: ignore[assignment] # n,layer*expert
+        return TrainSample(
+            seq_ctx=seq_ctx,
+            shifted_labels=shifted_labels_t,
+            rollout_logprobs=rollout_logprobs,
+            teacher_targets=self.actor.get_rollout_teacher_targets(state, shifted_labels=shifted_labels),
+            reward_score=float(state.reward["score"])
+            if state.reward is not None and "score" in state.reward
+            else None,
+        )
+
+    def pack_seq_ctx(self, pack: list[int]) -> SequenceContext:
+        """Cat the cached samples' seq contexts of one pack and tail-pad to
+        ``pack_max_length``.
+
+        pixel_values / routed-experts refs stay in ref form inside the ctx and
+        are materialized per pack by the role's ``_resolve_refs`` and released
+        with the pack; every other field is fully materialized here.
+        """
+        samples = self._cached_samples
+        if samples is None:
+            raise RuntimeError("training batch is not loaded; call load_train_batch before training")
+        batch_attr = self._cached_batch_attr
+        assert batch_attr is not None
+        real_tokens = 0
+        seq_ctx_list: list[SequenceContext] = []
+        for index in pack:
+            seq_ctx = samples[index].seq_ctx
+            assert seq_ctx.input_ids is not None
+            real_tokens += seq_ctx.input_ids.shape[1]
+            seq_ctx_list.append(seq_ctx)
+        padding_len = self.config.pack_max_length - real_tokens
+        assert padding_len >= 0, f"Pack tokens {real_tokens} exceed pack_max_length {self.config.pack_max_length}"
+        if padding_len > 0:
+            seq_ctx_list.append(
+                self.pack_padding_seq_ctx(
+                    padding_len,
+                    use_3d_position_ids=batch_attr["use_3d_position_ids"],
+                    has_routed_experts=batch_attr["has_routed_experts"],
+                )
             )
+        return SequenceContext.cat(seq_ctx_list)
 
-        self._train_teacher_manager: TrainTeacherManager | None = None
-        if worker_cfg.train_teacher_manager_config is not None:
-            self._train_teacher_manager = worker_cfg.train_teacher_manager_config.build(
-                chunk_size=worker_cfg.loss_cfg.chunk_size,
+    def cat_pack_fields(
+        self,
+        fields: dict[str, list[torch.Tensor] | None],
+        padding_len: int,
+    ) -> dict[str, torch.Tensor | None]:
+        """Concatenate per-sample rows of each field and tail-pad to pack
+        length.
+
+        Args:
+            fields (dict[str, list[torch.Tensor] | None]): Per-sample tensors by
+                field name. ``None`` marks a field absent for the whole pack and
+                is passed through as ``None``.
+            padding_len (int): Number of tail padding positions to append.
+
+        Returns:
+            dict[str, torch.Tensor | None]: Packed tensors keyed by field name.
+        """
+        packed: dict[str, torch.Tensor | None] = {}
+        for key, rows in fields.items():
+            if rows is None:
+                packed[key] = None
+                continue
+            tensor = rows[0] if len(rows) == 1 else torch.cat(rows, dim=1)
+            if padding_len > 0:
+                tensor = torch.cat([tensor, self.pack_padding_loss_input(key, padding_len)], dim=1)
+            packed[key] = tensor
+        return packed
+
+    def pack_padding_loss_input(self, key: str, padding_len: int) -> torch.Tensor:
+        """Build the padding rows of one packed loss-input tensor.
+
+        Args:
+            key (str): Loss-input field name, e.g. ``"shifted_labels"`` or
+                ``"teacher_logprobs"``.
+            padding_len (int): Number of padding positions to materialize.
+
+        Returns:
+            torch.Tensor: Padding rows of shape ``(1, padding_len[, top_k])``.
+        """
+        if key == "shifted_labels":
+            return torch.full((1, padding_len), -100, dtype=torch.long)
+        if key in ("advantages", "rollout_logprobs", "returns", "old_values"):
+            return torch.zeros(1, padding_len, dtype=torch.float32)
+        if key == "teacher_indices":
+            return torch.full((1, padding_len), -1, dtype=torch.long)
+        if key in ("teacher_logprobs", "target_token_ids"):
+            distillation_config = self.config.distillation_config
+            assert distillation_config is not None, f"Padding {key} requires distillation_config"
+            top_k = distillation_config.loss_config.top_k
+            if key == "teacher_logprobs":
+                if top_k is None:
+                    # Sampled teacher targets carry one logprob per position.
+                    return torch.zeros(1, padding_len, dtype=torch.float32)
+                return torch.zeros(1, padding_len, top_k, dtype=torch.float32)
+            assert top_k is not None, f"Padding {key} requires loss_config.top_k"
+            return torch.zeros(1, padding_len, top_k, dtype=torch.long)
+        raise ValueError(f"Unknown pack loss input key: {key}")
+
+    def pack_padding_seq_ctx(
+        self,
+        padding_len: int,
+        use_3d_position_ids: bool,
+        has_routed_experts: bool,
+    ) -> SequenceContext:
+        """Build the padding slot of one pack as a standalone sequence context.
+
+        Args:
+            padding_len (int): Number of padding positions to materialize.
+            use_3d_position_ids (bool): Whether to emit 3-axis mrope position ids.
+            has_routed_experts (bool): Whether to emit dummy routed-expert ids.
+
+        Returns:
+            SequenceContext: Padding context of length ``padding_len``.
+        """
+        # Reduce the attn calculation time by using multiple short sequence packs
+        pad_tokens = tuple(torch.zeros(1, 1024, dtype=torch.long) for _ in range(padding_len // 1024))
+        if padding_len % 1024 > 0:
+            pad_tokens = pad_tokens + (torch.zeros(1, padding_len % 1024, dtype=torch.long),)
+        pad_seq_ctx = SequenceContext.from_input_ids(pad_tokens, device="cpu")  # type: ignore[arg-type]
+        pad_seq_ctx.num_padding = padding_len
+        if use_3d_position_ids:
+            _position_ids_list = []
+            for pad_token in pad_tokens:
+                _position_ids = torch.arange(pad_token.size(-1)).view(1, 1, -1).expand(3, 1, -1)
+                _position_ids_list.append(_position_ids)
+            pad_seq_ctx.position_ids = torch.cat(_position_ids_list, dim=-1)  # type: ignore[assignment]
+        if has_routed_experts:
+            language_cfg = (
+                self.config.model_cfg.text_config
+                if isinstance(self.config.model_cfg, BaseComposeConfig)
+                else self.config.model_cfg
             )
+            pad_seq_ctx.rollout_routed_experts = torch.randint(
+                low=0, high=language_cfg.n_routed_experts, size=(padding_len, 1, 1)
+            )
+        return pad_seq_ctx
 
-        self._distillation = DistillationTrainerAdapter(worker_cfg.distillation_config)
+    def _add_sample_fields(self, field: str, values: list[float] | TokenBatchProto) -> None:
+        """Write controller-delivered training inputs (scalar/token advantages,
+        returns) onto the cached samples by sample index."""
+        samples = self._cached_samples
+        if samples is None:
+            raise RuntimeError("training batch is not loaded; call load_train_batch before training")
+        # Branch before iterating: iterating a union of lists gives mypy a
+        # joined element type (object); separate loops keep precise types.
+        if isinstance(values, TokenBatchProto):
+            tensor_rows = values.chunk()
+            if len(tensor_rows) != len(samples):
+                raise ValueError(f"rows {len(tensor_rows)} do not match samples {len(samples)}")
+            for sample, row in zip(samples, tensor_rows):
+                self._write_sample_field(field, sample, row)
+            return
+        if len(values) != len(samples):
+            raise ValueError(f"rows {len(values)} do not match samples {len(samples)}")
+        for sample, scalar in zip(samples, values):
+            self._write_sample_field(field, sample, None, scalar=float(scalar))
 
-        self._optimizer_steps = worker_cfg.optimizer_steps
-        profile_step = worker_cfg.profile_step
-        if isinstance(profile_step, int):
-            profile_step = [profile_step]
-        self._profile_step = set(profile_step or [])
-        self._profile_time = worker_cfg.profile_time
-        self._profile_memory = worker_cfg.profile_memory
-        self._global_train_step = 0
-
-        if worker_cfg.loss_cfg.chunk_size is not None:
-            mode = "chunk"
+    def _write_sample_field(
+        self,
+        field: str,
+        sample: TrainSample,
+        value: torch.Tensor | None,
+        *,
+        scalar: float | None = None,
+    ) -> None:
+        # Add ``field`` onto ``sample`` with ``value`` as its content: either a
+        # per-token tensor row or a scalar broadcast to the sequence length.
+        shifted_labels = sample.shifted_labels
+        if value is not None:
+            flat = value.detach().reshape(-1).float()
+            if flat.numel() != shifted_labels.size(1):
+                raise ValueError(
+                    f"Token {field} length mismatch: {flat.numel()} does not match "
+                    f"shifted labels length {shifted_labels.size(1)}"
+                )
+            tensor = flat.unsqueeze(0)
         else:
-            mode = "eager"
-        self.logprob_cfg = LogProbConfig(chunk_size=worker_cfg.loss_cfg.chunk_size, mode=mode)
-        self.mtp_config = None
-        if isinstance(worker_cfg.model_cfg, BaseComposeConfig):
-            if hasattr(worker_cfg.model_cfg.text_config, "mtp_config"):
-                self.mtp_config = worker_cfg.model_cfg.text_config.mtp_config
-        elif hasattr(worker_cfg.model_cfg, "mtp_config"):
-            # 非 compose 模型的 mtp_config 直接放在了 model_cfg 中
-            self.mtp_config = worker_cfg.model_cfg.mtp_config
-        self._mtp_trainable_parameters = (
-            [parameter for name, parameter in self._engine.model.trainable_parameters() if "mtp_block" in name]
-            if self.mtp_config is not None
-            else []
-        )
+            assert scalar is not None
+            tensor = torch.full(shifted_labels.shape, scalar, dtype=torch.float32)
+        if field == "advantages":
+            sample.advantages = tensor.masked_fill(shifted_labels.eq(-100), 0.0)
+        elif field == "returns":
+            sample.returns = tensor
+        else:
+            raise ValueError(f"Unknown sample field: {field}")
 
-        self.update_weighter = WeightUpdater(
-            rank=self.rank,
-            logger=self.logger,
-            config=self.config,
-            engine=self._engine,
-        )
+    @requires_role("actor")
+    @ray_method
+    def actor_fit(self, advantages: list[float] | TokenBatchProto | None = None) -> WorkerLogItem:
+        """Train the actor on the cached batch.
 
-        # 唯一的 worker-local 训练批次；角色只通过参数借用，不另建样本缓存。
-        self._batch: TrainBatch | None = None
-        self._batch_conversion_time_s = 0.0
-        self._pack_time_s = 0.0
+        GRPO scalar / session-GAE token advantages arrive here; the actor is the batch's last consumer and releases the
+        cache itself.
+        """
+        conversion_begin = time.perf_counter()
+        if advantages is not None:
+            self._add_sample_fields("advantages", advantages)  # GRPO scalars / session-GAE token rows
+            conversion_time_s = time.perf_counter() - conversion_begin
+        else:
+            conversion_time_s = 0.0
+        try:
+            worker_log_item = self.actor.fit()
+        finally:
+            self.release_train_batch()
+        worker_log_item.setdefault("packing_conversion_time_s", conversion_time_s)
+        return worker_log_item
+
+    @requires_role("critic")
+    @ray_method
+    def critic_collect_values(self, return_values: bool) -> TokenBatchProto | None:
+        assert self.critic is not None  # requires_role("critic") guarantees it
+        return self.critic.collect_values(return_values)
+
+    @requires_role("critic")
+    @ray_method
+    def critic_compute_segment_gae(self, **gae_kwargs) -> dict[str, float]:
+        assert self.critic is not None  # requires_role("critic") guarantees it
+        return self.critic.compute_segment_gae(**gae_kwargs)
+
+    @requires_role("critic")
+    @ray_method
+    def critic_fit(self, token_returns: TokenBatchProto | None = None) -> WorkerLogItem:
+        assert self.critic is not None  # requires_role("critic") guarantees it
+        if token_returns is not None:
+            self._add_sample_fields("returns", token_returns)  # session-GAE returns rows
+        return self.critic.fit()
+
+    @ray_method
+    def save(self, checkpoint_path: Path | str, no_save_optimizer: bool = False) -> None:
+        """Save the DCP checkpoint of every configured role."""
+        if not isinstance(checkpoint_path, Path):
+            checkpoint_path = Path(checkpoint_path)
+        for name, role in self._roles().items():
+            role.save(checkpoint_path / name, no_save_optimizer)
+        self.actor.save_sft_state(checkpoint_path)
+
+    @ray_method
+    def resume(self, load_checkpoint_cfg: LoadCheckpointConfig) -> None:
+        """Resume every configured role from the checkpoint."""
+        resume_from = load_checkpoint_cfg.checkpoint_path
+        if resume_from is None:
+            return
+        if isinstance(resume_from, str):
+            resume_from = Path(resume_from)
+        self.logger.info(f"Resume from checkpoint: {resume_from}")
+        if not resume_from.exists():
+            raise FileNotFoundError(f"Checkpoint path {resume_from} does not exist.")
+        for name, role in self._roles().items():
+            role.resume(resume_from / name, load_checkpoint_cfg)
+        self.actor.resume_sft_state(resume_from)
+
+    @ray_method
+    def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16) -> None:
+        """Save every configured role in Hugging Face format under
+        ``hf_dir``."""
+        hf_path = Path(hf_dir)
+        for name, role in self._roles().items():
+            role.save_hf(hf_path / name, save_dtype)
 
     @ray_method
     def suspend_train_nccl_process_groups(self) -> dict[str, object]:
@@ -409,49 +800,67 @@ class TrainingWorker(SingleAcceleratorWorker):
 
     @ray_method
     def bind_rollout_weight_update(self, *args, **kwargs):
-        return self.update_weighter.bind_rollout_weight_update(*args, **kwargs)
+        return self.actor.update_weighter.bind_rollout_weight_update(*args, **kwargs)
 
     @ray_method
     def weight_update(self, **kwargs):
-        return self.update_weighter.weight_update(**kwargs)
+        return self.actor.update_weighter.weight_update(**kwargs)
 
     @ray_method
     def get_ep_gather_count(self) -> int:
-        iterator = self.update_weighter.weight_iterator
+        iterator = self.actor.update_weighter.weight_iterator
         return 0 if iterator is None else iterator.ep_gather_count
 
     @ray_method
     def has_registered_weight_checkpoint(self) -> bool:
-        return self.update_weighter.has_registered_weight_checkpoint()
+        return self.actor.update_weighter.has_registered_weight_checkpoint()
 
-    def _init_sft(self, worker_cfg: WorkerConfig):
-        self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg
-        self._sft_dataloader: Dataloader | None = None
-        self._sft_dataloader_iter: Iterable | None = None
-        self._sft_loss_cfg: CELossConfig | None = None
-        self._rollout_steps_per_sft = worker_cfg.rollout_steps_per_sft
+    @ray_method
+    def get_data_replicate_size(self) -> int:
+        """Get the data replicate size for the training worker."""
+        # tp shards each sample across ranks; sp shards within a rank --
+        # replicate size multiplies both.
+        return self.config.fsdp_cfg.tp_size * self.sp_mesh.size()
 
-        self._rollout_step = 0
-        self._sft_cur_epoch = 0
-        self._sft_total_consumed_tokens = 0
+    @ray_method
+    def get_worker_cfg(self) -> WorkerConfig:
+        """Expose the worker config for controller-side pack planning."""
+        return self.config
 
-        if self._sft_dataloader_config is not None:
-            assert worker_cfg.sft_global_batch_size > 0, "sft_global_batch_size must be greater than 0"
-            assert worker_cfg.seed is not None, "seed must be set when sft_dataloader_config is not None"
-            tokenizer = AutoTokenizer.from_pretrained(worker_cfg.load_from, trust_remote_code=True)
-            self._sft_dataloader = self._sft_dataloader_config.build(
-                tokenizer=tokenizer,
-                dp_mesh=self.data_mesh["dp"],
-                global_batch_size=worker_cfg.sft_global_batch_size,
-                micro_batch_size=1,
-                seed=worker_cfg.seed,
-            )
-            self.logger.info(f"Sft Dataloader len: {len(self._sft_dataloader)}")
+    @ray_method
+    def get_model_cfg(self) -> TransformerConfig | BaseComposeConfig:
+        return self.config.model_cfg
 
-            sft_loss_cfg = worker_cfg.sft_loss_cfg
-            if worker_cfg.sft_loss_cfg is None:
-                sft_loss_cfg = CELossConfig()
-            self._sft_loss_cfg = sft_loss_cfg
+    def _clear_cublas_workspaces(self) -> None:
+        clear_fn = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
+        if clear_fn is None:
+            self.logger.warning("torch._C._cuda_clearCublasWorkspaces is unavailable")
+            return
+        try:
+            clear_fn()
+            DEVICE_MODULE.empty_cache()
+        except Exception as e:
+            self.logger.warning(f"Failed to clear cuBLAS workspaces: {e}")
+
+    @ray_method
+    def offload_model(self):
+        self.actor.offload_model()
+        DEVICE_MODULE.empty_cache()
+        self._clear_cublas_workspaces()
+
+    @ray_method
+    def offload_optimizer(self):
+        """Offload the optimizer of the training worker."""
+        self.actor.offload_optimizer()
+        DEVICE_MODULE.empty_cache()
+
+    @ray_method
+    def onload_model(self):
+        self.actor.onload_model()
+
+    @ray_method
+    def onload_optimizer(self):
+        self.actor.onload_optimizer()
 
     def _set_deterministic(self):
         if XTUNER_DETERMINISTIC:
@@ -460,19 +869,6 @@ class TrainingWorker(SingleAcceleratorWorker):
 
     def _set_random_seed(self, seed: None | int):
         set_random_seed(seed)
-
-    def _build_engine(self, worker_cfg: WorkerConfig) -> TrainEngine:
-        engine = TrainEngine(  # type: ignore
-            optim_cfg=worker_cfg.optim_cfg,
-            fsdp_cfg=worker_cfg.fsdp_cfg,
-            model_cfg=worker_cfg.model_cfg,
-        )
-        if worker_cfg.load_from is not None:
-            engine.from_hf(worker_cfg.load_from)
-
-        if engine.model.compile_cfg is not None and self.rank == 0:
-            self.logger.info(f"The `compile_cfg` of model is {json.dumps(engine.model.compile_cfg, indent=4)}")
-        return engine
 
     def _init_data_mesh(
         self,
@@ -495,774 +891,6 @@ class TrainingWorker(SingleAcceleratorWorker):
             mesh_dim_names=("dp", "sp"),
         )
         return data_mesh
-
-    def compute_actor_logprobs(
-        self,
-        seq_ctx_list: list[SequenceContext],
-        shifted_labels_list: list[torch.Tensor],
-    ) -> list[torch.Tensor]:
-        # precompute float8 dynamic scale only once
-        self._engine._maybe_precompute_float8_dynamic_scale_for_fsdp()
-        old_logprobs_list: list[torch.Tensor] = []
-        for seq_ctx, shifted_labels in zip(seq_ctx_list, shifted_labels_list):
-            loss_ctx = self.logprob_cfg.build(
-                data={"shifted_labels": shifted_labels}, sp_mesh=self.sp_mesh, device=DEVICE
-            )
-            assert loss_ctx is not None
-            output = self._engine.forward_only(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
-            old_logprobs_list.append(output["loss"])
-        return old_logprobs_list
-
-    def _maybe_offload_logprob(self, loss_ctx_list: Sequence[BaseRLLossContext]) -> None:
-        """Keep old policy logprobs on CPU between their metric and train
-        uses."""
-        if not self.config.offload_old_logprobs:
-            return
-        for loss_ctx in loss_ctx_list:
-            old_logprobs = loss_ctx.loss_kwargs.old_logprobs
-            if old_logprobs is not None:
-                loss_ctx.loss_kwargs.old_logprobs = old_logprobs.cpu()
-
-    def _maybe_onload_logprob(self, loss_ctx_list: Sequence[BaseRLLossContext]) -> None:
-        """Load old policy logprobs to the training device for one optimizer
-        group."""
-        if not self.config.offload_old_logprobs:
-            return
-        for loss_ctx in loss_ctx_list:
-            old_logprobs = loss_ctx.loss_kwargs.old_logprobs
-            if old_logprobs is not None:
-                loss_ctx.loss_kwargs.old_logprobs = old_logprobs.to(DEVICE)
-
-    def _maybe_clear_logprob(self, loss_ctx_list: Sequence[BaseRLLossContext]) -> None:
-        """Release old policy logprobs after their optimizer group is
-        consumed."""
-        if not self.config.offload_old_logprobs:
-            return
-        for loss_ctx in loss_ctx_list:
-            loss_ctx.loss_kwargs.old_logprobs = None
-
-    def compute_ref_logprobs(
-        self, seq_ctx_list: list[SequenceContext], shifted_labels_list: list[torch.Tensor]
-    ) -> list[torch.Tensor]:
-        assert self._has_ref
-        self._ref_model.to_device(DEVICE)
-        ref_logprobs_list: list[torch.Tensor] = []
-        for seq_ctx, shifted_labels in zip(seq_ctx_list, shifted_labels_list):
-            with torch.no_grad():
-                loss_ctx = self.logprob_cfg.build(
-                    data={"shifted_labels": shifted_labels}, sp_mesh=self.sp_mesh, device=DEVICE
-                )
-                assert loss_ctx is not None
-                ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
-                ref_logprobs_list.append(ref_output["loss"])
-        self._ref_model.to_device("cpu")
-        return ref_logprobs_list
-
-    def _maybe_compute_train_teacher_outputs(
-        self,
-        seq_ctx_list: list[SequenceContext],
-        loss_ctx_list: list[BaseRLLossContext],
-    ) -> TrainTeacherTimings | None:
-        if self._train_teacher_manager is None:
-            return None
-
-        self._engine.put_model_to_device("cpu")
-        self._engine.put_optimizer_to_device("cpu")
-        if hasattr(DEVICE_MODULE, "empty_cache"):
-            DEVICE_MODULE.empty_cache()
-        try:
-            teacher_timings = self._train_teacher_manager.compute_teacher_outputs(
-                seq_ctx_list,
-                loss_ctx_list,
-            )
-            return teacher_timings
-        finally:
-            self._engine.put_model_to_device(DEVICE)
-            self._engine.put_optimizer_to_device(DEVICE)
-
-    def _configured_teacher_loss_keys(self) -> list[str]:
-        distillation_config = self.config.distillation_config
-        if distillation_config is None:
-            return []
-        keys: list[str] = []
-        if distillation_config.rollout_teachers:
-            keys.append("teacher_logprobs")
-            if not distillation_config.loss_config.uses_sampled_token_targets:
-                keys.append("target_token_ids")
-        if distillation_config.train_teachers:
-            keys.append("teacher_indices")
-        return keys
-
-    def _resolve_pack_refs(self, seq_ctx: SequenceContext) -> None:
-        resolve_pack_refs(
-            seq_ctx,
-            model_cfg=self.config.model_cfg,
-            pack_max_length=self.config.pack_max_length,
-        )
-
-    @contextmanager
-    def _maybe_profiling(self, global_train_step: int, phase: str):
-        if global_train_step not in self._profile_step:
-            yield
-            return
-
-        if self.log_dir is not None:
-            profile_home = self.log_dir.parent
-        else:
-            profile_home = Path(os.environ.get("WORK_DIR", "."))
-
-        with contextlib.ExitStack() as stack:
-            if self._profile_time:
-                time_dir = profile_home / "profiling_time" / phase / f"global-step-{global_train_step}"
-                stack.enter_context(profiling_time(time_dir))
-            if self._profile_memory:
-                memory_dir = profile_home / "profiling_memory" / phase / f"global-step-{global_train_step}"
-                stack.enter_context(profiling_memory(memory_dir))
-            yield
-
-    @ray_method
-    def load_train_batch(
-        self,
-        rollout_item_refs: list[ray.ObjectRef],
-        rank_plan: RankPlan,
-        batch_attr: TrainBatchAttr,
-    ) -> None:
-        """Install one local training batch; the only data entry point.
-
-        Args:
-            rollout_item_refs (list[ray.ObjectRef]): Nested ref whose element zero wraps
-                this DP rank's ``RolloutState`` list, shared by all replicas.
-            rank_plan (RankPlan): Local pack indices addressing the states.
-            batch_attr (TrainBatchAttr): Batch-level attributes derived by the controller.
-
-        Returns:
-            None
-        """
-        rollout_items = ray.get(rollout_item_refs[0])
-        conversion_begin = time.perf_counter()
-        self._batch = TrainBatch(
-            rollout_items,
-            rank_plan,
-            batch_attr,
-            self._distillation,
-            pack_max_length=self.config.pack_max_length,
-            model_cfg=self.config.model_cfg,
-            teacher_loss_keys=self._configured_teacher_loss_keys(),
-            distillation_config=self.config.distillation_config,
-        )
-        self._batch_conversion_time_s = time.perf_counter() - conversion_begin
-
-    @ray_method
-    def release_train_batch(self) -> None:
-        """Release the worker-local batch; remote refs stay owned by the
-        trainer.
-
-        Safe to call when nothing is loaded.
-
-        Returns:
-            None
-        """
-        if self._batch is not None:
-            self._batch.close()
-            self._batch = None
-
-    @ray_method
-    def fit(self, advantages: Sequence[float | list[float]]) -> WorkerLogItem:
-        """Train one loaded rollout batch with the controller's advantages.
-
-        Args:
-            advantages (Sequence[float | list[float]]): Scalar or shifted-token
-                advantages aligned with the local sample order.
-
-        Returns:
-            WorkerLogItem: Training metrics of one rollout batch.
-        """
-        # NOTE: sglang会清除logger handle, 重新创建
-        self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
-        if self._batch is None:
-            raise RuntimeError("training batch is not loaded; call load_train_batch before fit")
-        self._batch.install_advantages(cast(list[float], list(advantages)))
-        self._batch.require_targets("actor")
-        rollout_idx = self._batch.attrs["rollout_idx"]
-        worker_log_item = self._fit(self._batch, rollout_idx)
-        worker_log_item.setdefault("packing_conversion_time_s", self._batch_conversion_time_s)
-        worker_log_item.setdefault("packing_pack_time_s", self._pack_time_s)
-        return worker_log_item
-
-    def _fit(
-        self,
-        batch: TrainBatch,
-        rollout_idx: int,
-    ) -> WorkerLogItem:
-        loss_cfg: BaseRLLossConfig = self.config.loss_cfg
-        step_packs = batch.plan.steps
-        num_optimizer_steps = len(step_packs)
-        assert num_optimizer_steps <= self._optimizer_steps, (
-            f"Pack plan optimizer steps {num_optimizer_steps} exceed configured "
-            f"optimizer_steps {self._optimizer_steps}"
-        )
-        if num_optimizer_steps < self._optimizer_steps:
-            self.logger.info(
-                f"Optimizer only steps {num_optimizer_steps} times because pack plan steps "
-                f"{num_optimizer_steps} < optimizer_steps {self._optimizer_steps}."
-            )
-        packs_per_step = [len(step_data_batches) for step_data_batches in step_packs]
-        flat_packs = tuple(pack for step in step_packs for pack in step)
-
-        # 每个 pack 单独从 TrainBatch 物化：CPU 序列、refs 解析、H2D 与 SP split 一次完成，
-        # 再把 loss context 建在 CPU 后搬到设备。各阶段共用同一 pack 顺序，collective 对称。
-        seq_ctx_list: list[SequenceContext] = []
-        full_labels_list: list[torch.Tensor] = []
-        loss_ctx_list: list[BaseRLLossContext] = []
-        mtp_loss_ctx_list: list[list[MTPLossContext]] = []
-        prepare_inputs_begin = time.perf_counter()
-        for full_pack in iter_cpu_packs(batch, flat_packs, self._resolve_pack_refs):
-            seq_ctx = full_pack.full_data["seq_ctx"].copy().to(DEVICE)
-            if self.sp_mesh.size() > 1:
-                seq_ctx = seq_ctx.split(self.sp_mesh)
-
-            # loss builder 收完整数据、内部算全量权重并切到本 rank；调用方不再手工 split。
-            loss_ctx = loss_cfg.build(data=full_pack.full_data, sp_mesh=self.sp_mesh, device=DEVICE)
-            assert loss_ctx is not None
-            if self.mtp_config is not None:
-                mtp_loss_ctxs_per_batch: list[MTPLossContext] = []
-                for mtp_idx in range(self.mtp_config.num_layers):
-                    mtp_loss_cfg = MTPLossConfig(
-                        **loss_cfg.model_dump(include={"mode", "chunk_size"}),
-                        mtp_depth=mtp_idx + 1,
-                        detach_mtp_lm_head_weight=self.mtp_config.detach_mtp_lm_head_weight,
-                    )
-                    mtp_ctx = mtp_loss_cfg.build(
-                        data={
-                            **full_pack.full_data,
-                            "logprobs": full_pack.full_data.get("rollout_logprobs"),
-                        },
-                        sp_mesh=self.sp_mesh,
-                        device=DEVICE,
-                    )
-                    if mtp_ctx is not None:
-                        mtp_loss_ctxs_per_batch.append(mtp_ctx)
-                mtp_loss_ctx_list.append(mtp_loss_ctxs_per_batch)
-
-            seq_ctx_list.append(seq_ctx)
-            full_labels_list.append(full_pack.full_data["shifted_labels"])
-            loss_ctx_list.append(loss_ctx)
-        self._pack_time_s = time.perf_counter() - prepare_inputs_begin
-        self.logger.debug(f"Rank{self.rank} Rollout {rollout_idx} prepare_inputs elapsed={self._pack_time_s:.4f}s")
-
-        # When sp_mesh.size() > 1, get the sp_split shifted_labels and rollout_logprobs
-        shifted_labels_list = [loss_ctx.loss_kwargs.shifted_labels for loss_ctx in loss_ctx_list]
-        rollout_logprobs_list = [loss_ctx.loss_kwargs.rollout_logprobs for loss_ctx in loss_ctx_list]
-
-        # compute old logprobs
-        old_logprobs_list = self.compute_actor_logprobs(seq_ctx_list, full_labels_list)
-        for old_logprobs, loss_ctx in zip(old_logprobs_list, loss_ctx_list):
-            loss_ctx.loss_kwargs.old_logprobs = old_logprobs
-
-        worker_log_item: WorkerLogItem = {"train_entropy": 0.0, "train_metrics": [], "sft_train_metrics": {}}
-        logger_msg = f"Rollout {rollout_idx}: "
-
-        # compute entropy
-        rank_grad_tokens: torch.Tensor | None = None
-        for shifted_labels in shifted_labels_list:
-            mask = shifted_labels != -100
-            grad_tokens = mask.sum()
-            rank_grad_tokens = grad_tokens if rank_grad_tokens is None else rank_grad_tokens + grad_tokens
-        rank_grad_tokens = cast(torch.Tensor, rank_grad_tokens)
-        global_grad_tokens = rank_grad_tokens
-        dist.all_reduce(global_grad_tokens, op=dist.ReduceOp.SUM)
-
-        avg_sum_entropy = calculate_entropy(shifted_labels_list, old_logprobs_list, global_grad_tokens)
-        avg_rollout_entropy = calculate_entropy(shifted_labels_list, rollout_logprobs_list, global_grad_tokens)
-
-        assert avg_sum_entropy is not None
-        worker_log_item["train_entropy"] = avg_sum_entropy.item()
-        logger_msg += f"avg entropy: {avg_sum_entropy:.4f}"
-        if avg_rollout_entropy is not None:
-            worker_log_item["rollout_entropy"] = avg_rollout_entropy.item()
-            logger_msg += f", avg rollout entropy: {avg_rollout_entropy:.4f}"
-
-        # compute rollout importance sampling metrics
-        all_rollout_is_metrics = []
-        all_mismatch_metrics = []
-        for i, loss_ctx in enumerate(loss_ctx_list):
-            if loss_ctx.loss_kwargs.rollout_logprobs is not None:
-                # calculate importance sampling weights
-                num_tokens = seq_ctx_list[i].seq_lens_q
-                mismatch_metrics, rollout_is_metrics = loss_ctx.compute_rollout_is(self.sp_mesh, num_tokens)
-                all_rollout_is_metrics.append(rollout_is_metrics)
-                all_mismatch_metrics.append(mismatch_metrics)
-
-        if len(all_mismatch_metrics) > 0:
-            mismatch_metrics = merge_rollout_is_metrics(all_mismatch_metrics, DEVICE)
-            if len(mismatch_metrics) > 0:
-                worker_log_item["mismatch_metrics"] = mismatch_metrics
-                logger_msg += f"\n rollout mismatch metrics:\n{json.dumps(mismatch_metrics, indent=4)}"
-
-        if len(all_rollout_is_metrics) > 0:
-            rollout_is_metrics = merge_rollout_is_metrics(all_rollout_is_metrics, DEVICE)
-            if len(rollout_is_metrics) > 0:
-                worker_log_item["rollout_is_metrics"] = rollout_is_metrics
-                logger_msg += f"\n rollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
-
-        if self.rank == 0:
-            self.logger.info(logger_msg)
-
-        only_calc_mismatch_ratio = os.environ.get("ONLY_CALC_MISMATCH_RATIO", "0") == "1"
-        if only_calc_mismatch_ratio:
-            # This early-return path skips the MTP forward. FSDP may have
-            # prefetched the MTP module already, leaving its all-gather result
-            # cached until we release it explicitly. The normal training branch
-            # can leave the same residue, but it is outside the peak-memory
-            # path and can be ignored.
-            self._release_deferred_fsdp_all_gathers(f"rollout_{rollout_idx}/only_calc_mismatch")
-            DEVICE_MODULE.empty_cache()
-            return worker_log_item
-
-        # compute reference logprobs
-        ref_logprobs_list: list[torch.Tensor] | None = None
-        if self._has_ref:
-            ref_logprobs_list = self.compute_ref_logprobs(seq_ctx_list, full_labels_list)
-
-            for i, loss_ctx in enumerate(loss_ctx_list):
-                loss_ctx.loss_kwargs.ref_logprobs = ref_logprobs_list[i]
-
-            kl_div_sum: torch.Tensor | None = None
-            for i, shifted_labels in enumerate(shifted_labels_list):
-                mask = shifted_labels != -100
-                kl_div = kl_penalty(
-                    cast(torch.Tensor, old_logprobs_list[i]),
-                    cast(torch.Tensor, ref_logprobs_list[i]),
-                    loss_weights=mask,
-                    kl_penalty="low_var_kl",
-                )
-                kl_div_sum = kl_div if kl_div_sum is None else kl_div_sum + kl_div
-
-            kl_div_sum = cast(torch.Tensor, kl_div_sum)
-            dist.all_reduce(kl_div_sum, op=dist.ReduceOp.SUM)
-            avg_kl_div = kl_div_sum / global_grad_tokens if global_grad_tokens > 0 else 0
-            self.logger.info(f"Rollout {rollout_idx}: avg KL divergence: {avg_kl_div:.4f}")
-
-        # Keep old logprobs on CPU once all rollout-level metrics have consumed
-        # them.  They are loaded back only for the train group that is about to
-        # run, which bounds their GPU residency by the optimizer group size.
-        self._maybe_offload_logprob(loss_ctx_list)
-        del old_logprobs_list
-
-        teacher_timings = self._maybe_compute_train_teacher_outputs(seq_ctx_list, loss_ctx_list)
-        if teacher_timings is not None:
-            worker_log_item.update({"teacher_timings": teacher_timings.to_dict()})
-
-        # compute batched loss context along the plan step boundaries
-        batched_loss_ctx_list: list[BaseRLLossContext] = []
-        batched_mtp_loss_ctx_list: list[list[MTPLossContext]] = []
-        LossContext = loss_cfg.loss_ctx_cls
-        start_idx = 0
-        for packs_in_step in packs_per_step:
-            step_loss_ctxs = loss_ctx_list[start_idx : start_idx + packs_in_step]
-            batched_loss_ctx_list.extend(
-                LossContext.build_batches(step_loss_ctxs)  # type: ignore[arg-type]
-            )
-
-            if self.mtp_config is not None:
-                step_seq_ctxs = seq_ctx_list[start_idx : start_idx + packs_in_step]
-                cu_seq_lens_list = [seq_ctx.cu_seq_lens_q for seq_ctx in step_seq_ctxs]
-                # mtp_loss_ctx_list: list[list[MTPLossContext]], outer=batch, inner=mtp_depth
-                num_mtp_depths = len(mtp_loss_ctx_list[0]) if mtp_loss_ctx_list else 0
-                for mtp_idx in range(num_mtp_depths):
-                    depth_mtp_loss_ctxs: list[LMHeadLossContext] = [
-                        mtp_loss_ctx_list[j][mtp_idx] for j in range(start_idx, start_idx + packs_in_step)
-                    ]
-                    batched_mtp_depth_ctxs = cast(
-                        list[MTPLossContext],
-                        MTPLossContext.build_batches(
-                            depth_mtp_loss_ctxs,
-                            cu_seq_lens_list=cu_seq_lens_list,
-                            sp_mesh=self.sp_mesh,
-                        ),
-                    )
-                    # Append each depth's batched ctx to the corresponding batch index
-                    for batch_offset, mtp_ctx in enumerate(batched_mtp_depth_ctxs):
-                        global_batch_idx = start_idx + batch_offset
-                        if global_batch_idx >= len(batched_mtp_loss_ctx_list):
-                            batched_mtp_loss_ctx_list.append([mtp_ctx])
-                        else:
-                            batched_mtp_loss_ctx_list[global_batch_idx].append(mtp_ctx)
-            start_idx += packs_in_step
-
-        # train optimizer steps along the plan step boundaries
-        start_idx = 0
-        for step_idx, packs_in_step in enumerate(packs_per_step):
-            global_train_step = self._global_train_step + 1
-            batches_seq_ctx = seq_ctx_list[start_idx : start_idx + packs_in_step]
-            batches_loss_ctx = batched_loss_ctx_list[start_idx : start_idx + packs_in_step]
-
-            engine_input = [
-                ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
-                for seq_ctx, loss_ctx in zip(batches_seq_ctx, batches_loss_ctx)
-            ]
-
-            if self.mtp_config is not None:
-                batches_mtp_loss_ctxs = batched_mtp_loss_ctx_list[start_idx : start_idx + packs_in_step]
-                engine_input = [
-                    ModelItem(
-                        seq_ctx=seq_ctx,
-                        loss_ctx=cast(
-                            dict[str, BaseLossContext],
-                            {"mtp": mtp_loss_ctx_depths, "lm": loss_ctx},
-                        ),
-                    )
-                    for seq_ctx, loss_ctx, mtp_loss_ctx_depths in zip(
-                        batches_seq_ctx, batches_loss_ctx, batches_mtp_loss_ctxs
-                    )
-                ]
-
-            self._maybe_onload_logprob(batches_loss_ctx)
-
-            # Make max_memory/reserved_memory below this step's peak instead of the process-lifetime peak (~2us, no
-            # sync), so the memory columns line up with per-step metrics such as `ep_load_peak_ratio`.
-            DEVICE_MODULE.reset_peak_memory_stats()  # type: ignore[attr-defined]
-            train_step_begin = time.perf_counter()
-            with self._maybe_profiling(global_train_step, "train_step"):
-                train_step_info = self._engine.train_step(
-                    data_batches=engine_input,
-                )
-            self.logger.debug(
-                f"Rank{self.rank} Rollout {rollout_idx} GlobalStep {global_train_step} "
-                f"train_step[{step_idx}].engine_train_step elapsed={time.perf_counter() - train_step_begin:.4f}s"
-            )
-            mtp_grad_metrics: dict[str, float] = {}
-            if self._mtp_trainable_parameters:
-                # `grad is None` is a structural signal: unlike a zero-valued grad,
-                # it means the MTP loss never reached that trainable parameter.
-                present_grad_count = sum(parameter.grad is not None for parameter in self._mtp_trainable_parameters)
-                mtp_grad_metrics = {
-                    "mtp_grad_parameter_coverage": present_grad_count / len(self._mtp_trainable_parameters),
-                }
-            grad_norm = self._engine.clip_grad_norm()
-            self._engine.step_optimizer(grad_norm)
-
-            # The current group will not be revisited in this fit call.
-            # Release its old-logprob references after backward and the
-            # optimizer update have both completed.
-            self._maybe_clear_logprob(batches_loss_ctx)
-
-            engine_logs_info = cast(dict[str, float], train_step_info.pop("logs_info"))  # type: ignore[misc]
-            engine_extra_info = train_step_info.pop("extra_info")  # type: ignore[misc]
-
-            if isinstance(engine_extra_info, ModelForwardExtraLogInfo):
-                extra_info_dict = engine_extra_info.get()
-            else:
-                extra_info_dict = cast(dict, engine_extra_info)
-
-            extra_info_dict = {
-                k: v.item() if isinstance(v, torch.Tensor) else v
-                for k, v in extra_info_dict.items()
-                if isinstance(v, (torch.Tensor, int, float))
-            }
-            extra_info_dict = loss_cfg.finalize_metrics(extra_info_dict, DEVICE)
-
-            train_step_info.pop("total_loss")  # type: ignore[misc]
-            max_memory = DEVICE_MODULE.max_memory_allocated() / (1024**3)  # type: ignore[attr-defined]
-            reserved_memory = DEVICE_MODULE.max_memory_reserved() / (1024**3)  # type: ignore[attr-defined]
-
-            train_log_item = WorkerTrainLogItem(
-                **engine_logs_info,  # type: ignore[typeddict-item]
-                **train_step_info,
-                **extra_info_dict,
-                **mtp_grad_metrics,  # type: ignore[typeddict-item]
-                grad_norm=grad_norm.item(),
-                max_memory=max_memory,
-                reserved_memory=reserved_memory,
-            )
-            worker_log_item["train_metrics"].append(train_log_item)
-
-            # Extract logs_info for logging
-            log_str = ", ".join(
-                f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
-                for key, value in train_log_item.items()
-                if not key.startswith("reduced_train_policy_") and key != "max_ratio"
-            )
-            log_str = f"Rank{self.rank} Rollout {rollout_idx} Step {step_idx}: " + log_str
-            self.logger.info(log_str)
-            self._global_train_step = global_train_step
-            start_idx += packs_in_step
-
-        self._rollout_step += 1
-        if self._sft_dataloader is not None and self._rollout_step % self._rollout_steps_per_sft == 0:
-            train_step_info = self._fit_sft()
-            engine_logs_info = train_step_info["logs_info"]
-            worker_log_item["sft_train_metrics"] = {
-                **engine_logs_info,
-                **train_step_info["extra_info"].get(),
-                "efficient_attn_ratio": train_step_info["efficient_attn_ratio"],
-            }
-
-        return worker_log_item
-
-    def _fit_sft(self):
-        self.logger.info(f"Train SFT after {self._rollout_step} RL steps")
-        if self._sft_dataloader_iter is None:
-            self._sft_dataloader_iter = iter(self._sft_dataloader)
-
-        time_before_get_data = time.time()
-        data_batch = self._next_sft_data_batch()
-        time_before_train_step = time.time()
-        data_time = time_before_train_step - time_before_get_data
-        DEVICE_MODULE.reset_peak_memory_stats()
-
-        train_step_info, grad_norm = self._train_one_step_sft(data_batch)
-
-        time_after_train_step = time.time()
-        step_time = time_after_train_step - time_before_train_step
-        step_consumed_tokens = train_step_info["step_consumed_tokens"]
-
-        reduced_step_consumed_tokens = self._reduce_number_across_rank(step_consumed_tokens)
-        self._sft_total_consumed_tokens += reduced_step_consumed_tokens
-
-        self._sft_log_step(
-            train_step_info=train_step_info,
-            local_step_consumed_tokens=step_consumed_tokens,
-            step_consumed_tokens=reduced_step_consumed_tokens,
-            total_consumed_tokens=self._sft_total_consumed_tokens,
-            data_time=data_time,
-            step_time=step_time,
-            grad_norm=grad_norm,
-        )
-
-        return train_step_info
-
-    def _next_sft_data_batch(self):
-        try:
-            data = next(self._sft_dataloader_iter)  # type: ignore[assignment]
-        except StopIteration:
-            self._sft_cur_epoch += 1
-            self._sft_dataloader.set_epoch(self._sft_cur_epoch)
-            self._sft_dataloader_iter = iter(self._sft_dataloader)
-            data = next(self._sft_dataloader_iter)
-        return data
-
-    def _train_one_step_sft(self, data_batch):
-        seq_ctx_list: list[SequenceContext] = []
-        loss_cfg: CELossConfig = self._sft_loss_cfg
-        loss_ctx_list: list[CELossContext] = []
-        for data in data_batch:
-            seq_ctx = data["seq_ctx"].to(DEVICE)
-            if self.sp_mesh.size() > 1:
-                seq_ctx = seq_ctx.split(sequence_parallel_mesh=self.sp_mesh)
-            seq_ctx_list.append(seq_ctx)
-            loss_ctx = loss_cfg.build(data=data, sp_mesh=self.sp_mesh, device=DEVICE)
-            loss_ctx_list.append(loss_ctx)
-
-        del data_batch
-
-        cu_seq_lens_list = [seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list]
-        loss_ctx_list = CELossContext.build_batches(
-            loss_ctx_list, cu_seq_lens_list=cu_seq_lens_list, sp_mesh=self.sp_mesh
-        )
-
-        engine_input = [
-            ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
-            for seq_ctx, loss_ctx in zip(seq_ctx_list, loss_ctx_list)
-        ]
-
-        train_step_info = self._engine.train_step(engine_input)
-        grad_norm = self._engine.clip_grad_norm()
-        self._engine.step_optimizer(grad_norm)
-        return train_step_info, grad_norm
-
-    def _sft_log_step(
-        self,
-        train_step_info: TrainStepInfo,
-        local_step_consumed_tokens: int,
-        step_consumed_tokens: int,
-        total_consumed_tokens: int,
-        data_time: float,
-        step_time: float,
-        grad_norm: torch.Tensor,
-    ):
-        tgs = local_step_consumed_tokens / step_time
-        logs_info = train_step_info.get("logs_info", {})
-        log_items = [f"{k}: {v:.8f}" for k, v in logs_info.items() if "loss" in k]
-        log_items.append(f"total_loss: {train_step_info['total_loss']:.8f}")
-        loss_log_str = ", ".join(log_items)
-
-        max_memory = DEVICE_MODULE.max_memory_allocated()  # type: ignore[attr-defined]
-        reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
-
-        self.logger.info(
-            f"Rank{self.rank} Step {self._rollout_step}: data_time: {data_time:.4f} time: {step_time:.4f} "
-            f"text_tokens: {local_step_consumed_tokens} "
-            f"step_consumed_tokens: {step_consumed_tokens} "
-            f"total_consumed_tokens: {total_consumed_tokens} "
-            f"efficient_attn_ratio: {train_step_info['efficient_attn_ratio']:.4f} "
-            f"{loss_log_str} "
-            f"grad_norm: {grad_norm:.8f} "
-            f"max_memory: {max_memory / (1024**3):.2f} GB "
-            f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
-            f"tgs: {tgs:.4f}"
-        )
-
-    def _reduce_number_across_rank(self, rank_number: int) -> int:
-        _gathered_list = [None for _ in range(dist.get_world_size())]
-        dist.all_gather_object(_gathered_list, rank_number)
-        reduced_number = sum(_gathered_list)  # type: ignore[arg-type]
-        return reduced_number
-
-    @ray_method
-    def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
-        self._engine.save_hf(hf_dir, save_dtype)
-
-    @ray_method
-    def get_data_replicate_size(self) -> int:
-        """Get the data replicate size for the training worker."""
-        # tp and pp will affect the data replicate size in engine
-        # sp will affect the data replicate size in worker
-        return self._engine.data_replicate_size * self.sp_mesh.size()
-
-    @ray_method
-    def get_worker_cfg(self) -> WorkerConfig:
-        """Expose the worker config for controller-side pack planning."""
-        return self.config
-
-    @ray_method
-    def get_model_cfg(self):
-        model_cfg = self._engine.model_cfg
-        return model_cfg
-
-    def _clear_cublas_workspaces(self) -> None:
-        clear_fn = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
-        if clear_fn is None:
-            self.logger.warning("torch._C._cuda_clearCublasWorkspaces is unavailable")
-            return
-        try:
-            clear_fn()
-            DEVICE_MODULE.empty_cache()
-        except Exception as e:
-            self.logger.warning(f"Failed to clear cuBLAS workspaces: {e}")
-
-    def _release_deferred_fsdp_all_gathers(self, log_tag: str) -> None:
-        comm_states, param_groups = release_deferred_fsdp_all_gathers(self._engine.model)
-        if comm_states or param_groups:
-            self.logger.debug(
-                f"[{log_tag}] released deferred FSDP all-gathers: "
-                f"comm_states={comm_states}, param_groups={param_groups}"
-            )
-
-    @ray_method
-    def offload_model(self):
-        model_moved = self._engine.put_model_to_device("cpu")
-        DEVICE_MODULE.empty_cache()
-        self._clear_cublas_workspaces()
-        if not model_moved:
-            self.logger.info("Skip model offload because model placement is unchanged.")
-            return
-        self.logger.info(
-            f"Offloaded model to CPU. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
-        )
-
-    @ray_method
-    def offload_optimizer(self):
-        """Offload the optimizer of the training worker."""
-        optimizer_moved = self._engine.put_optimizer_to_device("cpu")
-        DEVICE_MODULE.empty_cache()
-        if not optimizer_moved:
-            self.logger.info("Skip optimizer offload because no optimizer state needs to be moved.")
-            return
-        self.logger.info(
-            f"Offloaded optimizer to CPU. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, "
-            f"reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
-        )
-
-    @ray_method
-    def onload_model(self):
-        model_moved = self._engine.put_model_to_device(DEVICE)
-        if not model_moved:
-            self.logger.info("Skip model onload because model placement is unchanged.")
-
-    @ray_method
-    def onload_optimizer(self):
-        optimizer_moved = self._engine.put_optimizer_to_device(DEVICE)
-        if not optimizer_moved:
-            self.logger.info("Skip optimizer onload because no optimizer state needs to be moved.")
-
-    @ray_method
-    def save(self, checkpoint_path: Path | str, no_save_optimizer: bool = False):
-        """Save the DCP checkpoint of the training worker."""
-        if not isinstance(checkpoint_path, Path):
-            checkpoint_path = Path(checkpoint_path)
-        weights_path = checkpoint_path / self._SAVE_WEIGHTS_DIR
-
-        # Save model and optimizer
-        self._engine.save_dcp(
-            weights_dir=weights_path,
-            save_optimizer=not no_save_optimizer,
-        )
-
-        # Save sft dataloader
-        if self._sft_dataloader is not None:
-            sft_dataloader_path = checkpoint_path / self._SAVE_SFT_DATALOADER_DIR
-            dataloader_state = self._sft_dataloader.get_state_dict()
-            total_consumed_samples = dataloader_state["total_consumed_samples"]
-            if self.rank != 0:
-                return
-
-            torch.save(dataloader_state, sft_dataloader_path)
-
-            train_state_path = checkpoint_path / self._SAVE_SFT_TRAIN_STATE_PATH
-            with train_state_path.open("w") as f:
-                f.write(
-                    json.dumps(
-                        {
-                            "cur_step": self._rollout_step,
-                            "cur_epoch": self._sft_cur_epoch,
-                            "total_consumed_samples": total_consumed_samples,
-                            "total_consumed_tokens": self._sft_total_consumed_tokens,
-                        }
-                    )
-                )
-
-    @ray_method
-    def resume(self, load_checkpoint_cfg: LoadCheckpointConfig):
-        """Resume the training worker from the checkpoint."""
-        resume_from = load_checkpoint_cfg.checkpoint_path
-        if resume_from is None:
-            return
-        if isinstance(resume_from, str):
-            resume_from = Path(resume_from)
-        self.logger.info(f"Resume from checkpoint: {resume_from}")
-
-        if not resume_from.exists():
-            raise FileNotFoundError(f"Checkpoint path {resume_from} does not exist.")
-
-        weights_path = resume_from / self._SAVE_WEIGHTS_DIR
-        if not weights_path.exists():
-            raise FileNotFoundError(f"Checkpoint at {resume_from} has no '{self._SAVE_WEIGHTS_DIR}/' directory.")
-
-        self._engine.load_dcp(
-            weights_dir=weights_path,
-            load_states=load_checkpoint_cfg.load_optimizer_states,
-            load_args=load_checkpoint_cfg.load_optimizer_args,
-        )
-
-        # Resume sft dataloader
-        if self._sft_dataloader is not None:
-            train_state_path = resume_from / self._SAVE_SFT_TRAIN_STATE_PATH
-            if not train_state_path.exists():
-                raise FileNotFoundError(f"Train state path {train_state_path} does not exist.")
-            with train_state_path.open("r") as f:
-                train_state = json.loads(f.read())
-            self._rollout_step = train_state["cur_step"]
-            self._sft_cur_epoch = train_state["cur_epoch"]
-            self._sft_total_consumed_tokens = train_state["total_consumed_tokens"]
-            self.logger.info(f"Resume sft train state from {train_state_path}")
-
-            sft_dataloader_path = resume_from / self._SAVE_SFT_DATALOADER_DIR
-            if not sft_dataloader_path.exists():
-                raise FileNotFoundError(f"Dataloader path {sft_dataloader_path} does not exist.")
-            dataloader_state = torch.load(sft_dataloader_path, map_location=DEVICE)
-            self._sft_dataloader.load_state_dict(dataloader_state)
-            self.logger.info(f"Resume sft dataloader from {sft_dataloader_path}")
 
     @ray_method
     def ready(self) -> bool:
