@@ -51,7 +51,6 @@ from xtuner.v1.rl.utils import (
     CPUResourceManager,
     asyncio_run,
     create_task,
-    free_object_refs,
     set_cpu_resource_manager,
     sort_rollout_state_for_deterministic,
 )
@@ -87,6 +86,16 @@ def _trainer_config_requires_rollout_proxy(cfg: "BaseRLTrainerConfig") -> bool:
     return _agent_loop_manager_requires_rollout_proxy(
         cfg.agent_loop_manager_cfg
     ) or _agent_loop_manager_requires_rollout_proxy(cfg.eval_agent_loop_manager_cfg)
+
+
+# 在使用了 trace_store 情况下，我们不能提前释放 obj ref，而是由 trainer 在消费后统一释放
+# 这样可以确保一拆多情况下正确。判断逻辑和 rollout_proxy 一致。
+def _agent_loop_manager_uses_trace_store(
+    cfg: AgentLoopManagerConfig | DisaggAgentLoopManagerConfig | None,
+) -> bool:
+    # Agent loops that require the rollout proxy currently export train traces
+    # through RolloutTraceStore. Those trace refs are shared across segments.
+    return _agent_loop_manager_requires_rollout_proxy(cfg)
 
 
 def _migrate_manager_is_valid_sample_fn(
@@ -664,6 +673,8 @@ class BaseRLTrainer:
         if cfg.train_worker_cfg.seed is None:
             self.logger.warning(f"RLTrainer seed {cfg.seed} is used as train worker seed.")
             cfg.train_worker_cfg.seed = cfg.seed
+        if _agent_loop_manager_uses_trace_store(cfg.agent_loop_manager_cfg):
+            cfg.train_worker_cfg.free_rollout_routed_experts_in_worker = False
         cfg.train_worker_cfg.load_from = cfg.load_from
         cfg.train_worker_cfg.log_dir = log_dir
         cfg.train_worker_cfg.train_teacher_manager_config = self._distillation.train_teacher_manager_config
@@ -851,7 +862,7 @@ class BaseRLTrainer:
 
         # save tokenizer
         if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
-            self.tokenizer.save_pretrained(str(save_hf_path))
+            self.tokenizer.save_pretrained(str(save_hf_path / "actor"))
 
     async def _run_initial_evaluate(self) -> None:
         eval_batch: list[list[RolloutState]] = []
@@ -896,32 +907,24 @@ class BaseRLTrainer:
         )
         return set(released_session_ids)
 
-    def _release_train_batch_resources(self, train_batch: list[list[RolloutState]]) -> None:
-        """Release the consumed batch's trace sessions and remaining remote
-        refs.
+    def _release_all_trace_sessions(self) -> None:
+        from xtuner.v1.rl.rollout.trace_store import get_existing_store
 
-        Trace-owned routed-expert refs are released with their session; everything
-        else (ordinary routed refs and pixels) is freed once, deduplicated.
+        store = get_existing_store()
+        if store is None:
+            return
 
-        Args:
-            train_batch (list[list[RolloutState]]): The batch that was fully consumed.
+        self.logger.info("Release all sessions and free associated resources")
+        ray.get(store.release_all.remote())
+        keys = ray.get(store.list_sessions.remote())
+        # A leftover session key should stay visible without crashing fit()
+        # during teardown.
+        if keys:
+            self.logger.warning(f"Trace store keys not released after release_all: {keys}")
 
-        Returns:
-            None
-        """
-        released_sessions = self._release_trace_sessions(_trace_session_ids(train_batch))
-        refs: list[ray.ObjectRef] = []
-        for group in train_batch:
-            for state in group:
-                pixels = state.mm_info.get("pixel_values") if state.mm_info is not None else None
-                trace_released = state.session_id is not None and str(state.session_id) in released_sessions
-                routed = None if trace_released else state.routed_experts
-                for value in (pixels, routed):
-                    if isinstance(value, ray.ObjectRef):
-                        refs.append(value)
-                    elif isinstance(value, (list, tuple)):
-                        refs.extend(item for item in value if isinstance(item, ray.ObjectRef))
-        free_object_refs(refs)
+    def _release_trace_sessions_after_train_batch(self, train_batch: list[list[RolloutState]]) -> None:
+        """Release training traces when no concurrent rollout owner exists."""
+        self._release_all_trace_sessions()
 
     def _prepare_train_batch(
         self,
@@ -987,7 +990,7 @@ class BaseRLTrainer:
         step_timer_dict: dict,
         *,
         offload_rollout_before_train: bool = False,
-        onload_train_before_train: bool = False,
+        resume_train_nccl_before_train: bool = False,
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
         produce_result: ProduceBatchResult | None = None,
@@ -1002,18 +1005,16 @@ class BaseRLTrainer:
         self._save_trajectories(train_batch, train_trajectory_path)
         self.logger.info(f"Train step {train_step} train trajectories saved to {train_trajectory_path}")
 
-        # 共卡训练前切换资源：检查 rollout -> offload rollout -> onload train。
+        # 共卡训练前切换资源：检查 rollout -> offload rollout
         if offload_rollout_before_train:
             ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
-        if onload_train_before_train:
+        if resume_train_nccl_before_train:
             if getattr(self, "_train_nccl_suspended", False):
                 with timer("resume_train_nccl", step_timer_dict):
                     self.train_controller.resume_train_nccl_process_groups()
                 self._train_nccl_suspended = False
-            with timer("onload", step_timer_dict):
-                self.train_controller.onload(target="all")
-                self.logger.info("Training controller loaded")
 
+        # fit内部再做worker的onload，ppo onload critic, 其他的onload actor
         with timer("training", step_timer_dict):
             workers_log_item, data_info = self.train_controller.fit(
                 train_batch,
@@ -1025,7 +1026,7 @@ class BaseRLTrainer:
 
         data_info["invalid_train_groups"] = dropped_groups
         data_info["invalid_train_samples"] = dropped_samples
-        self._release_train_batch_resources(train_batch)
+        self._release_trace_sessions_after_train_batch(train_batch)
 
         return {
             "data_info": data_info,
@@ -1177,8 +1178,13 @@ class BaseRLTrainer:
                 "training_tokens",
                 "benchmark_end_time_s",
             }
-            response_data_info = {k: v for k, v in data_info.items() if k not in benchmark_data_info_keys}
+            # Keys already carrying a "time/" prefix (phase timers from the
+            # controller) keep their own group; the rest go under response/.
+            response_data_info = {
+                k: v for k, v in data_info.items() if k not in benchmark_data_info_keys and not k.startswith("time/")
+            }
             all_scalars.update({f"response/{k}": v for k, v in response_data_info.items()})
+            all_scalars.update({k: v for k, v in data_info.items() if k.startswith("time/")})
             throughput_benchmark = self._compute_benchmark_metrics(
                 data_info,
                 produce_result,
@@ -1305,11 +1311,7 @@ class BaseRLTrainer:
                             "finish_info": data.extra_fields.get("agent_finish_info", None),
                             "tool_turns": data.extra_fields.get("agent_tool_turns", None),
                             "session_id": str(data.session_id) if data.session_id is not None else None,
-                            "segment_index": (
-                                data.train_meta.segment_index
-                                if data.train_meta is not None
-                                else data.extra_fields.get("agent_trace_segment_index")
-                            ),
+                            "segment_index": data.extra_fields.get("agent_trace_segment_index"),
                             "segment_count": data.extra_fields.get("agent_trace_segment_count"),
                             "artifacts": data.extra_fields.get("agent_artifacts"),
                             "messages": data.extra_fields.get("agent_messages"),
@@ -1382,11 +1384,7 @@ class BaseRLTrainer:
                             "finish_info": data.extra_fields.get("agent_finish_info", None),
                             "tool_turns": data.extra_fields.get("agent_tool_turns", None),
                             "session_id": str(data.session_id) if data.session_id is not None else None,
-                            "segment_index": (
-                                data.train_meta.segment_index
-                                if data.train_meta is not None
-                                else data.extra_fields.get("agent_trace_segment_index")
-                            ),
+                            "segment_index": data.extra_fields.get("agent_trace_segment_index"),
                             "segment_count": data.extra_fields.get("agent_trace_segment_count"),
                             "artifacts": data.extra_fields.get("agent_artifacts"),
                             "messages": data.extra_fields.get("agent_messages"),
@@ -1595,7 +1593,7 @@ class RLColocateTrainer(BaseRLTrainer):
                         train_step,
                         step_timer_dict,
                         offload_rollout_before_train=True,
-                        onload_train_before_train=True,
+                        resume_train_nccl_before_train=True,
                         raw_rewards_sum=produce_result.raw_rewards_sum,
                         raw_rewards_count=produce_result.raw_rewards_count,
                         produce_result=produce_result,
@@ -1636,7 +1634,7 @@ class RLColocateTrainer(BaseRLTrainer):
                     train_step,
                     step_timer_dict,
                     offload_rollout_before_train=False,
-                    onload_train_before_train=False,
+                    resume_train_nccl_before_train=False,
                 )
                 eval_log_info: dict[str, float] = {}
                 produce_result = ProduceBatchResult(rollout_states=train_batch)
@@ -1757,6 +1755,10 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             self._resume_from_checkpoint(self._load_checkpoint_cfg.checkpoint_path)
 
         self._cpu_resource_manager.log_registered_summary()
+
+    def _release_trace_sessions_after_train_batch(self, train_batch: list[list[RolloutState]]) -> None:
+        """Release only consumed traces while the background producer runs."""
+        self._release_trace_sessions(_trace_session_ids(train_batch))
 
     def _build_disaggregated_placement_groups(
         self,
