@@ -46,7 +46,7 @@ from xtuner.v1.utils.nccl_process_group import resume_nccl_process_groups, suspe
 
 from .actor_worker import ActorWorker
 from .critic_worker import CriticWorker, CriticWorkerConfig
-from .pack import DPRankPackIndices, TokenBatchProto
+from .pack import DPRankPackIndices, RankPlan, TokenBatchProto
 from .role_worker import RoleName
 
 
@@ -219,7 +219,6 @@ class WorkerConfig(BaseModel):
     profile_step: list[int] | int | None = None  # 1-based global RL train_step ids to profile.
     profile_time: bool = True
     profile_memory: bool = False
-    free_rollout_routed_experts_in_worker: bool = True  # 默认不需要用户配置
     offload_rollout_routed_experts: bool = False
     train_teacher_manager_config: TrainTeacherManagerConfig | None = None
 
@@ -419,7 +418,7 @@ class TrainingWorker(SingleAcceleratorWorker):
     def load_train_batch(
         self,
         rollout_item_refs: list[ray.ObjectRef],
-        pack_plan: DPRankPackIndices,
+        rank_plan: RankPlan,
         batch_attr: TrainBatchAttr,
     ) -> None:
         """The only data entry point into the worker; holds no role/loss
@@ -433,7 +432,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             self._get_train_sample(state, batch_attr["use_3d_position_ids"]) for state in rollout_items
         ]
         del rollout_items
-        self._cached_pack_plan = pack_plan
+        self._cached_pack_plan = cast(DPRankPackIndices, list(rank_plan.steps))
         self._cached_batch_attr = batch_attr
 
     @ray_method
