@@ -402,7 +402,7 @@ class TestCELossWithSP(DistributedTestBase):
         )
         seq_ctx.to(self.device)
 
-        loss_cfg = CELossConfig(mode=loss_mode, chunk_size=chunk_size, loss_reduction="token")
+        loss_cfg = CELossConfig(mode=loss_mode, chunk_size=chunk_size, loss_reduction=loss_reduction)
         data_mesh = init_data_mesh(self.device, sp_size=sp_size)
         sp_mesh = data_mesh["sp"]
         seq_ctx.sequence_parallel_mesh = sp_mesh

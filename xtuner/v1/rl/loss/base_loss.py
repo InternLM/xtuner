@@ -102,7 +102,7 @@ class BaseRLLossConfig(CELossConfig):
         self,
         data: dict,
         sp_mesh: DeviceMesh | None = None,
-        device: str | torch.device = DEVICE,
+        device: str | torch.device | None = None,
     ) -> "BaseRLLossContext | None":
         """Build RL loss context from data dict.
 
@@ -124,6 +124,8 @@ class BaseRLLossConfig(CELossConfig):
         # Check for required fields
         if "shifted_labels" not in data or "advantages" not in data:
             return None
+        if device is None:
+            device = DEVICE
 
         # Extract RL-specific fields from data
         shifted_labels = data["shifted_labels"]

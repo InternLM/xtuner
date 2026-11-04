@@ -1,14 +1,18 @@
 """Critic 模型单测(Qwen3.5-VL compose 模型)。
 
 覆盖的行为:
-- TestCriticCustomHFKeyMapping(CPU,无需 GPU/权重)
+- TestCriticHeadConstruction(小模型,无需外部权重)
+    - test_value_head_never_ties_to_embeddings: 初始化及后置修改配置时,value head 均不绑定 embeddings
+    - test_value_head_forward_uses_shared_lm_head_protocol: forward-only values 与 critic loss forward/backward
+- TestCriticCustomHFKeyMapping(小模型,无需外部权重)
     - test_loaded_mapped_critic_head_is_not_reinitialized: hf_key_mapping 映射的 value head strict 加载后保留 checkpoint 值
     - test_actor_to_critic_strict_load_initializes_head: actor checkpoint strict 加载进 critic,缺失头随机初始化
     - test_backbone_missing_still_strict_error: head 豁免不掩盖 backbone 缺失,strict 仍报错
+    - test_single_file_critic_checkpoint_is_rejected_by_actor: 无 index 的 critic checkpoint 在非严格加载时也被 actor 拒绝
 - TestCriticSFT(8 卡 + QWEN3_5_MOE_PATH)
     - test_critic_rejects_mtp: value_head 配置拒绝 MTP
     - test_critic_qwen35_value_head_hf_keys: value head 落盘为顶层 value_head.weight(无 language_model. 前缀)
-    - test_critic_accepts_xtuner_actor_checkpoint_head_metadata: checkpoint head 元数据的角色校验(actor→critic 放行,critic→actor 拒绝)
+    - test_head_checkpoint_role_inferred_from_keys: 根据实际 checkpoint keys 校验 actor/critic 角色
     - test_critic_sft_loss: SFT MSE 路径,从 build_loss_ctx_batch 公开入口进入的 forward/backward 与数值
     - test_critic_clipped_value_loss: PPO clipped 路径,同上
     - test_critic_load_actor_and_save_hf: actor 权重加载 → save_hf → strict 重载一致性
@@ -35,15 +39,52 @@ from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.loss.critic_loss import CriticLossConfig
 from xtuner.v1.model.base import BaseModel, HeadConfig, XTunerBaseModelConfig
 from xtuner.v1.model.compose.qwen3_5.qwen3_5_config import Qwen3_5_VLMoE35BA3Config
+from xtuner.v1.model.dense.qwen3 import Qwen3Dense2BConfig
 from xtuner.v1.model.moe.qwen3_5_text import Qwen3_5_VLTextMoE35BA3BConfig
 from xtuner.v1.module.head import ValueHead
 from xtuner.v1.module.mtp.config import MTPConfig
 from xtuner.v1.utils.device import get_device
+from xtuner.v1.utils.loader import HFCheckpointLoader
 
 
 DEVICE = get_device()
 CLIPRANGE_VALUE = 0.2
 QWEN3_5_MOE_PATH = os.environ.get("QWEN3_5_MOE_PATH")
+
+
+class TestCriticHeadConstruction(unittest.TestCase):
+    def test_value_head_never_ties_to_embeddings(self):
+        for post_init_update in (False, True):
+            with self.subTest(post_init_update=post_init_update):
+                config = Qwen3Dense2BConfig()
+                if post_init_update:
+                    config.head_config.type = "value_head"
+                else:
+                    config.head_config = HeadConfig(type="value_head")
+                with torch.device("meta"):
+                    model = config.build()
+                self.assertFalse(config.tie_head)
+                self.assertEqual(tuple(model.lm_head.weight.shape), (1, config.hidden_size))
+                self.assertIsNot(model.lm_head.weight, model.embed_tokens.weight)
+
+    def test_value_head_forward_uses_shared_lm_head_protocol(self):
+        head = ValueHead(hidden_size=4)
+        hidden = torch.randn(2, 3, 4, requires_grad=True)
+        _, (values, _) = head(hidden)
+        self.assertEqual(values.shape, (2, 3, 1))
+        self.assertEqual(values.dtype, torch.float32)
+
+        labels = torch.zeros(2, 3, dtype=torch.long)
+        ctx = CriticLossConfig().build(
+            {"shifted_labels": labels, "returns": torch.randn(2, 3)},
+            device="cpu",
+        )
+        assert ctx is not None
+        ctx = ctx.__class__.build_batches([ctx])[0]
+        loss, (training_values, _) = head(hidden, ctx)
+        torch.testing.assert_close(training_values, values)
+        loss.backward()
+        self.assertTrue(torch.isfinite(head.weight.grad).all())
 
 
 class _MappedCriticConfig(XTunerBaseModelConfig):
@@ -116,7 +157,7 @@ class TestCriticCustomHFKeyMapping(unittest.TestCase):
             loaded_keys, unloaded_keys, missing_keys = model.from_hf(tmpdir, strict=True)
 
         self.assertIn("backbone.weight", loaded_keys)
-        self.assertIn("lm_head.weight", loaded_keys)
+        self.assertNotIn("lm_head.weight", loaded_keys)
         self.assertNotIn("lm_head.weight", unloaded_keys)
         self.assertNotIn("critic.weight", missing_keys)
         self.assertNotEqual(model.lm_head.weight.abs().sum().item(), 0.0)
@@ -129,6 +170,19 @@ class TestCriticCustomHFKeyMapping(unittest.TestCase):
             _write_mapped_ckpt(tmpdir, {"lm_head.weight": torch.zeros(4, 4)})
             with self.assertRaisesRegex(RuntimeError, "Missing keys in checkpoint"):
                 model.from_hf(tmpdir, strict=True)
+
+    def test_single_file_critic_checkpoint_is_rejected_by_actor(self):
+        model = _MappedCriticModel(_MappedCriticConfig(head_config=HeadConfig(type="lm_head"), hf_key_mapping=None))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_file(
+                {
+                    "value_head.weight": torch.zeros(1, 4),
+                    "backbone.weight": torch.zeros(4, 4),
+                },
+                str(Path(tmpdir) / "model.safetensors"),
+            )
+            with self.assertRaisesRegex(RuntimeError, "Cannot load a checkpoint containing value_head"):
+                model.from_hf(tmpdir, strict=False)
 
 
 def _mse_value_loss(
@@ -217,7 +271,9 @@ class TestCriticSFT(DeterministicDDPTestCase):
     def test_critic_rejects_mtp(self):
         pg = self.create_pg(str(DEVICE))
         with self.assertRaisesRegex(ValueError, "does not support MTP"):
-            Qwen3_5_VLTextMoE35BA3BConfig(head_config=HeadConfig(type="value_head"), mtp_config=MTPConfig(num_layers=1))
+            Qwen3_5_VLTextMoE35BA3BConfig(
+                head_config=HeadConfig(type="value_head"), mtp_config=MTPConfig(num_layers=1)
+            )
         try:
             dist.destroy_process_group(pg)
         except (AssertionError, ValueError):
@@ -248,13 +304,13 @@ class TestCriticSFT(DeterministicDDPTestCase):
             index_path = Path(tmpdir) / "model.safetensors.index.json"
             # actor checkpoint:无 value_head 权重,critic 模型放行(头稍后随机初始化)
             index_path.write_text(json.dumps({"weight_map": {"lm_head.weight": "model.safetensors"}}))
-            model.language_model._validate_head_checkpoint(Path(tmpdir))
+            model.language_model._prepare_head_load(HFCheckpointLoader(tmpdir))
 
             # critic checkpoint:含 value_head 权重,actor 模型必须拒绝(没有词表头)
             index_path.write_text(json.dumps({"weight_map": {"value_head.weight": "model.safetensors"}}))
             model.language_model.config.head_config.type = "lm_head"
             with self.assertRaisesRegex(RuntimeError, "Cannot load a checkpoint containing value_head"):
-                model.language_model._validate_head_checkpoint(Path(tmpdir))
+                model.language_model._prepare_head_load(HFCheckpointLoader(tmpdir))
 
         try:
             dist.destroy_process_group(pg)
