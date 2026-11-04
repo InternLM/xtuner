@@ -6,13 +6,13 @@ resets the recursion at trajectory boundaries, and observation tokens are skippe
 
 from __future__ import annotations
 
-from typing import Any, Literal, Sequence
+from typing import Any, Literal, Sequence, cast
 
 import torch
 
 from xtuner.v1.data_proto.rl_data import RolloutState
 
-from .base import AdvantageEstimator
+from .base import TokenAdvantageEstimator
 
 
 def terminal_rewards(
@@ -170,7 +170,7 @@ def normalize_with_moments(
     ]
 
 
-class GAEEstimator(AdvantageEstimator):
+class GAEEstimator(TokenAdvantageEstimator):
     """Token GAE with one discount for actor advantage and critic return."""
 
     def __init__(
@@ -184,13 +184,6 @@ class GAEEstimator(AdvantageEstimator):
         self.gae_lambda = gae_lambda
         self.reward_scope = reward_scope
         self.normalize_actor_advantage = normalize_actor_advantage
-
-    def compute(self, rewards: torch.Tensor, group: list[Any]) -> torch.Tensor:
-        del rewards, group
-        raise NotImplementedError(
-            "GAEEstimator.compute does not estimate group-scalar advantages. "
-            "Use compute_session_gae after the critic value pass."
-        )
 
     def compute_segment_gae(
         self,
@@ -229,113 +222,8 @@ class GAEEstimator(AdvantageEstimator):
         )
         return advantages.detach(), critic_returns.detach()
 
-    def compute_session_gae(
-        self,
-        states: Sequence[RolloutState],
-        values: Sequence[Sequence[float]],
-    ) -> tuple[list[list[float]], list[list[float]]]:
-        """Return actor advantages and critic returns over session-grouped
-        segments.
 
-        Segments that share a session are concatenated into one trajectory and the
-        reward is placed on the session's last controllable action. When
-        ``normalize_actor_advantage`` is set, actor advantages are standardized with
-        population moments over the full batch; critic returns stay unnormalized.
-
-        Args:
-            states (Sequence[RolloutState]): Flat rollout states in training order.
-            values (Sequence[Sequence[float]]): One value row per state from the
-                critic forward pass.
-
-        Returns:
-            tuple[list[list[float]], list[list[float]]]: Actor advantages and critic
-                returns, one row per state.
-        """
-        if len(states) != len(values):
-            raise ValueError(f"states and values must have the same length, got {len(states)} and {len(values)}")
-        action_masks: list[list[bool]] = []
-        for state, sample_values in zip(states, values):
-            labels = state.labels or []
-            mask = [label != -100 for label in labels[1:]]
-            if len(mask) != len(sample_values):
-                raise ValueError(f"shifted label length {len(mask)} does not match value length {len(sample_values)}")
-            action_masks.append(mask)
-
-        # Concatenate segments that share a session into one trajectory, ordered by
-        # ``agent_trace_segment_index``, and place the session reward on its last
-        # controllable action.
-        advantages: list[list[float] | None] = [None] * len(states)
-        returns: list[list[float] | None] = [None] * len(states)
-        groups: dict[Any, list[int]] = {}
-        for index, state in enumerate(states):
-            if state.session_id is not None:
-                key: tuple[str, Any] = ("session", state.session_id)
-            elif state.rollout_id is not None:
-                key = ("rollout", state.rollout_id)
-            else:
-                key = ("index", index)
-            groups.setdefault(key, []).append(index)
-        for members in groups.values():
-            segment_order: list[tuple[int, int]] = []
-            for index in members:
-                raw = states[index].extra_fields.get("agent_trace_segment_index")
-                segment_index = raw if isinstance(raw, int) else index
-                segment_order.append((segment_index, index))
-            ordered = [index for _, index in sorted(segment_order)]
-            flat_values: list[float] = []
-            flat_mask: list[bool] = []
-            widths: list[int] = []
-            for index in ordered:
-                flat_values.extend(float(value) for value in values[index])
-                flat_mask.extend(action_masks[index])
-                widths.append(len(values[index]))
-            reward = 0.0
-            for index in reversed(ordered):
-                sample_reward = states[index].reward
-                if sample_reward is not None and "score" in sample_reward:
-                    reward = float(sample_reward["score"])
-                    break
-            if not flat_values:
-                split_advantages: list[list[float]] = [[] for _ in ordered]
-                split_returns: list[list[float]] = [[] for _ in ordered]
-            else:
-                sample_actor_advantages, sample_critic_returns = self.compute_segment_gae(
-                    torch.tensor(flat_values, dtype=torch.float32),
-                    torch.tensor([reward], dtype=torch.float32),
-                    torch.tensor(flat_mask, dtype=torch.bool),
-                    torch.tensor([0, len(flat_values)], dtype=torch.int32),
-                )
-                flat_advantages = sample_actor_advantages.reshape(-1).tolist()
-                flat_returns = sample_critic_returns.reshape(-1).tolist()
-                split_advantages = []
-                split_returns = []
-                cursor = 0
-                for width in widths:
-                    split_advantages.append(flat_advantages[cursor : cursor + width])
-                    split_returns.append(flat_returns[cursor : cursor + width])
-                    cursor += width
-            for index, sample_advantages, sample_returns in zip(ordered, split_advantages, split_returns):
-                advantages[index] = sample_advantages
-                returns[index] = sample_returns
-        actor_advantages: list[list[float]] = []
-        critic_returns: list[list[float]] = []
-        for maybe_advantages, maybe_returns in zip(advantages, returns):
-            if maybe_advantages is None or maybe_returns is None:
-                raise RuntimeError("Session GAE did not cover every sample")
-            actor_advantages.append(maybe_advantages)
-            critic_returns.append(maybe_returns)
-
-        if self.normalize_actor_advantage:
-            actor_advantages = normalize_actor_advantages(actor_advantages, action_masks)
-        else:
-            actor_advantages = [
-                [advantage if keep else 0.0 for advantage, keep in zip(sample_advantages, sample_mask)]
-                for sample_advantages, sample_mask in zip(actor_advantages, action_masks)
-            ]
-        return actor_advantages, critic_returns
-
-
-class DecoupledGAEEstimator(AdvantageEstimator):
+class DecoupledGAEEstimator(TokenAdvantageEstimator):
     """Token GAE with independent actor and critic discount parameters.
 
     Decoupled GAE as proposed in `VAPO: Efficient and Reliable Reinforcement Learning
@@ -371,13 +259,6 @@ class DecoupledGAEEstimator(AdvantageEstimator):
         self.actor_length_adaptive_alpha = actor_length_adaptive_alpha
         self.actor_positive_scale = actor_positive_scale
         self.actor_negative_scale = actor_negative_scale
-
-    def compute(self, rewards: torch.Tensor, group: list[Any]) -> torch.Tensor:
-        del rewards, group
-        raise NotImplementedError(
-            "DecoupledGAEEstimator.compute does not estimate group-scalar advantages. "
-            "Use compute_segment_gae after the critic value pass."
-        )
 
     def compute_segment_gae(
         self,
@@ -430,3 +311,93 @@ class DecoupledGAEEstimator(AdvantageEstimator):
             0.0,
         )
         return actor_advantages.detach(), critic_returns.detach()
+
+
+def session_token_targets(
+    estimator: TokenAdvantageEstimator,
+    states: Sequence[RolloutState],
+    full_values: Sequence[torch.Tensor],
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """Compute session-grouped PPO targets from full per-sample values.
+
+    Segments sharing a session are concatenated in ``segment_index`` order and the
+    session reward is placed on its last controllable action. Results are split
+    back into the original sample order, and actor advantages are normalized once
+    over the whole batch. Critic returns stay unnormalized.
+
+    Args:
+        estimator (TokenAdvantageEstimator): Segment GAE estimator (session scope).
+        states (Sequence[RolloutState]): Flat rollout states in training order.
+        full_values (Sequence[torch.Tensor]): One full value row per state.
+
+    Returns:
+        tuple[list[torch.Tensor], list[torch.Tensor]]: Per-sample advantage and
+        return rows, both 1D CPU tensors.
+    """
+    if isinstance(estimator, DecoupledGAEEstimator):
+        raise ValueError("Decoupled GAE remains segment-only")
+    if len(states) != len(full_values):
+        raise ValueError(f"states and values must have the same length, got {len(states)} and {len(full_values)}")
+    masks = [torch.tensor(state.labels or [])[1:].ne(-100) for state in states]
+    for state, values, mask in zip(states, full_values, masks):
+        if values.numel() != mask.numel():
+            raise ValueError(
+                f"shifted label length {mask.numel()} does not match value length {values.numel()}: "
+                f"rollout_id={state.rollout_id}"
+            )
+
+    groups: dict[Any, list[int]] = {}
+    for index, state in enumerate(states):
+        if state.session_id is not None:
+            key: tuple[str, Any] = ("session", state.session_id)
+        elif state.rollout_id is not None:
+            key = ("rollout", state.rollout_id)
+        else:
+            key = ("index", index)
+        groups.setdefault(key, []).append(index)
+
+    advantages: list[torch.Tensor | None] = [None] * len(states)
+    returns: list[torch.Tensor | None] = [None] * len(states)
+    for members in groups.values():
+        ordered = sorted(members, key=lambda index: (_segment_index(states[index], index), index))
+        widths = [full_values[index].numel() for index in ordered]
+        values = torch.cat([full_values[index].flatten().float().cpu() for index in ordered])
+        mask = torch.cat([masks[index] for index in ordered])
+        reward = 0.0
+        for index in reversed(ordered):
+            sample_reward = states[index].reward
+            if sample_reward is not None and "score" in sample_reward:
+                reward = float(sample_reward["score"])
+                break
+        sample_advantages, sample_returns = estimator.compute_segment_gae(
+            values,
+            torch.tensor([reward], dtype=torch.float32),
+            mask,
+            torch.tensor([0, values.numel()], dtype=torch.int32),
+        )
+        for index, advantage, ret in zip(
+            ordered,
+            sample_advantages.split(widths),
+            sample_returns.split(widths),
+        ):
+            advantages[index] = advantage
+            returns[index] = ret
+
+    resolved_advantages = [cast(torch.Tensor, value) for value in advantages]
+    resolved_returns = [cast(torch.Tensor, value) for value in returns]
+    if estimator.normalize_actor_advantage:
+        valid = torch.cat([advantage[mask] for advantage, mask in zip(resolved_advantages, masks)]).double()
+        moments = torch.stack((valid.sum(), valid.square().sum(), valid.new_tensor(float(valid.numel()))))
+        resolved_advantages = normalize_with_moments(resolved_advantages, masks, moments)
+    return (
+        [advantage.masked_fill(~mask, 0.0) for advantage, mask in zip(resolved_advantages, masks)],
+        resolved_returns,
+    )
+
+
+def _segment_index(state: RolloutState, fallback: int) -> int:
+    meta = state.train_meta
+    if meta is not None and meta.segment_index is not None:
+        return meta.segment_index
+    raw = state.extra_fields.get("agent_trace_segment_index")
+    return raw if isinstance(raw, int) else fallback

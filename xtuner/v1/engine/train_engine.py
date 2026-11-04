@@ -324,11 +324,20 @@ class TrainEngine:
                 for grad in device_grads:
                     grad.mul_(device_clip_coef)
 
-    def step_optimizer(self, grad_norm):
-        """Step the optimizer to update the model parameters."""
+    def step_optimizer(self, grad_norm) -> bool:
+        """Step the optimizer to update the model parameters.
+
+        Args:
+            grad_norm (torch.Tensor): Clipped gradient norm of the step.
+
+        Returns:
+            bool: Whether the optimizer update was actually applied.
+        """
+        applied = True
         if torch.isnan(grad_norm) or torch.isinf(grad_norm):
             log_rank0.warning(f"Gradient norm {grad_norm} is invalid, skipping optimizer step.")
             self.optimizer.zero_grad()
+            applied = False
         elif (
             self.optim_cfg.skip_grad_norm_threshold is not None and grad_norm > self.optim_cfg.skip_grad_norm_threshold
         ):
@@ -336,10 +345,11 @@ class TrainEngine:
                 f"Gradient norm {grad_norm} exceeds the threshold {self.optim_cfg.skip_grad_norm_threshold}, skipping optimizer step."
             )
             self.optimizer.zero_grad()
+            applied = False
         else:
             self.optimizer.step()
             self.optimizer.zero_grad()
-        return grad_norm
+        return applied
 
     # TODO: Should be removed
     @staticmethod
