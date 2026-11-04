@@ -95,6 +95,34 @@ def _resolve_routed_experts(expert_keys: List[Any], session_id: str) -> List[Any
     )
 
 
+def _assemble_trace(nodes: List["TreeNode"], session_id: str) -> dict:
+    """Assemble an exportable trace dict from trie nodes in path order.
+
+    Args:
+        nodes (List["TreeNode"]): Trace nodes whose values are
+            ``TokenizedSegment`` instances, in chronological order.
+        session_id (str): The session identifier, used for error messages.
+
+    Returns:
+        dict: The trace dictionary containing `input_ids`, `labels`,
+        `logprobs`, and `routed_experts`.
+    """
+    trace: dict[str, Any] = {"input_ids": [], "labels": [], "logprobs": []}
+    expert_keys: List[Any] = []
+    for node in nodes:
+        node_val = node.value
+        if not isinstance(node_val, TokenizedSegment):
+            raise TypeError(f"Unexpected trace node value type: {type(node_val)!r}")
+        assert node_val.labels is not None
+        assert node_val.logprobs is not None
+        trace["input_ids"].extend(node_val.token_ids)
+        trace["labels"].extend(node_val.labels)
+        trace["logprobs"].extend(node_val.logprobs)
+        expert_keys.append(node_val.expert_key)
+    trace["routed_experts"] = _resolve_routed_experts(expert_keys, session_id)
+    return trace
+
+
 class TokenizedSegment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -359,6 +387,41 @@ class RolloutTraceStore:
         self.objects.clear()
         self.updated_at.clear()
 
+    def export_partial_training_trace(self, session_id: str) -> dict:
+        """Export the whole session trace without requiring a prompt text.
+
+        Only fully finished turns are stored, so the export ends exactly at
+        the last finished turn; an in-progress turn is never included. Use for
+        trajectories that cannot render a full prompt text (e.g. timed-out
+        rollouts). Returns empty lists when nothing was stored.
+
+        A session with divergent branches (e.g. a retried rollout reusing the
+        same session id) is rejected instead of being concatenated, so callers
+        never train on a mixed-attempt trajectory.
+
+        Args:
+            session_id (str): The session identifier.
+
+        Returns:
+            dict: The trace dictionary with the same contract as
+            ``export_training_trace``.
+        """
+        trie = self.sessions.get(session_id)
+        if trie is None:
+            return _assemble_trace([], session_id)
+        nodes: List[TreeNode] = []
+        node = trie.root
+        while node.children:
+            if len(node.children) > 1:
+                raise ValueError(
+                    f"Trace session {session_id!r} has {len(node.children)} divergent branches; "
+                    "partial export requires a single committed chain."
+                )
+            node = next(iter(node.children.values()))
+            if node.value is not None:
+                nodes.append(node)
+        return _assemble_trace(nodes, session_id)
+
     def export_training_trace(self, session_id: str, prompt_text: str) -> dict:
         """Export the stored training trace given a complete prompt text.
 
@@ -400,20 +463,7 @@ class RolloutTraceStore:
                 f"prompt_len={len(prompt_text)} matched_len={len(key)} key_count={len(session_keys)}. "
                 "See the logged '[TraceStore] prompt mismatch' report for the full diff."
             )
-        trace: dict[str, Any] = {"input_ids": [], "labels": [], "logprobs": []}
-        expert_keys: list[Any] = []
-        for node in nodes:
-            node_val = node.value
-            if not isinstance(node_val, TokenizedSegment):
-                raise TypeError(f"Unexpected trace node value type: {type(node_val)!r}")
-            assert node_val.labels is not None
-            assert node_val.logprobs is not None
-            trace["input_ids"].extend(node_val.token_ids)
-            trace["labels"].extend(node_val.labels)
-            trace["logprobs"].extend(node_val.logprobs)
-            expert_keys.append(node_val.expert_key)
-        trace["routed_experts"] = _resolve_routed_experts(expert_keys, session_id)
-        return trace
+        return _assemble_trace(nodes, session_id)
 
     def get_objects(self, keys: list[str]) -> list[ray.ObjectRef]:
         """Fetch ray.ObjectRef elements by their keys.

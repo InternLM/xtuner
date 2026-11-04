@@ -1,3 +1,16 @@
+"""RolloutTraceStore 的行为测试。
+
+TestRolloutTraceCleanup —— session 释放与 ObjectRef 清理行为
+TestRolloutTraceStore —— store actor 的 session 生命周期与引用递归释放
+TestExportPartialTrainingTrace —— export_partial_training_trace 的部分导出行为
+- test_exports_committed_segments_in_order:
+    同一 session 的多个 segment 按写入顺序拼接导出,无 MoE 时 routed_experts 为 None。
+- test_divergent_session_is_rejected:
+    session 出现分叉(重试后轨迹不同)时抛错,而不是把两次尝试拼接在一起。
+- test_empty_session_returns_empty_trace:
+    不存在的 session 返回空 trace 而不是报错。
+"""
+
 import asyncio
 import unittest
 from types import SimpleNamespace
@@ -8,6 +21,7 @@ import ray
 from xtuner.v1.rl.rollout import trace_store as trace_store_module
 from xtuner.v1.rl.rollout.trace_store import (
     RolloutTraceStore,
+    TokenizedSegment,
     _free_ray_refs,
     get_existing_store,
     release_and_discard_rollout_groups,
@@ -111,3 +125,97 @@ class TestRolloutTraceStore(unittest.TestCase):
             _free_ray_refs({"outer": [({"inner": object_ref},)]})
 
         free.assert_called_once_with([object_ref], local_only=False)
+
+
+class TestExportPartialTrainingTrace(unittest.TestCase):
+    """export_partial_training_trace 对 session trie 的部分导出行为。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.started_ray = False
+        try:
+            if not ray.is_initialized():
+                ray.init(address="local", num_cpus=1, include_dashboard=False, ignore_reinit_error=True)
+                cls.started_ray = True
+        except Exception as exc:
+            raise unittest.SkipTest(f"Ray init failed for trace-store tests: {exc}") from exc
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.started_ray and ray.is_initialized():
+            ray.shutdown()
+
+    def test_exports_committed_segments_in_order(self):
+        # 行为:同一 session 的多个 segment 按写入顺序拼接导出
+        store = RolloutTraceStore.remote()
+        try:
+            ray.get(
+                store.insert.remote(
+                    "s",
+                    "hello ",
+                    TokenizedSegment(text="hello ", token_ids=[1, 2], labels=[-100, 5], logprobs=[0.0, 0.1]),
+                )
+            )
+            ray.get(
+                store.insert.remote(
+                    "s",
+                    "hello world",
+                    TokenizedSegment(text="world", token_ids=[3, 4], labels=[6, 7], logprobs=[0.2, 0.3]),
+                )
+            )
+
+            trace = ray.get(store.export_partial_training_trace.remote("s"))
+
+            self.assertEqual(trace["input_ids"], [1, 2, 3, 4])
+            self.assertEqual(trace["labels"], [-100, 5, 6, 7])
+            self.assertEqual(trace["logprobs"], [0.0, 0.1, 0.2, 0.3])
+            self.assertIsNone(trace["routed_experts"])
+        finally:
+            ray.kill(store)
+
+    def test_divergent_session_is_rejected(self):
+        # 行为:同一 session 出现分叉(重试后轨迹不同)时拒绝导出,而不是拼接两次尝试
+        store = RolloutTraceStore.remote()
+        try:
+            ray.get(
+                store.insert.remote(
+                    "s",
+                    "hello ",
+                    TokenizedSegment(text="hello ", token_ids=[1, 2], labels=[-100, 5], logprobs=[0.0, 0.1]),
+                )
+            )
+            ray.get(
+                store.insert.remote(
+                    "s",
+                    "hello world",
+                    TokenizedSegment(text="world", token_ids=[3, 4], labels=[6, 7], logprobs=[0.2, 0.3]),
+                )
+            )
+            # 重试产生第二条不同的 assistant 轨迹,在 "hello " 节点下形成兄弟分支。
+            ray.get(
+                store.insert.remote(
+                    "s",
+                    "hello there",
+                    TokenizedSegment(text="there", token_ids=[8, 9], labels=[10, 11], logprobs=[0.4, 0.5]),
+                )
+            )
+
+            with self.assertRaises(ray.exceptions.RayTaskError) as ctx:
+                ray.get(store.export_partial_training_trace.remote("s"))
+
+            self.assertIn("divergent branches", str(ctx.exception))
+        finally:
+            ray.kill(store)
+
+    def test_empty_session_returns_empty_trace(self):
+        # 行为:不存在的 session 返回空 trace 而不是报错,也不会创建空 session
+        store = RolloutTraceStore.remote()
+        try:
+            trace = ray.get(store.export_partial_training_trace.remote("missing"))
+
+            self.assertEqual(trace["input_ids"], [])
+            self.assertEqual(trace["labels"], [])
+            self.assertIsNone(trace["routed_experts"])
+            self.assertEqual(ray.get(store.list_sessions.remote()), [])
+        finally:
+            ray.kill(store)
