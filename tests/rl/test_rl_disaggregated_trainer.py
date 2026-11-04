@@ -30,12 +30,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerStatus,
     ProduceBatchResult,
     ProduceBatchStatus,
 )
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.distillation import DistillationTrainerAdapter
 from xtuner.v1.train.rl_trainer import RLDisaggregatedTrainer, _validate_sync_intervals
 
@@ -196,6 +196,20 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
                 }
             ],
         }
+
+    def test_debug_mode_allocates_only_the_selected_resource_pool(self):
+        for mode in ("rollout", "train"):
+            trainer = self._make_trainer(_FakeManager([]))
+            trainer._debug_rollout = mode == "rollout"
+            trainer._debug_train = mode == "train"
+            with patch(
+                "xtuner.v1.train.rl_trainer.AutoAcceleratorWorkers.build_placement_group",
+                return_value=SimpleNamespace(id="selected"),
+            ) as build:
+                train_pg, rollout_pg = trainer._build_disaggregated_placement_groups("train", "rollout")
+            self.assertEqual(build.call_count, 1)
+            self.assertEqual(train_pg is None, mode == "rollout")
+            self.assertEqual(rollout_pg is None, mode == "train")
 
     def test_debug_rollout_saves_three_steps_without_optimizer_or_sync(self):
         states = [[RolloutState(message=[], status=Status.COMPLETED)]]
@@ -620,7 +634,12 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             self.assertFalse(sleeping, "Producer must not resume while inference is sleeping")
             events.append(f"continue_produce:{model_step}")
 
+        async def manager_pause():
+            events.append("requests_sealed")
+
         trainer.agent_loop_manager = SimpleNamespace(
+            prepare_sync=AsyncMock(),
+            pause_produce=AsyncMock(side_effect=manager_pause),
             resume=AsyncMock(side_effect=manager_resume),
             continue_produce=AsyncMock(side_effect=manager_continue_produce),
         )
@@ -636,7 +655,10 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer.agent_loop_manager.resume.assert_awaited_once_with(Path(self.temp_dir.name))
         trainer.agent_loop_manager.continue_produce.assert_awaited_once_with(model_step=3)
         self.assertTrue(events[0].startswith("manager_resume:"))
-        self.assertEqual(events[1:], ["offload", "weights_allocated", "update_weights", "ready", "continue_produce:3"])
+        self.assertEqual(
+            events[1:],
+            ["requests_sealed", "offload", "weights_allocated", "update_weights", "ready", "continue_produce:3"],
+        )
 
     def test_resume_failure_does_not_resume_production(self):
         for failure in ("offload", "onload_weights", "weight_update", "onload_kvcache"):

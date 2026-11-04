@@ -2058,7 +2058,9 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             train_resources=cfg.train_resources,
             rollout_resources=cfg.rollout_resources,
         )
-        self._cpu_resource_manager = CPUResourceManager([pg for pg in (self._train_pg, self._rollout_pg) if pg is not None])
+        self._cpu_resource_manager = CPUResourceManager(
+            [pg for pg in (self._train_pg, self._rollout_pg) if pg is not None]
+        )
         self._cpu_resource_manager.log_initial_snapshot()
         set_cpu_resource_manager(self._cpu_resource_manager)
         if not self._debug_rollout:
@@ -2115,11 +2117,17 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         train_pg_name = f"{pg_name_prefix}_train"
         rollout_pg_name = f"{pg_name_prefix}_rollout"
 
-        train_pg = (None if self._debug_rollout else
-                    AutoAcceleratorWorkers.build_placement_group(train_resources, name=train_pg_name))
-        rollout_pg = (None if self._debug_train else
-                      AutoAcceleratorWorkers.build_placement_group(rollout_resources, name=rollout_pg_name))
-        if train_pg.id == rollout_pg.id:
+        train_pg = (
+            None
+            if self._debug_rollout
+            else AutoAcceleratorWorkers.build_placement_group(train_resources, name=train_pg_name)
+        )
+        rollout_pg = (
+            None
+            if self._debug_train
+            else AutoAcceleratorWorkers.build_placement_group(rollout_resources, name=rollout_pg_name)
+        )
+        if train_pg is not None and rollout_pg is not None and train_pg.id == rollout_pg.id:
             raise RuntimeError(
                 "RLDisaggregatedTrainer requires distinct placement groups for train and rollout, "
                 f"but both resolved to the same placement group id={train_pg.id}. "
@@ -2128,8 +2136,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
         self.logger.info(
             "Created disaggregated placement groups: "
-            f"train={train_pg_name}(id={train_pg.id}), "
-            f"rollout={rollout_pg_name}(id={rollout_pg.id})"
+            f"train={train_pg_name}(id={getattr(train_pg, 'id', None)}), "
+            f"rollout={rollout_pg_name}(id={getattr(rollout_pg, 'id', None)})"
         )
         return train_pg, rollout_pg
 
@@ -2137,6 +2145,12 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         checkpoint_path = self._resume_train_controller_and_state(checkpoint_path)
         saved_model_step = asyncio_run(self._resume_agent_loop_manager(checkpoint_path))
         assert self._cur_step == saved_model_step
+
+        # A fresh SessionServer starts at version zero. Seal requests before
+        # replacing weights so continue_produce publishes the restored version
+        # through the same barrier used by ordinary updates.
+        asyncio_run(self.agent_loop_manager.prepare_sync(False))
+        asyncio_run(self.agent_loop_manager.pause_produce())
 
         # Empty-init engines can retain GPU allocations while marked asleep.
         # Use the same offload/allocate/receive/warmup lifecycle as online sync;
