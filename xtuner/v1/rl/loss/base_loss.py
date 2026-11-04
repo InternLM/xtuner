@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import torch
 import torch.distributed as dist
@@ -210,9 +210,55 @@ class BaseRLLossKwargs(CELossKwargs):
         return self
 
 
+class ActorSnapshotLike(Protocol):
+    """Structural contract of one pack's frozen actor loss inputs."""
+
+    @property
+    def shifted_labels(self) -> torch.Tensor: ...
+
+    @property
+    def old_logprobs(self) -> torch.Tensor: ...
+
+    @property
+    def is_weights(self) -> torch.Tensor | None: ...
+
+    @property
+    def ref_logprobs(self) -> torch.Tensor | None: ...
+
+    @property
+    def teacher_logprobs(self) -> torch.Tensor | None: ...
+
+    @property
+    def target_token_ids(self) -> torch.Tensor | None: ...
+
+
 class BaseRLLossContext(CELossContext):
     loss_cfg: BaseRLLossConfig  # type: ignore[assignment]
     loss_kwargs: BaseRLLossKwargs  # type: ignore[assignment]
+
+    def bind_actor_snapshot(self, snapshot: ActorSnapshotLike) -> None:
+        """Bind one pack's frozen stage outputs to this local context.
+
+        Snapshot tensors are already sequence-parallel local, so they are only
+        moved to the context device and never split again.
+
+        Args:
+            snapshot (ActorSnapshotLike): Frozen labels, old/ref logprobs, IS
+                weights and teacher targets of this pack.
+
+        Returns:
+            None
+        """
+        kwargs = self.loss_kwargs
+        if snapshot.shifted_labels.shape != kwargs.shifted_labels.shape:
+            raise ValueError("Snapshot belongs to a different local layout")
+        device = kwargs.shifted_labels.device
+        kwargs.shifted_labels = snapshot.shifted_labels.to(device)
+        kwargs.old_logprobs = snapshot.old_logprobs.to(device)
+        for field in ("is_weights", "ref_logprobs", "teacher_logprobs", "target_token_ids"):
+            value = getattr(snapshot, field)
+            if value is not None:
+                setattr(kwargs, field, value.to(device))
 
     def compute_rollout_is(
         self, sp_mesh: DeviceMesh, num_tokens: torch.Tensor
