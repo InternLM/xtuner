@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import torch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, validate_rollout_group, validate_train_group
-from xtuner.v1.rl.agent_loop.agent_loop import AgentLoop
 from xtuner.v1.rl.agent_loop_manager.produce_utils import ProduceBatchResult, _TaskRunner, take_train_batch
 from xtuner.v1.rl.agent_loop_manager.producer import ProduceProgress
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
@@ -31,7 +30,7 @@ def canonical_state(uid=1):
         reward={"score": 1.0},
     )
     state.response_model_steps = [1] * 4
-    AgentLoop._write_train_meta(None, state)
+    state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
     return state
 
 
@@ -43,7 +42,7 @@ class TestTrainFields(unittest.TestCase):
         state = canonical_state()
         validate_train_group([state], task_name="math")
         state.logprobs = [0.0] * 6
-        AgentLoop._write_train_meta(None, state)
+        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
         validate_train_group([state], task_name="math")
 
     def test_invalid_training_fields_include_context(self):
@@ -116,7 +115,7 @@ class TestTrainFields(unittest.TestCase):
     def test_training_validation_rejects_stale_token_count(self):
         state = canonical_state()
         state.num_tokens += 1
-        with self.assertRaisesRegex(ValueError, "stale train meta"):
+        with self.assertRaisesRegex(ValueError, "inconsistent"):
             validate_train_group([state], task_name="math")
 
     def test_public_validation_rejects_versions_longer_than_response(self):
@@ -165,9 +164,7 @@ class TestTrainBatchContract(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(state.train_meta.supervised_tokens, 2)
             self.assertEqual(state.num_tokens, old_length)
             self.assertEqual(replace(state.train_meta, supervised_tokens=old_meta.supervised_tokens), old_meta)
-            self.assertEqual(state.extra_fields["supervised_tokens"], 2)
-            self.assertEqual(state.extra_fields["train_prompt_length"], 2)
-            self.assertEqual(state.extra_fields["train_response_length"], 4)
+            self.assertEqual(state.extra_fields, {})
 
     async def test_training_boundary_discards_entire_invalid_group(self):
         bad, sibling, good = canonical_state(1), canonical_state(2), canonical_state(3)
@@ -198,7 +195,7 @@ class TestTrainBatchContract(unittest.IsolatedAsyncioTestCase):
         state.task_name = "math"
         state.response_model_steps = [0, 0, 2, 2]
         state.labels = [-100, -100, -100, -100, 22, 23]
-        AgentLoop._write_train_meta(None, state)
+        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
         trainer = SimpleNamespace(logger=MagicMock())
         batch = [[state]]
         await asyncio.to_thread(BaseRLTrainer._prepare_train_batch, trainer, batch, 2)

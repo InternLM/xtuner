@@ -345,21 +345,34 @@ class TestTrajectoryLogging(unittest.TestCase):
         self.assertIsNone(row["agent"]["segment_count"])
         self.assertIsNone(row["agent"]["artifacts"])
 
-    def test_invalid_train_group_is_not_written(self):
-        data = self._make_rollout(
+    def test_invalid_train_group_is_filtered_before_saving(self):
+        # 非法组在进入轨迹保存前由 _prepare_train_batch 过滤，落盘层不再重复检查。
+        bad = self._make_rollout(
             rollout_id=20,
             session_id=123,
             reward=1.0,
             artifacts={"large_blob": "discarded"},
             status=Status.FAILED,
         )
-        trajectory_path = self.output_dir / "train_rollout_1.jsonl"
+        good = self._make_rollout(
+            rollout_id=21,
+            session_id=123,
+            reward=2.0,
+            artifacts=None,
+            status=Status.COMPLETED,
+        )
+        good.input_ids = [1, 2, 3]
+        good.labels = [-100, 2, 3]
+        good.response_model_steps = [0, 0]
+        good.set_training_fields(input_ids=good.input_ids, labels=good.labels, logprobs=None)
+        batch = [[bad], [good]]
 
-        self.trainer._save_trajectories([[data]], trajectory_path)
+        dropped_groups, dropped_samples = self.trainer._prepare_train_batch(batch, train_step=1)
 
-        objects = self._load_jsonl(trajectory_path)
-        self.assertEqual(objects[0]["total_len"], 0)
-        self.assertEqual(len(objects), 1)
+        self.assertEqual(dropped_groups, 1)
+        self.assertEqual(dropped_samples, 1)
+        self.assertEqual(len(batch), 1)
+        self.assertEqual(batch[0][0].rollout_id, 21)
 
 
 if __name__ == "__main__":

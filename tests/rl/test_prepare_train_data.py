@@ -4,18 +4,17 @@
 trainer、Ray worker、模型或 rollout backend：
 
 - loop 侧 ``canonicalize_train_fields``：基类为 prompt+response 型样本构造统一全序列字段
-  （``input_ids``/``labels``/``logprobs`` 等长、未 shift）并写轻量 train meta；
-  localhost/sandbox 复用基类 metadata 计算，训练字段由 trainer 入口检查。
-- controller 侧 ``TrainingController._prepare_rollout_items``：只消费轻量 meta 字段
-  （``num_tokens``/``supervised_tokens``/``train_prompt_length`` 等），完成组级
-  reward 分组；pack_plan 固定后再计算 advantage，不构造训练张量。
+  （``input_ids``/``labels``/``logprobs`` 等长、未 shift）并发布 ``TrainMeta``；
+  localhost/sandbox 复用基类实现，训练字段由 trainer 入口检查。
+- controller 侧 ``TrainingController._prepare_rollout_items``：只消费 ``TrainMeta`` 摘要，
+  完成组级 reward 分组；pack_plan 固定后再计算 advantage，不构造训练张量。
 - token 级张量构造与 pack 物化在 training worker 侧（见 ``test_training_worker_rank.py``）；
   index-only 打包计划见 ``test_pack.py``。
 
 当前测试点：
 - 无效 rollout group 由 trainer 入口丢弃；缺 reward 在 task_adv_weight>0 时 fail fast，=0 时零 advantage 参训。
 - 同一个 prompt 下多个 response 各自使用对应 reward / advantage；advantage 统计只计监督位。
-- controller 依赖 write_train_meta 写入的 meta 字段，缺失时 fail fast。
+- controller 依赖 ``set_training_fields`` 发布的 ``TrainMeta``，缺失时 fail fast。
 - shuffle 只打乱调度顺序，items 与 advantages 的配对关系保持不变。
 - 批级 3D position 布局位由 meta 推导（use_3d_position_ids）。
 """
@@ -410,9 +409,9 @@ class TestAgenticLoopCanonicalizeTrainFields(unittest.TestCase):
 class TestPrepareRolloutItems(unittest.TestCase):
     """TrainingController._prepare_rollout_items 合同：组级 advantage 与 data_info 统计。
 
-    controller 只消费 write_train_meta 写入的轻量 meta 字段（缺失即 fail fast；组级
-    状态/对齐校验由 replay buffer 查询与 canonicalize_train_fields 保证）；shift/张量化/
-    pack 物化在 training worker 侧（见 test_training_worker_rank.py），本类不构造任何训练张量。
+    controller 只消费 set_training_fields 发布的 TrainMeta（缺失即 fail fast；组级
+    状态/对齐校验由 trainer 入口保证）；shift/张量化/pack 物化在 training worker 侧
+    （见 test_training_worker_rank.py），本类不构造任何训练张量。
     """
 
     def _build_controller(self, advantages: list[float], task_adv_weight: float = 1.0) -> TrainingController:
@@ -484,7 +483,7 @@ class TestPrepareRolloutItems(unittest.TestCase):
             if state.logprobs is not None:
                 state.logprobs = [0.0] * len(resolved_prompt_ids) + list(state.logprobs)
         if write_meta:
-            AgentLoop._write_train_meta(None, state)
+            state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
         return state
 
     def test_noncontiguous_session_reuses_original_advantage(self):
@@ -604,9 +603,9 @@ class TestPrepareRolloutItems(unittest.TestCase):
         state = self._state(
             input_ids=[30, 31, 40, 41, 42],
             labels=[-100, -100, 40, 41, 42],
-            logprobs=[0.0, -0.1, -0.2, -0.3],
-            write_meta=False,
+            logprobs=None,
         )
+        state.logprobs = [0.0, -0.1, -0.2, -0.3]
 
         with self.assertRaisesRegex(ValueError, "logprobs length mismatch"):
             validate_train_group([state], task_name="test")
@@ -674,7 +673,7 @@ class TestPrepareRolloutItems(unittest.TestCase):
 
             self.assertEqual(state.labels, [-100, -100, -100, 21])
             self.assertEqual(state.train_meta.supervised_tokens, 1)
-            self.assertEqual(state.extra_fields["supervised_tokens"], 1)
+            self.assertEqual(state.extra_fields, {})
             state.validate_training()
             controller = self._build_controller([1.5])
             items, advantages, info, use_3d = self._prepare(controller, produce_result.rollout_states)
