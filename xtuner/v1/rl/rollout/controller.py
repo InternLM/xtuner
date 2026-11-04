@@ -176,6 +176,16 @@ class RolloutController:
             ]
         )
 
+    def assert_request_gates_healthy(self):
+        workers = self.registry.active_entrypoints()
+        servers = ray.get([w.actor.get_session_server.remote() for w in workers], timeout=ROLLOUT_RAY_GET_TIMEOUT)
+        if not servers or any(server is None for server in servers):
+            raise RuntimeError("A fixed Agent request entrypoint is missing")
+        states = ray.get([s.request_status.remote() for s in servers], timeout=ROLLOUT_RAY_GET_TIMEOUT)
+        failures = [state for state in states if state["failures"]]
+        if failures:
+            raise RuntimeError(f"Unsettled Agent requests stop this run: {failures}")
+
     def prepare_pause(self, *, freeze_timeout: float, drain_timeout: float):
         """Freeze topology, seal every entrypoint, then drain with one deadline."""
         if self._request_barrier is not None:
@@ -203,8 +213,10 @@ class RolloutController:
         if endpoints != barrier["endpoints"]:
             raise RuntimeError("Fixed rollout topology changed under barrier")
         # All versions are installed before any gate opens. Failure leaves gates sealed.
-        ray.get([s.install_request_version.remote(barrier["epoch"], model_step) for s in servers],
-                timeout=ROLLOUT_RAY_GET_TIMEOUT)
+        ray.get(
+            [s.install_request_version.remote(barrier["epoch"], model_step) for s in servers],
+            timeout=ROLLOUT_RAY_GET_TIMEOUT,
+        )
         ray.get([s.reopen_requests.remote(barrier["epoch"]) for s in servers], timeout=ROLLOUT_RAY_GET_TIMEOUT)
         self._request_barrier = None
         self.health_manager.resume()

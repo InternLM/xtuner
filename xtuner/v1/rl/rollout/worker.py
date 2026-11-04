@@ -16,7 +16,7 @@ import ray
 import requests  # type: ignore[import-untyped]
 from cyclopts import Group, Parameter
 from packaging.version import Version
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from typing_extensions import Annotated
 

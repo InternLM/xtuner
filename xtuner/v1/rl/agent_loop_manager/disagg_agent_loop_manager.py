@@ -17,6 +17,7 @@ from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.utils import get_logger
 
+from .agent_turn_pause_policy import AgentTurnPausePolicy, DrainPendingPausePolicy
 from .disagg_producer import (
     DisaggAsyncProduceStrategyConfig,
     DisaggProduceContext,
@@ -41,7 +42,6 @@ from .produce_utils import (
     task_checkpoint_path,
 )
 from .sampler import Sampler, SamplerConfig
-from .agent_turn_pause_policy import AgentTurnPausePolicy, DrainPendingPausePolicy
 
 
 if TYPE_CHECKING:
@@ -116,10 +116,15 @@ class DisaggAgentLoopManagerConfig(BaseModel):
             )
 
         return DisaggAgentLoopManager(
-            pause_policy=(AgentTurnPausePolicy(quiesce_timeout=self.turn_resume_quiesce_timeout,
-                                               freeze_timeout=self.turn_resume_freeze_timeout,
-                                               drain_timeout=self.turn_resume_drain_timeout)
-                          if self.turn_resume_drain_timeout is not None else DrainPendingPausePolicy()),
+            pause_policy=(
+                AgentTurnPausePolicy(
+                    quiesce_timeout=self.turn_resume_quiesce_timeout,
+                    freeze_timeout=self.turn_resume_freeze_timeout,
+                    drain_timeout=self.turn_resume_drain_timeout,
+                )
+                if self.turn_resume_drain_timeout is not None
+                else DrainPendingPausePolicy()
+            ),
             task_runners=task_runners,
             replay_buffer=replay_buffer,
             rollout_controller=rollout_controller,
@@ -302,15 +307,17 @@ class DisaggAgentLoopManager:
             task.produce_strategy.scheduling_paused = True
         async with asyncio.timeout(timeout):
             await self._producer_idle.wait()
-            await asyncio.gather(*[task.produce_strategy.quiesce(self._pending_context(task))
-                                   for task in self.task_runners])
+            await asyncio.gather(
+                *[task.produce_strategy.quiesce(self._pending_context(task)) for task in self.task_runners]
+            )
         if get_pending_task_counts(self.task_runners):
             raise RuntimeError("Quiesce left pending tasks")
 
     async def close(self):
         self.shutdown()
-        results = await asyncio.gather(*[task.produce_strategy.close() for task in self.task_runners],
-                                       return_exceptions=True)
+        results = await asyncio.gather(
+            *[task.produce_strategy.close() for task in self.task_runners], return_exceptions=True
+        )
         for result in results:
             if isinstance(result, BaseException):
                 raise result
@@ -401,6 +408,7 @@ class DisaggAgentLoopManager:
         current_model_step = train_step - 1
 
         while not self._finish_event.is_set():
+            await self._pause_policy.check_requests(self._rollout_controller)
             if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
                 if current_model_step > self._model_step:
                     pause_time_s = self._consume_pause_time()

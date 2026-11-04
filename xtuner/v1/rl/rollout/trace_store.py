@@ -174,10 +174,13 @@ class Trie:
                 node = node.children[key]
                 break
 
-        if node.value is not None and (getattr(node.value, "request_id", None) is not None or
-                                       getattr(value, "request_id", None) is not None):
-            raise ValueError(f"Conflicting trace write: old_request_id={getattr(node.value, 'request_id', None)} "
-                             f"new_request_id={getattr(value, 'request_id', None)}")
+        if node.value is not None and (
+            getattr(node.value, "request_id", None) is not None or getattr(value, "request_id", None) is not None
+        ):
+            raise ValueError(
+                f"Conflicting trace write: old_request_id={getattr(node.value, 'request_id', None)} "
+                f"new_request_id={getattr(value, 'request_id', None)}"
+            )
         node.value = value
 
     def search(self, text: str, filter_none: bool = False) -> Tuple[str, List["TreeNode"]]:
@@ -424,6 +427,19 @@ class RolloutTraceStore:
             trace["response_model_steps"] = response_model_steps
             trace["request_ids"] = request_ids
         return trace
+
+    def contains_request_ids(self, session_id: str, request_ids: list[str]) -> bool:
+        """Validate transcript provenance across committed branches of one session."""
+        trie = self.sessions.get(session_id)
+        if trie is None:
+            return False
+        missing = set(request_ids)
+        stack = [trie.root]
+        while stack and missing:
+            node = stack.pop()
+            missing.discard(getattr(node.value, "request_id", None))
+            stack.extend(node.children.values())
+        return not missing
 
     def get_objects(self, keys: list[str]) -> list[ray.ObjectRef]:
         """Fetch ray.ObjectRef elements by their keys.

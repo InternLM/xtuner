@@ -1,9 +1,13 @@
 """Disaggregated pause policy; PendingTasks remains the sole live-task owner."""
+
 from .produce_utils import pause_pending_tasks, retain_pending_tasks
 
 
 class DrainPendingPausePolicy:
     pending_cleanup = staticmethod(pause_pending_tasks)
+
+    async def check_requests(self, controller):
+        return
 
     async def before_sync(self, manager, checkpoint_due):
         return
@@ -24,13 +28,17 @@ class AgentTurnPausePolicy:
         self.drain_timeout = drain_timeout
         self.barrier = None
 
+    async def check_requests(self, controller):
+        await controller.assert_request_gates_healthy.remote()
+
     async def before_sync(self, manager, checkpoint_due):
         if checkpoint_due:
             await manager.quiesce(self.quiesce_timeout)
 
     async def pause(self, controller):
         self.barrier = await controller.prepare_pause.remote(
-            freeze_timeout=self.freeze_timeout, drain_timeout=self.drain_timeout)
+            freeze_timeout=self.freeze_timeout, drain_timeout=self.drain_timeout
+        )
         await controller.pause_generation.remote()
 
     async def resume(self, controller, model_step):

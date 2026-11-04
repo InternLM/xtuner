@@ -46,8 +46,13 @@ class RequestGate:
         self._failures: dict[str, str] = {}
 
     def snapshot(self) -> dict:
-        return dict(open=self._open, epoch=self._epoch, model_step=self._model_step,
-                    active=list(self._active), failures=dict(self._failures))
+        return dict(
+            open=self._open,
+            epoch=self._epoch,
+            model_step=self._model_step,
+            active=list(self._active),
+            failures=dict(self._failures),
+        )
 
     @asynccontextmanager
     async def request(self, session_id: str):

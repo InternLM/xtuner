@@ -4,6 +4,7 @@ import asyncio
 import copy
 import importlib
 import json
+import os
 import traceback
 import uuid
 from typing import Any, Literal
@@ -48,11 +49,36 @@ def _resolve_runner(pipeline: Any, session_id: str) -> Any:
     return pipeline
 
 
+MIN_VALID_ATTEMPTS = int(os.environ.get("SANDBOX_MIN_VALID_ATTEMPTS", "2"))
+
+
 def _drop_failed_train_samples(samples: list[RolloutState], mode: Literal["train", "eval"]) -> list[RolloutState]:
+    """swe-stage2: per-attempt dropping of invalid (FAILED) executions.
+
+    - mixed group: failed attempts dropped; remaining valid attempts train.
+    - fewer than MIN_VALID_ATTEMPTS valid independent attempts (distinct
+      agent_session_id): whole group marked FILTERED with a recorded reason,
+      so it never reaches replay/advantage/policy loss.
+    - all attempts failed: statuses kept as FAILED so the group is counted
+      and discarded as failed, not silently re-labelled.
+    """
     if mode != "train":
         return samples
     filtered = [sample for sample in samples if sample.status != Status.FAILED]
-    return filtered or samples
+    if len(filtered) == len(samples):
+        return samples
+    if not filtered:
+        return samples
+    valid_attempts = {sample.extra_fields.get("agent_session_id") for sample in filtered}
+    if len(valid_attempts) < MIN_VALID_ATTEMPTS:
+        for sample in samples:
+            sample.status = Status.FILTERED
+            sample.extra_fields["filter_reason"] = (
+                f"valid_independent_attempts<{MIN_VALID_ATTEMPTS} "
+                f"(valid={len(valid_attempts)}, dropped_failed={len(samples) - len(filtered)})"
+            )
+        return samples
+    return filtered
 
 
 def _validate_trace_segment(
@@ -298,6 +324,7 @@ class AgentInSandboxLoop(AgentLoop):
         rollout_state.reward = _extract_reward_payload(item)
         rollout_state.extra_fields["origin_data_source"] = item.data_source
         rollout_state.extra_fields["agent_status"] = item.status.value
+        rollout_state.extra_fields["agent_sandbox_env_id"] = item.infer.sandbox_env_id
         selected_agent = _selected_agent(item)
         if selected_agent is not None:
             rollout_state.extra_fields["agent_name"] = selected_agent.get("name")
@@ -364,9 +391,18 @@ class AgentInSandboxLoop(AgentLoop):
                 if not data["routed_experts"]:
                     raise ValueError("turn-resume MoE training requires routed experts on every node")
                 records = _load_messages_artifact(item.artifacts)
-                matching = [record for record in records if record.get("messages") == messages and
-                            record.get("tools") == tools]
-                if len(matching) != 1 or matching[0].get("request_ids") != data.get("request_ids"):
+                matching = [
+                    record for record in records if record.get("messages") == messages and record.get("tools") == tools
+                ]
+                recorded_ids = matching[0].get("request_ids", []) if len(matching) == 1 else []
+                path_ids = data.get("request_ids", [])
+                if (
+                    not recorded_ids
+                    or not path_ids
+                    or recorded_ids[-1] != path_ids[-1]
+                    or not set(path_ids).issubset(recorded_ids)
+                    or not await trace_store.contains_request_ids.remote(str(rollout_state.session_id), recorded_ids)
+                ):
                     raise ValueError("Agent transcript request IDs do not match committed trace")
                 segment_state.response_model_steps = versions
                 segment_state.extra_fields["request_ids"] = data["request_ids"]

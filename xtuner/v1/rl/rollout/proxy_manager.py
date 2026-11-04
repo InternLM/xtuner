@@ -1,6 +1,9 @@
 import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
+from uuid import uuid4
+
+import ray
 
 from xtuner.v1.rl.utils.misc import (
     check_chat_completions,
@@ -25,6 +28,7 @@ class RolloutProxyManager(RolloutWorkerLifecycleListener):
     _CHECK_INTERVAL_SECONDS = 3.0
 
     def __init__(self, config: "RolloutConfig"):
+        self._turn_resume = getattr(config, "turn_resume_wait_timeout", None) is not None
         self._model_name = config.model_name
         self._routed_proxy_url = config.routed_proxy_url
         self._routed_proxy_admin_url = config.routed_proxy_admin_url
@@ -107,10 +111,25 @@ class RolloutProxyManager(RolloutWorkerLifecycleListener):
         self._logger.info(
             f"Validating routed API proxy chat completions: url={self._routed_proxy_url}, model={model_name}"
         )
-        for attempt in range(1, self._CHECK_ATTEMPTS + 1):
-            if check_chat_completions(self._routed_proxy_url, model_name):
+        attempts = 1 if self._turn_resume else self._CHECK_ATTEMPTS
+        for attempt in range(1, attempts + 1):
+            if self._turn_resume:
+                from .trace_store import get_existing_store
+
+                session_id = str(uuid4())
+                try:
+                    succeeded = check_chat_completions(
+                        self._routed_proxy_url, model_name, max_tokens=1024, session_id=session_id
+                    )
+                finally:
+                    store = get_existing_store()
+                    if store is not None:
+                        ray.get(store.release_sessions.remote([session_id]))
+            else:
+                succeeded = check_chat_completions(self._routed_proxy_url, model_name)
+            if succeeded:
                 return
-            if attempt < self._CHECK_ATTEMPTS:
+            if attempt < attempts:
                 self._logger.warning(
                     f"check chat completions failed for routed API proxy {self._routed_proxy_url}, "
                     f"retrying {attempt}/{self._CHECK_ATTEMPTS - 1} after {self._CHECK_INTERVAL_SECONDS}s"

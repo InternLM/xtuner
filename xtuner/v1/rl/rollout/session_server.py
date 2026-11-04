@@ -14,8 +14,8 @@ from transformers import AutoTokenizer
 from xtuner.v1.utils import get_logger
 
 from .chat_template import canonicalize_messages_for_chat_template
-from .trace_store import TokenizedSegment, get_store
 from .request_gate import RequestGate, RequestLease, SettlementReceipt
+from .trace_store import TokenizedSegment, get_store
 
 
 FMT_OPENAI = "openai"
@@ -238,7 +238,6 @@ def _filter_anthropic_user_tools(tools) -> Optional[list]:
 
 
 class SessionServer:
-    request_gate: RequestGate | None = None
     """SessionServer intercepts and records requests sent to a remote LLM API
     worker.
 
@@ -270,6 +269,8 @@ class SessionServer:
         read_bufsize (int): Buffer limit for line reader in ClientSession. Default is 64MB (2**26).
     """
 
+    request_gate: RequestGate | None = None
+
     def __init__(
         self,
         worker_base_url: str,
@@ -289,8 +290,9 @@ class SessionServer:
         self.read_bufsize = read_bufsize
         self.enable_return_routed_experts = enable_return_routed_experts
         self.turn_resume_wait_timeout = turn_resume_wait_timeout
-        self.request_gate = (RequestGate(wait_timeout=turn_resume_wait_timeout)
-                             if turn_resume_wait_timeout is not None else None)
+        self.request_gate = (
+            RequestGate(wait_timeout=turn_resume_wait_timeout) if turn_resume_wait_timeout is not None else None
+        )
         self.store = get_store()
         self.stop_word = self.tokenizer.eos_token or ""
 
@@ -417,11 +419,13 @@ class SessionServer:
             caller but kept for symmetry.
         """
         if orig_req_body.get("_xt_request_id") is not None and (
-                not worker_resp.get("choices") or
-                any(c.get("finish_reason") not in {"stop", "length", "tool_calls"}
-                    for c in worker_resp["choices"])):
-            raise RuntimeError("Backend returned an unsuccessful generation terminal: " +
-                               str([c.get("finish_reason") for c in worker_resp.get("choices", [])]))
+            not worker_resp.get("choices")
+            or any(c.get("finish_reason") not in {"stop", "length", "tool_calls"} for c in worker_resp["choices"])
+        ):
+            raise RuntimeError(
+                "Backend returned an unsuccessful generation terminal: "
+                + str([c.get("finish_reason") for c in worker_resp.get("choices", [])])
+            )
         session_id = orig_req_body["session_id"]
 
         if fmt == FMT_ANTHROPIC:
@@ -495,8 +499,9 @@ class SessionServer:
             if delta_len > 0:
                 delta_expert = ray.put(raw_routed_expert[prefix_len : prefix_len + delta_len])
             response_expert = ray.put(raw_routed_expert[prefix_len + delta_len :])
-        elif self.enable_return_routed_experts and _bool_request_value(
-            orig_req_body.get("return_routed_experts"), True
+        elif self.enable_return_routed_experts and (
+            orig_req_body.get("_xt_request_id") is not None
+            or _bool_request_value(orig_req_body.get("return_routed_experts"), True)
         ):
             raise RuntimeError(
                 "SessionServer response is missing routed_experts, but enable_return_routed_experts is True."
@@ -511,9 +516,13 @@ class SessionServer:
             await self.store.insert.remote(
                 session_id,
                 key=old_prompt,
-                value=TokenizedSegment(text=delta_text, token_ids=delta_ids, expert_key=delta_expert,
-                                       request_id=orig_req_body.get("_xt_request_id"),
-                                       model_step=orig_req_body.get("_xt_model_step")),
+                value=TokenizedSegment(
+                    text=delta_text,
+                    token_ids=delta_ids,
+                    expert_key=delta_expert,
+                    request_id=orig_req_body.get("_xt_request_id"),
+                    model_step=orig_req_body.get("_xt_model_step"),
+                ),
             )
         await self.store.insert.remote(
             session_id,
@@ -565,14 +574,18 @@ class SessionServer:
         if self.request_gate is None or not _is_generation_endpoint(request.method, path):
             return await self._forward_request(request)
         fmt = _detect_format(path)
+        if fmt != FMT_OPENAI:
+            return web.json_response(
+                _error_payload(fmt, "turn-resume supports OpenAI chat completions only", 400), status=400
+            )
         try:
             body = await request.json()
         except (ValueError, UnicodeDecodeError):
             return web.json_response(_error_payload(fmt, "Invalid generation JSON", 400), status=400)
-        if (not isinstance(body, dict) or body.get("stream") or
-                not _request_uses_trace_store(body)):
-            return web.json_response(_error_payload(fmt, "turn-resume requires nonstream traced generation", 400),
-                                     status=400)
+        if not isinstance(body, dict) or body.get("stream") or not _request_uses_trace_store(body):
+            return web.json_response(
+                _error_payload(fmt, "turn-resume requires nonstream traced generation", 400), status=400
+            )
         async with self.request_gate.request(str(body["session_id"])) as lease:
             return await self._forward_request(request, lease)
 
@@ -827,21 +840,30 @@ class SessionServer:
                     trace_start = time.perf_counter()
                     await self.on_response(response_data, fmt, orig_req_body)
                     trace_s = time.perf_counter() - trace_start
-                    if lease is not None and any(c.get("finish_reason") not in {"stop", "length", "tool_calls"}
-                                                  for c in response_data.get("choices", [])):
+                    if lease is not None and any(
+                        c.get("finish_reason") not in {"stop", "length", "tool_calls"}
+                        for c in response_data.get("choices", [])
+                    ):
                         raise RuntimeError("Unsuccessful backend generation terminal")
                 except Exception as exc:
                     session_error_msg = f"SessionServer response hook failed: {type(exc).__name__}: {exc}"
 
         if lease is not None:
-            complete = (not is_stream and is_success_response and response_data is not None and
-                        not _is_error_payload(response_data) and bool(response_data.get("choices")) and
-                        all(c.get("finish_reason") is not None for c in response_data["choices"]))
+            complete = (
+                not is_stream
+                and is_success_response
+                and response_data is not None
+                and not _is_error_payload(response_data)
+                and bool(response_data.get("choices"))
+                and all(c.get("finish_reason") is not None for c in response_data["choices"])
+            )
             terminal = "trace_committed" if complete and not session_error_msg else "failed"
             get_logger().info(f"request_terminal id={lease.request_id} outcome={terminal} backend_ended={complete}")
-            get_logger().info(f"request_timing id={lease.request_id} prepare_s={prepare_s:.6f} "
-                              f"forward_s={forward_s:.6f} trace_s={trace_s:.6f} "
-                              f"total_s={time.perf_counter() - request_start:.6f}")
+            get_logger().info(
+                f"request_timing id={lease.request_id} prepare_s={prepare_s:.6f} "
+                f"forward_s={forward_s:.6f} trace_s={trace_s:.6f} "
+                f"total_s={time.perf_counter() - request_start:.6f}"
+            )
             lease.settlement = SettlementReceipt(complete, True, terminal)
             if terminal == "trace_committed":
                 payload = json.loads(response.body)
@@ -1218,6 +1240,9 @@ class SessionServerActor:
         if self.server is None or self.server.request_gate is None:
             raise RuntimeError("turn-resume gate is not enabled")
         return self.server.request_gate
+
+    async def request_status(self):
+        return self._gate().snapshot()
 
     async def seal_requests(self, epoch: int):
         await self._gate().seal(epoch)
