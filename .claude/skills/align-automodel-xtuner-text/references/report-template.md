@@ -4,9 +4,11 @@ Fill every section. Write **not verified** where something was not measured; do 
 
 ## 1. Verdict
 
-- Level reached: first-step norm-only / first-step tensor-level / short horizon / long horizon / native-stack benchmark only.
+- Horizon: first step / short <N> updates / long <N> updates; outcome: pass / fail / not verified.
+- Gradient coverage: norm-only / mapped tensors (<population and coverage>); update checks actually performed: <items>.
+- Benchmark scope, if any: controlled matched stack / native stack; separate from the parity verdict.
 - One-sentence result, including the direction of any remaining difference (A − B convention).
-- Explicitly out of scope: <items>.
+- Explicitly out of scope: <items>; keep failed gates failed even if later diagnostic steps were collected.
 
 ## 2. Comparison contract
 
@@ -60,3 +62,6 @@ Fill every section. Write **not verified** where something was not measured; do 
 - Source revisions, local patches, environments, run/log paths for every arm.
 - Failed criteria kept as failures; any revised criterion and the fresh pair validating it.
 - Open items, retracted hypotheses, and what a reviewer should check next.
+- Cause provenance for each claimed cause: independently found / externally informed / mixed / unknown
+  (N/A while no candidate cause); state whether independent localization succeeded before any external
+  answer appeared.
