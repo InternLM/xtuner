@@ -487,6 +487,12 @@ def flash_attn_bwd_sm90_multilaunch(
     sequences run as more, smaller launches instead of erroring. Only when a
     single slice still does not fit does `_check_accum_workspace` raise a clear
     error instead of a raw CUDA OOM.
+
+    Cost (CI shape 16384 q x 16384 kv x 64 heads x 512 dim x topk 2048, H200,
+    same-source A/B — see PR discussion R2): single-layer backward 57ms vs stock
+    36ms (~1.6x); per training step, step-time +10~16%, global TGS -13~14%, peak
+    allocated memory +3.05 GiB (reserved +0.35 GiB). The sliced FP32 workspace
+    above is the memory side of that cost.
     """
     total_S_q, num_head, head_dim = q.shape
     total_S_kv = kv.shape[0]
