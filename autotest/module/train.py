@@ -87,9 +87,7 @@ class Train:
                     + debug_keepalive
                 )
                 if launch_script:
-                    # OPD-style launchers start their own servers (e.g. rollout
-                    # teachers) and read the rest of the setup from envs.
-                    command += f'bash -x {launch_script} "${{MODEL_PATH}}" "${{DATA_PATH}}"'
+                    command += f"{launch_script}"
                 else:
                     command += f"bash -x autotest/utils/ci_run_rl.sh {accelerator} {infer_type} {config_path} ${{MODEL_PATH}} ${{DATA_PATH}} ${{EVAL_DATA_PATH}}"
                 if debug_keepalive:
