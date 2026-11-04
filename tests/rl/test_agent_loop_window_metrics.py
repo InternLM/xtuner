@@ -38,8 +38,14 @@ class _CountingLoop(AgentLoop):
         return drained
 
 
-class _NoMetricsLoop(_CountingLoop):
+class _NoMetricsLoop(AgentLoop):
     """不覆写 collect_metrics 的具体子类，验证基类默认返回空。"""
+
+    def __init__(self) -> None:  # noqa: D107 - test stub
+        pass
+
+    async def generate_sample(self, rollout_state, **kwargs):  # noqa: ANN001, ANN202 - abstract stub
+        raise NotImplementedError
 
 
 class _FakeWorker:
