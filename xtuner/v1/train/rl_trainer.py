@@ -1241,7 +1241,11 @@ class BaseRLTrainer:
                             "finish_info": data.extra_fields.get("agent_finish_info", None),
                             "tool_turns": data.extra_fields.get("agent_tool_turns", None),
                             "session_id": str(data.session_id) if data.session_id is not None else None,
-                            "segment_index": data.extra_fields.get("agent_trace_segment_index"),
+                            "segment_index": (
+                                data.train_meta.segment_index
+                                if data.train_meta is not None
+                                else data.extra_fields.get("agent_trace_segment_index")
+                            ),
                             "segment_count": data.extra_fields.get("agent_trace_segment_count"),
                             "artifacts": data.extra_fields.get("agent_artifacts"),
                             "messages": data.extra_fields.get("agent_messages"),
@@ -1310,7 +1314,11 @@ class BaseRLTrainer:
                             "finish_info": data.extra_fields.get("agent_finish_info", None),
                             "tool_turns": data.extra_fields.get("agent_tool_turns", None),
                             "session_id": str(data.session_id) if data.session_id is not None else None,
-                            "segment_index": data.extra_fields.get("agent_trace_segment_index"),
+                            "segment_index": (
+                                data.train_meta.segment_index
+                                if data.train_meta is not None
+                                else data.extra_fields.get("agent_trace_segment_index")
+                            ),
                             "segment_count": data.extra_fields.get("agent_trace_segment_count"),
                             "artifacts": data.extra_fields.get("agent_artifacts"),
                             "messages": data.extra_fields.get("agent_messages"),
