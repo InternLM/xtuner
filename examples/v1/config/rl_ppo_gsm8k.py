@@ -34,7 +34,6 @@ critic_cfg = CriticWorkerConfig(
     optim_cfg=AdamWConfig(lr=1e-6, foreach=False, weight_decay=0.1),
     loss_cfg=CriticLossConfig(cliprange_value=0.2, ignore_idx=-100),
     lr_cfg=LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6),
-    optimizer_steps=train_optimizer_steps,
 )
 
 train_worker_cfg = WorkerConfig(

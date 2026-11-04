@@ -22,7 +22,7 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status, TeacherTargets
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter, RolloutTeacherConfig
 from xtuner.v1.rl.loss import DistillationLossConfig, GRPOLossConfig
 from xtuner.v1.rl.trainer.actor_worker import ActorWorker
-from xtuner.v1.rl.trainer.pack import RankPlan, RLDataPacker
+from xtuner.v1.rl.trainer.pack import RankPlan, RLDataPacker, TokenBatchProto
 from xtuner.v1.rl.trainer.train_batch import TrainBatch, get_train_seq_ctx
 
 
@@ -510,8 +510,70 @@ class TestConfiguredTeacherLossKeys(unittest.TestCase):
         ):
             with self.subTest(config=config):
                 worker.config = SimpleNamespace(distillation_config=config)
-                self.assertEqual(worker._configured_teacher_loss_keys(), expected)
+                self.assertEqual(worker.teacher_loss_keys(), expected)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTrainBatchTargets(unittest.TestCase):
+    """S4 target installation and trajectory export on the complete CPU batch."""
+
+    def _batch(self) -> TrainBatch:
+        state = _make_state(uid=1, response_ids=[20, 21], supervised_mask=[1, 0])
+        return _make_batch([state], pack_max_length=4)
+
+    def test_install_old_values_and_ppo_targets_round_trip(self):
+        batch = self._batch()
+        batch.install_old_values([torch.tensor([0.1, 0.2, 0.3, 0.4])])
+        batch.install_ppo_targets(
+            TokenBatchProto.concat([torch.tensor([1.0, 2.0, 3.0, 4.0])]),
+            TokenBatchProto.concat([torch.tensor([5.0, 6.0, 7.0, 8.0])]),
+        )
+        batch.require_targets("critic")
+
+        pack = batch.materialize((0,))
+        torch.testing.assert_close(pack.full_data["old_values"], torch.tensor([[0.1, 0.2, 0.3, 0.4]]))
+        # advantages are zeroed at ignored positions; returns are installed verbatim.
+        torch.testing.assert_close(pack.full_data["advantages"], torch.tensor([[0.0, 0.0, 3.0, 0.0]]))
+        torch.testing.assert_close(pack.full_data["returns"], torch.tensor([[5.0, 6.0, 7.0, 8.0]]))
+
+    def test_require_targets_rejects_incomplete_critic_targets(self):
+        batch = self._batch()
+        batch.install_old_values([torch.tensor([0.1, 0.2, 0.3, 0.4])])
+        with self.assertRaisesRegex(ValueError, "returns"):
+            batch.require_targets("critic")
+
+    def test_install_ppo_targets_validates_lengths_before_writing(self):
+        batch = self._batch()
+        with self.assertRaisesRegex(ValueError, "returns row"):
+            batch.install_ppo_targets(
+                TokenBatchProto.concat([torch.tensor([1.0, 2.0, 3.0, 4.0])]),
+                TokenBatchProto.concat([torch.tensor([1.0])]),
+            )
+        self.assertIsNone(batch._samples[0].advantages)
+        self.assertIsNone(batch._samples[0].returns)
+
+    def test_trajectory_data_exports_complete_rows_and_boundaries(self):
+        first = _make_state(uid=1, response_ids=[20, 21], supervised_mask=[1, 0])
+        second = _make_state(uid=2, response_ids=[30, 31, 32])
+        second.reward = {"score": 2.0}
+        batch = _make_batch([first, second], pack_max_length=9)
+        batch.install_old_values([torch.tensor([0.1, 0.2, 0.3, 0.4]), torch.tensor([0.5, 0.6, 0.7, 0.8, 0.9])])
+
+        trajectory = batch.trajectory_data()
+
+        torch.testing.assert_close(trajectory["values"], torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]))
+        self.assertEqual(trajectory["scores"].tolist(), [1.0, 2.0])
+        self.assertEqual(trajectory["mask"].tolist(), [False, False, True, False, False, False, True, True, True])
+        self.assertEqual(trajectory["cu_seq_lens"].tolist(), [0, 4, 9])
+
+    def test_trajectory_data_requires_reward_score(self):
+        state = _make_state(uid=1, response_ids=[20, 21])
+        state.reward = None
+        batch = _make_batch([state], pack_max_length=4)
+        batch.install_old_values([torch.tensor([0.1, 0.2, 0.3, 0.4])])
+
+        with self.assertRaisesRegex(ValueError, "reward score"):
+            batch.trajectory_data()

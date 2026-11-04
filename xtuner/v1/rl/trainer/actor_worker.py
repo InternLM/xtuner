@@ -1,4 +1,4 @@
-"""The actor role worker: policy training inside a ``TrainingWorker`` host."""
+"""The actor role: policy training, ref/teacher stages, MTP and SFT tail."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import json
 import os
 import time
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, cast
 
@@ -17,61 +18,66 @@ from transformers import AutoTokenizer
 from xtuner.v1.datasets.dataloader import Dataloader
 from xtuner.v1.engine.train_engine import TrainEngine, TrainStepInfo
 from xtuner.v1.loss import CELossConfig, LogProbConfig
-from xtuner.v1.loss.ce_loss import CELossContext, LMHeadLossContext
+from xtuner.v1.loss.ce_loss import CELossContext
 from xtuner.v1.loss.mtp_loss import MTPLossConfig, MTPLossContext
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.profiler import profiling_memory, profiling_time
-from xtuner.v1.rl.distillation import (
-    DistillationTrainerAdapter,
-    TrainTeacherManager,
-    TrainTeacherTimings,
-)
+from xtuner.v1.rl.distillation import TrainTeacherManager, TrainTeacherTimings
 from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, kl_penalty
 from xtuner.v1.rl.model_utils import build_frozen_model
 from xtuner.v1.rl.weight_update import WeightUpdater
 from xtuner.v1.utils import get_device, get_torch_device_module
 
 from ..rollout_is import merge_rollout_is_metrics
-from .pack import DPRankPackIndices
-from .role_worker import (
-    RoleWorker,
-    _PackItem,
-    resolve_mm_inputs,
-    resolve_routed_experts,
-)
+from .role_worker import RoleContext, RoleWorker
 from .schedule import build_lr_scheduler
+from .train_batch import FullPack, TrainBatch, iter_cpu_packs, resolve_pack_refs
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-    from xtuner.v1.data_proto.rl_data import RolloutState
     from xtuner.v1.data_proto.sequence_context import SequenceContext
-    from xtuner.v1.loss import BaseLossContext
 
-    from .worker import TrainBatchAttr, TrainingWorker, TrainSample, WorkerConfig, WorkerLogItem
+    from .worker import WorkerConfig, WorkerLogItem
+
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
-# SFT state files, written at the checkpoint root for backward compatibility.
+# SFT state files, written at the checkpoint root.
 _SFT_DATALOADER_FILE = "sft_dataloader"
 _SFT_TRAIN_STATE_FILE = "sft_train_state.json"
 
 
+@dataclass(frozen=True)
+class ActorSnapshot:
+    """Frozen loss inputs of one pack, all tensors sequence-parallel local CPU.
+
+    Args:
+        shifted_labels (torch.Tensor): Labels after rollout importance sampling.
+        old_logprobs (torch.Tensor): Frozen old-policy log probabilities.
+        is_weights (torch.Tensor | None): Rollout importance-sampling weights.
+        ref_logprobs (torch.Tensor | None): Reference log probabilities.
+        teacher_logprobs (torch.Tensor | None): Train-teacher log probabilities.
+        target_token_ids (torch.Tensor | None): Train-teacher top-k target ids.
+    """
+
+    shifted_labels: torch.Tensor
+    old_logprobs: torch.Tensor
+    is_weights: torch.Tensor | None
+    ref_logprobs: torch.Tensor | None
+    teacher_logprobs: torch.Tensor | None
+    target_token_ids: torch.Tensor | None
+
+
 class ActorWorker(RoleWorker):
-    """The policy role: ref model, distillation, MTP, SFT tail, and rollout
-    weight sync all live here. The engine is the actor's own; the process
-    group used for weight sync comes from the host."""
+    """The policy role: ref model, distillation, MTP, SFT tail and weight sync."""
 
     role_name = "actor"
+    loss_cfg: BaseRLLossConfig
 
-    def __init__(self, worker_cfg: WorkerConfig, host: TrainingWorker) -> None:
-        super().__init__(host)
-        self.config = worker_cfg
-        self.logger = host.logger
-        self.rank = host.rank
+    def __init__(self, worker_cfg: WorkerConfig, ctx: RoleContext) -> None:
+        super().__init__(worker_cfg, ctx)
         self.engine = self._build_engine(worker_cfg)
         self.lr_scheduler = None
         if worker_cfg.scheduler_steps is not None:
@@ -94,9 +100,6 @@ class ActorWorker(RoleWorker):
                 chunk_size=worker_cfg.loss_cfg.chunk_size,
             )
 
-        self._distillation = DistillationTrainerAdapter(worker_cfg.distillation_config)
-        self._optimizer_steps = worker_cfg.optimizer_steps
-
         profile_step = worker_cfg.profile_step
         if isinstance(profile_step, int):
             profile_step = [profile_step]
@@ -115,8 +118,17 @@ class ActorWorker(RoleWorker):
             if hasattr(worker_cfg.model_cfg.text_config, "mtp_config"):
                 self.mtp_config = worker_cfg.model_cfg.text_config.mtp_config
         elif hasattr(worker_cfg.model_cfg, "mtp_config"):
-            # 非 compose 模型的 mtp_config 直接放在了 model_cfg 中
             self.mtp_config = worker_cfg.model_cfg.mtp_config
+        self.mtp_cfgs: list[MTPLossConfig] = []
+        if self.mtp_config is not None:
+            for depth in range(self.mtp_config.num_layers):
+                self.mtp_cfgs.append(
+                    MTPLossConfig(
+                        **worker_cfg.loss_cfg.model_dump(include={"mode", "chunk_size"}),
+                        mtp_depth=depth + 1,
+                        detach_mtp_lm_head_weight=self.mtp_config.detach_mtp_lm_head_weight,
+                    )
+                )
         self._mtp_trainable_parameters = (
             [parameter for name, parameter in self.engine.model.trainable_parameters() if "mtp_block" in name]
             if self.mtp_config is not None
@@ -131,13 +143,51 @@ class ActorWorker(RoleWorker):
         )
 
         self._init_sft(worker_cfg)
-
-        # Per-pack stage-A products (old/ref logprobs, teacher outputs), keyed
-        # by the pack's sample-index tuple. Rows are SP-split shaped and CPU
-        # resident between the two stages.
-        self._staged: dict[tuple[int, ...], dict[str, torch.Tensor | None]] = {}
-
         self.loss_cfg: BaseRLLossConfig | None = worker_cfg.loss_cfg
+
+    def teacher_loss_keys(self) -> list[str]:
+        """Return loss fields required from configured teachers.
+
+        Returns:
+            list[str]: Extra per-pack loss keys.
+        """
+        distillation_config = self.config.distillation_config
+        if distillation_config is None:
+            return []
+        keys: list[str] = []
+        if distillation_config.rollout_teachers:
+            keys.append("teacher_logprobs")
+            if not distillation_config.loss_config.uses_sampled_token_targets:
+                keys.append("target_token_ids")
+        if distillation_config.train_teachers:
+            keys.append("teacher_indices")
+        return keys
+
+    def fit(self, batch: TrainBatch) -> WorkerLogItem:
+        """Run old/ref/teacher stages and policy updates on ``batch``.
+
+        Args:
+            batch (TrainBatch): The installed local batch with actor targets.
+
+        Returns:
+            WorkerLogItem: Actor training metrics.
+        """
+        batch.require_targets("actor")
+        worker_log_item: WorkerLogItem = {
+            "train_entropy": 0.0,
+            "train_metrics": [],
+            "sft_train_metrics": {},
+        }
+        snapshots_by_pack = self._collect_old_policy_snapshots(batch, worker_log_item)
+        try:
+            self._stage_ref_logprobs(batch, snapshots_by_pack)
+            teacher_timings = self._stage_teacher_outputs(batch, snapshots_by_pack)
+            if teacher_timings is not None:
+                worker_log_item["teacher_timings"] = teacher_timings.to_dict()
+            return self._fit_policy_then_sft(batch, snapshots_by_pack, worker_log_item)
+        finally:
+            # Controller closes the local batch; RLTrainer releases remote refs.
+            snapshots_by_pack.clear()
 
     def _build_engine(self, worker_cfg: WorkerConfig) -> TrainEngine:
         engine = TrainEngine(  # type: ignore[call-arg]
@@ -167,7 +217,7 @@ class ActorWorker(RoleWorker):
             tokenizer = AutoTokenizer.from_pretrained(worker_cfg.load_from, trust_remote_code=True)
             self._sft_dataloader = worker_cfg.sft_dataloader_cfg.build(
                 tokenizer=tokenizer,
-                dp_mesh=self.host.data_mesh["dp"],
+                dp_mesh=self.data_mesh["dp"],
                 global_batch_size=worker_cfg.sft_global_batch_size,
                 micro_batch_size=1,
                 seed=worker_cfg.seed,
@@ -179,8 +229,8 @@ class ActorWorker(RoleWorker):
         if global_train_step not in self._profile_step:
             return contextlib.nullcontext()
 
-        if self.host.log_dir is not None:
-            profile_home = self.host.log_dir.parent
+        if self.log_dir is not None:
+            profile_home = self.log_dir.parent
         else:
             profile_home = Path(os.environ.get("WORK_DIR", "."))
 
@@ -202,125 +252,62 @@ class ActorWorker(RoleWorker):
         return {"mtp_grad_parameter_coverage": present_grad_count / len(self._mtp_trainable_parameters)}
 
     def _resolve_refs(self, seq_ctx: SequenceContext) -> None:
-        resolve_mm_inputs(seq_ctx)
-        resolve_routed_experts(
+        resolve_pack_refs(
             seq_ctx,
             model_cfg=self.config.model_cfg,
             pack_max_length=self.config.pack_max_length,
         )
 
-    def _forward_logprobs(self, seq_ctx: SequenceContext, shifted_labels: torch.Tensor) -> torch.Tensor:
-        loss_ctx = self.logprob_cfg.build(data={"shifted_labels": shifted_labels})
-        assert loss_ctx is not None
-        output = self.engine.forward_only(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
-        return output["loss"]
-
     def _forward_ref_logprobs(self, seq_ctx: SequenceContext, shifted_labels: torch.Tensor) -> torch.Tensor:
         assert self._has_ref
         with torch.no_grad():
-            loss_ctx = self.logprob_cfg.build(data={"shifted_labels": shifted_labels})
+            loss_ctx = self.logprob_cfg.build(data={"shifted_labels": shifted_labels}, device=self.device)
             assert loss_ctx is not None
             ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
         return ref_output["loss"]
 
-    def _configured_teacher_loss_keys(self) -> list[str]:
-        distillation_config = self.config.distillation_config
-        if distillation_config is None:
-            return []
-        keys: list[str] = []
-        if distillation_config.rollout_teachers:
-            keys.append("teacher_logprobs")
-            if not distillation_config.loss_config.uses_sampled_token_targets:
-                keys.append("target_token_ids")
-        if distillation_config.train_teachers:
-            keys.append("teacher_indices")
-        return keys
-
-    def _pack_loss_fields(
-        self, samples: list[TrainSample], pack: list[int], batch_attr: TrainBatchAttr
-    ) -> dict[str, torch.Tensor | None]:
-        """Concatenate one pack's loss inputs on CPU, tail-padded."""
-        template_keys = list(batch_attr["pack_loss_keys"])
-        for key in self._configured_teacher_loss_keys():
-            if key not in template_keys:
-                template_keys.append(key)
-
-        if pack:
-            rollout_rows = [samples[index].rollout_logprobs for index in pack]
-            rows: dict[str, list[torch.Tensor] | None] = {
-                "shifted_labels": [samples[index].shifted_labels for index in pack],
-                "advantages": [cast(torch.Tensor, samples[index].advantages) for index in pack],
-                "rollout_logprobs": (
-                    [cast(torch.Tensor, row) for row in rollout_rows]
-                    if all(row is not None for row in rollout_rows)
-                    else None
-                ),
-            }
-
-            for key in self._configured_teacher_loss_keys():
-                if key not in rows:
-                    values = [samples[index].teacher_targets.get(key) for index in pack]
-                    present = [value is not None for value in values]
-                    if not all(present):
-                        raise ValueError(f"Required pack field {key} must be present on every sample: {present}")
-                    rows[key] = [cast(torch.Tensor, value) for value in values]
-        else:
-            # Scheduling-only padding slot: empty rows mark the fields present.
-            rows = {
-                "shifted_labels": [],
-                "advantages": [],
-                "rollout_logprobs": [] if "rollout_logprobs" in template_keys else None,
-            }
-            for key in template_keys:
-                rows[key] = []
-        return self._pack_loss_rows(samples, pack, rows)
-
-    def _stage_old_logprobs(self, rollout_idx: int) -> tuple[WorkerLogItem, float]:
-        """Stage-A pass 1: recompute old logprobs and rollout-level metrics.
-
-        Runs the iter-pack prefetch pipeline once; per pack the forward yields
-        old logprobs while entropy/grad-token sums and IS metrics accumulate.
-        Sums are all-reduced and normalized once at the end so communication
-        does not scale with pack count.
-        """
-        # precompute float8 dynamic scale only once
+    def _collect_old_policy_snapshots(
+        self, batch: TrainBatch, worker_log_item: WorkerLogItem
+    ) -> dict[tuple[int, ...], ActorSnapshot]:
+        """Recompute old logprobs and freeze one snapshot per pack."""
         self.engine._maybe_precompute_float8_dynamic_scale_for_fsdp()
-
-        # ``sft_train_metrics`` must exist even without the SFT
-        worker_log_item: WorkerLogItem = {"train_entropy": 0.0, "train_metrics": [], "sft_train_metrics": {}}
         entropy_sum: torch.Tensor | None = None
         rollout_entropy_sum: torch.Tensor | None = None
         grad_tokens: torch.Tensor | None = None
         all_rollout_is_metrics: list[dict[str, float]] = []
         all_mismatch_metrics: list[dict[str, float]] = []
+        snapshots: dict[tuple[int, ...], ActorSnapshot] = {}
+        pack_indices = [pack for step in batch.plan.steps for pack in step]
         pack_time_begin = time.perf_counter()
 
-        for step_items in self._iter_steps():
-            for pack, seq_ctx in step_items:
-                ctx_dict = self.pack_loss_ctx(pack, seq_ctx, build_mtp=False)
-                loss_ctx = cast(BaseRLLossContext, ctx_dict["lm"])
-                kwargs = loss_ctx.loss_kwargs
-                shifted_labels = kwargs.shifted_labels
-                old_logprobs = self._forward_logprobs(seq_ctx, shifted_labels)
-                kwargs.old_logprobs = old_logprobs
+        for full_pack in iter_cpu_packs(batch, pack_indices, self._resolve_refs):
+            data = full_pack.full_data
+            seq_ctx = self._to_device_seq(data["seq_ctx"])
+            ctx = self.loss_cfg.build(data, sp_mesh=self.sp_mesh, device=self.device)
+            assert ctx is not None
+            read_ctx = self.logprob_cfg.build(data, sp_mesh=self.sp_mesh, device=self.device)
+            assert read_ctx is not None
+            old_logprobs = self.engine.forward_only(seq_ctx=seq_ctx, loss_ctx=read_ctx)["loss"]
+            ctx.loss_kwargs.old_logprobs = old_logprobs
 
-                mask = shifted_labels != -100
-                entropy = -(old_logprobs * mask).sum()
-                entropy_sum = entropy if entropy_sum is None else entropy_sum + entropy
-                grad_tokens = mask.sum() if grad_tokens is None else grad_tokens + mask.sum()
-                if kwargs.rollout_logprobs is not None:
-                    rollout_entropy = -(kwargs.rollout_logprobs * mask).sum()
-                    rollout_entropy_sum = (
-                        rollout_entropy if rollout_entropy_sum is None else rollout_entropy_sum + rollout_entropy
-                    )
-                if kwargs.rollout_logprobs is not None:
-                    num_tokens = seq_ctx.seq_lens_q
-                    mismatch_metrics, rollout_is_metrics = loss_ctx.compute_rollout_is(self.host.sp_mesh, num_tokens)
-                    all_rollout_is_metrics.append(rollout_is_metrics)
-                    all_mismatch_metrics.append(mismatch_metrics)
+            labels = ctx.loss_kwargs.shifted_labels
+            mask = labels != self.config.loss_cfg.ignore_idx
+            entropy = -(old_logprobs * mask).sum()
+            entropy_sum = entropy if entropy_sum is None else entropy_sum + entropy
+            grad_tokens = mask.sum() if grad_tokens is None else grad_tokens + mask.sum()
+            if ctx.loss_kwargs.rollout_logprobs is not None:
+                rollout_entropy = -(ctx.loss_kwargs.rollout_logprobs * mask).sum()
+                rollout_entropy_sum = (
+                    rollout_entropy if rollout_entropy_sum is None else rollout_entropy_sum + rollout_entropy
+                )
+                mismatch_metrics, rollout_is_metrics = ctx.compute_rollout_is(self.sp_mesh, seq_ctx.seq_lens_q)
+                all_rollout_is_metrics.append(rollout_is_metrics)
+                all_mismatch_metrics.append(mismatch_metrics)
 
-                self._staged.setdefault(tuple(pack), {})["old_logprobs"] = old_logprobs.detach().cpu()
-        pack_time_s = time.perf_counter() - pack_time_begin
+            snapshots[full_pack.indices] = self._capture_snapshot(ctx)
+
+        worker_log_item["packing_pack_time_s"] = time.perf_counter() - pack_time_begin
+        worker_log_item["packing_conversion_time_s"] = 0.0
 
         entropy_sum = cast(torch.Tensor, entropy_sum)
         grad_tokens = cast(torch.Tensor, grad_tokens)
@@ -329,289 +316,192 @@ class ActorWorker(RoleWorker):
         avg_sum_entropy = entropy_sum / grad_tokens if grad_tokens > 0 else torch.tensor(0.0)
         worker_log_item["train_entropy"] = avg_sum_entropy.item()
 
-        logger_msg = f"Rollout {rollout_idx}: avg entropy: {avg_sum_entropy:.4f}"
+        logger_msg = f"Rollout {batch.attrs['rollout_idx']}: avg entropy: {avg_sum_entropy:.4f}"
         if rollout_entropy_sum is not None:
             dist.all_reduce(rollout_entropy_sum, op=dist.ReduceOp.SUM)
             avg_rollout_entropy = rollout_entropy_sum / grad_tokens if grad_tokens > 0 else torch.tensor(0.0)
             worker_log_item["rollout_entropy"] = avg_rollout_entropy.item()
             logger_msg += f", avg rollout entropy: {avg_rollout_entropy:.4f}"
 
-        if len(all_mismatch_metrics) > 0:
-            mismatch_metrics = merge_rollout_is_metrics(all_mismatch_metrics, DEVICE)
-            if len(mismatch_metrics) > 0:
+        if all_mismatch_metrics:
+            mismatch_metrics = merge_rollout_is_metrics(all_mismatch_metrics, self.device)
+            if mismatch_metrics:
                 worker_log_item["mismatch_metrics"] = mismatch_metrics
                 logger_msg += f"\n rollout mismatch metrics:\n{json.dumps(mismatch_metrics, indent=4)}"
-        if len(all_rollout_is_metrics) > 0:
-            rollout_is_metrics = merge_rollout_is_metrics(all_rollout_is_metrics, DEVICE)
-            if len(rollout_is_metrics) > 0:
+        if all_rollout_is_metrics:
+            rollout_is_metrics = merge_rollout_is_metrics(all_rollout_is_metrics, self.device)
+            if rollout_is_metrics:
                 worker_log_item["rollout_is_metrics"] = rollout_is_metrics
                 logger_msg += f"\n rollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
         if self.rank == 0:
             self.logger.info(logger_msg)
 
         self._global_grad_tokens = grad_tokens
-        return worker_log_item, pack_time_s
+        return snapshots
 
-    def _stage_ref_logprobs(self) -> None:
-        """Stage-A pass 2 (only with a ref model): ref logprobs + KL metric.
-
-        The ref model is onloaded once for the whole pass and offloaded at the stage boundary; per-pack bouncing of the
-        second model is not acceptable.
-        """
+    def _stage_ref_logprobs(
+        self,
+        batch: TrainBatch,
+        snapshots_by_pack: dict[tuple[int, ...], ActorSnapshot],
+    ) -> None:
+        """Stage reference logprobs and KL metrics for every pack."""
+        if not self._has_ref:
+            return
         kl_div_sum: torch.Tensor | None = None
-        self._ref_model.to_device(DEVICE)
+        self._ref_model.to_device(self.device)
+        pack_indices = [pack for step in batch.plan.steps for pack in step]
         try:
-            for step_items in self._iter_steps():
-                for pack, seq_ctx in step_items:
-                    staged = self._staged.setdefault(tuple(pack), {})
-                    old_logprobs = staged["old_logprobs"]
-                    assert old_logprobs is not None
-                    ctx_dict = self.pack_loss_ctx(pack, seq_ctx, build_mtp=False)
-                    loss_ctx = cast(BaseRLLossContext, ctx_dict["lm"])
-                    kwargs = loss_ctx.loss_kwargs
-                    ref_logprobs = self._forward_ref_logprobs(seq_ctx, kwargs.shifted_labels)
-                    mask = kwargs.shifted_labels != -100
-                    kl_div = kl_penalty(
-                        old_logprobs.to(DEVICE),
-                        ref_logprobs,
-                        loss_weights=mask,
-                        kl_penalty="low_var_kl",
-                    )
-                    kl_div_sum = kl_div if kl_div_sum is None else kl_div_sum + kl_div
-                    staged["ref_logprobs"] = ref_logprobs.detach().cpu()
+            for full_pack in iter_cpu_packs(batch, pack_indices, self._resolve_refs):
+                data = full_pack.full_data
+                seq_ctx = self._to_device_seq(data["seq_ctx"])
+                ctx = self.loss_cfg.build(data, sp_mesh=self.sp_mesh, device=self.device)
+                assert ctx is not None
+                snapshot = snapshots_by_pack[full_pack.indices]
+                ctx.bind_actor_snapshot(snapshot)
+                ref_logprobs = self._forward_ref_logprobs(seq_ctx, ctx.loss_kwargs.shifted_labels)
+                mask = ctx.loss_kwargs.shifted_labels != self.config.loss_cfg.ignore_idx
+                kl_div = kl_penalty(
+                    snapshot.old_logprobs.to(self.device),
+                    ref_logprobs,
+                    loss_weights=mask,
+                    kl_penalty="low_var_kl",
+                )
+                kl_div_sum = kl_div if kl_div_sum is None else kl_div_sum + kl_div
+                snapshots_by_pack[full_pack.indices] = self._capture_snapshot(
+                    ctx, overrides={"ref_logprobs": ref_logprobs}
+                )
         finally:
             self._ref_model.to_device("cpu")
+
         kl_div_sum = cast(torch.Tensor, kl_div_sum)
         dist.all_reduce(kl_div_sum, op=dist.ReduceOp.SUM)
         grad_tokens = self._global_grad_tokens
         avg_kl_div = kl_div_sum / grad_tokens if grad_tokens > 0 else 0
         self.logger.info(f"avg KL divergence: {avg_kl_div:.4f}")
 
-    def _stage_teacher_outputs(self) -> TrainTeacherTimings | None:
-        """Stage-A pass 3 (only with train teachers): one whole-batch call.
-
-        The teacher model is a second model: it goes on/off the GPU once at
-        the stage boundary while the actor engine steps aside. The pass needs
-        the full batch of prepared contexts alive at once, mirroring the
-        pre-refactor behavior.
-        """
+    def _stage_teacher_outputs(
+        self,
+        batch: TrainBatch,
+        snapshots_by_pack: dict[tuple[int, ...], ActorSnapshot],
+    ) -> TrainTeacherTimings | None:
+        """Run the whole-batch teacher pass while the actor engine steps
+        aside."""
         if self._train_teacher_manager is None:
             return None
-        # Go through the granular role methods so the residency flag stays
-        # correct (never touch engine.put_*_to_device directly).
-        self.offload_model()
         self.offload_optimizer()
-        if hasattr(DEVICE_MODULE, "empty_cache"):
-            DEVICE_MODULE.empty_cache()
+        self.offload_model()
+        DEVICE_MODULE.empty_cache()
+
+        pack_indices = [pack for step in batch.plan.steps for pack in step]
+        seq_ctx_list: list[SequenceContext] = []
+        loss_ctx_list: list[BaseRLLossContext] = []
         try:
-            seq_ctx_list: list[SequenceContext] = []
-            loss_ctx_list: list[BaseRLLossContext] = []
-            flat_packs = [p for step in self._plan() for p in step]
-            for pack, seq_ctx in self._iter_packs(flat_packs):
-                ctx_dict = self.pack_loss_ctx(pack, seq_ctx, build_mtp=False)
-                loss_ctx_list.append(cast(BaseRLLossContext, ctx_dict["lm"]))
+            for full_pack in iter_cpu_packs(batch, pack_indices, self._resolve_refs):
+                data = full_pack.full_data
+                seq_ctx = self._to_device_seq(data["seq_ctx"])
+                ctx = self.loss_cfg.build(data, sp_mesh=self.sp_mesh, device=self.device)
+                assert ctx is not None
+                ctx.bind_actor_snapshot(snapshots_by_pack[full_pack.indices])
                 seq_ctx_list.append(seq_ctx)
-            teacher_timings = self._train_teacher_manager.compute_teacher_outputs(
-                seq_ctx_list,
-                loss_ctx_list,
-            )
-            for pack, loss_ctx in zip(flat_packs, loss_ctx_list):
-                kwargs = loss_ctx.loss_kwargs
-                teacher_logprobs = getattr(kwargs, "teacher_logprobs", None)
-                target_token_ids = getattr(kwargs, "target_token_ids", None)
-                staged = self._staged.setdefault(tuple(pack), {})
-                staged["teacher_logprobs"] = teacher_logprobs.detach().cpu() if teacher_logprobs is not None else None
-                staged["target_token_ids"] = target_token_ids.detach().cpu() if target_token_ids is not None else None
-            return teacher_timings
+                loss_ctx_list.append(ctx)
+
+            # Keep the teacher's whole-batch interface: no per-pack on/offload.
+            timings = self._train_teacher_manager.compute_teacher_outputs(seq_ctx_list, loss_ctx_list)
+            for pack, ctx in zip(pack_indices, loss_ctx_list):
+                snapshots_by_pack[pack] = self._capture_snapshot(ctx)
         finally:
-            self.onload_model()
-            self.onload_optimizer()
+            # Drop temporary device contexts before restoring the actor engine.
+            seq_ctx_list.clear()
+            loss_ctx_list.clear()
+            del seq_ctx, ctx
 
-    def _build_step_input(self, items: list[_PackItem]) -> list[ModelItem]:
-        loss_cfg = self.config.loss_cfg
-        LossContext = loss_cfg.loss_ctx_cls
-        batched_lm = LossContext.build_batches([item[1]["lm"] for item in items])  # type: ignore[arg-type,misc]
+        # Restore only on success; failures propagate and terminate the round.
+        self.onload_model()
+        self.onload_optimizer()
+        return timings
 
-        mtp_items: list[list[MTPLossContext]] = [
-            item[1].get("mtp", [])  # type: ignore[assignment,misc]
-            for item in items
-        ]
-        has_mtp = any(mtp_items)
-        batched_mtp: list[list[MTPLossContext]] = [[] for _ in items]
-        if has_mtp:
-            cu_seq_lens_list = [item[0].cu_seq_lens_q for item in items]
-            num_mtp_depths = len(mtp_items[0]) if mtp_items else 0
-            for mtp_idx in range(num_mtp_depths):
-                depth_mtp_loss_ctxs: list[LMHeadLossContext] = [depths[mtp_idx] for depths in mtp_items]
-                batched_mtp_depth_ctxs = cast(
-                    list[MTPLossContext],
-                    MTPLossContext.build_batches(
-                        depth_mtp_loss_ctxs,
-                        cu_seq_lens_list=cu_seq_lens_list,
-                        sp_mesh=self.host.sp_mesh,
-                    ),
-                )
-                for batch_offset, mtp_ctx in enumerate(batched_mtp_depth_ctxs):
-                    batched_mtp[batch_offset].append(mtp_ctx)
-
-        engine_input: list[ModelItem] = []
-        for item, lm_ctx, mtp_depths in zip(items, batched_lm, batched_mtp):
-            loss_ctx_map: dict[str, BaseLossContext] = {"lm": lm_ctx}
-            if has_mtp:
-                loss_ctx_map["mtp"] = mtp_depths  # type: ignore[assignment]
-            engine_input.append(ModelItem(seq_ctx=item[0], loss_ctx=loss_ctx_map))
-        return engine_input
-
-    def pack_loss_ctx(
+    def _capture_snapshot(
         self,
-        pack: list[int],
-        seq_ctx: SequenceContext,
+        ctx: BaseRLLossContext,
         *,
-        build_mtp: bool = True,
-    ) -> dict[str, BaseLossContext]:
-        """Build the actor's packed loss context for one pack.
+        overrides: dict[str, torch.Tensor] | None = None,
+    ) -> ActorSnapshot:
+        """Freeze the current context's loss inputs into one CPU record."""
+        kwargs = ctx.loss_kwargs
+        overrides = overrides or {}
+        values: dict[str, torch.Tensor | None] = {}
+        for name in ActorSnapshot.__dataclass_fields__:
+            if name in ("teacher_logprobs", "target_token_ids") and self._train_teacher_manager is None:
+                values[name] = None
+                continue
+            tensor = overrides.get(name, getattr(kwargs, name, None))
+            values[name] = None if tensor is None else tensor.detach().cpu().clone()
+        return ActorSnapshot(**cast(dict[str, Any], values))
 
-        Composes cached labels/advantages/rollout logprobs/rollout teacher
-        targets with the stage-A rows (old/ref logprobs, train-teacher
-        outputs) re-attached positionally. ``SequenceContext.to``/``split``
-        are destructive, so the staged rows keep their stage-A SP-split shape
-        and are only moved back to the device here, never re-split.
-        """
-        samples, _plan, batch_attr = self._cached()
-        loss_inputs = self._pack_loss_fields(samples, pack, batch_attr)
-        loss_cfg = self.config.loss_cfg
-        loss_ctx = loss_cfg.build(data=loss_inputs, device="cpu")
-        assert loss_ctx is not None
-        kwargs = loss_ctx.loss_kwargs
-        kwargs.to(DEVICE)
-        # seq/loss alignment is by construction (same pack indices, same tail
-        # padding rule); this is the belt-and-braces check. All loss fields are
-        # pre-split here, so compare against the packed shifted-labels length,
-        # not the (possibly SP-split) seq_ctx length.
-        packed_len = cast(torch.Tensor, loss_inputs["shifted_labels"]).shape[1]
-        for key, tensor in loss_inputs.items():
-            assert tensor is None or tensor.shape[1] == packed_len, f"{key}: {tensor.shape[1]} vs {packed_len}"
-
-        mtp_ctxs: list[MTPLossContext] = []
-        if build_mtp and self.mtp_config is not None:
-            for mtp_idx in range(self.mtp_config.num_layers):
-                mtp_loss_cfg = MTPLossConfig(
-                    **loss_cfg.model_dump(include={"mode", "chunk_size"}),
-                    mtp_depth=mtp_idx + 1,
-                    detach_mtp_lm_head_weight=self.mtp_config.detach_mtp_lm_head_weight,
-                )
-                mtp_ctx = mtp_loss_cfg.build(
-                    data={
-                        "shifted_labels": kwargs.shifted_labels,
-                        "seq_ctx": seq_ctx,
-                        "logprobs": kwargs.rollout_logprobs,
-                    },
-                    sp_mesh=self.host.sp_mesh,
-                )
-                if mtp_ctx is not None:
-                    mtp_ctxs.append(mtp_ctx)
-
-        if self.host.sp_mesh.size() > 1:
-            kwargs.sp_split(self.host.sp_mesh)
-
-        # Stage-A rows are already SP-split shaped (they were produced by
-        # forwards on split contexts) and several loss-kwargs sp_split
-        # implementations would re-split them, so they are re-attached only
-        # after sp_split.
-        staged = self._staged.get(tuple(pack), {})
-        for field in ("old_logprobs", "ref_logprobs", "teacher_logprobs", "target_token_ids"):
-            row = staged.get(field)
-            if row is not None:
-                setattr(kwargs, field, row.to(DEVICE))
-
-        ctx_dict: dict[str, BaseLossContext] = {"lm": loss_ctx}
-        if mtp_ctxs:
-            ctx_dict["mtp"] = mtp_ctxs  # type: ignore[assignment]
-        return ctx_dict
-
-    def fit(self) -> WorkerLogItem:
-        """Self-contained actor training: stage A then stage B.
-
-        Stage A (GPU peak = 1 pack): the iter-pack pipeline recomputes old
-        logprobs; the ref model (if any) runs the same pipeline once at a
-        stage boundary; train teachers run one whole-batch call. Entropy /
-        grad-token / KL accumulate raw sums and normalize once at the end;
-        IS/mismatch are computed per pack and merged once. The
-        ``ONLY_CALC_MISMATCH_RATIO`` debug path returns right after stage A.
-
-        Stage B (GPU peak = 1 optimizer step): a fresh iter-pack stream
-        re-cats each pack (to/split are destructive), re-attaches the staged
-        rows, and feeds ``_train_optimizer_steps``. The SFT tail is actor-specific.
-        """
-        samples, plan, batch_attr = self._cached()
-        rollout_idx = batch_attr["rollout_idx"]
-        if any(sample.advantages is None for sample in samples):
-            raise ValueError("actor fit requires staged advantages on every cached sample")
-        num_optimizer_steps = len(plan)
-        assert num_optimizer_steps <= self._optimizer_steps, (
-            f"Pack plan optimizer steps {num_optimizer_steps} exceed configured "
-            f"optimizer_steps {self._optimizer_steps}"
-        )
-        if num_optimizer_steps < self._optimizer_steps:
-            self.logger.info(
-                f"Optimizer only steps {num_optimizer_steps} times because pack plan steps "
-                f"{num_optimizer_steps} < optimizer_steps {self._optimizer_steps}."
-            )
-        self._staged = {}
-        try:
-            return self._fit_stages(samples, plan, batch_attr, rollout_idx)
-        finally:
-            # The actor is the batch's last consumer: release the shared
-            # routed-experts refs exactly once, on every exit path. Each stage
-            # re-resolves from the pristine cache, so freeing earlier would
-            # poison the later passes.
-            self._staged = {}
-
-    def _fit_stages(
+    def _fit_policy_then_sft(
         self,
-        samples: list[TrainSample],
-        plan: DPRankPackIndices,
-        batch_attr: TrainBatchAttr,
-        rollout_idx: int,
+        batch: TrainBatch,
+        snapshots_by_pack: dict[tuple[int, ...], ActorSnapshot],
+        worker_log_item: WorkerLogItem,
     ) -> WorkerLogItem:
-        # ---- stage A ----
-        worker_log_item, pack_time_s = self._stage_old_logprobs(rollout_idx)
-
-        only_calc_mismatch_ratio = os.environ.get("ONLY_CALC_MISMATCH_RATIO", "0") == "1"
-        if only_calc_mismatch_ratio:
-            # This early-return path skips the MTP forward. FSDP may have
-            # prefetched the MTP module already, leaving its all-gather result
-            # cached until we release it explicitly.
-            self._release_deferred_fsdp_all_gathers(f"rollout_{rollout_idx}/only_calc_mismatch")
-            DEVICE_MODULE.empty_cache()
-            return worker_log_item
-
-        if self._has_ref:
-            self._stage_ref_logprobs()
-
-        teacher_timings = self._stage_teacher_outputs()
-        if teacher_timings is not None:
-            worker_log_item.update({"teacher_timings": teacher_timings.to_dict()})
-
-        # ---- stage B ----
-        def optimizer_step_packs() -> Iterator[list[_PackItem]]:
-            for step_items in self._iter_steps():
-                yield [(seq_ctx, self.pack_loss_ctx(pack, seq_ctx)) for pack, seq_ctx in step_items]
-
-        train_log_item = self._train_optimizer_steps(optimizer_step_packs())
-        worker_log_item["train_metrics"] = train_log_item["train_metrics"]
-        worker_log_item["packing_pack_time_s"] = pack_time_s
+        """Run every policy update, then the SFT tail at its configured
+        cadence."""
+        for step_indices in batch.plan.steps:
+            packs = list(iter_cpu_packs(batch, step_indices, self._resolve_refs))
+            items = self._build_step_input(packs, snapshots_by_pack)
+            worker_log_item["train_metrics"].append(self._train_update(items))
+            del items
 
         self._rollout_step += 1
         if self._sft_dataloader is not None and self._rollout_step % self._rollout_steps_per_sft == 0:
             train_step_info = self._fit_sft()
-            engine_logs_info = train_step_info["logs_info"]
             worker_log_item["sft_train_metrics"] = {
-                **engine_logs_info,
+                **train_step_info["logs_info"],
                 **train_step_info["extra_info"].get(),
                 "efficient_attn_ratio": train_step_info["efficient_attn_ratio"],
             }
         return worker_log_item
+
+    def _build_step_input(
+        self,
+        full_packs: list[FullPack],
+        snapshots_by_pack: dict[tuple[int, ...], ActorSnapshot],
+    ) -> list[ModelItem]:
+        """Build and calibrate one optimizer step's model inputs."""
+        items: list[ModelItem] = []
+        depth_ctx_lists: list[list[MTPLossContext]] = []
+        for pack in full_packs:
+            data = pack.full_data
+            seq_ctx = self._to_device_seq(data["seq_ctx"])
+            main_ctx = self.loss_cfg.build(data, sp_mesh=self.sp_mesh, device=self.device)
+            assert main_ctx is not None
+            mtp_ctxs = [
+                cfg.build(
+                    data={**data, "logprobs": data.get("rollout_logprobs")},
+                    sp_mesh=self.sp_mesh,
+                    device=self.device,
+                )
+                for cfg in self.mtp_cfgs
+            ]
+            main_ctx.bind_actor_snapshot(snapshots_by_pack[pack.indices])
+            loss_ctx: dict[str, Any] = {"lm": main_ctx}
+            if self.mtp_cfgs:
+                loss_ctx["mtp"] = mtp_ctxs
+                depth_ctx_lists.append(cast(list[MTPLossContext], mtp_ctxs))
+            items.append(ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx))
+
+        self.loss_cfg.loss_ctx_cls.build_batches(
+            cast(list[CELossContext], [item["loss_ctx"]["lm"] for item in items])  # type: ignore[index]
+        )
+        if self.mtp_cfgs:
+            cu_seq_lens_list = [item["seq_ctx"].cu_seq_lens_q for item in items]
+            for depth, cfg in enumerate(self.mtp_cfgs):
+                cfg.loss_ctx_cls.build_batches(  # type: ignore[arg-type]
+                    [pack_ctxs[depth] for pack_ctxs in depth_ctx_lists],
+                    cu_seq_lens_list=cu_seq_lens_list,
+                    sp_mesh=self.sp_mesh,
+                )
+        return items
 
     def _fit_sft(self) -> TrainStepInfo:
         self.logger.info(f"Train SFT after {self._rollout_step} RL steps")
@@ -662,11 +552,11 @@ class ActorWorker(RoleWorker):
         loss_cfg: CELossConfig = self._sft_loss_cfg  # type: ignore[assignment]
         loss_ctx_list: list[CELossContext] = []
         for data in data_batch:
-            seq_ctx = data["seq_ctx"].to(DEVICE)
-            if self.host.sp_mesh.size() > 1:
-                seq_ctx = seq_ctx.split(sequence_parallel_mesh=self.host.sp_mesh)
+            seq_ctx = data["seq_ctx"].to(self.device)
+            if self.sp_mesh.size() > 1:
+                seq_ctx = seq_ctx.split(sequence_parallel_mesh=self.sp_mesh)
             seq_ctx_list.append(seq_ctx)
-            loss_ctx = loss_cfg.build(data={"shifted_labels": data["shifted_labels"]}, sp_mesh=self.host.sp_mesh)
+            loss_ctx = loss_cfg.build(data=data, sp_mesh=self.sp_mesh, device=self.device)
             assert loss_ctx is not None
             loss_ctx_list.append(loss_ctx)
 
@@ -674,7 +564,7 @@ class ActorWorker(RoleWorker):
 
         cu_seq_lens_list = [seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list]
         loss_ctx_list = CELossContext.build_batches(
-            loss_ctx_list, cu_seq_lens_list=cu_seq_lens_list, sp_mesh=self.host.sp_mesh
+            loss_ctx_list, cu_seq_lens_list=cu_seq_lens_list, sp_mesh=self.sp_mesh
         )
 
         engine_input = [
@@ -725,25 +615,6 @@ class ActorWorker(RoleWorker):
         reduced_number = sum(_gathered_list)  # type: ignore[arg-type]
         return reduced_number
 
-    def _release_deferred_fsdp_all_gathers(self, log_tag: str) -> None:
-        from xtuner.v1.utils.fsdp import release_deferred_fsdp_all_gathers
-
-        comm_states, param_groups = release_deferred_fsdp_all_gathers(self.engine.model)
-        if comm_states or param_groups:
-            self.logger.debug(
-                f"[{log_tag}] released deferred FSDP all-gathers: "
-                f"comm_states={comm_states}, param_groups={param_groups}"
-            )
-
-    def get_rollout_teacher_targets(
-        self,
-        state: RolloutState,
-        *,
-        shifted_labels: Sequence[int],
-    ) -> dict[str, torch.Tensor]:
-        """Extract one rollout sample's distillation teacher target fields."""
-        return self._distillation.rollout_teacher_targets(state, shifted_labels=shifted_labels)
-
     def save_sft_state(self, checkpoint_path: Path) -> None:
         """Persist the SFT dataloader and train state under
         ``checkpoint_path``."""
@@ -789,6 +660,6 @@ class ActorWorker(RoleWorker):
         sft_dataloader_path = resume_from / _SFT_DATALOADER_FILE
         if not sft_dataloader_path.exists():
             raise FileNotFoundError(f"Dataloader path {sft_dataloader_path} does not exist.")
-        dataloader_state = torch.load(sft_dataloader_path, map_location=DEVICE)
+        dataloader_state = torch.load(sft_dataloader_path, map_location=self.device)
         sft_dataloader.load_state_dict(dataloader_state)
         self.logger.info(f"Resume sft dataloader from {sft_dataloader_path}")
