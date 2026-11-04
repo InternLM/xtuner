@@ -203,3 +203,30 @@ class TestSerialization(unittest.TestCase):
 
         self.assertEqual(restored.train_meta, state.train_meta)
         restored.validate_training()
+
+
+class TestRayRoundTrip(unittest.TestCase):
+    def test_ray_round_trip_preserves_train_meta_and_methods(self):
+        import ray
+
+        started = not ray.is_initialized()
+        if started:
+            ray.init(num_cpus=1, include_dashboard=False, log_to_driver=False)
+        try:
+            state = make_state()
+            state.set_training_fields(
+                input_ids=[10, 11, 20, 21, 22],
+                labels=[-100, -100, 20, 21, 22],
+                logprobs=None,
+            )
+
+            restored = ray.get(ray.put(state))
+
+            self.assertIsInstance(restored, RolloutState)
+            self.assertEqual(restored.train_meta, state.train_meta)
+            restored.validate_training()
+            restored.apply_response_mask([True, False, True])
+            self.assertEqual(restored.labels, [-100, -100, 20, -100, 22])
+        finally:
+            if started:
+                ray.shutdown()
