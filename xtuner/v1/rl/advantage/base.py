@@ -19,7 +19,7 @@ Example:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Literal
 
 import torch
 
@@ -60,3 +60,37 @@ class AdvantageEstimator(ABC):
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}()"
+
+
+class TokenAdvantageEstimator(ABC):
+    """Interface for token-level trajectory advantage estimation.
+
+    Token estimators are defined in parallel with :class:`AdvantageEstimator`:
+    they consume complete trajectories (values, terminal scores, action masks and
+    packed boundaries) and return unnormalized ``(advantages, returns)``. They do
+    not implement group-scalar ``compute``.
+    """
+
+    reward_scope: Literal["segment", "session"]
+    normalize_actor_advantage: bool
+
+    @abstractmethod
+    def compute_segment_gae(
+        self,
+        values: torch.Tensor,
+        scores: torch.Tensor,
+        mask: torch.Tensor,
+        cu_seq_lens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return unnormalized actor advantages and critic returns.
+
+        Args:
+            values (torch.Tensor): Frozen critic values of shape ``[T]``.
+            scores (torch.Tensor): One terminal score per trajectory.
+            mask (torch.Tensor): Action-token mask of shape ``[T]``.
+            cu_seq_lens (torch.Tensor): Packed trajectory boundaries.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: Actor advantages and critic returns.
+        """
+        ...

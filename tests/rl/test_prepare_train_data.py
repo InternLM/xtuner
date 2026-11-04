@@ -22,7 +22,8 @@ trainer、Ray worker、模型或 rollout backend：
 
 import sys
 import unittest
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
@@ -413,14 +414,27 @@ class TestPrepareRolloutItems(unittest.TestCase):
         controller.task_adv_weight = task_adv_weight
         controller.distillation = DistillationTrainerAdapter(None)
         controller.logger = MagicMock()
+        controller.workers = [
+            SimpleNamespace(
+                install_advantages=SimpleNamespace(remote=MagicMock(return_value=None)),
+                get_data_replicate_size=SimpleNamespace(remote=MagicMock(return_value=1)),
+            )
+        ]
         return controller
+
+    @staticmethod
+    def _plan(sample_count: int):
+        from xtuner.v1.rl.trainer.pack import PackPlan, RankPlan
+
+        indices = tuple(range(sample_count))
+        return PackPlan(ranks=(RankPlan(global_indices=indices, steps=((indices,),)),), metrics={})
 
     def _prepare(self, controller, data_groups):
         prepared = controller._prepare_rollout_items(data_groups, rollout_idx=0)
-        from xtuner.v1.rl.trainer.pack import PackPlan
 
-        plan = PackPlan(ranks=(), metrics={})
-        advantages = controller._prepare_advantages(prepared)
+        plan = self._plan(len(prepared["rollout_items"]))
+        with patch("xtuner.v1.rl.trainer.controller.ray.get", side_effect=lambda value, timeout=None: value):
+            advantages = controller._prepare_group_targets(prepared, plan)
         return (
             prepared["rollout_items"],
             advantages,
@@ -496,7 +510,8 @@ class TestPrepareRolloutItems(unittest.TestCase):
         prepared = controller._prepare_rollout_items([[self._state()]], rollout_idx=0)
         self.assertEqual(controller.advantage_estimator.calls, [])
         self.assertNotIn("advantages", prepared)
-        self.assertEqual(controller._prepare_advantages(prepared), [1.0])
+        with patch("xtuner.v1.rl.trainer.controller.ray.get", side_effect=lambda value, timeout=None: value):
+            self.assertEqual(controller._prepare_group_targets(prepared, self._plan(1)), [1.0])
         self.assertEqual(len(controller.advantage_estimator.calls), 1)
 
     def test_returns_items_with_per_sample_advantages(self):

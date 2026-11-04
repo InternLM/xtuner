@@ -7,7 +7,6 @@ import math
 import torch
 
 from xtuner.v1.config.optim import LRConfig
-from xtuner.v1.engine.train_engine import TrainEngine
 
 
 def build_lr_scheduler(
@@ -40,14 +39,6 @@ def build_lr_scheduler(
         raise ValueError(f"Unsupported lr type: {lr_cfg.lr_type}")
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
-
-
-def optimizer_step_succeeds(engine: TrainEngine, grad_norm: torch.Tensor) -> bool:
-    """Return whether ``TrainEngine.step_optimizer`` will apply the update."""
-    if not torch.isfinite(grad_norm):
-        return False
-    threshold = engine.optim_cfg.skip_grad_norm_threshold
-    return threshold is None or bool(grad_norm <= threshold)
 
 
 def partition_indices(indices: list[int], max_updates: int) -> list[list[int]]:

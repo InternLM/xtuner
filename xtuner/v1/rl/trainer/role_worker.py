@@ -1,28 +1,22 @@
-"""Symmetric role-worker ABC hosted inside one ``TrainingWorker`` process."""
+"""Single-role training lifecycle shared by the actor and critic workers."""
 
 from __future__ import annotations
 
 import contextlib
-import queue
-import threading
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Iterator, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
-import numpy as np
-import ray
 import torch
 import torch.distributed as dist
 
-from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.model.base import ModelItem
-from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.rl.loss import BaseRLLossConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import get_device, get_torch_device_module
 
-from .pack import DPRankPackIndices
-from .schedule import optimizer_step_succeeds
+from .train_batch import resolve_mm_inputs
 
 
 DEVICE = get_device()
@@ -31,174 +25,101 @@ DEVICE_MODULE = get_torch_device_module()
 if TYPE_CHECKING:
     from logging import Logger
 
-    from xtuner.v1.data_proto.sequence_context import SequenceContext
-    from xtuner.v1.loss import BaseLossContext
-    from xtuner.v1.model.base import TransformerConfig
+    from torch.distributed.device_mesh import DeviceMesh
 
-    from .worker import TrainBatchAttr, TrainingWorker, TrainSample, WorkerLogItem
+    from xtuner.v1.data_proto.sequence_context import SequenceContext
+    from xtuner.v1.engine.train_engine import TrainEngine
+    from xtuner.v1.loss import BaseLossContext
+
+    from .train_batch import TrainBatch
+    from .worker import WorkerLogItem, WorkerTrainLogItem
+
+RoleName = Literal["actor", "critic"]
 
 # One prepared (seq_ctx, loss_ctx dict) pair per pack; roles build the dict
 # (e.g. ``{"lm": ctx}`` or ``{"lm": ctx, "mtp": [depth ctxs]}``) before handing
-# the step to ``_train_optimizer_steps``.
+# the step to ``_train_update``.
 _PackItem = tuple["SequenceContext", dict[str, "BaseLossContext"]]
 
-# Marks "no more packs" on the prefetch queue; distinct from any exception
-# that _produce tunnels to the consumer.
-_SENTINEL = object()
 
-_UINT16_CAPACITY = 1 << 16
+@dataclass(frozen=True)
+class RoleContext:
+    """Process-local dependencies handed to a role at construction.
 
-# A role name; None means no role resides on the GPU.
-RoleName = Literal["actor", "critic"]
-
-
-def _rollout_routed_experts_storage_dtype(n_routed_experts: int) -> torch.dtype:
-    """Choose a compact lossless dtype for stored routed-expert IDs."""
-    if n_routed_experts <= _UINT16_CAPACITY:
-        return torch.uint16
-    return torch.long
-
-
-def _as_rollout_routed_experts_tensor(
-    rollout_routed_experts: np.ndarray,
-    *,
-    n_routed_experts: int,
-) -> torch.Tensor:
-    """Convert finalized routed-expert IDs to their CPU storage dtype."""
-    storage_dtype = _rollout_routed_experts_storage_dtype(n_routed_experts)
-    if storage_dtype == torch.uint16 and rollout_routed_experts.dtype != np.uint16:
-        if rollout_routed_experts.size > 0:
-            min_expert_id = rollout_routed_experts.min()
-            max_expert_id = rollout_routed_experts.max()
-            if min_expert_id < 0 or max_expert_id >= _UINT16_CAPACITY:
-                raise ValueError(
-                    f"Routed-expert IDs cannot be represented as uint16: min={min_expert_id}, max={max_expert_id}"
-                )
-    return torch.as_tensor(rollout_routed_experts, dtype=storage_dtype)
-
-
-def resolve_mm_inputs(seq_ctx: SequenceContext) -> None:
-    """Materialize multimodal pixel-value object refs into one CPU tensor.
-
-    Pure CPU / ray.get work: safe to run inside a prefetch producer thread.
+    Args:
+        data_mesh (DeviceMesh): Data/sequence-parallel mesh owned by the host.
+        device (torch.device): Compute device of the role engine.
+        rank (int): Global process rank.
+        seed (int): Shared training seed for deterministic pass ordering.
+        logger (Logger): Process logger.
+        log_dir (Path | None): Experiment log directory used by profiling.
     """
-    pixel_values = seq_ctx.pixel_values
-    if pixel_values is None:
-        return
-    if isinstance(pixel_values, np.ndarray):
-        raise NotImplementedError("The case where pixel_values is a numpy array is not implemented yet.")
-    assert isinstance(pixel_values, list), f"pixel_values should be list of tensor, got {type(pixel_values)}"
-    pixel_values = ray.get(list(pixel_values))
-    pixel_values = [torch.as_tensor(pixel_value) for pixel_value in pixel_values]
-    seq_ctx.pixel_values = torch.cat(pixel_values, dim=0)
 
-
-def resolve_routed_experts(
-    seq_ctx: SequenceContext,
-    *,
-    model_cfg: TransformerConfig | BaseComposeConfig,
-    pack_max_length: int,
-) -> None:
-    """Materialize rollout routed-expert refs into one packed CPU tensor.
-
-    Pure CPU / ray.get work on the calling thread. Never frees refs: the actor fit materializes each pack several times
-    (old/ref/teacher/train passes) and each pass re-resolves from the pristine cache; RLTrainer releases the batch's
-    remote resources after the whole batch is consumed.
-    """
-    rollout_routed_experts = seq_ctx.rollout_routed_experts
-    if rollout_routed_experts is None:
-        # Dense models: rollout carries no routed-expert refs.
-        return
-    language_cfg = model_cfg.text_config if isinstance(model_cfg, BaseComposeConfig) else model_cfg
-    if not getattr(language_cfg, "n_routed_experts", 0):
-        # Dense model with stale refs (misconfigured rollout): drop them; the
-        # forward routes on its own.
-        seq_ctx.rollout_routed_experts = None
-        return
-    storage_dtype = _rollout_routed_experts_storage_dtype(language_cfg.n_routed_experts)
-
-    if not isinstance(rollout_routed_experts, list):
-        # All-padding pack: rollout_routed_experts is already a dummy tensor.
-        assert isinstance(rollout_routed_experts, torch.Tensor), (
-            f"padding experts should be a dummy tensor, bug got {type(rollout_routed_experts)}"
-        )
-        seq_ctx.rollout_routed_experts = torch.randint(
-            low=0,
-            high=language_cfg.n_routed_experts,
-            size=(pack_max_length, language_cfg.num_hidden_layers, language_cfg.num_experts_per_tok),
-            dtype=storage_dtype,
-        )
-        return
-
-    # list[n,l,e]
-    out_rollout_routed_expert = []
-    for rollout_routed_expert in rollout_routed_experts:
-        if isinstance(rollout_routed_expert, torch.Tensor):
-            # Padding slot inside a mixed pack: a dummy tensor marks padding
-            # positions; re-materialize it at the packed (l, e) shape.
-            rollout_routed_experts_tensor = torch.randint(
-                low=0,
-                high=language_cfg.n_routed_experts,
-                size=(
-                    rollout_routed_expert.size(0),
-                    language_cfg.num_hidden_layers,
-                    language_cfg.num_experts_per_tok,
-                ),
-                dtype=storage_dtype,
-            )
-            out_rollout_routed_expert.append(rollout_routed_experts_tensor)
-            continue
-        if isinstance(rollout_routed_expert, ray.ObjectRef):
-            rollout_routed_expert = ray.get(rollout_routed_expert)
-        elif isinstance(rollout_routed_expert, list):
-            _rollout_routed_expert = []
-            for rollout_routed_expert_ref in rollout_routed_expert:
-                _rollout_routed_expert.append(ray.get(rollout_routed_expert_ref))  # np
-            rollout_routed_expert = np.concatenate(_rollout_routed_expert, axis=0)[1:, ...]
-        else:
-            raise ValueError(f"Invalid rollout_routed_expert_refs type: {type(rollout_routed_expert)}")
-        rollout_routed_expert = _as_rollout_routed_experts_tensor(
-            rollout_routed_expert,
-            n_routed_experts=language_cfg.n_routed_experts,
-        )
-        rollout_routed_expert = rollout_routed_expert.reshape(
-            -1, language_cfg.num_hidden_layers, language_cfg.num_experts_per_tok
-        )
-        out_rollout_routed_expert.append(rollout_routed_expert)
-
-    seq_ctx.rollout_routed_experts = torch.cat(out_rollout_routed_expert, dim=0)  # max_len,l,e
-    assert seq_ctx.rollout_routed_experts.size(0) == seq_ctx.input_ids.size(1), (
-        f"rollout_routed_experts.size(0) {seq_ctx.rollout_routed_experts.size(0)} "
-        f"!= input_ids.size(1) {seq_ctx.input_ids.size(1)}"
-    )
+    data_mesh: DeviceMesh
+    device: torch.device
+    rank: int
+    seed: int
+    logger: Logger
+    log_dir: Path | None
 
 
 class RoleWorker(ABC):
-    """A training role (actor / critic / ...) living inside one
-    ``TrainingWorker``.
+    """One role's engine, scheduler, update counters and placement facts.
 
-    All shared infrastructure (process group, device meshes, batch cache, pack
-    primitives) is reached through ``self.host``; a role never calls the host's
-    RPC or lifecycle methods.
+    A role owns only its own engine. It does not hold the host or read the
+    host's batch cache: every fit/collect call receives the ``TrainBatch``
+    explicitly. Model/optimizer placement is recorded per role and only moved
+    through the onload/offload methods below.
     """
 
     role_name: ClassVar[RoleName]
 
     engine: TrainEngine
     lr_scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
-    logger: Logger
-    rank: int
     # ``finalize_metrics`` is only defined on RL loss configs.
     loss_cfg: BaseRLLossConfig | None = None
 
-    def __init__(self, host: TrainingWorker) -> None:
-        if host is None:
-            raise ValueError(f"{type(self).__name__} must be attached to a TrainingWorker")
-        self.host = host
+    def __init__(self, config: Any, ctx: RoleContext) -> None:
+        self.config = config
+        self.data_mesh = ctx.data_mesh
+        self.sp_mesh = ctx.data_mesh["sp"]
+        self.device = ctx.device
+        self.rank = ctx.rank
+        self.seed = ctx.seed
+        self.logger = ctx.logger
+        self.log_dir = ctx.log_dir
+        # Placement facts updated by the granular move methods below.
+        self._model_on_device = True
+        self._optimizer_on_device = True
         self._global_train_step = 0
+        self.attempted_updates = 0
+        self.completed_updates = 0
+
+    @property
+    def model_on_device(self) -> bool:
+        """Whether the role model currently resides on the compute device."""
+        return self._model_on_device
+
+    @property
+    def optimizer_on_device(self) -> bool:
+        """Whether the role optimizer state currently resides on the compute
+        device."""
+        return self._optimizer_on_device
+
+    def require_model_residency(self) -> None:
+        """Fail fast when the role model is not resident for a forward pass."""
+        if not self._model_on_device:
+            raise RuntimeError(f"{self.role_name} model is not on the compute device")
+
+    def require_train_residency(self) -> None:
+        """Fail fast when either the model or optimizer is off the compute
+        device."""
+        self.require_model_residency()
+        if not self._optimizer_on_device:
+            raise RuntimeError(f"{self.role_name} optimizer is not on the compute device")
 
     def onload(self) -> None:
-        """Move model + optimizer to the GPU as a whole."""
+        """Move model + optimizer to the compute device as a whole."""
         self.onload_model()
         self.onload_optimizer()
 
@@ -208,23 +129,27 @@ class RoleWorker(ABC):
         self.offload_model()
 
     def onload_model(self) -> bool:
-        """Move the model to the GPU; return whether it actually moved."""
-        model_moved = self.engine.put_model_to_device(DEVICE)
-        if not model_moved:
+        """Move the model to the compute device; return whether it moved."""
+        moved = self.engine.put_model_to_device(self.device)
+        if not moved:
             self.logger.info("Skip model onload because model placement is unchanged.")
-        return model_moved
+        self._model_on_device = True
+        return moved
 
     def onload_optimizer(self) -> bool:
-        """Move the optimizer to the GPU; return whether it actually moved."""
-        optimizer_moved = self.engine.put_optimizer_to_device(DEVICE)
-        if not optimizer_moved:
+        """Move the optimizer to the compute device; return whether it
+        moved."""
+        moved = self.engine.put_optimizer_to_device(self.device)
+        if not moved:
             self.logger.info("Skip optimizer onload because no optimizer state needs to be moved.")
-        return optimizer_moved
+        self._optimizer_on_device = True
+        return moved
 
     def offload_model(self) -> bool:
-        """Move the model to the CPU; return whether it actually moved."""
-        model_moved = self.engine.put_model_to_device("cpu")
-        if not model_moved:
+        """Move the model to the CPU; return whether it moved."""
+        moved = self.engine.put_model_to_device("cpu")
+        self._model_on_device = False
+        if not moved:
             self.logger.info("Skip model offload because model placement is unchanged.")
             return False
         self.logger.info(
@@ -234,9 +159,10 @@ class RoleWorker(ABC):
         return True
 
     def offload_optimizer(self) -> bool:
-        """Move the optimizer to the CPU; return whether it actually moved."""
-        optimizer_moved = self.engine.put_optimizer_to_device("cpu")
-        if not optimizer_moved:
+        """Move the optimizer to the CPU; return whether it moved."""
+        moved = self.engine.put_optimizer_to_device("cpu")
+        self._optimizer_on_device = False
+        if not moved:
             self.logger.info("Skip optimizer offload because no optimizer state needs to be moved.")
             return False
         self.logger.info(
@@ -246,240 +172,189 @@ class RoleWorker(ABC):
         return True
 
     @abstractmethod
-    def fit(self) -> WorkerLogItem:  # noqa: F821
-        """Run one training round on the batch cached by the host.
+    def fit(self, batch: TrainBatch) -> WorkerLogItem:
+        """Train one round on the complete local batch.
 
-        The in-process signature is parameter-less by design: training inputs
-        (scalar/token advantages, returns) arrive through named RPCs
-        (``actor_fit(advantages)`` / ``critic_fit(token_returns)``); the host
-        writes them into the sample cache via ``_add_sample_fields`` and the
-        role reads them from there. This keeps every role's in-process
-        signature uniform and decouples training inputs from the pack plan.
+        Args:
+            batch (TrainBatch): The batch installed by the worker.
+
+        Returns:
+            WorkerLogItem: Role training metrics.
         """
 
     def save(self, path: Path, no_save_optimizer: bool = False) -> None:
-        """Save a DCP checkpoint under ``path`` (the host already appended the
-        role dir)."""
+        """Save the role checkpoint under ``path``.
+
+        Args:
+            path (Path): Role directory chosen by the host (``actor``/``critic``).
+            no_save_optimizer (bool): Skip optimizer state.
+
+        Returns:
+            None
+        """
         self.engine.save_dcp(weights_dir=path, save_optimizer=not no_save_optimizer)
+        path.mkdir(parents=True, exist_ok=True)
+        rng_state: dict[str, object] = {"torch": torch.get_rng_state()}
+        if torch.cuda.is_initialized():
+            rng_state["cuda"] = torch.cuda.get_rng_state_all()
+        torch.save(rng_state, path / f"rng_state_rank{self.rank}.pt")
+        if self.rank == 0:
+            torch.save(
+                {
+                    "attempted_updates": self.attempted_updates,
+                    "completed_updates": self.completed_updates,
+                    "scheduler": self.lr_scheduler.state_dict() if self.lr_scheduler is not None else None,
+                    # LambdaLR.state_dict does not store the lambda closure; persist its definition too.
+                    "scheduler_config": self._scheduler_config(),
+                },
+                path / "role_state.pt",
+            )
 
     def resume(self, path: Path, cfg: LoadCheckpointConfig) -> None:
-        """Restore from the DCP checkpoint under ``path``."""
+        """Restore the role checkpoint under ``path``.
+
+        Args:
+            path (Path): Role directory chosen by the host.
+            cfg (LoadCheckpointConfig): Optimizer/scheduler loading switches.
+
+        Returns:
+            None
+        """
         if not (path / ".metadata").is_file():
             raise FileNotFoundError(f"Checkpoint at {path} has no DCP metadata.")
+        initial_lrs = self.lr_scheduler.get_last_lr() if self.lr_scheduler is not None else None
         self.engine.load_dcp(
             weights_dir=path,
             load_states=cfg.load_optimizer_states,
             load_args=cfg.load_optimizer_args,
         )
+        state_file = path / "role_state.pt"
+        if not state_file.is_file():
+            raise FileNotFoundError(f"Role checkpoint at {path} has no role_state.pt.")
+        state = torch.load(state_file, weights_only=True)
+        if cfg.load_scheduler and self.lr_scheduler is not None:
+            if state["scheduler_config"] != self._scheduler_config():
+                raise ValueError("Scheduler configuration changed; explicitly choose load_scheduler=False")
+            self.lr_scheduler.load_state_dict(state["scheduler"])
+        self.attempted_updates = state["attempted_updates"]
+        self.completed_updates = state["completed_updates"]
+        if self.lr_scheduler is not None:
+            lrs = cast(list[float], self.lr_scheduler.get_last_lr() if cfg.load_scheduler else initial_lrs)
+            for group, lr in zip(self.engine.optimizer.param_groups, lrs):
+                group["lr"] = lr
+
+        rng_file = path / f"rng_state_rank{self.rank}.pt"
+        if not rng_file.is_file():
+            raise FileNotFoundError(f"Role checkpoint at {path} has no rng_state_rank{self.rank}.pt.")
+        rng_state = torch.load(rng_file, weights_only=True)
+        torch.set_rng_state(rng_state["torch"])
+        if "cuda" in rng_state and torch.cuda.is_initialized():
+            torch.cuda.set_rng_state_all(rng_state["cuda"])
 
     def save_hf(self, hf_dir: Path, save_dtype: torch.dtype) -> None:
-        """Save the role model in Hugging Face format under ``hf_dir``."""
-        self.engine.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
-
-    def _cached(self) -> tuple[list[TrainSample], DPRankPackIndices, TrainBatchAttr]:
-        return self.host.get_cached_batch()  # type: ignore[return-value]
-
-    def _plan(self) -> DPRankPackIndices:
-        """Return the cached pack plan (index-only)."""
-        return self.host.get_cached_batch()[1]  # type: ignore[return-value]
-
-    def _pack_loss_rows(
-        self,
-        samples: list[TrainSample],
-        pack: list[int],
-        rows: dict[str, list[torch.Tensor] | None],
-    ) -> dict[str, torch.Tensor | None]:
-        """Concatenate one pack's per-sample loss rows, tail-padded to
-        ``pack_max_length``; an empty pack materializes entirely as padding.
+        """Save the role model in Hugging Face format under ``hf_dir``.
 
         Args:
-            samples (list[TrainSample]): The host's cached samples.
-            pack (list[int]): Sample indices of the pack.
-            rows (dict[str, list[torch.Tensor] | None]): Per-sample tensors by
-                field name. ``None`` marks the field absent for the whole pack
-                and passes through as ``None``; an empty list marks it present
-                so a padding-only pack still materializes it.
+            hf_dir (Path): Output directory.
+            save_dtype (torch.dtype): Export dtype.
 
         Returns:
-            dict[str, torch.Tensor | None]: Packed tensors keyed by field name.
+            None
         """
-        if pack:
-            real_tokens = sum(samples[index].seq_ctx.input_ids.shape[1] for index in pack)  # type: ignore[union-attr,misc]
-            padding_len = self.host.config.pack_max_length - int(real_tokens)
-            if padding_len < 0:
-                raise ValueError(
-                    f"Pack tokens {real_tokens} exceed pack_max_length {self.host.config.pack_max_length}"
-                )
-            return self.host.cat_pack_fields(rows, padding_len)
-        padding_len = self.host.config.pack_max_length
-        return {
-            key: (self.host.pack_padding_loss_input(key, padding_len) if row is not None else None)
-            for key, row in rows.items()
-        }
+        self.engine.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
+
+    def _scheduler_config(self) -> dict | None:
+        if self.lr_scheduler is None:
+            return None
+        return {"lr_cfg": self.config.lr_cfg.model_dump(), "scheduler_steps": self.config.scheduler_steps}
 
     def _resolve_refs(self, seq_ctx: SequenceContext) -> None:
-        """Resolve per-pack object refs on the CPU side.
+        """Materialize object refs on the CPU side before device transfer.
 
-        Default: multimodal refs only. Roles override to add or drop fields:
-        the actor also resolves routed experts, the critic drops them
-        (it routes on its own).
+        Args:
+            seq_ctx (SequenceContext): Packed CPU context.
+
+        Returns:
+            None
         """
         resolve_mm_inputs(seq_ctx)
 
-    def _iter_packs(
-        self, packs: list[list[int]], *, split: bool = True
-    ) -> Iterator[tuple[list[int], SequenceContext]]:
-        """Materialize packs one at a time and yield ``(pack_indices,
-        prepared_seq_ctx)``, overlapping each pack's CPU preparation with the
-        previous pack's GPU work.
+    def _to_device_seq(self, seq_ctx: SequenceContext) -> SequenceContext:
+        """Copy a packed CPU context to the device and split it for SP.
 
-        This is the single materialization point: only one pack's copy is
-        alive at a time (a list comprehension would materialize the whole
-        batch at once and void the memory win). While the consumer trains on
-        pack N, a producer thread prepares pack N+1 — but strictly CPU work
-        only: ``pack_seq_ctx``'s cat plus ``_resolve_refs``' ray.get. H2D and
-        SP split stay on the consuming thread so CUDA call-thread ownership
-        stays simple.
+        Args:
+            seq_ctx (SequenceContext): Packed CPU context.
 
-        Hard constraints (breaking either reintroduces the bugs this design
-        fixed):
-
-        - ``_resolve_refs`` and ``pack_seq_ctx`` must stay pure CPU: no CUDA
-          calls and no ``dist.*`` collectives in the producer thread. Ref
-          freeing lives in the roles' fit finally, never here.
-        - The consumer side must always run to ``finally``: the stop flag +
-          queue drain there is what unblocks a producer blocked on ``put``
-          when the generator is abandoned (consumer exception, early return).
+        Returns:
+            SequenceContext: The device context of this rank (SP-split when configured).
         """
-        stop = threading.Event()
-        buffer: queue.Queue = queue.Queue(maxsize=1)
+        seq_ctx.offload_rollout_routed_experts = getattr(self.config, "offload_rollout_routed_experts", False)
+        device_seq = seq_ctx.copy().to(self.device)
+        if self.sp_mesh.size() > 1:
+            device_seq = device_seq.split(sequence_parallel_mesh=self.sp_mesh)
+        return device_seq
 
-        def _produce() -> None:
-            try:
-                for p in packs:
-                    if stop.is_set():
-                        return
-                    seq_ctx = self.host.pack_seq_ctx(p)  # CPU cat
-                    self._resolve_refs(seq_ctx)  # role-level refs resolution (ray.get)
-                    buffer.put((p, seq_ctx))
-                buffer.put(_SENTINEL)
-            except BaseException as exc:  # noqa: BLE001 - tunneled to the consumer below
-                buffer.put(exc)
+    def _train_update(self, items: list[ModelItem]) -> WorkerTrainLogItem:
+        """Run one optimizer update for an already calibrated step.
 
-        threading.Thread(target=_produce, daemon=True).start()
-        try:
-            while (item := buffer.get()) is not _SENTINEL:
-                if isinstance(item, BaseException):
-                    raise item
-                p, seq_ctx = item
-                seq_ctx.offload_rollout_routed_experts = self.host.config.offload_rollout_routed_experts
-                seq_ctx = seq_ctx.to(DEVICE)
-                sp_mesh = self.host.sp_mesh if split else None
-                if sp_mesh is not None and sp_mesh.size() > 1:
-                    seq_ctx = seq_ctx.split(sequence_parallel_mesh=sp_mesh)
-                yield p, seq_ctx
-        finally:
-            # Consumer exited early (exception or generator close): let the
-            # producer see the stop flag and drain the queue so its blocked
-            # ``put`` returns and the thread (and its materialized seq_ctx)
-            # can be released.
-            stop.set()
-            try:
-                while True:
-                    buffer.get_nowait()
-            except queue.Empty:
-                pass
+        Args:
+            items (list[ModelItem]): Engine inputs of one optimizer step.
 
-    def _iter_steps(self, *, split: bool = True) -> Iterator[list[tuple[list[int], SequenceContext]]]:
-        """Group ``_iter_packs`` deliveries by optimizer-step boundary.
-
-        ``_build_step_input`` needs the whole step's pack list, so this
-        buffers one step at a time. Materialization stays lazy across step
-        boundaries.
+        Returns:
+            WorkerTrainLogItem: Per-step training log item.
         """
-        plan = self._plan()
-        stream = self._iter_packs([p for step in plan for p in step], split=split)
-        for step in plan:
-            yield [next(stream) for _ in step]
+        self._global_train_step += 1
+        global_train_step = self._global_train_step
+        self.attempted_updates += 1
 
-    @abstractmethod
-    def _build_step_input(self, items: list[_PackItem]) -> list[ModelItem]:
-        """Merge one optimizer step's prepared packs into engine input.
-
-        Runs the role's ``LossContext.build_batches`` along the step boundary
-        so the global-normalization denominator is all-reduced once per step.
-        Role-specific batching (MTP depths, critic contexts) lives here.
-        """
-
-    def _train_optimizer_steps(self, optimizer_step_packs: Iterator[list[_PackItem]]) -> WorkerLogItem:
-        """Consume prepared optimizer steps and train.
-
-        Per optimizer update:
-          → ``_build_step_input`` (build_batches along the step boundary, one
-            all-reduce per normalization denominator)
-          → ``engine.train_step`` → ``clip_grad_norm`` →
-            ``optimizer_step_succeeds`` → ``step_optimizer``
-          → the lr scheduler only steps when the optimizer update applies
-          → accumulate ``WorkerLogItem.train_metrics``
-
-        Empty-update filtering and multi-pass expansion are done by the role
-        before calling this; they do not enter the skeleton.
-        """
-        from .worker import WorkerLogItem as _WorkerLogItem
-
-        worker_log_item: WorkerLogItem = _WorkerLogItem(train_entropy=0.0, train_metrics=[])
-        for step_items in optimizer_step_packs:
-            self._global_train_step += 1
-            global_train_step = self._global_train_step
-            engine_input = self._build_step_input(step_items)
-
-            # Make max_memory/reserved_memory below this step's peak instead of the
-            # process-lifetime peak (~2us, no sync), so the memory columns line up
-            # with per-step metrics such as `ep_load_peak_ratio`.
-            DEVICE_MODULE.reset_peak_memory_stats()
-            with self._maybe_profiling(global_train_step):
-                train_step_info = self.engine.train_step(data_batches=engine_input)
-            grad_norm = self.engine.clip_grad_norm()
-            stepped = optimizer_step_succeeds(self.engine, grad_norm)
-            self.engine.step_optimizer(grad_norm)
-            if stepped and self.lr_scheduler is not None:
+        # Make max_memory/reserved_memory below this step's peak instead of the
+        # process-lifetime peak (~2us, no sync).
+        DEVICE_MODULE.reset_peak_memory_stats()
+        with self._maybe_profiling(global_train_step):
+            train_step_info = self.engine.train_step(data_batches=items)
+        grad_norm = self.engine.clip_grad_norm()
+        applied = self.engine.step_optimizer(grad_norm)
+        if applied:
+            self.completed_updates += 1
+            if self.lr_scheduler is not None:
                 self.lr_scheduler.step()
 
-            engine_logs_info = dict(train_step_info.pop("logs_info"))  # type: ignore[misc]
-            engine_extra_info = train_step_info.pop("extra_info")  # type: ignore[misc]
-            train_step_info.pop("total_loss", None)  # type: ignore[misc]
-            if hasattr(engine_extra_info, "get"):
-                extra_info_dict = engine_extra_info.get()
-            else:
-                extra_info_dict = engine_extra_info
-            extra_info_dict = {
-                k: v.item() if isinstance(v, torch.Tensor) else v
-                for k, v in extra_info_dict.items()
-                if isinstance(v, (torch.Tensor, int, float))
-            }
-            if self.loss_cfg is not None:
-                extra_info_dict = self.loss_cfg.finalize_metrics(extra_info_dict, DEVICE)
-            extra_info_dict.update(self._extra_step_metrics())
-            max_memory = DEVICE_MODULE.max_memory_allocated() / (1024**3)
-            reserved_memory = DEVICE_MODULE.max_memory_reserved() / (1024**3)
+        engine_logs_info = dict(train_step_info.pop("logs_info"))  # type: ignore[misc]
+        engine_extra_info = train_step_info.pop("extra_info")  # type: ignore[misc]
+        train_step_info.pop("total_loss", None)  # type: ignore[misc]
+        if hasattr(engine_extra_info, "get"):
+            extra_info_dict = engine_extra_info.get()
+        else:
+            extra_info_dict = engine_extra_info
+        extra_info_dict = {
+            k: v.item() if isinstance(v, torch.Tensor) else v
+            for k, v in extra_info_dict.items()
+            if isinstance(v, (torch.Tensor, int, float))
+        }
+        if self.loss_cfg is not None:
+            extra_info_dict = self.loss_cfg.finalize_metrics(extra_info_dict, DEVICE)
+        extra_info_dict.update(self._extra_step_metrics())
+        max_memory = DEVICE_MODULE.max_memory_allocated() / (1024**3)
+        reserved_memory = DEVICE_MODULE.max_memory_reserved() / (1024**3)
 
-            train_log_item = {
+        train_log_item = cast(
+            "WorkerTrainLogItem",
+            {
                 **engine_logs_info,
                 **train_step_info,
                 **extra_info_dict,
                 "grad_norm": grad_norm.item(),
                 "max_memory": max_memory,
                 "reserved_memory": reserved_memory,
-            }
-            worker_log_item["train_metrics"].append(train_log_item)  # type: ignore[typeddict-item,arg-type]
-
-            log_str = ", ".join(
-                f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
-                for key, value in train_log_item.items()
-                if not key.startswith("reduced_train_policy_") and key != "max_ratio"
-            )
-            self.logger.info(f"Rank{self.rank} GlobalStep {global_train_step}: {log_str}")
-        return worker_log_item
+            },
+        )
+        log_str = ", ".join(
+            f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
+            for key, value in train_log_item.items()
+            if not key.startswith("reduced_train_policy_") and key != "max_ratio"
+        )
+        self.logger.info(f"Rank{self.rank} GlobalStep {global_train_step}: {log_str}")
+        return train_log_item
 
     def _maybe_profiling(self, global_train_step: int) -> Any:
         """Profile matching steps when the role enables profiling; no-op
@@ -487,19 +362,22 @@ class RoleWorker(ABC):
         return contextlib.nullcontext()
 
     def _extra_step_metrics(self) -> dict[str, float]:
-        """Role-specific per-step metrics merged into ``train_metrics``."""
+        """Role-specific per-step metrics merged into the training log."""
         return {}
 
-    def _masked_token_count(self, packs: list[list[int]]) -> int:
-        """Count trainable tokens (masked-label positions) across all ranks.
+    def _masked_token_count(self, batch: TrainBatch, packs: list[list[int]]) -> int:
+        """Count trainable tokens across all ranks for a set of packs.
 
-        Reads the host's cached CPU labels, so it works on pack indices before any materialization. The critic uses it
-        to drop empty updates symmetrically across ranks.
+        Args:
+            batch (TrainBatch): The local batch.
+            packs (list[list[int]]): Local pack indices.
+
+        Returns:
+            int: Global masked-token count.
         """
-        samples = self.host.get_cached_batch()[0]
-        local_tokens = sum(int(samples[index].shifted_labels.ne(-100).sum()) for pack in packs for index in pack)
+        local_tokens = batch.local_masked_token_count(packs)
         # NCCL-only process groups reject CPU tensors; keep it on the device.
-        total = torch.tensor(float(local_tokens), device=DEVICE)
+        total = torch.tensor(float(local_tokens), device=self.device)
         if dist.is_available() and dist.is_initialized():
             dist.all_reduce(total, op=dist.ReduceOp.SUM)
         return int(total.item())

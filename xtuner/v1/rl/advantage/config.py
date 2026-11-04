@@ -4,7 +4,7 @@ from typing import Annotated, Literal
 from cyclopts import Group, Parameter
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from xtuner.v1.rl.advantage.base import AdvantageEstimator
+from xtuner.v1.rl.advantage.base import AdvantageEstimator, TokenAdvantageEstimator
 
 
 advantage_group = Group("Advantage Estimation", sort_key=2, help="Advantage estimation configuration.")
@@ -15,7 +15,7 @@ class BaseAdvantageConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    def build(self) -> AdvantageEstimator:
+    def build(self) -> AdvantageEstimator | TokenAdvantageEstimator:
         raise NotImplementedError("Subclasses must implement this method.")
 
 
@@ -55,7 +55,7 @@ class GAEAdvantageConfig(BaseAdvantageConfig):
             raise ValueError(f"reward_scope must be 'segment' or 'session', got {self.reward_scope!r}.")
         return self
 
-    def build(self) -> AdvantageEstimator:
+    def build(self) -> TokenAdvantageEstimator:
         from xtuner.v1.rl.advantage.gae import GAEEstimator
 
         return GAEEstimator(
@@ -134,7 +134,7 @@ class DecoupledGAEAdvantageConfig(BaseAdvantageConfig):
             raise ValueError(f"actor_length_adaptive_alpha must be finite and positive when set, got {alpha}.")
         return self
 
-    def build(self) -> AdvantageEstimator:
+    def build(self) -> TokenAdvantageEstimator:
         from xtuner.v1.rl.advantage.gae import DecoupledGAEEstimator
 
         return DecoupledGAEEstimator(
