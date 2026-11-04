@@ -159,8 +159,8 @@ class TrainBatch:
                 if "rollout_logprobs" in self._loss_keys()
                 else None
             )
-            fields["returns"] = self._padding_loss_input("returns", padding_len) if self.has_targets else None
-            fields["old_values"] = self._padding_loss_input("old_values", padding_len) if self.has_targets else None
+            for key in ("returns", "old_values"):
+                fields[key] = self._padding_loss_input(key, padding_len) if key in self._loss_keys() else None
             for key in self.teacher_loss_keys:
                 fields[key] = self._padding_loss_input(key, padding_len)
 
@@ -207,8 +207,8 @@ class TrainBatch:
             offset += length
         return output
 
-    def install_advantages(self, payload: list[float] | TokenBatchProto) -> None:
-        """Broadcast scalar advantages or install aligned token rows.
+    def set_advantages(self, payload: list[float] | TokenBatchProto) -> None:
+        """Broadcast scalar advantages or set aligned token rows.
 
         Args:
             payload (list[float] | TokenBatchProto): One scalar per sample, or one
@@ -221,8 +221,8 @@ class TrainBatch:
         for sample, row in zip(self._samples, rows):
             sample.advantages = row.masked_fill(sample.shifted_labels.eq(-100), 0.0)
 
-    def install_old_values(self, rows: list[torch.Tensor]) -> None:
-        """Install the complete frozen critic values of every sample.
+    def set_old_values(self, rows: list[torch.Tensor]) -> None:
+        """Set the complete frozen critic values of every sample.
 
         Args:
             rows (list[torch.Tensor]): One full token row per sample, in plan order.
@@ -234,8 +234,8 @@ class TrainBatch:
         for sample, row in zip(self._samples, rows):
             sample.values = row.detach().reshape(1, -1).float().cpu()
 
-    def install_ppo_targets(self, advantages: TokenBatchProto, returns: TokenBatchProto) -> None:
-        """Install paired full-token PPO targets atomically.
+    def set_ppo_targets(self, advantages: TokenBatchProto, returns: TokenBatchProto) -> None:
+        """Set paired full-token PPO targets atomically.
 
         Both payloads are validated before any sample is written. Advantages are
         masked at ignored positions; returns keep their raw values.
@@ -330,14 +330,6 @@ class TrainBatch:
         """Release the local CPU samples; remote refs are owned by the
         trainer."""
         self._samples.clear()
-
-    @property
-    def has_targets(self) -> bool:
-        """Whether the batch already carries PPO targets (returns/old
-        values)."""
-        return bool(self._samples) and all(
-            sample.returns is not None and sample.values is not None for sample in self._samples
-        )
 
     def local_masked_token_count(self, packs: list[list[int]]) -> int:
         """Count trainable tokens of the given local packs before

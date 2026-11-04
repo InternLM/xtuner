@@ -87,8 +87,8 @@ class TrainingController:
         self.logger = get_logger()
         # Token estimators and the critic are configured together; scalar
         # estimators drive group-based training without a critic.
-        self._token_advantages = isinstance(advantage_estimator, TokenAdvantageEstimator)
-        if self._token_advantages != has_critic:
+        token_advantages = isinstance(advantage_estimator, TokenAdvantageEstimator)
+        if token_advantages != has_critic:
             raise ValueError("Token estimator and critic must be configured together")
         self._has_critic = has_critic
 
@@ -185,7 +185,7 @@ class TrainingController:
         for worker_index, worker in enumerate(self.workers):
             rank = pack_plan.ranks[worker_index // data_replicate_size]
             handles.append(
-                worker.install_advantages.remote(  # type: ignore[attr-defined]
+                worker.set_advantages.remote(  # type: ignore[attr-defined]
                     [advantages[index] for index in rank.global_indices]
                 )
             )
@@ -363,13 +363,16 @@ class TrainingController:
                 has_rollout_logprobs = has_rollout_logprobs or meta.has_rollout_logprobs
                 has_routed_experts = has_routed_experts or meta.has_routed_experts
 
+        pack_loss_keys = ["rollout_logprobs"] if has_rollout_logprobs else []
+        if self._has_critic:
+            pack_loss_keys += ["returns", "old_values"]
         return {
             "rollout_items": rollout_items,
             "reward_groups": reward_groups,
             "batch_attr": {
                 "rollout_idx": rollout_idx,
                 "use_3d_position_ids": use_3d_position_ids,
-                "pack_loss_keys": ["rollout_logprobs"] if has_rollout_logprobs else [],
+                "pack_loss_keys": pack_loss_keys,
                 "has_routed_experts": has_routed_experts,
             },
             "cluster_rewards": cluster_rewards_list,
@@ -479,7 +482,7 @@ class TrainingController:
         ]
         ray.get(
             [
-                worker.install_ppo_targets.remote(targets_by_dp[worker_index // data_replicate_size])  # type: ignore[attr-defined]
+                worker.set_ppo_targets.remote(targets_by_dp[worker_index // data_replicate_size])  # type: ignore[attr-defined]
                 for worker_index, worker in enumerate(self.workers)
             ],
             timeout=TRAIN_RAY_GET_TIMEOUT,

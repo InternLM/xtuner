@@ -6,12 +6,13 @@
 - TestTrainingSchedule —— pass 顺序、update 切分与 warmup 计数
 - TestResidencyAndGuards —— set_residency 跨角色搬运与 role placement 守卫
 - TestCriticConstruction —— critic 复用宿主 FSDP/SP 拓扑并 strict 加载
-- TestRoleCheckpoint —— role checkpoint 的计数/scheduler/RNG 契约
-- TestCriticSegmentTargets —— TrainBatch 上的 segment targets 安装与统计
+- TestRoleCheckpoint —— role checkpoint 的步号/scheduler/RNG 契约
+- TestCriticSegmentTargets —— TrainBatch 上的 segment targets 写入与统计
 - TestControllerPPOGuards —— token estimator / critic 构造期配对校验
 - TestCheckpointOrchestration —— checkpoint 的 role-first 目录编排
-- TestSessionGAEDispatch —— session GAE 按 PackPlan 恢复全局序并安装目标
+- TestSessionGAEDispatch —— session GAE 按 PackPlan 恢复全局序并写入目标
 - TestGAEFitSkipsGroupAdvantages —— GAE 模式不调用 group advantage 估计
+- TestCriticSPAndSessionTargets —— SP 非整除 pack、跨 DP 乱序 session 与空 DP
 """
 
 import tempfile
@@ -21,6 +22,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+import torch.distributed as dist
+from torch.testing._internal.common_distributed import DistributedTestBase
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig
 from xtuner.v1.config.optim import LRConfig
@@ -31,6 +34,7 @@ from xtuner.v1.rl.advantage import (
     GAEAdvantageConfig,
     GAEEstimator,
     GRPOAdvantageConfig,
+    TokenAdvantageEstimator,
     TokenStats,
     session_token_targets,
 )
@@ -45,6 +49,7 @@ from xtuner.v1.rl.trainer.schedule import build_lr_scheduler, partition_indices,
 from xtuner.v1.rl.trainer.train_batch import TrainBatch
 from xtuner.v1.rl.trainer.worker import TrainingWorker
 from xtuner.v1.train.trainer import LoadCheckpointConfig
+from xtuner.v1.utils.test_utils import init_data_mesh
 
 
 def _state(**overrides) -> RolloutState:
@@ -61,7 +66,7 @@ def _state(**overrides) -> RolloutState:
 
 
 class TestGAEAdvantageEstimation(unittest.TestCase):
-    """GAE 优势/回报估计的数值语义（public: GAEEstimator.compute_segment_gae / compute_session_gae）。"""
+    """GAE 优势/回报估计的数值语义（public: GAEEstimator.compute_segment_gae / session_token_targets）。"""
 
     def test_gae_places_outcome_reward_on_the_last_supervised_token(self):
         # 行为：结局 reward 只落在最后一个被监督的 token 上
@@ -302,8 +307,16 @@ class TestCriticConstruction(unittest.TestCase):
         train_engine.return_value.from_hf.assert_called_once_with("/tmp/critic", strict=True)
 
 
+class _CustomTokenEstimator(TokenAdvantageEstimator):
+    reward_scope = "segment"
+    normalize_actor_advantage = False
+
+    def compute_segment_gae(self, values, scores, mask, cu_seq_lens):
+        return GAEEstimator(normalize_actor_advantage=False).compute_segment_gae(values, scores, mask, cu_seq_lens)
+
+
 class TestCriticSegmentTargets(unittest.TestCase):
-    """critic 在 TrainBatch 上计算并安装 segment targets。"""
+    """critic 在 TrainBatch 上计算并写入 segment targets。"""
 
     @staticmethod
     def _batch(*, reward: float | None = 1.0, normalize_values: bool = True) -> TrainBatch:
@@ -333,7 +346,7 @@ class TestCriticSegmentTargets(unittest.TestCase):
             teacher_loss_keys=[],
             distillation_config=None,
         )
-        batch.install_old_values([torch.tensor([0.2, 0.1, 0.3])])
+        batch.set_old_values([torch.tensor([0.2, 0.1, 0.3])])
         return batch
 
     @staticmethod
@@ -342,7 +355,7 @@ class TestCriticSegmentTargets(unittest.TestCase):
         critic.device = torch.device("cpu")
         return critic
 
-    def test_installs_complete_segment_targets(self):
+    def test_sets_complete_segment_targets(self):
         batch = self._batch()
         stats = self._critic().compute_segment_targets(
             batch,
@@ -359,6 +372,17 @@ class TestCriticSegmentTargets(unittest.TestCase):
         self.assertAlmostEqual(stats.min, 0.7, places=5)
         self.assertAlmostEqual(stats.max, 0.9, places=5)
 
+    def test_custom_estimator_uses_public_token_interface(self):
+        batch = self._batch()
+        stats = self._critic().compute_segment_targets(
+            batch,
+            _CustomTokenEstimator(),
+            contribute=True,
+        )
+
+        batch.require_targets("critic")
+        self.assertEqual(stats.count, 2)
+
     def test_normalizes_actor_advantage_but_not_returns(self):
         batch = self._batch()
         stats = self._critic().compute_segment_targets(
@@ -373,7 +397,7 @@ class TestCriticSegmentTargets(unittest.TestCase):
         torch.testing.assert_close(pack.full_data["returns"], torch.tensor([[0.0, 1.0, 1.0]], dtype=torch.float32))
         self.assertAlmostEqual(stats.sum, 0.0, places=5)
 
-    def test_non_contributing_replica_installs_targets_without_stats(self):
+    def test_non_contributing_replica_sets_targets_without_stats(self):
         batch = self._batch()
         stats = self._critic().compute_segment_targets(
             batch,
@@ -456,7 +480,7 @@ class TestSessionGAEDispatch(unittest.TestCase):
         workers = [
             SimpleNamespace(
                 critic_collect_values=SimpleNamespace(remote=MagicMock(return_value=value)),
-                install_ppo_targets=SimpleNamespace(remote=MagicMock(return_value=None)),
+                set_ppo_targets=SimpleNamespace(remote=MagicMock(return_value=None)),
             )
             for value in value_batches
         ]
@@ -514,7 +538,7 @@ class TestSessionGAEDispatch(unittest.TestCase):
 
         for worker_index, worker in enumerate(workers):
             rank = pack_plan.ranks[worker_index // 2]
-            payload = worker.install_ppo_targets.remote.call_args.args[0]
+            payload = worker.set_ppo_targets.remote.call_args.args[0]
             advantage_rows = payload[0].chunk()
             return_rows = payload[1].chunk()
             self.assertEqual(len(advantage_rows), len(rank.global_indices))
@@ -576,7 +600,6 @@ class TestGAEFitSkipsGroupAdvantages(unittest.TestCase):
         controller.advantage_estimator = GAEEstimator(reward_scope="segment")
         controller.distillation = SimpleNamespace(task_adv_weight=1.0)
         controller.logger = MagicMock()
-        controller._token_advantages = True
         controller._has_critic = True
         controller._prepare_group_targets = MagicMock(side_effect=AssertionError("must not run in GAE mode"))
 
@@ -606,9 +629,9 @@ class _DummyRole(RoleWorker):
 
 
 class TestRoleTrainUpdate(unittest.TestCase):
-    """RoleWorker._train_update owns update counting and scheduler stepping."""
+    """RoleWorker._train_update owns the global step and scheduler stepping."""
 
-    def test_counts_only_applied_updates(self):
+    def test_steps_scheduler_only_for_applied_updates(self):
         role = _DummyRole.__new__(_DummyRole)
         role.role_name = "actor"
         role.rank = 0
@@ -616,8 +639,6 @@ class TestRoleTrainUpdate(unittest.TestCase):
         role.logger = MagicMock()
         role.loss_cfg = None
         role._global_train_step = 0
-        role.attempted_updates = 0
-        role.completed_updates = 0
         role.lr_scheduler = MagicMock()
         role.engine = SimpleNamespace(
             train_step=MagicMock(
@@ -633,20 +654,18 @@ class TestRoleTrainUpdate(unittest.TestCase):
 
         log_item = RoleWorker._train_update(role, [])
 
-        self.assertEqual(role.attempted_updates, 1)
-        self.assertEqual(role.completed_updates, 1)
+        self.assertEqual(role._global_train_step, 1)
         role.lr_scheduler.step.assert_called_once_with()
         self.assertIn("grad_norm", log_item)
 
         role.engine.step_optimizer = MagicMock(return_value=False)
         RoleWorker._train_update(role, [])
-        self.assertEqual(role.attempted_updates, 2)
-        self.assertEqual(role.completed_updates, 1)
+        self.assertEqual(role._global_train_step, 2)
         self.assertEqual(role.lr_scheduler.step.call_count, 1)
 
 
 class TestRoleCheckpoint(unittest.TestCase):
-    """Role checkpoint owns counters, scheduler definition and per-rank RNG."""
+    """Role checkpoint owns the global step, scheduler definition and per-rank RNG."""
 
     @staticmethod
     def _role(*, scheduler_steps: int = 10, initial_lr: float = 1e-3) -> _DummyRole:
@@ -658,8 +677,6 @@ class TestRoleCheckpoint(unittest.TestCase):
         role.rank = 0
         role.seed = 0
         role.logger = MagicMock()
-        role.attempted_updates = 0
-        role.completed_updates = 0
         role._global_train_step = 0
         optimizer = torch.optim.AdamW([torch.nn.Parameter(torch.zeros(1))], lr=initial_lr)
         role.engine = SimpleNamespace(
@@ -670,12 +687,11 @@ class TestRoleCheckpoint(unittest.TestCase):
         role.lr_scheduler = build_lr_scheduler(optimizer, role.config.lr_cfg, scheduler_steps)
         return role
 
-    def test_save_resume_restores_counts_scheduler_and_rng(self):
+    def test_save_resume_restores_step_scheduler_and_rng(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "actor"
             role = self._role()
-            role.attempted_updates = 3
-            role.completed_updates = 2
+            role._global_train_step = 3
             role.lr_scheduler.step()
             expected_lr = role.lr_scheduler.get_last_lr()[0]
             torch.manual_seed(1234)
@@ -691,8 +707,7 @@ class TestRoleCheckpoint(unittest.TestCase):
             resumed = self._role(initial_lr=5e-4)
             resumed.resume(path, LoadCheckpointConfig())
 
-            self.assertEqual(resumed.attempted_updates, 3)
-            self.assertEqual(resumed.completed_updates, 2)
+            self.assertEqual(resumed._global_train_step, 3)
             self.assertEqual(resumed.engine.optimizer.param_groups[0]["lr"], expected_lr)
             self.assertTrue(torch.equal(torch.get_rng_state(), expected_rng))
 
@@ -719,3 +734,122 @@ class TestRoleCheckpoint(unittest.TestCase):
             resumed = self._role(scheduler_steps=20)
             with self.assertRaisesRegex(ValueError, "Scheduler configuration changed"):
                 resumed.resume(path, LoadCheckpointConfig())
+
+
+class _InputValueCritic(CriticWorker):
+    def forward_only(self, seq_ctx):
+        return seq_ctx.input_ids.float().unsqueeze(-1)
+
+
+class TestCriticSPAndSessionTargets(DistributedTestBase):
+    @property
+    def world_size(self) -> int:
+        return 6
+
+    def test_sp_values_restore_cross_dp_session_targets(self):
+        dist.init_process_group(
+            "gloo",
+            init_method=f"file://{self.file_name}",
+            rank=self.rank,
+            world_size=self.world_size,
+        )
+        try:
+            mesh = init_data_mesh("cpu", 2)
+            rank = dist.get_rank()
+            states = [
+                _state(
+                    rollout_id=0,
+                    session_id=9,
+                    input_ids=[30, 31, 32, 33],
+                    labels=[-100, -100, 32, 33],
+                    reward={"score": 2.0},
+                    extra_fields={"agent_trace_segment_index": 1},
+                ),
+                _state(
+                    rollout_id=1,
+                    session_id=9,
+                    input_ids=[10, 11, 12],
+                    labels=[-100, 11, 12],
+                    reward={"score": 0.0},
+                    extra_fields={"agent_trace_segment_index": 0},
+                ),
+                _state(
+                    rollout_id=2,
+                    session_id=10,
+                    input_ids=[50, 51, 52, 53, 54],
+                    labels=[-100, -100, -100, 53, 54],
+                    reward={"score": -1.0},
+                    extra_fields={"agent_trace_segment_index": 0},
+                ),
+            ]
+            plan = PackPlan(
+                ranks=(
+                    RankPlan(global_indices=(1,), steps=(((0,),),)),
+                    RankPlan(global_indices=(2, 0), steps=(((0, 1),),)),
+                    RankPlan(global_indices=(), steps=(((),),)),
+                ),
+                metrics={},
+            )
+            rank_plan = plan.ranks[rank // 2]
+            batch = TrainBatch(
+                [states[index] for index in rank_plan.global_indices],
+                rank_plan,
+                {
+                    "rollout_idx": 0,
+                    "use_3d_position_ids": False,
+                    "pack_loss_keys": ["returns", "old_values"],
+                    "has_routed_experts": False,
+                },
+                DistillationTrainerAdapter(None),
+                pack_max_length=9,
+                model_cfg=SimpleNamespace(n_routed_experts=0),
+                teacher_loss_keys=[],
+                distillation_config=None,
+            )
+            critic = _InputValueCritic.__new__(_InputValueCritic)
+            critic.sp_mesh = mesh["sp"]
+            critic.device = torch.device("cpu")
+            critic.config = SimpleNamespace(offload_rollout_routed_experts=False)
+            critic.engine = SimpleNamespace(_maybe_precompute_float8_dynamic_scale_for_fsdp=MagicMock())
+
+            value_payload = critic.collect_values(batch, return_values=rank % 2 == 0)
+            if rank % 2 == 1:
+                self.assertIsNone(value_payload)
+            elif rank == 4:
+                self.assertEqual(value_payload.lengths.numel(), 0)
+
+            payloads = [None] * self.world_size
+            dist.all_gather_object(payloads, value_payload)
+            rows_by_dp = [payloads[index] for index in (0, 2, 4)]
+            self.assertTrue(all(payload is not None for payload in rows_by_dp))
+            values = plan.restore_rows(rows_by_dp)
+            expected_values = [torch.tensor(state.input_ids[:-1], dtype=torch.float32) for state in states]
+            for actual, expected in zip(values, expected_values):
+                torch.testing.assert_close(actual, expected)
+
+            estimator = GAEEstimator(reward_scope="session", normalize_actor_advantage=True)
+            advantages, returns = session_token_targets(estimator, states, values)
+            expected_advantages, expected_returns = session_token_targets(
+                estimator,
+                states,
+                expected_values,
+            )
+            batch.set_ppo_targets(
+                TokenBatchProto.concat([advantages[index] for index in rank_plan.global_indices]),
+                TokenBatchProto.concat([returns[index] for index in rank_plan.global_indices]),
+            )
+            batch.require_targets("critic")
+
+            full_pack = batch.materialize(batch.plan.steps[0][0])
+            if not rank_plan.global_indices:
+                torch.testing.assert_close(full_pack.full_data["old_values"], torch.zeros(1, 9))
+                torch.testing.assert_close(full_pack.full_data["returns"], torch.zeros(1, 9))
+            for field, expected_rows in (
+                ("advantages", expected_advantages),
+                ("returns", expected_returns),
+            ):
+                for local_index, row in batch.unpack_rows(full_pack, full_pack.full_data[field]):
+                    global_index = rank_plan.global_indices[local_index]
+                    torch.testing.assert_close(row.flatten(), expected_rows[global_index])
+        finally:
+            dist.destroy_process_group()

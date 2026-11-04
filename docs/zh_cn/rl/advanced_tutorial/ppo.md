@@ -1,12 +1,12 @@
 # PPO
 
-PPO 在 actor 的 policy loss 之外再训一个 value head。Critic 不是第二组 Ray actor，而是挂在 actor 的 `TrainingWorker` 上，配置写在 `WorkerConfig.critic_cfg`。两边共用训练卡，由 `switch_role_modules` 换上换下：先切到 critic，`collect_values` 取 value，`GAEEstimator.compute_gae` 算出 actor advantage 和 critic return，再 `critic.fit`，然后切回 actor 做 policy 更新。
+PPO 在 actor 的 policy loss 之外再训一个 value head。Critic 不是第二组 Ray actor，而是挂在 actor 的 `TrainingWorker` 上，配置写在 `WorkerConfig.critic_cfg`。两边共用训练卡，由 `TrainingWorker.set_residency` 换上换下：先切到 critic，`collect_values` 取 value，再通过 `compute_segment_gae`（session 模式由 `session_token_targets` 拼接轨迹）算出 actor advantage 和 critic return，再 `critic.fit`，然后切回 actor 做 policy 更新。
 
 Critic 模型配置的 `head_config.type` 必须是 `"value_head"`。checkpoint 里没有 value head 权重时，这个头用 `Normal(0, 1 / (hidden_size + 1))` 初始化，其余权重从 checkpoint 加载。Actor 的 `head_config.type` 是 `"lm_head"`。
 
 Critic 前向不使用 rollout 记录的 expert id。`seq_ctx.rollout_routed_experts` 在进 critic 前被置成 `None`，MoE router 按 critic 自己的 logits 选 expert。这些 ObjectRef 留给后面的 actor `fit` 再取、再释放。
 
-参数在 CPU 和 GPU 之间的切换只发生在 `onload` / `offload`，由 `switch_role_modules` 调用。`collect_values` 和 `critic.fit` 不自己搬模型。
+参数在 CPU 和 GPU 之间的切换只发生在 `onload` / `offload`，由 `TrainingWorker.set_residency` 调用。`collect_values` 和 `critic.fit` 不自己搬模型。
 
 ## GAEAdvantageConfig
 
@@ -37,11 +37,11 @@ class GAEAdvantageConfig(BaseAdvantageConfig):
 - `reward_scope` 决定奖励放在哪里。`segment` 把每条样本当作一条轨迹，奖励放在该样本最后一个可训练动作上。`session` 把同一 session 的片段拼成一条轨迹，只在最后一个可训练动作上放一个奖励。`cu_seq_lens` 在轨迹边界重置，观察 token（`labels[1:] == -100`）不参与递推。
 - `normalize_actor_advantage` 为 `True` 时，对整个 batch 里保留下来的 actor advantage 做标准化。Critic return 不标准化。被掩掉的位置写成 0。
 
-`GAEEstimator.compute` 不用于 PPO。组内标量 advantage 走 GRPO 那组 estimator；PPO 在 critic value 前向之后调用 `compute_gae`。
+`GAEEstimator.compute` 不用于 PPO。组内标量 advantage 走 GRPO 那组 estimator；segment PPO 在 critic value 前向之后调用 `compute_segment_gae`，session PPO 则由 `session_token_targets` 完成跨 segment 的目标计算。
 
 ## Actor loss
 
-Actor 更新的是词表上的 policy loss，配置类型是 [`GRPOLossConfig`](xtuner.v1.rl.loss.GRPOLossConfig)。`compute_gae` 返回的是每个 token 一条 advantage，actor `fit` 按这个向量对齐到 `shifted_labels`。`labels == -100` 的位置 advantage 写成 0，loss 权重也是 0。切回 actor 之后、做 policy 更新之前，actor 会再算一遍当前策略的 `old_logprobs`。
+Actor 更新的是词表上的 policy loss，配置类型是 [`GRPOLossConfig`](xtuner.v1.rl.loss.GRPOLossConfig)。GAE 为每个 token 生成一条 advantage，actor `fit` 按这个向量对齐到 `shifted_labels`。`labels == -100` 的位置 advantage 写成 0，loss 权重也是 0。切回 actor 之后、做 policy 更新之前，actor 会再算一遍当前策略的 `old_logprobs`。
 
 `policy_loss_cfg["loss_type"]` 选 `vanilla` 或 `mask_pg`。两种都先算重要性比：
 
@@ -80,16 +80,14 @@ class CriticWorkerConfig(BaseModel):
     loss_cfg: CriticLossConfig = CriticLossConfig()
     lr_cfg: LRConfig
     load_from: str | Path
-    optimizer_steps: int = 1
     num_passes: int = 1
-    optimizer_steps_per_pass: int | None = None
+    optimizer_steps_per_pass: int = 1
     scheduler_steps: int = 1_000_000
 ```
 
 - Critic 挂在 actor 的 `TrainingWorker` 上，复用 host 的 `WorkerConfig.fsdp_cfg` 与 `sp_size`，因此在 `CriticWorkerConfig` 中不再重复配置 FSDP 和序列并行拓扑。
-- `optimizer_steps_per_pass` 为 `None` 时，critic 沿用 actor 的 pack 计划，并检查步数不超过 `optimizer_steps`。
-- 设置了 `optimizer_steps_per_pass` 时，每个 pass 把本地 pack 摊平。第一轮保持原顺序，之后的 pass 打乱，再切成 `optimizer_steps_per_pass` 次优化器更新。`num_passes` 是重复次数。
-- 一次更新里可训练 token 数为 0 时跳过。梯度范数通过 `optimizer_step_succeeds` 时才 `scheduler.step()`。
+- 每个 pass 都把本地 pack 摊平，第一轮保持原顺序，之后的 pass 打乱，再切成至多 `optimizer_steps_per_pass` 次优化器更新。`num_passes` 是完整 pass 的重复次数；`optimizer_steps_per_pass=1` 表示该 pass 的全部 pack 组成一次更新。
+- 一次更新里全局可训练 token 数为 0 时，所有 rank 共同跳过。`TrainEngine.step_optimizer` 返回实际是否应用更新，只有返回 `True` 时才调用 `scheduler.step()`。
 
 ## Checkpoint 布局
 
