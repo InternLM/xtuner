@@ -1500,8 +1500,8 @@ class BaseRLTrainer:
         all_scalars["async/failed_samples"] = produce_result.failed_samples
         all_scalars["async/filtered_samples"] = produce_result.filtered_samples
         if produce_result.custom_scalars:
-            for key, value in derive_window_means(produce_result.custom_scalars).items():
-                all_scalars[f"agent/{key}"] = value
+            for metric_key, metric_value in derive_window_means(produce_result.custom_scalars).items():
+                all_scalars[f"agent/{metric_key}"] = metric_value
 
         if train_info:
             data_info = train_info.get("data_info", {})
