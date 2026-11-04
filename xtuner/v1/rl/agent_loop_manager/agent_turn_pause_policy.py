@@ -5,6 +5,9 @@ from .produce_utils import pause_pending_tasks, retain_pending_tasks
 class DrainPendingPausePolicy:
     pending_cleanup = staticmethod(pause_pending_tasks)
 
+    async def before_sync(self, manager, checkpoint_due):
+        return
+
     async def pause(self, controller):
         await controller.pause_generation.remote()
 
@@ -15,10 +18,15 @@ class DrainPendingPausePolicy:
 class AgentTurnPausePolicy:
     pending_cleanup = staticmethod(retain_pending_tasks)
 
-    def __init__(self, *, freeze_timeout: float, drain_timeout: float):
+    def __init__(self, *, freeze_timeout: float, drain_timeout: float, quiesce_timeout: float = 1800):
+        self.quiesce_timeout = quiesce_timeout
         self.freeze_timeout = freeze_timeout
         self.drain_timeout = drain_timeout
         self.barrier = None
+
+    async def before_sync(self, manager, checkpoint_due):
+        if checkpoint_due:
+            await manager.quiesce(self.quiesce_timeout)
 
     async def pause(self, controller):
         self.barrier = await controller.prepare_pause.remote(

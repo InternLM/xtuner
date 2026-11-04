@@ -1,5 +1,6 @@
 import copy
 import json
+import time
 from functools import reduce
 from http import HTTPStatus
 from operator import add
@@ -578,6 +579,9 @@ class SessionServer:
     async def _forward_request(self, request: web.Request, lease: RequestLease | None = None) -> web.Response:
         """Proxy handler: detect format, run hooks, forward, stream back."""
 
+        request_start = time.perf_counter()
+        prepare_s = 0.0
+        trace_s = 0.0
         req_path = request.match_info["path"]
         is_generation_endpoint = _is_generation_endpoint(request.method, req_path)
         fmt = _detect_format(req_path)
@@ -649,7 +653,9 @@ class SessionServer:
                     orig_return_token_ids = _bool_request_value(request_data.get("return_token_ids"), False)
                     orig_return_routed_experts = _bool_request_value(request_data.get("return_routed_experts"), True)
 
+                    prepare_start = time.perf_counter()
                     request_data = await self.on_request(request_data, fmt, trace_enabled=trace_enabled)
+                    prepare_s = time.perf_counter() - prepare_start
                     request_body = json.dumps(request_data).encode("utf-8")
             except (json.JSONDecodeError, UnicodeDecodeError):
                 pass
@@ -694,6 +700,7 @@ class SessionServer:
             else None
         )
 
+        forward_start = time.perf_counter()
         timeout = ClientTimeout(total=self.request_timeout, sock_connect=30)
         async with ClientSession(read_bufsize=self.read_bufsize, timeout=timeout) as client:
             async with client.request(
@@ -784,6 +791,7 @@ class SessionServer:
                         body=final_raw_response,
                     )
 
+        forward_s = time.perf_counter() - forward_start
         # Apply abstract on_response processing
         response_data: Optional[dict] = None
         skip_done = bool(is_stream and not trace_response)
@@ -816,7 +824,9 @@ class SessionServer:
 
             if response_data is not None:
                 try:
+                    trace_start = time.perf_counter()
                     await self.on_response(response_data, fmt, orig_req_body)
+                    trace_s = time.perf_counter() - trace_start
                     if lease is not None and any(c.get("finish_reason") not in {"stop", "length", "tool_calls"}
                                                   for c in response_data.get("choices", [])):
                         raise RuntimeError("Unsuccessful backend generation terminal")
@@ -829,6 +839,9 @@ class SessionServer:
                         all(c.get("finish_reason") is not None for c in response_data["choices"]))
             terminal = "trace_committed" if complete and not session_error_msg else "failed"
             get_logger().info(f"request_terminal id={lease.request_id} outcome={terminal} backend_ended={complete}")
+            get_logger().info(f"request_timing id={lease.request_id} prepare_s={prepare_s:.6f} "
+                              f"forward_s={forward_s:.6f} trace_s={trace_s:.6f} "
+                              f"total_s={time.perf_counter() - request_start:.6f}")
             lease.settlement = SettlementReceipt(complete, True, terminal)
             if terminal == "trace_committed":
                 payload = json.loads(response.body)

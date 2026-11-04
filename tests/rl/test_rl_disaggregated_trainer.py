@@ -35,6 +35,7 @@ from xtuner.v1.rl.agent_loop_manager import (
     ProduceBatchResult,
     ProduceBatchStatus,
 )
+from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.distillation import DistillationTrainerAdapter
 from xtuner.v1.train.rl_trainer import RLDisaggregatedTrainer, _validate_sync_intervals
 
@@ -54,6 +55,12 @@ class _FakeManager:
     async def get_batch(self, batch_size: int, train_step: int):
         self.calls.append(("get_batch", batch_size, train_step))
         return self._results.pop(0)
+
+    async def prepare_sync(self, checkpoint_due):
+        self.calls.append(("prepare_sync", checkpoint_due))
+
+    async def close(self):
+        self.calls.append("close")
 
     async def pause_produce(self):
         self.calls.append("pause_produce")
@@ -104,6 +111,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
     def _make_trainer(self, agent_loop_manager):
         trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
+        trainer._debug_rollout = trainer._debug_train = False
         trainer.logger = MagicMock()
         trainer._cur_step = 0
         trainer._total_train_steps = 1
@@ -114,6 +122,8 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._enable_initial_evaluate = False
         trainer._evaluate_step = 1
         trainer._debug_rollout = False
+        trainer._debug_train = False
+        trainer._checkpoint_interval = -1
         trainer._display_all_workers_log = False
         trainer._num_workers = 1.0
         trainer._rollout_num_workers = 1.0
@@ -186,6 +196,29 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
                 }
             ],
         }
+
+    def test_debug_rollout_saves_three_steps_without_optimizer_or_sync(self):
+        states = [[RolloutState(message=[], status=Status.COMPLETED)]]
+        manager = _FakeManager([ProduceBatchResult(rollout_states=states) for _ in range(3)])
+        trainer = self._make_trainer(manager)
+        trainer._debug_rollout = True
+        trainer._total_train_steps = 3
+        trainer._save_debug_rollout_batch = MagicMock()
+        trainer._sync_weights_and_save = AsyncMock()
+        trainer.fit()
+        self.assertEqual([c.args[1] for c in trainer._save_debug_rollout_batch.call_args_list], [1, 2, 3])
+        trainer.train_controller.fit.assert_not_called()
+        trainer._sync_weights_and_save.assert_not_awaited()
+        self.assertEqual(trainer._cur_step, 3)
+
+    def test_debug_train_reuses_existing_loop_and_saves_actor_optimizer(self):
+        trainer = self._make_trainer(_FakeManager([]))
+        trainer._debug_train = True
+        trainer._fit_debug_train = MagicMock()
+        trainer.train_controller.save = MagicMock()
+        trainer.fit()
+        trainer._fit_debug_train.assert_called_once_with()
+        trainer.train_controller.save.assert_called_once_with(str(trainer.exp_dir / "debug-train-dcp"), False)
 
     def test_fit_persists_checkpoint_for_completed_model_step(self):
         # 验证 checkpoint 以 fit 完成的 model_step 为准，并通过 async manager.save 落盘。
@@ -536,6 +569,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
     def test_resume_from_checkpoint_makes_empty_init_workers_ready(self):
         trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
+        trainer._debug_rollout = trainer._debug_train = False
         trainer.logger = MagicMock()
         trainer._load_checkpoint_cfg = SimpleNamespace(checkpoint_path=Path(self.temp_dir.name))
         trainer.train_controller = SimpleNamespace(resume=MagicMock(return_value="resume"))
@@ -661,6 +695,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
     def test_resource_layout_uses_distinct_train_and_rollout_group_names(self):
         # 验证 train/rollout placement group 使用不同名字，避免 Ray 复用同一组资源。
         trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
+        trainer._debug_rollout = trainer._debug_train = False
         trainer.logger = MagicMock()
         trainer._meta = SimpleNamespace(
             latest_exp=SimpleNamespace(exp_dir=str(Path(self.temp_dir.name) / "20260416130000")),
@@ -691,6 +726,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
     def test_resource_layout_fails_fast_when_train_and_rollout_share_group(self):
         # 验证 Ray 返回同一 placement group 时 fail fast，并打印可排查的不变量。
         trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
+        trainer._debug_rollout = trainer._debug_train = False
         trainer.logger = MagicMock()
         trainer._meta = SimpleNamespace(
             latest_exp=SimpleNamespace(exp_dir=str(Path(self.temp_dir.name) / "20260416130000")),
