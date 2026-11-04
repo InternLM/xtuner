@@ -1,7 +1,6 @@
 import unittest
 
 import numpy as np
-
 from xtuner.v1.rl.rollout.trace_store import RolloutTraceStore, TokenizedSegment, Trie
 
 

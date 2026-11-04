@@ -3,7 +3,6 @@ import unittest
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
-
 from xtuner.v1.rl.rollout.request_gate import RequestGate
 from xtuner.v1.rl.rollout.session_server import SessionServer
 
