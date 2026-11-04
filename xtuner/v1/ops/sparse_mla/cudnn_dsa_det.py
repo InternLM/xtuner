@@ -55,15 +55,20 @@ def _ensure_det_cudnn_runtime() -> None:
     import cudnn
 
     version = getattr(cudnn, "__version__", "unknown")
-    assert version == _DET_TESTED_CUDNN_VERSION, (
-        f"deterministic DSA backward is validated against cudnn {_DET_TESTED_CUDNN_VERSION}, "
-        f"found {version}: the scatter_dkv_atomic override mirrors that version's internals. "
-        "Re-validate the subclass against the new cudnn (see _cudnn_dsa_bwd_det_subclass.py) "
-        "and bump _DET_TESTED_CUDNN_VERSION, or run with XTUNER_DETERMINISTIC=false."
-    )
-    assert hasattr(FlashAttentionDSABackwardSm90Det, "scatter_dkv_atomic") and hasattr(
-        FlashAttentionDSABackwardSm90Det.__mro__[1], "scatter_dkv_atomic"
-    ), "cudnn's FlashAttentionDSABackwardSm90 no longer has scatter_dkv_atomic to override"
+    if version != _DET_TESTED_CUDNN_VERSION:
+        # RuntimeError, not assert: `python -O` strips asserts, which would silently
+        # void the version pin and lose bitwise repeatability under the det flag.
+        raise RuntimeError(
+            f"deterministic DSA backward is validated against cudnn {_DET_TESTED_CUDNN_VERSION}, "
+            f"found {version}: the scatter_dkv_atomic override mirrors that version's internals. "
+            "Re-validate the subclass against the new cudnn (see _cudnn_dsa_bwd_det_subclass.py) "
+            "and bump _DET_TESTED_CUDNN_VERSION, or run with XTUNER_DETERMINISTIC=false."
+        )
+    if not (
+        hasattr(FlashAttentionDSABackwardSm90Det, "scatter_dkv_atomic")
+        and hasattr(FlashAttentionDSABackwardSm90Det.__mro__[1], "scatter_dkv_atomic")
+    ):
+        raise RuntimeError("cudnn's FlashAttentionDSABackwardSm90 no longer has scatter_dkv_atomic to override")
     _det_runtime_checked = True
 
 
@@ -77,12 +82,17 @@ def _check_accum_workspace(n_splits: int, seqlen_k_rounded: int, head_dim_rounde
     workspace_bytes = 4 * n_splits * seqlen_k_rounded * head_dim_rounded
     free_bytes, _ = torch.cuda.mem_get_info(device)
     if workspace_bytes > free_bytes:
+        if n_splits == 1:
+            hint = "Even a single per-CTA slice does not fit; run with XTUNER_DETERMINISTIC=false."
+        else:
+            hint = (
+                "Reduce `chunk` in flash_attn_bwd_sm90_multilaunch (fewer slices per launch, "
+                "proportionally more launches) or run with XTUNER_DETERMINISTIC=false."
+            )
         raise RuntimeError(
             f"deterministic DSA backward needs {workspace_bytes / 2**30:.2f} GiB for the per-CTA "
             f"FP32 accumulator ({n_splits} slices x {seqlen_k_rounded} kv x {head_dim_rounded} dim "
-            f"x 4 bytes) but only {free_bytes / 2**30:.2f} GiB is free. Reduce `chunk` in "
-            "flash_attn_bwd_sm90_multilaunch (fewer slices per launch, proportionally more "
-            "launches) or run with XTUNER_DETERMINISTIC=false."
+            f"x 4 bytes) but only {free_bytes / 2**30:.2f} GiB is free. {hint}"
         )
 
 
@@ -180,10 +190,13 @@ def flash_attn_bwd_sm90(
     # query-head tile per CTA (qhead_per_kvhead > tile_m) would make CTAs (x, 0)
     # and (x, 1) silently share slice x and lose bitwise repeatability. Reject
     # such shapes instead of falling back to the nondeterministic stock path.
-    assert qhead_per_kvhead <= m_block_size, (
-        f"deterministic DSA backward requires qhead_per_kvhead <= {m_block_size} "
-        f"(single query-head tile per CTA), got {qhead_per_kvhead}"
-    )
+    if qhead_per_kvhead > m_block_size:
+        # RuntimeError, not assert: `python -O` strips asserts — this guard is what
+        # keeps the blockIdx.x-only slice offset sound (see the comment above).
+        raise RuntimeError(
+            f"deterministic DSA backward requires qhead_per_kvhead <= {m_block_size} "
+            f"(single query-head tile per CTA), got {qhead_per_kvhead}"
+        )
 
     device = q.device
 
@@ -221,10 +234,6 @@ def flash_attn_bwd_sm90(
     sm_count = torch.cuda.get_device_properties(device).multi_processor_count
     total_blocks = seqlen_q * num_head_kv * batch_size  # num_head(grid) = n_kv * qhead_tiles = 1
     n_splits = min(sm_count, total_blocks)
-    import os as _os
-
-    if "DET_N_SPLITS" in _os.environ:
-        n_splits = int(_os.environ["DET_N_SPLITS"])
     if n_splits_override is not None:
         n_splits = n_splits_override
     if not only_preprocess:
@@ -233,11 +242,13 @@ def flash_attn_bwd_sm90(
         # is (seqlen_q, 1, 1) — one CTA per query — so seqlen_q must not exceed
         # n_splits; longer sequences must go through flash_attn_bwd_sm90_multilaunch,
         # which launches at most chunk=n_splits queries at a time.
-        assert seqlen_q <= n_splits, (
-            f"deterministic DSA backward needs one accumulator slice per CTA: this launch has "
-            f"seqlen_q={seqlen_q} CTAs but n_splits={n_splits} slices. "
-            "Use flash_attn_bwd_sm90_multilaunch for longer sequences."
-        )
+        if seqlen_q > n_splits:
+            # RuntimeError, not assert: `python -O` strips asserts (see above).
+            raise RuntimeError(
+                f"deterministic DSA backward needs one accumulator slice per CTA: this launch has "
+                f"seqlen_q={seqlen_q} CTAs but n_splits={n_splits} slices. "
+                "Use flash_attn_bwd_sm90_multilaunch for longer sequences."
+            )
     if dkv_accum is None:
         _check_accum_workspace(n_splits, seqlen_k_rounded, head_dim_rounded, device)
         dkv_accum = torch.zeros(
@@ -467,13 +478,15 @@ def flash_attn_bwd_sm90_multilaunch(
     A single ordered reduction + postprocess runs at the end.
 
     Memory contract: the accumulator workspace is `4 * min(chunk, S_q) *
-    round_up(S_k, 64) * round_up(D, 32)` bytes (one full-KV FP32 slice per CTA of
+    round_up(S_k, 64) * round_up(D, 32)` bytes (one full-KV FP32 slice per query of
     a launch) plus one reduced accumulator of `4 * round_up(S_k, 64) *
     round_up(D, 32)` bytes. That is 4 GiB at the GLM-5.3 CI shape (S_k=16K,
-    D=512) but grows linearly with S_k (144 GiB at S_k=512K, D=576), so long
-    sequences must shrink `chunk` (fewer slices per launch, proportionally more
-    launches) — shapes that still cannot fit raise a clear error via
-    `_check_accum_workspace` instead of a raw CUDA OOM.
+    D=512) but grows linearly with S_k (144 GiB at S_k=512K, D=576 with
+    chunk=128). The driver therefore halves the per-launch query count (and the
+    slice count) until the workspace fits 80% of the free memory — longer
+    sequences run as more, smaller launches instead of erroring. Only when a
+    single slice still does not fit does `_check_accum_workspace` raise a clear
+    error instead of a raw CUDA OOM.
     """
     total_S_q, num_head, head_dim = q.shape
     total_S_kv = kv.shape[0]
@@ -481,11 +494,23 @@ def flash_attn_bwd_sm90_multilaunch(
     head_dim_rounded = (head_dim + 32 - 1) // 32 * 32
     seqlen_k_rounded = (total_S_kv + 63) // 64 * 64
 
-    # slices are private per CTA of a launch: need chunk slices (may exceed SM
-    # count when a launch spans multiple waves; CTAs of different waves never
-    # run concurrently... they may, but slice ownership is by blockIdx which is
-    # unique within the launch, so privacy holds regardless of scheduling).
+    # slices are private per CTA of a launch: need one slice per query of a
+    # launch (may exceed SM count when a launch spans multiple waves; CTAs of
+    # different waves never run concurrently... they may, but slice ownership is
+    # by blockIdx which is unique within the launch, so privacy holds regardless
+    # of scheduling).
     n_splits = min(chunk, total_S_q)
+    # Auto-shrink the launch granularity until the FP32 slice workspace fits a
+    # budget of 80% free memory: chunk=128 at 512K/576-dim would need 144 GiB,
+    # which op-level users cannot remediate by hand. Halving n_splits also halves
+    # the per-launch query count below (launch count grows proportionally), so
+    # slice privacy — one slice per CTA of a launch — is preserved by
+    # construction. `_check_accum_workspace` remains as the final guard for the
+    # n_splits==1 case.
+    free_bytes, _ = torch.cuda.mem_get_info(device)
+    budget = int(free_bytes * 0.8)
+    while n_splits > 1 and 4 * n_splits * seqlen_k_rounded * head_dim_rounded > budget:
+        n_splits //= 2
     _check_accum_workspace(n_splits, seqlen_k_rounded, head_dim_rounded, device)
     dkv_accum = torch.zeros(
         1,
@@ -523,9 +548,9 @@ def flash_attn_bwd_sm90_multilaunch(
         n_splits_override=n_splits,
     )
 
-    n_chunks = (total_S_q + chunk - 1) // chunk
+    n_chunks = (total_S_q + n_splits - 1) // n_splits
     for c in range(n_chunks):
-        s, e = c * chunk, min((c + 1) * chunk, total_S_q)
+        s, e = c * n_splits, min((c + 1) * n_splits, total_S_q)
         flash_attn_bwd_sm90(
             q[s:e],
             kv,
