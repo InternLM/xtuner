@@ -587,7 +587,16 @@ class SessionServer:
                 _error_payload(fmt, "turn-resume requires nonstream traced generation", 400), status=400
             )
         async with self.request_gate.request(str(body["session_id"])) as lease:
-            return await self._forward_request(request, lease)
+            started = time.perf_counter()
+            try:
+                return await self._forward_request(request, lease)
+            except BaseException as exc:
+                get_logger().error(
+                    f"request_forward_failed id={lease.request_id} exception={type(exc).__name__} "
+                    f"elapsed_s={time.perf_counter() - started:.6f} "
+                    f"settlement_recorded={lease.settlement is not None}"
+                )
+                raise
 
     async def _forward_request(self, request: web.Request, lease: RequestLease | None = None) -> web.Response:
         """Proxy handler: detect format, run hooks, forward, stream back."""
