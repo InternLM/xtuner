@@ -17,6 +17,7 @@ import torch
 from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.model.compose.base import BaseComposeConfig
+from xtuner.v1.utils.profile import timer
 
 from .pack import RankPlan, TokenBatchProto
 
@@ -453,6 +454,8 @@ def iter_cpu_packs(
     batch: TrainBatch,
     indices: Sequence[Sequence[int]],
     resolve_refs,
+    timings: dict[str, float] | None = None,
+    stage: str = "",
 ) -> Iterator[FullPack]:
     """Materialize packs one at a time, resolving each pack's refs before
     yield.
@@ -461,13 +464,20 @@ def iter_cpu_packs(
         batch (TrainBatch): Batch holding the CPU samples.
         indices (Sequence[Sequence[int]]): Local sample indices per pack.
         resolve_refs: Callback that materializes object refs on the pack's ``seq_ctx``.
+        timings (dict[str, float] | None): Optional accumulator for CPU preparation timings.
+        stage (str): Prefix separating the same measurements in different training stages.
 
     Yields:
         FullPack: The current pack.
     """
+    timings = {} if timings is None else timings
+    prefix = f"{stage}/" if stage else ""
     for pack_indices in indices:
-        pack = batch.materialize(tuple(pack_indices))
-        resolve_refs(pack.full_data["seq_ctx"])
+        with timer(f"{prefix}iter_cpu_packs", timings):
+            with timer(f"{prefix}iter_cpu_packs/materialize", timings):
+                pack = batch.materialize(tuple(pack_indices))
+            with timer(f"{prefix}iter_cpu_packs/resolve_refs", timings):
+                resolve_refs(pack.full_data["seq_ctx"])
         yield pack
 
 

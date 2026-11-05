@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -305,10 +306,16 @@ class RoleWorker(ABC):
         # Make max_memory/reserved_memory below this step's peak instead of the
         # process-lifetime peak (~2us, no sync).
         DEVICE_MODULE.reset_peak_memory_stats()
+        train_step_begin = time.perf_counter()
         with self._maybe_profiling(global_train_step):
             train_step_info = self.engine.train_step(data_batches=items)
+        train_step_time = time.perf_counter() - train_step_begin
+        clip_grad_begin = time.perf_counter()
         grad_norm = self.engine.clip_grad_norm()
+        clip_grad_time = time.perf_counter() - clip_grad_begin
+        optimizer_begin = time.perf_counter()
         applied = self.engine.step_optimizer(grad_norm)
+        optimizer_time = time.perf_counter() - optimizer_begin
         if applied and self.lr_scheduler is not None:
             self.lr_scheduler.step()
 
@@ -339,6 +346,9 @@ class RoleWorker(ABC):
                 "grad_norm": grad_norm.item(),
                 "max_memory": max_memory,
                 "reserved_memory": reserved_memory,
+                "train_step_time_s": train_step_time,
+                "clip_grad_norm_time_s": clip_grad_time,
+                "optimizer_step_time_s": optimizer_time,
             },
         )
         log_str = ", ".join(

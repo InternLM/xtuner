@@ -28,6 +28,7 @@ from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, kl_penalty
 from xtuner.v1.rl.model_utils import build_frozen_model
 from xtuner.v1.rl.weight_update import WeightUpdater
 from xtuner.v1.utils import get_device, get_torch_device_module
+from xtuner.v1.utils.profile import timer
 
 from ..rollout_is import merge_rollout_is_metrics
 from .role_worker import RoleContext, RoleWorker
@@ -172,11 +173,14 @@ class ActorWorker(RoleWorker):
         Returns:
             WorkerLogItem: Actor training metrics.
         """
+        fit_begin = time.perf_counter()
+        self._stage_timings: dict[str, float] = {}
         batch.require_targets("actor")
         worker_log_item: WorkerLogItem = {
             "train_entropy": 0.0,
             "train_metrics": [],
             "sft_train_metrics": {},
+            "stage_timings": self._stage_timings,
         }
         snapshots_by_pack = self._collect_old_policy_snapshots(batch, worker_log_item)
         try:
@@ -184,7 +188,9 @@ class ActorWorker(RoleWorker):
             teacher_timings = self._stage_teacher_outputs(batch, snapshots_by_pack)
             if teacher_timings is not None:
                 worker_log_item["teacher_timings"] = teacher_timings.to_dict()
-            return self._fit_policy_then_sft(batch, snapshots_by_pack, worker_log_item)
+            worker_log_item = self._fit_policy_then_sft(batch, snapshots_by_pack, worker_log_item)
+            self._stage_timings["fit/total"] = time.perf_counter() - fit_begin
+            return worker_log_item
         finally:
             # Controller closes the local batch; RLTrainer releases remote refs.
             snapshots_by_pack.clear()
@@ -270,7 +276,10 @@ class ActorWorker(RoleWorker):
         self, batch: TrainBatch, worker_log_item: WorkerLogItem
     ) -> dict[tuple[int, ...], ActorSnapshot]:
         """Recompute old logprobs and freeze one snapshot per pack."""
-        self.engine._maybe_precompute_float8_dynamic_scale_for_fsdp()
+        stage_begin = time.perf_counter()
+        timings = self._stage_timings
+        with timer("old_policy/precompute_float8", timings):
+            self.engine._maybe_precompute_float8_dynamic_scale_for_fsdp()
         entropy_sum: torch.Tensor | None = None
         rollout_entropy_sum: torch.Tensor | None = None
         grad_tokens: torch.Tensor | None = None
@@ -278,37 +287,43 @@ class ActorWorker(RoleWorker):
         all_mismatch_metrics: list[dict[str, float]] = []
         snapshots: dict[tuple[int, ...], ActorSnapshot] = {}
         pack_indices = [pack for step in batch.plan.steps for pack in step]
-        pack_time_begin = time.perf_counter()
 
-        for full_pack in iter_cpu_packs(batch, pack_indices, self._resolve_refs):
+        for full_pack in iter_cpu_packs(batch, pack_indices, self._resolve_refs, timings, "old_policy"):
             data = full_pack.full_data
-            seq_ctx = self._to_device_seq(data["seq_ctx"])
-            ctx = self.loss_cfg.build(data, sp_mesh=self.sp_mesh, device=self.device)
-            assert ctx is not None
-            read_ctx = self.logprob_cfg.build(data, sp_mesh=self.sp_mesh, device=self.device)
-            assert read_ctx is not None
-            old_logprobs = self.engine.forward_only(seq_ctx=seq_ctx, loss_ctx=read_ctx)["loss"]
+            with timer("old_policy/to_device", timings):
+                seq_ctx = self._to_device_seq(data["seq_ctx"])
+            with timer("old_policy/build_loss", timings):
+                ctx = self.loss_cfg.build(data, sp_mesh=self.sp_mesh, device=self.device)
+                assert ctx is not None
+                read_ctx = self.logprob_cfg.build(data, sp_mesh=self.sp_mesh, device=self.device)
+                assert read_ctx is not None
+            # CUDA forward returns asynchronously; snapshot_d2h also includes the remaining GPU execution.
+            with timer("old_policy/forward", timings):
+                old_logprobs = self.engine.forward_only(seq_ctx=seq_ctx, loss_ctx=read_ctx)["loss"]
             ctx.loss_kwargs.old_logprobs = old_logprobs
 
-            labels = ctx.loss_kwargs.shifted_labels
-            mask = labels != self.config.loss_cfg.ignore_idx
-            entropy = -(old_logprobs * mask).sum()
-            entropy_sum = entropy if entropy_sum is None else entropy_sum + entropy
-            grad_tokens = mask.sum() if grad_tokens is None else grad_tokens + mask.sum()
-            if ctx.loss_kwargs.rollout_logprobs is not None:
-                rollout_entropy = -(ctx.loss_kwargs.rollout_logprobs * mask).sum()
-                rollout_entropy_sum = (
-                    rollout_entropy if rollout_entropy_sum is None else rollout_entropy_sum + rollout_entropy
-                )
-                mismatch_metrics, rollout_is_metrics = ctx.compute_rollout_is(self.sp_mesh, seq_ctx.seq_lens_q)
-                all_rollout_is_metrics.append(rollout_is_metrics)
-                all_mismatch_metrics.append(mismatch_metrics)
+            with timer("old_policy/metrics", timings):
+                labels = ctx.loss_kwargs.shifted_labels
+                mask = labels != self.config.loss_cfg.ignore_idx
+                entropy = -(old_logprobs * mask).sum()
+                entropy_sum = entropy if entropy_sum is None else entropy_sum + entropy
+                grad_tokens = mask.sum() if grad_tokens is None else grad_tokens + mask.sum()
+                if ctx.loss_kwargs.rollout_logprobs is not None:
+                    rollout_entropy = -(ctx.loss_kwargs.rollout_logprobs * mask).sum()
+                    rollout_entropy_sum = (
+                        rollout_entropy if rollout_entropy_sum is None else rollout_entropy_sum + rollout_entropy
+                    )
+                    mismatch_metrics, rollout_is_metrics = ctx.compute_rollout_is(self.sp_mesh, seq_ctx.seq_lens_q)
+                    all_rollout_is_metrics.append(rollout_is_metrics)
+                    all_mismatch_metrics.append(mismatch_metrics)
 
-            snapshots[full_pack.indices] = self._capture_snapshot(ctx)
+            with timer("old_policy/snapshot_d2h", timings):
+                snapshots[full_pack.indices] = self._capture_snapshot(ctx)
 
-        worker_log_item["packing_pack_time_s"] = time.perf_counter() - pack_time_begin
+        worker_log_item["packing_pack_time_s"] = timings["old_policy/iter_cpu_packs"]
         worker_log_item["packing_conversion_time_s"] = 0.0
 
+        finalize_begin = time.perf_counter()
         entropy_sum = cast(torch.Tensor, entropy_sum)
         grad_tokens = cast(torch.Tensor, grad_tokens)
         dist.all_reduce(entropy_sum, op=dist.ReduceOp.SUM)
@@ -337,6 +352,8 @@ class ActorWorker(RoleWorker):
             self.logger.info(logger_msg)
 
         self._global_grad_tokens = grad_tokens
+        timings["old_policy/finalize_metrics"] = time.perf_counter() - finalize_begin
+        timings["old_policy/total"] = time.perf_counter() - stage_begin
         return snapshots
 
     def _stage_ref_logprobs(
@@ -347,37 +364,47 @@ class ActorWorker(RoleWorker):
         """Stage reference logprobs and KL metrics for every pack."""
         if not self._has_ref:
             return
+        stage_begin = time.perf_counter()
+        timings = self._stage_timings
         kl_div_sum: torch.Tensor | None = None
-        self._ref_model.to_device(self.device)
+        with timer("ref/model_onload", timings):
+            self._ref_model.to_device(self.device)
         pack_indices = [pack for step in batch.plan.steps for pack in step]
         try:
-            for full_pack in iter_cpu_packs(batch, pack_indices, self._resolve_refs):
+            for full_pack in iter_cpu_packs(batch, pack_indices, self._resolve_refs, timings, "ref"):
                 data = full_pack.full_data
-                seq_ctx = self._to_device_seq(data["seq_ctx"])
-                ctx = self.loss_cfg.build(data, sp_mesh=self.sp_mesh, device=self.device)
-                assert ctx is not None
-                snapshot = snapshots_by_pack[full_pack.indices]
-                ctx.bind_actor_snapshot(snapshot)
-                ref_logprobs = self._forward_ref_logprobs(seq_ctx, ctx.loss_kwargs.shifted_labels)
-                mask = ctx.loss_kwargs.shifted_labels != self.config.loss_cfg.ignore_idx
-                kl_div = kl_penalty(
-                    snapshot.old_logprobs.to(self.device),
-                    ref_logprobs,
-                    loss_weights=mask,
-                    kl_penalty="low_var_kl",
-                )
-                kl_div_sum = kl_div if kl_div_sum is None else kl_div_sum + kl_div
-                snapshots_by_pack[full_pack.indices] = self._capture_snapshot(
-                    ctx, overrides={"ref_logprobs": ref_logprobs}
-                )
+                with timer("ref/to_device", timings):
+                    seq_ctx = self._to_device_seq(data["seq_ctx"])
+                with timer("ref/build_loss", timings):
+                    ctx = self.loss_cfg.build(data, sp_mesh=self.sp_mesh, device=self.device)
+                    assert ctx is not None
+                    snapshot = snapshots_by_pack[full_pack.indices]
+                    ctx.bind_actor_snapshot(snapshot)
+                with timer("ref/forward", timings):
+                    ref_logprobs = self._forward_ref_logprobs(seq_ctx, ctx.loss_kwargs.shifted_labels)
+                with timer("ref/kl_metrics", timings):
+                    mask = ctx.loss_kwargs.shifted_labels != self.config.loss_cfg.ignore_idx
+                    kl_div = kl_penalty(
+                        snapshot.old_logprobs.to(self.device),
+                        ref_logprobs,
+                        loss_weights=mask,
+                        kl_penalty="low_var_kl",
+                    )
+                    kl_div_sum = kl_div if kl_div_sum is None else kl_div_sum + kl_div
+                with timer("ref/snapshot_d2h", timings):
+                    snapshots_by_pack[full_pack.indices] = self._capture_snapshot(
+                        ctx, overrides={"ref_logprobs": ref_logprobs}
+                    )
         finally:
-            self._ref_model.to_device("cpu")
+            with timer("ref/model_offload", timings):
+                self._ref_model.to_device("cpu")
 
         kl_div_sum = cast(torch.Tensor, kl_div_sum)
         dist.all_reduce(kl_div_sum, op=dist.ReduceOp.SUM)
         grad_tokens = self._global_grad_tokens
         avg_kl_div = kl_div_sum / grad_tokens if grad_tokens > 0 else 0
         self.logger.info(f"avg KL divergence: {avg_kl_div:.4f}")
+        timings["ref/total"] = time.perf_counter() - stage_begin
 
     def _stage_teacher_outputs(
         self,
@@ -388,27 +415,34 @@ class ActorWorker(RoleWorker):
         aside."""
         if self._train_teacher_manager is None:
             return None
-        self.offload_optimizer()
-        self.offload_model()
-        DEVICE_MODULE.empty_cache()
+        stage_begin = time.perf_counter()
+        timings = self._stage_timings
+        with timer("teacher/actor_offload", timings):
+            self.offload_optimizer()
+            self.offload_model()
+            DEVICE_MODULE.empty_cache()
 
         pack_indices = [pack for step in batch.plan.steps for pack in step]
         seq_ctx_list: list[SequenceContext] = []
         loss_ctx_list: list[BaseRLLossContext] = []
         try:
-            for full_pack in iter_cpu_packs(batch, pack_indices, self._resolve_refs):
+            for full_pack in iter_cpu_packs(batch, pack_indices, self._resolve_refs, timings, "teacher"):
                 data = full_pack.full_data
-                seq_ctx = self._to_device_seq(data["seq_ctx"])
-                ctx = self.loss_cfg.build(data, sp_mesh=self.sp_mesh, device=self.device)
-                assert ctx is not None
-                ctx.bind_actor_snapshot(snapshots_by_pack[full_pack.indices])
+                with timer("teacher/to_device", timings):
+                    seq_ctx = self._to_device_seq(data["seq_ctx"])
+                with timer("teacher/build_loss", timings):
+                    ctx = self.loss_cfg.build(data, sp_mesh=self.sp_mesh, device=self.device)
+                    assert ctx is not None
+                    ctx.bind_actor_snapshot(snapshots_by_pack[full_pack.indices])
                 seq_ctx_list.append(seq_ctx)
                 loss_ctx_list.append(ctx)
 
             # Keep the teacher's whole-batch interface: no per-pack on/offload.
-            timings = self._train_teacher_manager.compute_teacher_outputs(seq_ctx_list, loss_ctx_list)
-            for pack, ctx in zip(pack_indices, loss_ctx_list):
-                snapshots_by_pack[pack] = self._capture_snapshot(ctx)
+            with timer("teacher/compute", timings):
+                teacher_timings = self._train_teacher_manager.compute_teacher_outputs(seq_ctx_list, loss_ctx_list)
+            with timer("teacher/snapshot_d2h", timings):
+                for pack, ctx in zip(pack_indices, loss_ctx_list):
+                    snapshots_by_pack[pack] = self._capture_snapshot(ctx)
         finally:
             # Drop temporary device contexts before restoring the actor engine.
             seq_ctx_list.clear()
@@ -416,9 +450,11 @@ class ActorWorker(RoleWorker):
             del seq_ctx, ctx
 
         # Restore only on success; failures propagate and terminate the round.
-        self.onload_model()
-        self.onload_optimizer()
-        return timings
+        with timer("teacher/actor_onload", timings):
+            self.onload_model()
+            self.onload_optimizer()
+        timings["teacher/total"] = time.perf_counter() - stage_begin
+        return teacher_timings
 
     def _capture_snapshot(
         self,
@@ -446,20 +482,27 @@ class ActorWorker(RoleWorker):
     ) -> WorkerLogItem:
         """Run every policy update, then the SFT tail at its configured
         cadence."""
-        for step_indices in batch.plan.steps:
-            packs = list(iter_cpu_packs(batch, step_indices, self._resolve_refs))
-            items = self._build_step_input(packs, snapshots_by_pack)
-            worker_log_item["train_metrics"].append(self._train_update(items))
-            del items
+        timings = self._stage_timings
+        with timer("actor_update/total", timings):
+            for step_indices in batch.plan.steps:
+                packs = list(iter_cpu_packs(batch, step_indices, self._resolve_refs, timings, "actor_update"))
+                items = self._build_step_input(packs, snapshots_by_pack)
+                metrics = self._train_update(items)
+                worker_log_item["train_metrics"].append(metrics)
+                for key in ("train_step_time_s", "clip_grad_norm_time_s", "optimizer_step_time_s"):
+                    timing_key = f"actor_update/{key}"
+                    timings[timing_key] = timings.get(timing_key, 0.0) + metrics[key]
+                del items
 
         self._rollout_step += 1
         if self._sft_dataloader is not None and self._rollout_step % self._rollout_steps_per_sft == 0:
-            train_step_info = self._fit_sft()
-            worker_log_item["sft_train_metrics"] = {
-                **train_step_info["logs_info"],
-                **train_step_info["extra_info"].get(),
-                "efficient_attn_ratio": train_step_info["efficient_attn_ratio"],
-            }
+            with timer("sft/total", timings):
+                train_step_info = self._fit_sft()
+                worker_log_item["sft_train_metrics"] = {
+                    **train_step_info["logs_info"],
+                    **train_step_info["extra_info"].get(),
+                    "efficient_attn_ratio": train_step_info["efficient_attn_ratio"],
+                }
         return worker_log_item
 
     def _build_step_input(
@@ -468,39 +511,43 @@ class ActorWorker(RoleWorker):
         snapshots_by_pack: dict[tuple[int, ...], ActorSnapshot],
     ) -> list[ModelItem]:
         """Build and calibrate one optimizer step's model inputs."""
+        timings = self._stage_timings
         items: list[ModelItem] = []
         depth_ctx_lists: list[list[MTPLossContext]] = []
         for pack in full_packs:
             data = pack.full_data
-            seq_ctx = self._to_device_seq(data["seq_ctx"])
-            main_ctx = self.loss_cfg.build(data, sp_mesh=self.sp_mesh, device=self.device)
-            assert main_ctx is not None
-            mtp_ctxs = [
-                cfg.build(
-                    data={**data, "logprobs": data.get("rollout_logprobs")},
-                    sp_mesh=self.sp_mesh,
-                    device=self.device,
-                )
-                for cfg in self.mtp_cfgs
-            ]
-            main_ctx.bind_actor_snapshot(snapshots_by_pack[pack.indices])
+            with timer("actor_update/to_device", timings):
+                seq_ctx = self._to_device_seq(data["seq_ctx"])
+            with timer("actor_update/build_loss", timings):
+                main_ctx = self.loss_cfg.build(data, sp_mesh=self.sp_mesh, device=self.device)
+                assert main_ctx is not None
+                mtp_ctxs = [
+                    cfg.build(
+                        data={**data, "logprobs": data.get("rollout_logprobs")},
+                        sp_mesh=self.sp_mesh,
+                        device=self.device,
+                    )
+                    for cfg in self.mtp_cfgs
+                ]
+                main_ctx.bind_actor_snapshot(snapshots_by_pack[pack.indices])
             loss_ctx: dict[str, Any] = {"lm": main_ctx}
             if self.mtp_cfgs:
                 loss_ctx["mtp"] = mtp_ctxs
                 depth_ctx_lists.append(cast(list[MTPLossContext], mtp_ctxs))
             items.append(ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx))
 
-        self.loss_cfg.loss_ctx_cls.build_batches(
-            cast(list[CELossContext], [item["loss_ctx"]["lm"] for item in items])  # type: ignore[index]
-        )
-        if self.mtp_cfgs:
-            cu_seq_lens_list = [item["seq_ctx"].cu_seq_lens_q for item in items]
-            for depth, cfg in enumerate(self.mtp_cfgs):
-                cfg.loss_ctx_cls.build_batches(  # type: ignore[arg-type]
-                    [pack_ctxs[depth] for pack_ctxs in depth_ctx_lists],
-                    cu_seq_lens_list=cu_seq_lens_list,
-                    sp_mesh=self.sp_mesh,
-                )
+        with timer("actor_update/build_batches", timings):
+            self.loss_cfg.loss_ctx_cls.build_batches(
+                cast(list[CELossContext], [item["loss_ctx"]["lm"] for item in items])  # type: ignore[index]
+            )
+            if self.mtp_cfgs:
+                cu_seq_lens_list = [item["seq_ctx"].cu_seq_lens_q for item in items]
+                for depth, cfg in enumerate(self.mtp_cfgs):
+                    cfg.loss_ctx_cls.build_batches(  # type: ignore[arg-type]
+                        [pack_ctxs[depth] for pack_ctxs in depth_ctx_lists],
+                        cu_seq_lens_list=cu_seq_lens_list,
+                        sp_mesh=self.sp_mesh,
+                    )
         return items
 
     def _fit_sft(self) -> TrainStepInfo:

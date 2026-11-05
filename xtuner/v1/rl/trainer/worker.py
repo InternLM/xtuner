@@ -209,6 +209,9 @@ class WorkerTrainLogItem(TypedDict, total=False):
     mtp_grad_parameter_coverage: float
     max_memory: float
     reserved_memory: float
+    train_step_time_s: float
+    clip_grad_norm_time_s: float
+    optimizer_step_time_s: float
 
 
 class WorkerLogItem(TypedDict):
@@ -221,6 +224,7 @@ class WorkerLogItem(TypedDict):
     sft_train_metrics: NotRequired[dict[str, float]]
     packing_conversion_time_s: NotRequired[float]
     packing_pack_time_s: NotRequired[float]
+    stage_timings: NotRequired[dict[str, float]]
 
 
 class TrainingWorker(SingleAcceleratorWorker):

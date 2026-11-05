@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Iterator, Literal, Sequence, TypedDict, cast
 
@@ -455,44 +456,48 @@ class TrainingController:
             )
 
         if not session:
-            stats = ray.get(
-                [
-                    worker.critic_compute_segment_targets.remote(  # type: ignore[attr-defined]
-                        estimator, contribute=is_representative[worker_index]
+            with timer("compute_segment_targets", timers):
+                stats = ray.get(
+                    [
+                        worker.critic_compute_segment_targets.remote(  # type: ignore[attr-defined]
+                            estimator, contribute=is_representative[worker_index]
+                        )
+                        for worker_index, worker in enumerate(self.workers)
+                    ],
+                    timeout=TRAIN_RAY_GET_TIMEOUT,
+                )
+            return TokenStats.merge(cast(list[TokenStats], stats))
+
+        with timer("compute_session_targets", timers):
+            rows_by_dp = [
+                value_results[worker_index]
+                for worker_index in range(len(self.workers))
+                if is_representative[worker_index]
+            ]
+            values = pack_plan.restore_rows(cast(list[TokenBatchProto], rows_by_dp))
+            advantages, returns = session_token_targets(estimator, prepared["rollout_items"], values)
+            targets_by_dp = [
+                ray.put(
+                    (
+                        TokenBatchProto.concat([advantages[index] for index in rank.global_indices]),
+                        TokenBatchProto.concat([returns[index] for index in rank.global_indices]),
                     )
+                )
+                for rank in pack_plan.ranks
+            ]
+            ray.get(
+                [
+                    worker.set_ppo_targets.remote(targets_by_dp[worker_index // data_replicate_size])  # type: ignore[attr-defined]
                     for worker_index, worker in enumerate(self.workers)
                 ],
                 timeout=TRAIN_RAY_GET_TIMEOUT,
             )
-            return TokenStats.merge(cast(list[TokenStats], stats))
-
-        rows_by_dp = [
-            value_results[worker_index] for worker_index in range(len(self.workers)) if is_representative[worker_index]
-        ]
-        values = pack_plan.restore_rows(cast(list[TokenBatchProto], rows_by_dp))
-        advantages, returns = session_token_targets(estimator, prepared["rollout_items"], values)
-        targets_by_dp = [
-            ray.put(
-                (
-                    TokenBatchProto.concat([advantages[index] for index in rank.global_indices]),
-                    TokenBatchProto.concat([returns[index] for index in rank.global_indices]),
-                )
+            return TokenStats.merge(
+                [
+                    TokenStats.from_masked(advantage, torch.tensor(state.labels or [])[1:].ne(-100))
+                    for state, advantage in zip(prepared["rollout_items"], advantages)
+                ]
             )
-            for rank in pack_plan.ranks
-        ]
-        ray.get(
-            [
-                worker.set_ppo_targets.remote(targets_by_dp[worker_index // data_replicate_size])  # type: ignore[attr-defined]
-                for worker_index, worker in enumerate(self.workers)
-            ],
-            timeout=TRAIN_RAY_GET_TIMEOUT,
-        )
-        return TokenStats.merge(
-            [
-                TokenStats.from_masked(advantage, torch.tensor(state.labels or [])[1:].ne(-100))
-                for state, advantage in zip(prepared["rollout_items"], advantages)
-            ]
-        )
 
     @contextmanager
     def _loaded_batch(
@@ -501,6 +506,7 @@ class TrainingController:
         pack_plan: PackPlan,
         batch_attr: TrainBatchAttr,
         data_replicate_size: int,
+        timings: dict[str, float] | None = None,
     ) -> Iterator[None]:
         """Load one local batch per worker and release it on every exit path.
 
@@ -512,36 +518,40 @@ class TrainingController:
             pack_plan (PackPlan): Controller-side packing plan.
             batch_attr (TrainBatchAttr): Batch-level attributes shared by workers.
             data_replicate_size (int): Number of workers holding one data replica.
+            timings (dict[str, float] | None): Optional load/release timing accumulator.
 
         Yields:
             None
         """
+        timings = {} if timings is None else timings
         refs_by_dp: list[list[ray.ObjectRef]] = []
         try:
-            # Nested in a list so Ray does not dereference it before the worker
-            # fetches it; replicas of one DP rank share the ref.
-            refs_by_dp = [
-                [ray.put([rollout_items[index] for index in rank.global_indices])] for rank in pack_plan.ranks
-            ]
-            load_handles = []
-            for worker_idx, worker in enumerate(self.workers):
-                dp_rank = worker_idx // data_replicate_size
-                load_handles.append(
-                    worker.load_train_batch.remote(  # type: ignore[attr-defined]
-                        refs_by_dp[dp_rank],
-                        pack_plan.ranks[dp_rank],
-                        batch_attr,
+            with timer("load_train_batch", timings):
+                # Nested in a list so Ray does not dereference it before the worker
+                # fetches it; replicas of one DP rank share the ref.
+                refs_by_dp = [
+                    [ray.put([rollout_items[index] for index in rank.global_indices])] for rank in pack_plan.ranks
+                ]
+                load_handles = []
+                for worker_idx, worker in enumerate(self.workers):
+                    dp_rank = worker_idx // data_replicate_size
+                    load_handles.append(
+                        worker.load_train_batch.remote(  # type: ignore[attr-defined]
+                            refs_by_dp[dp_rank],
+                            pack_plan.ranks[dp_rank],
+                            batch_attr,
+                        )
                     )
-                )
-            ray.get(load_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+                ray.get(load_handles, timeout=TRAIN_RAY_GET_TIMEOUT)
             yield
         finally:
             original_error = sys.exception()
             try:
-                ray.get(
-                    [worker.release_train_batch.remote() for worker in self.workers],  # type: ignore[attr-defined]
-                    timeout=TRAIN_RAY_GET_TIMEOUT,
-                )
+                with timer("release_train_batch", timings):
+                    ray.get(
+                        [worker.release_train_batch.remote() for worker in self.workers],  # type: ignore[attr-defined]
+                        timeout=TRAIN_RAY_GET_TIMEOUT,
+                    )
             except (RuntimeError, ray.exceptions.RayError) as exc:
                 self.logger.warning(f"Failed to release cached training batch: {exc}")
                 if original_error is None:
@@ -557,8 +567,10 @@ class TrainingController:
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
     ) -> tuple[list[WorkerLogItem], dict[str, float]]:
+        fit_begin = time.perf_counter()
         timers: dict[str, float] = {}
-        prepared = self._prepare_rollout_items(rollout_groups, rollout_idx)
+        with timer("prepare_rollout_items", timers):
+            prepared = self._prepare_rollout_items(rollout_groups, rollout_idx)
         rollout_items = prepared["rollout_items"]
         if not rollout_items:
             raise ValueError(f"Rollout {rollout_idx} has no valid training samples")
@@ -566,17 +578,19 @@ class TrainingController:
         worker_cfg = ray.get(self.workers[0].get_worker_cfg.remote())  # type: ignore[attr-defined]
         data_replicate_size = ray.get(self.workers[0].get_data_replicate_size.remote())  # type: ignore[attr-defined]
 
-        pack_plan = self._build_pack_plan(rollout_items, pack_max_length, worker_cfg, data_replicate_size)
+        with timer("build_pack_plan", timers):
+            pack_plan = self._build_pack_plan(rollout_items, pack_max_length, worker_cfg, data_replicate_size)
 
         sample_advantages: list[float] | None = None
         token_stats: TokenStats | None = None
         critic_log_infos: list[WorkerLogItem] | None = None
-        with self._loaded_batch(rollout_items, pack_plan, prepared["batch_attr"], data_replicate_size):
+        with self._loaded_batch(rollout_items, pack_plan, prepared["batch_attr"], data_replicate_size, timings=timers):
             if self._has_critic:
-                ray.get(
-                    [worker.set_residency.remote("critic", "critic") for worker in self.workers],  # type: ignore[attr-defined]
-                    timeout=TRAIN_RAY_GET_TIMEOUT,
-                )
+                with timer("set_critic_residency", timers):
+                    ray.get(
+                        [worker.set_residency.remote("critic", "critic") for worker in self.workers],  # type: ignore[attr-defined]
+                        timeout=TRAIN_RAY_GET_TIMEOUT,
+                    )
                 token_stats = self._prepare_ppo_targets(prepared, pack_plan, data_replicate_size, timers)
                 with timer("critic_fit", timers):
                     critic_log_infos = ray.get(
@@ -584,12 +598,14 @@ class TrainingController:
                         timeout=TRAIN_RAY_GET_TIMEOUT,
                     )
             else:
-                sample_advantages = self._prepare_group_targets(prepared, pack_plan)
+                with timer("prepare_group_targets", timers):
+                    sample_advantages = self._prepare_group_targets(prepared, pack_plan)
 
-            ray.get(
-                [worker.set_residency.remote("actor", "actor") for worker in self.workers],  # type: ignore[attr-defined]
-                timeout=TRAIN_RAY_GET_TIMEOUT,
-            )
+            with timer("set_actor_residency", timers):
+                ray.get(
+                    [worker.set_residency.remote("actor", "actor") for worker in self.workers],  # type: ignore[attr-defined]
+                    timeout=TRAIN_RAY_GET_TIMEOUT,
+                )
             with timer("actor_fit", timers):
                 log_infos = ray.get(
                     [worker.actor_fit.remote() for worker in self.workers],  # type: ignore[attr-defined]
@@ -597,16 +613,25 @@ class TrainingController:
                 )
         del rollout_items
 
-        data_info = self._build_trainer_log_info(
-            prepared,
-            pack_plan,
-            log_infos,
-            sample_advantages,
-            token_stats=token_stats,
-            raw_rewards_sum=raw_rewards_sum,
-            raw_rewards_count=raw_rewards_count,
-        )
+        with timer("build_log_info", timers):
+            data_info = self._build_trainer_log_info(
+                prepared,
+                pack_plan,
+                log_infos,
+                sample_advantages,
+                token_stats=token_stats,
+                raw_rewards_sum=raw_rewards_sum,
+                raw_rewards_count=raw_rewards_count,
+            )
         data_info.update(self._critic_log_scalars(critic_log_infos))
+        for role, role_logs in (("actor", log_infos), ("critic", critic_log_infos or [])):
+            stage_keys = {key for log in role_logs for key in log.get("stage_timings", {})}
+            for key in stage_keys:
+                # The slowest rank determines the distributed stage's critical path.
+                timers[f"{role}/{key}"] = max(
+                    log["stage_timings"][key] for log in role_logs if key in log.get("stage_timings", {})
+                )
+        timers["controller_fit"] = time.perf_counter() - fit_begin
         data_info.update({f"time/{name}": value for name, value in timers.items()})
         return log_infos, data_info
 

@@ -46,7 +46,7 @@ from xtuner.v1.rl.trainer.critic_worker import CriticWorker, CriticWorkerConfig
 from xtuner.v1.rl.trainer.pack import PackPlan, RankPlan, TokenBatchProto
 from xtuner.v1.rl.trainer.role_worker import RoleContext, RoleWorker
 from xtuner.v1.rl.trainer.schedule import build_lr_scheduler, partition_indices, pass_order
-from xtuner.v1.rl.trainer.train_batch import TrainBatch
+from xtuner.v1.rl.trainer.train_batch import TrainBatch, iter_cpu_packs
 from xtuner.v1.rl.trainer.worker import TrainingWorker
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils.test_utils import init_data_mesh
@@ -116,6 +116,31 @@ class TestGAEAdvantageEstimation(unittest.TestCase):
             gae_lambda=1.0,
         )
         self.assertEqual(observed.tolist(), [1.0, 0.0, 1.0])
+
+    def test_gae_preserves_float32_recursion_and_length_adaptive_lambda(self):
+        advantages, returns = GAEEstimator(
+            gae_gamma=1.0,
+            gae_lambda=1.0,
+            normalize_actor_advantage=False,
+        ).compute_segment_gae(
+            torch.tensor([0.1, 0.2, 0.3, 1.0, 1.2]),
+            torch.tensor([1.0, -0.5]),
+            torch.tensor([False, True, True, False, True]),
+            torch.tensor([0, 3, 5]),
+        )
+        torch.testing.assert_close(advantages, torch.tensor([0.0, 0.8, 0.7, 0.0, -1.7]))
+        torch.testing.assert_close(returns, torch.tensor([0.0, 1.0, 1.0, 0.0, -0.5]))
+
+        adaptive = action_gae(
+            torch.zeros(3),
+            torch.tensor([0.0, 0.0, 1.0]),
+            torch.ones(3, dtype=torch.bool),
+            torch.tensor([0, 3]),
+            gamma=1.0,
+            gae_lambda=0.95,
+            length_adaptive_alpha=0.5,
+        )
+        torch.testing.assert_close(adaptive, torch.tensor([1.0 / 9.0, 1.0 / 3.0, 1.0]))
 
     def test_session_scope_places_one_reward_on_the_last_segment(self):
         # 行为：session 作用域下 reward 落在会话最后一个分段末尾
@@ -355,6 +380,24 @@ class TestCriticSegmentTargets(unittest.TestCase):
         critic.device = torch.device("cpu")
         return critic
 
+    def test_iter_cpu_packs_profiles_each_lazily_materialized_pack(self):
+        batch = self._batch()
+        resolved = []
+        timings: dict[str, float] = {}
+        packs = iter_cpu_packs(batch, [(0,), (0,)], resolved.append, timings, "test")
+
+        self.assertEqual(resolved, [])
+        first = next(packs)
+        self.assertEqual(first.indices, (0,))
+        self.assertEqual(len(resolved), 1)
+        next(packs)
+        self.assertEqual(len(resolved), 2)
+        self.assertEqual(
+            set(timings),
+            {"test/iter_cpu_packs", "test/iter_cpu_packs/materialize", "test/iter_cpu_packs/resolve_refs"},
+        )
+        self.assertGreater(timings["test/iter_cpu_packs"], 0.0)
+
     def test_sets_complete_segment_targets(self):
         batch = self._batch()
         stats = self._critic().compute_segment_targets(
@@ -584,7 +627,7 @@ class TestGAEFitSkipsGroupAdvantages(unittest.TestCase):
             set_residency=_rpc(None),
             critic_collect_values=_rpc(None),
             critic_compute_segment_targets=_rpc(TokenStats.empty()),
-            critic_fit=_rpc([]),
+            critic_fit=_rpc({}),
             actor_fit=_rpc({}),
         )
         state = _state()

@@ -18,6 +18,7 @@ from xtuner.v1.rl.advantage.gae import normalize_with_moments
 from xtuner.v1.rl.advantage.stats import TokenStats
 from xtuner.v1.rl.loss import CriticLossConfig
 from xtuner.v1.utils import get_device
+from xtuner.v1.utils.profile import timer
 
 from .pack import TokenBatchProto
 from .role_worker import RoleContext, RoleWorker
@@ -101,6 +102,7 @@ class CriticWorker(RoleWorker):
         self.engine.from_hf(worker_cfg.load_from, strict=True)
         self.lr_scheduler = build_lr_scheduler(self.engine.optimizer, worker_cfg.lr_cfg, worker_cfg.scheduler_steps)
         self.loss_cfg = None  # CriticLossConfig has no finalize_metrics
+        self._stage_timings: dict[str, float] = {}
 
     def _resolve_refs(self, seq_ctx: SequenceContext) -> None:
         """Multimodal refs only: the critic routes experts on its own."""
@@ -134,24 +136,33 @@ class CriticWorker(RoleWorker):
         Returns:
             TokenBatchProto | None: Per-sample value rows when requested.
         """
-        pack_indices = [pack for step in batch.plan.steps for pack in step]
-        rows: list[torch.Tensor | None] = [None] * len(batch.plan.global_indices)
-        self.engine._maybe_precompute_float8_dynamic_scale_for_fsdp()
-        for full_pack in iter_cpu_packs(batch, pack_indices, self._resolve_refs):
-            full_seq = full_pack.full_data["seq_ctx"]
-            pack_length = full_seq.input_ids.shape[1]
-            seq_ctx = self._to_device_seq(full_seq)
-            local = self.forward_only(seq_ctx).squeeze(-1)
-            full = sp_gather(local, self.sp_mesh, dim=1) if self.sp_mesh.size() > 1 else local
-            full = full[:, :pack_length]  # remove SP padding; unpack removes pack padding
-            for sample_index, value in batch.unpack_rows(full_pack, full):
-                rows[sample_index] = value
-            # Empty packs still run the same forward/gather and unpack to [].
-        if any(row is None for row in rows):
-            raise RuntimeError("pack plan did not cover every local sample")
-        resolved = [cast(torch.Tensor, row) for row in rows]
-        batch.set_old_values(resolved)
-        return TokenBatchProto.concat([row.flatten() for row in resolved]) if return_values else None
+        timings = self._stage_timings = {}
+        with timer("critic_values/total", timings):
+            pack_indices = [pack for step in batch.plan.steps for pack in step]
+            rows: list[torch.Tensor | None] = [None] * len(batch.plan.global_indices)
+            with timer("critic_values/precompute_float8", timings):
+                self.engine._maybe_precompute_float8_dynamic_scale_for_fsdp()
+            for full_pack in iter_cpu_packs(batch, pack_indices, self._resolve_refs, timings, "critic_values"):
+                full_seq = full_pack.full_data["seq_ctx"]
+                pack_length = full_seq.input_ids.shape[1]
+                with timer("critic_values/to_device", timings):
+                    seq_ctx = self._to_device_seq(full_seq)
+                # unpack_d2h synchronizes and therefore includes remaining GPU forward/gather execution.
+                with timer("critic_values/forward", timings):
+                    local = self.forward_only(seq_ctx).squeeze(-1)
+                with timer("critic_values/sp_gather", timings):
+                    full = sp_gather(local, self.sp_mesh, dim=1) if self.sp_mesh.size() > 1 else local
+                full = full[:, :pack_length]  # remove SP padding; unpack removes pack padding
+                with timer("critic_values/unpack_d2h", timings):
+                    for sample_index, value in batch.unpack_rows(full_pack, full):
+                        rows[sample_index] = value
+                # Empty packs still run the same forward/gather and unpack to [].
+            if any(row is None for row in rows):
+                raise RuntimeError("pack plan did not cover every local sample")
+            resolved = [cast(torch.Tensor, row) for row in rows]
+            with timer("critic_values/set_old_values", timings):
+                batch.set_old_values(resolved)
+            return TokenBatchProto.concat([row.flatten() for row in resolved]) if return_values else None
 
     def compute_segment_targets(
         self,
@@ -173,30 +184,36 @@ class CriticWorker(RoleWorker):
         Returns:
             TokenStats: Normalized action-token statistics (empty for non-representatives).
         """
-        trajectory = batch.trajectory_data()
-        advantages, returns = estimator.compute_segment_gae(**trajectory)
-        mask = trajectory["mask"]
-        moments = torch.zeros(3, dtype=torch.float64, device=self.device)
-        if contribute:
-            valid = advantages[mask]
-            moments[:] = torch.tensor(
-                [valid.double().sum(), valid.double().square().sum(), valid.numel()],
-                device=self.device,
-                dtype=torch.float64,
-            )
-        if estimator.normalize_actor_advantage:
-            if dist.is_available() and dist.is_initialized():
-                dist.all_reduce(moments, op=dist.ReduceOp.SUM)
-            advantages = normalize_with_moments([advantages], [mask], moments.cpu())[0]
+        timings = self.__dict__.setdefault("_stage_timings", {})
+        with timer("gae/total", timings):
+            with timer("gae/trajectory_data", timings):
+                trajectory = batch.trajectory_data()
+            with timer("gae/compute", timings):
+                advantages, returns = estimator.compute_segment_gae(**trajectory)
+            mask = trajectory["mask"]
+            moments = torch.zeros(3, dtype=torch.float64, device=self.device)
+            if contribute:
+                valid = advantages[mask]
+                moments[:] = torch.tensor(
+                    [valid.double().sum(), valid.double().square().sum(), valid.numel()],
+                    device=self.device,
+                    dtype=torch.float64,
+                )
+            with timer("gae/normalize", timings):
+                if estimator.normalize_actor_advantage:
+                    if dist.is_available() and dist.is_initialized():
+                        dist.all_reduce(moments, op=dist.ReduceOp.SUM)
+                    advantages = normalize_with_moments([advantages], [mask], moments.cpu())[0]
 
-        lengths = (trajectory["cu_seq_lens"][1:] - trajectory["cu_seq_lens"][:-1]).tolist()
-        advantage_rows = list(advantages.split(lengths)) if sum(lengths) else []
-        return_rows = list(returns.split(lengths)) if sum(lengths) else []
-        batch.set_ppo_targets(
-            TokenBatchProto.concat(advantage_rows),
-            TokenBatchProto.concat(return_rows),
-        )
-        return TokenStats.from_masked(advantages, mask) if contribute else TokenStats.empty()
+            with timer("gae/install_targets", timings):
+                lengths = (trajectory["cu_seq_lens"][1:] - trajectory["cu_seq_lens"][:-1]).tolist()
+                advantage_rows = list(advantages.split(lengths)) if sum(lengths) else []
+                return_rows = list(returns.split(lengths)) if sum(lengths) else []
+                batch.set_ppo_targets(
+                    TokenBatchProto.concat(advantage_rows),
+                    TokenBatchProto.concat(return_rows),
+                )
+            return TokenStats.from_masked(advantages, mask) if contribute else TokenStats.empty()
 
     def fit(self, batch: TrainBatch) -> WorkerLogItem:
         """Train the clipped value head over the configured passes.
@@ -208,20 +225,35 @@ class CriticWorker(RoleWorker):
             WorkerLogItem: Critic training metrics.
         """
         batch.require_targets("critic")
-        worker_log_item: WorkerLogItem = {"train_entropy": 0.0, "train_metrics": []}
-        for update_packs in self._updates(batch):
-            packs = [list(pack) for pack in update_packs]
-            if self._masked_token_count(batch, packs) == 0:
-                # All ranks observe the same global count and skip together.
-                continue
-            items: list[ModelItem] = []
-            for full_pack in iter_cpu_packs(batch, update_packs, self._resolve_refs):
-                seq_ctx = self._to_device_seq(full_pack.full_data["seq_ctx"])
-                ctx = self.config.loss_cfg.build(full_pack.full_data, sp_mesh=self.sp_mesh, device=self.device)
-                assert ctx is not None
-                items.append(ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": ctx}))
-            self.config.loss_cfg.loss_ctx_cls.build_batches([item["loss_ctx"]["lm"] for item in items])  # type: ignore[index]
-            worker_log_item["train_metrics"].append(self._train_update(items))
+        timings = self.__dict__.setdefault("_stage_timings", {})
+        worker_log_item: WorkerLogItem = {
+            "train_entropy": 0.0,
+            "train_metrics": [],
+            "stage_timings": timings,
+        }
+        with timer("fit/total", timings):
+            for update_packs in self._updates(batch):
+                packs = [list(pack) for pack in update_packs]
+                with timer("critic_update/masked_token_count", timings):
+                    masked_token_count = self._masked_token_count(batch, packs)
+                if masked_token_count == 0:
+                    # All ranks observe the same global count and skip together.
+                    continue
+                items: list[ModelItem] = []
+                for full_pack in iter_cpu_packs(batch, update_packs, self._resolve_refs, timings, "critic_update"):
+                    with timer("critic_update/to_device", timings):
+                        seq_ctx = self._to_device_seq(full_pack.full_data["seq_ctx"])
+                    with timer("critic_update/build_loss", timings):
+                        ctx = self.config.loss_cfg.build(full_pack.full_data, sp_mesh=self.sp_mesh, device=self.device)
+                        assert ctx is not None
+                    items.append(ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": ctx}))
+                with timer("critic_update/build_batches", timings):
+                    self.config.loss_cfg.loss_ctx_cls.build_batches([item["loss_ctx"]["lm"] for item in items])  # type: ignore[index]
+                metrics = self._train_update(items)
+                worker_log_item["train_metrics"].append(metrics)
+                for key in ("train_step_time_s", "clip_grad_norm_time_s", "optimizer_step_time_s"):
+                    timing_key = f"critic_update/{key}"
+                    timings[timing_key] = timings.get(timing_key, 0.0) + metrics[key]
         return worker_log_item
 
     def _updates(self, batch: TrainBatch) -> Iterator[list[tuple[int, ...]]]:
