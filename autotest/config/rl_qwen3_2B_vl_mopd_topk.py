@@ -38,7 +38,8 @@ EVAL_DATA_SOURCE_TAGS = {
 
 
 def mopd_compute_metric(samples):
-    """Emit per-source accuracy so TensorBoard logs eval/gsm8k/acc, eval/geo3k/acc."""
+    """Emit per-source accuracy so TensorBoard logs eval/gsm8k/acc,
+    eval/geo3k/acc."""
     scores_by_source = {data_source: [] for data_source in EVAL_DATA_SOURCE_TAGS}
     for sample in samples:
         data_source = sample.extra_fields.get("origin_data_source")
@@ -116,7 +117,7 @@ experimental_name = "qwen3_2b_vl_opd_topk"
 total_epochs = 15
 total_train_steps = 50
 train_batch_size = 128
-top_k = 64
+top_k = 128
 prompt_repeat_k = 1
 rollout_tp_size = 1
 rollout_ep_size = 1
@@ -201,7 +202,7 @@ loss_cfg = DistillationLossConfig(
     kl_loss_type="low_var_kl",
     mode="chunk",
     chunk_size=512,
-    loss_mode="forward_kl_topk",
+    loss_mode="reverse",
     use_policy_gradient=False,
     top_k=top_k,
     log_prob_min_clamp=-10.0,
@@ -280,9 +281,7 @@ if enable_evaluate:
                 hf_checkpoint=model_path, sample_params=evaluation_sample_params
             ),
             judger_config=_judger(),
-            sampler_config=SamplerConfig(
-                dataloader_cfg=eval_dataloader_cfg, prompt_repeat_k=eval_prompt_repeat_k
-            ),
+            sampler_config=SamplerConfig(dataloader_cfg=eval_dataloader_cfg, prompt_repeat_k=eval_prompt_repeat_k),
         ),
     )
     evaluator_config = EvaluatorConfig(compute_metric_func=mopd_compute_metric)
