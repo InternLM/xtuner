@@ -2,7 +2,7 @@
 
 Same models / data / training shape as the sampled-token mopd e2e, but Teacher
 targets come from frozen FSDP Teachers inside each TrainingWorker
-(TrainTeacherConfig + DistillationLossConfig loss_mode=forward_kl_topk).
+(TrainTeacherConfig + DistillationLossConfig loss_mode=reverse, top_k=128).
 
 Baseline metrics of the reference 50-step run, recorded every 5 steps
 (aligned with the eval cadence; step 0 is the eval-only point before
@@ -11,22 +11,21 @@ training). Column names map to TB tags: ``topk_opd_kl`` =
 is identical at every step), ``overlap`` =
 ``distillation/reduced_topk_opd_overlap_fraction``, ``student_mass`` /
 ``teacher_mass`` = ``..._student_selected_mass`` / ``..._teacher_selected_mass``,
-``rewards`` = ``response/rewards/mean``. Step-1/2 smoke golden values live in
-``tests/rl/test_opd_two_step_accuracy.py::TOPK_GOLDEN``.
+``rewards`` = ``response/rewards/mean``.
 
 | step | topk_opd_kl | overlap | student_mass | teacher_mass | rewards | gsm8k_acc | geo3k_acc |
 |------|-------------|---------|--------------|--------------|---------|-----------|-----------|
-|    0 |           - |       - |            - |            - |       - |    0.4382 |    0.2785 |
-|    5 |      0.2708 |  0.6670 |       0.9971 |       0.9992 |  0.5172 |    0.5451 |    0.2651 |
-|   10 |      0.2707 |  0.6573 |       0.9921 |       0.9962 |  0.6031 |    0.6732 |    0.2471 |
-|   15 |      0.2610 |  0.6731 |       0.9924 |       0.9975 |  0.5813 |    0.6778 |    0.2456 |
-|   20 |      0.2624 |  0.6608 |       0.9878 |       0.9967 |  0.6602 |    0.6793 |    0.2141 |
-|   25 |      0.2688 |  0.6691 |       0.9889 |       0.9970 |  0.5813 |    0.6808 |    0.2201 |
-|   30 |      0.2520 |  0.6650 |       0.9887 |       0.9968 |  0.6320 |    0.6785 |    0.2351 |
-|   35 |      0.2451 |  0.6571 |       0.9918 |       0.9983 |  0.6172 |    0.6922 |    0.2097 |
-|   40 |      0.2304 |  0.6603 |       0.9916 |       0.9977 |  0.6258 |    0.6839 |    0.2201 |
-|   45 |      0.2161 |  0.6478 |       0.9931 |       0.9983 |  0.5906 |    0.6611 |    0.1872 |
-|   50 |      0.2444 |  0.6361 |       0.9928 |       0.9987 |  0.7453 |    0.6839 |    0.2037 |
+|    0 |           - |       - |            - |            - |       - |    0.4337 |    0.2666 |
+|    5 |      0.3260 |  0.6460 |       0.9987 |       0.9996 |  0.4844 |    0.5876 |    0.2725 |
+|   10 |      0.3021 |  0.6366 |       0.9990 |       0.9997 |  0.5961 |    0.6846 |    0.2681 |
+|   15 |      0.3010 |  0.6469 |       0.9991 |       0.9997 |  0.6039 |    0.6778 |    0.2800 |
+|   20 |      0.3076 |  0.6283 |       0.9994 |       0.9998 |  0.6859 |    0.6778 |    0.3160 |
+|   25 |      0.2985 |  0.6364 |       0.9996 |       0.9998 |  0.5469 |    0.6649 |    0.3070 |
+|   30 |      0.2788 |  0.6416 |       0.9995 |       0.9998 |  0.6250 |    0.6785 |    0.3175 |
+|   35 |      0.2807 |  0.6306 |       0.9996 |       0.9998 |  0.6117 |    0.6876 |    0.3070 |
+|   40 |      0.2510 |  0.6377 |       0.9996 |       0.9998 |  0.6164 |    0.6801 |    0.2815 |
+|   45 |      0.2447 |  0.6315 |       0.9996 |       0.9998 |  0.6922 |    0.6960 |    0.2890 |
+|   50 |      0.3088 |  0.6183 |       0.9995 |       0.9998 |  0.7367 |    0.6929 |    0.2845 |
 
 This path does NOT launch Rollout Teacher HTTP servers. Student rollout still
 uses LMDeploy/SGLang via the normal RL launcher.
@@ -112,7 +111,7 @@ experimental_name = "qwen3_vl_2b_train_teacher_topk_e2e"
 total_epochs = 15
 total_train_steps = int(os.environ.get("TOTAL_TRAIN_STEPS", "50"))
 train_batch_size = int(os.environ.get("TRAIN_BATCH_SIZE", "128"))
-top_k = int(os.environ.get("OPD_TOP_K", "64"))
+top_k = int(os.environ.get("OPD_TOP_K", "128"))
 prompt_repeat_k = 1
 rollout_tp_size = 1
 rollout_ep_size = 1
@@ -205,7 +204,7 @@ loss_cfg = DistillationLossConfig(
     kl_loss_type="low_var_kl",
     mode="chunk",
     chunk_size=512,
-    loss_mode="forward_kl_topk",
+    loss_mode="reverse",
     use_policy_gradient=False,
     top_k=top_k,
     log_prob_min_clamp=-10.0,
