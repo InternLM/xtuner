@@ -28,11 +28,18 @@ def reduce_sum_across_dp_group(dp_mesh: DeviceMesh | None, local_value: int) -> 
         return int(local_value)
     if not dist.is_available() or not dist.is_initialized():
         return int(local_value)
-    # ``dp_mesh`` is guaranteed to be set here (the early return above handles
-    # ``None``), and it already carries the device type of the mesh the
-    # collective runs on (cuda / npu / xpu / ...), so use it instead of
-    # assuming CUDA.
-    device = torch.device(dp_mesh.device_type)
+    # The device must match the backend the group was created with.  The mesh
+    # cannot be asked: ``Trainer._init_data_mesh`` builds it on ``"cpu"`` when
+    # the parameters are not offloaded, and a CPU tensor in an ``nccl``/``hccl``
+    # collective raises "No backend type associated with device type cpu".
+    backend = str(dist.get_backend(dp_mesh.get_group())).lower()
+    device_type = {
+        "nccl": "cuda",
+        "hccl": "npu",
+        "xccl": "xpu",
+        "cncl": "mlu",
+    }.get(backend, "cpu")
+    device = torch.device(device_type)
     tensor = torch.tensor([local_value], dtype=torch.int64, device=device)
     dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=dp_mesh.get_group())
     return int(tensor.item())
