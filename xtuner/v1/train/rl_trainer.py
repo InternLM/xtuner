@@ -651,6 +651,25 @@ class RLDisaggregatedTrainerConfig(BaseRLTrainerConfig):
     train_resources: AcceleratorResourcesConfig
     rollout_resources: AcceleratorResourcesConfig
 
+    @model_validator(mode="after")
+    def _validate_turn_resume(self):
+        enabled = self.rollout_config.turn_resume_wait_timeout is not None
+        manager_enabled = self.agent_loop_manager_cfg.turn_resume_drain_timeout is not None
+        if enabled != manager_enabled:
+            raise ValueError("turn-resume requires both request gates and Agent pause policy")
+        if enabled:
+            if self.enable_evaluate or self.enable_initial_evaluate or self.eval_agent_loop_manager_cfg is not None:
+                raise ValueError("turn-resume first version rejects every online evaluation entrypoint")
+            if self.rollout_config.health_check_failure_threshold != 0:
+                raise ValueError("turn-resume requires fixed topology: disable automatic worker recovery")
+            tasks = self.agent_loop_manager_cfg.tasks
+            for task in tasks if isinstance(tasks, list) else [tasks]:
+                if not getattr(task.agent_loop_config, "require_turn_provenance", False):
+                    raise ValueError("Agent turn-resume requires complete request provenance and MoE routes")
+                if getattr(task.produce_strategy_config, "enable_partial_rollout", False):
+                    raise ValueError("Complete-turn pause cannot use token partial rollout")
+        return self
+
     def build(self) -> "RLDisaggregatedTrainer":
         return RLDisaggregatedTrainer(self)
 
@@ -883,12 +902,13 @@ class BaseRLTrainer:
         saved_model_step = await self.agent_loop_manager.resume(checkpoint_path)
         return saved_model_step
 
+    def _checkpoint_due(self, cur_step: int) -> bool:
+        interval = self._checkpoint_interval
+        return interval is not None and interval > 0 and cur_step % interval == 0
+
     async def _maybe_save_checkpoint(self, cur_step: int) -> None:
         """Save checkpoint if interval condition is met."""
-        ckp_interval = self._checkpoint_interval
-        if ckp_interval is None or ckp_interval == -1:
-            return
-        if cur_step % ckp_interval != 0:
+        if not self._checkpoint_due(cur_step):
             return
 
         checkpoint_path = self.exp_dir / self._CHECKPOINT_DIR / f"ckpt-step-{cur_step}"
@@ -1115,6 +1135,31 @@ class BaseRLTrainer:
         ]
         torch.save(serializable_batch, save_path)
         self.logger.info(f"Debug rollout batch for step {train_step} saved to {save_path}")
+
+    def _fit_debug_train(self) -> None:
+        self._benchmark_start_time_s = time.perf_counter()
+        self._benchmark_training_samples = 0
+        self._benchmark_training_tokens = 0
+
+        init_train_step = self._cur_step + 1
+        for train_step in range(init_train_step, self._total_train_steps + 1):
+            self.logger.info(f"Debug train step {train_step}/{self._total_train_steps} start")
+            step_timer_dict: dict[str, float] = {}
+            with timer("step", step_timer_dict):
+                with timer("load_debug_rollout", step_timer_dict):
+                    train_batch = self._load_debug_rollout_batch(train_step)
+                train_log_info = self._train_one_batch(
+                    train_batch,
+                    train_step,
+                    step_timer_dict,
+                    offload_rollout_before_train=False,
+                    onload_train_before_train=False,
+                )
+                eval_log_info: dict[str, float] = {}
+                produce_result = ProduceBatchResult(rollout_states=train_batch)
+
+            self._log_step(train_step, step_timer_dict, produce_result, train_log_info, eval_log_info)
+            self._cur_step = train_step
 
     def _list_debug_rollout_files(self, debug_rollout_dir: Path) -> dict[int, Path]:
         debug_files = {
@@ -1935,31 +1980,6 @@ class RLColocateTrainer(BaseRLTrainer):
             self._log_step(train_step, step_timer_dict, produce_result, train_log_info, eval_log_info)
             self._cur_step = train_step
 
-    def _fit_debug_train(self) -> None:
-        self._benchmark_start_time_s = time.perf_counter()
-        self._benchmark_training_samples = 0
-        self._benchmark_training_tokens = 0
-
-        init_train_step = self._cur_step + 1
-        for train_step in range(init_train_step, self._total_train_steps + 1):
-            self.logger.info(f"Debug train step {train_step}/{self._total_train_steps} start")
-            step_timer_dict: dict[str, float] = {}
-            with timer("step", step_timer_dict):
-                with timer("load_debug_rollout", step_timer_dict):
-                    train_batch = self._load_debug_rollout_batch(train_step)
-                train_log_info = self._train_one_batch(
-                    train_batch,
-                    train_step,
-                    step_timer_dict,
-                    offload_rollout_before_train=False,
-                    onload_train_before_train=False,
-                )
-                eval_log_info: dict[str, float] = {}
-                produce_result = ProduceBatchResult(rollout_states=train_batch)
-
-            self._log_step(train_step, step_timer_dict, produce_result, train_log_info, eval_log_info)
-            self._cur_step = train_step
-
     def _get_colocate_rollout_model_step(self, train_step: int) -> int:
         previous_step = train_step - 1
         return previous_step - (previous_step % self._sync_weights_interval)
@@ -2038,10 +2058,21 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             train_resources=cfg.train_resources,
             rollout_resources=cfg.rollout_resources,
         )
-        self._cpu_resource_manager = CPUResourceManager([self._train_pg, self._rollout_pg])
+        self._cpu_resource_manager = CPUResourceManager(
+            [pg for pg in (self._train_pg, self._rollout_pg) if pg is not None]
+        )
         self._cpu_resource_manager.log_initial_snapshot()
         set_cpu_resource_manager(self._cpu_resource_manager)
-        self.train_controller = self._train_worker_cfg.build(self._train_pg)
+        if not self._debug_rollout:
+            self.train_controller = self._train_worker_cfg.build(self._train_pg)
+        if self._debug_train:
+            self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_path, trust_remote_code=True)
+            self._debug_train_files = self._list_debug_rollout_files(self._debug_rollout_dir)
+            if cfg.total_train_steps is None:
+                self._total_train_steps = max(self._debug_train_files)
+            return
+        if self._debug_rollout:
+            self._rollout_config.skip_load_weights = False
         self.rollout_controller = self._rollout_config.build(self._rollout_pg)
 
         if self._rollout_config.weight_transport_type != "nccl":
@@ -2058,6 +2089,9 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                     "In disaggregated mode, should_continue_fn must be default, "
                     "because it does not allow early stopping in production."
                 )
+
+        if self._debug_rollout:
+            return
 
         bind_train_rollout(
             train_controller=self.train_controller,
@@ -2083,9 +2117,17 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         train_pg_name = f"{pg_name_prefix}_train"
         rollout_pg_name = f"{pg_name_prefix}_rollout"
 
-        train_pg = AutoAcceleratorWorkers.build_placement_group(train_resources, name=train_pg_name)
-        rollout_pg = AutoAcceleratorWorkers.build_placement_group(rollout_resources, name=rollout_pg_name)
-        if train_pg.id == rollout_pg.id:
+        train_pg = (
+            None
+            if self._debug_rollout
+            else AutoAcceleratorWorkers.build_placement_group(train_resources, name=train_pg_name)
+        )
+        rollout_pg = (
+            None
+            if self._debug_train
+            else AutoAcceleratorWorkers.build_placement_group(rollout_resources, name=rollout_pg_name)
+        )
+        if train_pg is not None and rollout_pg is not None and train_pg.id == rollout_pg.id:
             raise RuntimeError(
                 "RLDisaggregatedTrainer requires distinct placement groups for train and rollout, "
                 f"but both resolved to the same placement group id={train_pg.id}. "
@@ -2094,8 +2136,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
         self.logger.info(
             "Created disaggregated placement groups: "
-            f"train={train_pg_name}(id={train_pg.id}), "
-            f"rollout={rollout_pg_name}(id={rollout_pg.id})"
+            f"train={train_pg_name}(id={getattr(train_pg, 'id', None)}), "
+            f"rollout={rollout_pg_name}(id={getattr(rollout_pg, 'id', None)})"
         )
         return train_pg, rollout_pg
 
@@ -2103,6 +2145,12 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         checkpoint_path = self._resume_train_controller_and_state(checkpoint_path)
         saved_model_step = asyncio_run(self._resume_agent_loop_manager(checkpoint_path))
         assert self._cur_step == saved_model_step
+
+        # A fresh SessionServer starts at version zero. Seal requests before
+        # replacing weights so continue_produce publishes the restored version
+        # through the same barrier used by ordinary updates.
+        asyncio_run(self.agent_loop_manager.prepare_sync(False))
+        asyncio_run(self.agent_loop_manager.pause_produce())
 
         # Empty-init engines can retain GPU allocations while marked asleep.
         # Use the same offload/allocate/receive/warmup lifecycle as online sync;
@@ -2152,6 +2200,12 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
     async def _fit(self):
         self.logger.info("Start RL disaggregated training")
+        if self._debug_train:
+            await asyncio.to_thread(self._fit_debug_train)
+            # Diagnostic actor/optimizer checkpoint. Full manager/replay checkpoint
+            # acceptance uses the online quiescent save path below.
+            await asyncio.to_thread(self.train_controller.save, str(self.exp_dir / "debug-train-dcp"), False)
+            return
         if self._cur_step >= self._total_train_steps:
             self.logger.info(f"Train steps {self._total_train_steps} reached, stop training")
             return
@@ -2209,14 +2263,19 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                             "unless status is empty EXPIRED_BATCH."
                         )
                         # 训练路径放到线程里执行，避免阻塞事件循环。
-                        train_log_info = await asyncio.to_thread(
-                            self._train_one_batch,
-                            train_batch,
-                            train_step,
-                            step_timer_dict,
-                            raw_rewards_sum=produce_result.raw_rewards_sum,
-                            raw_rewards_count=produce_result.raw_rewards_count,
-                        )
+                        if self._debug_rollout:
+                            self._save_debug_rollout_batch(train_batch, train_step)
+                            self._release_trace_sessions_after_train_batch(train_batch)
+                            train_log_info = {}
+                        else:
+                            train_log_info = await asyncio.to_thread(
+                                self._train_one_batch,
+                                train_batch,
+                                train_step,
+                                step_timer_dict,
+                                raw_rewards_sum=produce_result.raw_rewards_sum,
+                                raw_rewards_count=produce_result.raw_rewards_count,
+                            )
                         sync_model_step = train_step
 
                     # 保存、同步、评测、恢复 producer 都以已完成 model_step 为口径。
@@ -2227,7 +2286,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                         or sync_model_step == self._total_train_steps
                     )
 
-                    if need_sync:
+                    if need_sync and not self._debug_rollout:
+                        await self.agent_loop_manager.prepare_sync(self._checkpoint_due(sync_model_step))
                         # 同步前暂停 producer，避免 pending rollout 继续写 buffer。
                         with timer("pause_produce", step_timer_dict):
                             await self.agent_loop_manager.pause_produce()
@@ -2253,7 +2313,11 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 train_step = self._cur_step + 1
         finally:
             self.agent_loop_manager.shutdown()
-            await producer_task
+            await asyncio.sleep(0)
+            if not producer_task.done():
+                producer_task.cancel()
+            await asyncio.gather(producer_task, return_exceptions=True)
+            await self.agent_loop_manager.close()
 
     async def _sync_weights_and_save(self, model_step: int, step_timer_dict: dict):
         # producer 已暂停；保持 save -> bind -> update 顺序。

@@ -177,6 +177,8 @@ def free_rollout_state_refs(rollout_state: RolloutState) -> None:
 
     from xtuner.v1.rl.utils.ray_utils import free_object_refs
 
+    # Routes are shared with trace nodes, sibling segments and train workers.
+    rollout_state.routed_experts = None
     refs: list[ObjectRef] = []
 
     def clear_object_refs(value: Any) -> Any:
@@ -259,15 +261,7 @@ def update_status_from_finish_reason(finish_reason: str | None) -> Status:
 
 
 def reset_rollout_response(rollout_state: RolloutState) -> RolloutState:
-    routed_experts = getattr(rollout_state, "routed_experts", None)
-    if routed_experts is not None:
-        from ray import ObjectRef
-
-        from xtuner.v1.rl.utils.ray_utils import free_object_refs
-
-        if isinstance(routed_experts, (ObjectRef, list)):
-            free_object_refs(routed_experts)
-        rollout_state.routed_experts = None
+    rollout_state.routed_experts = None
     prompt_ids = getattr(rollout_state, "prompt_ids", None)
     rollout_state.tokens = list(prompt_ids) if prompt_ids is not None else None
     rollout_state.response = ""
