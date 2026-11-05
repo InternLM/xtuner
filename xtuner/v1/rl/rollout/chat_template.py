@@ -43,6 +43,7 @@ def canonicalize_messages_for_chat_template(messages: list[dict], *, tokenizer=N
             # untouched; request rendering and trace lookup share this view.
             systems = [message for message in messages if message.get("role") == "system"]
             contents = [message.get("content", "") for message in systems]
+            content: str | list[dict[str, Any]]
             if all(isinstance(content, str) for content in contents):
                 content = "".join(contents)
             else:
