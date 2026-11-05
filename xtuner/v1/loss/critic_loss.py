@@ -51,6 +51,20 @@ class CriticLossConfig(BaseLossConfig):
     def _loss_kwargs_cls(self) -> type["CriticLossKwargs"]:
         return CriticLossKwargs
 
+    def finalize_metrics(self, extra_info_dict: dict[str, Any], device: str | torch.device) -> dict[str, Any]:
+        """Finalize value-clip metrics emitted by
+        :meth:`CriticLossContext.loss_fn`.
+
+        Args:
+            extra_info_dict (dict[str, Any]): Per-rank metric dict after micro-batch reduction.
+            device (str | torch.device): Device used for the all-reduce tensor.
+
+        Returns:
+            dict[str, Any]: The updated metric dict with global clip/valid counts
+            and the derived ``reduced_critic_value_clip_frac``.
+        """
+        return finalize_critic_value_metrics(extra_info_dict, device)
+
     def build(
         self,
         data: dict,
@@ -221,19 +235,34 @@ class CriticLossContext(BaseLossContext):
         if old_values is not None:
             old_values = old_values.reshape_as(v)
 
-        rank_grad_tokens = (shifted_labels != self.loss_cfg.ignore_idx).sum()
-        if rank_grad_tokens == 0:
-            loss = values.sum() * 0
-        elif old_values is None:
-            per_token = 0.5 * (v - returns) ** 2
-            loss = (per_token * loss_weight).sum()
+        valid_mask = shifted_labels != self.loss_cfg.ignore_idx
+        rank_grad_tokens = valid_mask.sum()
+        extra_info: dict[str, Any] = {}
+        if old_values is None:
+            if rank_grad_tokens == 0:
+                loss = values.sum() * 0
+            else:
+                per_token = 0.5 * (v - returns) ** 2
+                loss = (per_token * loss_weight).sum()
         else:
             cliprange = self.loss_cfg.cliprange_value
             v_clip = old_values + (v - old_values).clamp(-cliprange, cliprange)
             per_token = 0.5 * torch.maximum((v - returns) ** 2, (v_clip - returns) ** 2)
             loss = (per_token * loss_weight).sum()
+            # Emit the counters on every rank whenever old_values is present, including
+            # fully-masked ranks whose counts are zero: a missing key would make
+            # ``finalize_critic_value_metrics`` skip its all-reduce rank-conditionally
+            # and deadlock NCCL against ranks that do reduce (the pack builder avoids
+            # the same class of bug by zero-filling old_values for missing packs).
+            # Match the clip condition used by ``clamp`` exactly: equality keeps the
+            # unclipped value, so only a strict deviation beyond the range counts.
+            clipped = (v - old_values).abs() > cliprange
+            extra_info = {
+                "reduced_critic_value_clip_count": (clipped & valid_mask).float().sum(),
+                "reduced_critic_value_valid_count": valid_mask.float().sum(),
+            }
 
-        return loss, (values, {})
+        return loss, (values, extra_info)
 
     def forward(
         self,
@@ -246,3 +275,38 @@ class CriticLossContext(BaseLossContext):
         if dist.is_initialized():
             loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
         return loss, (values, extra_info)
+
+
+def finalize_critic_value_metrics(extra_info_dict: dict[str, Any], device: str | torch.device) -> dict[str, Any]:
+    """All-reduce critic value-clip counters and derive the clip fraction.
+
+    Consumes the per-rank sums emitted by ``CriticLossContext.loss_fn`` after
+    micro-batch reduction, all-reduces them into global counts, and derives
+    ``reduced_critic_value_clip_frac``. Dictionaries without the critic keys
+    (e.g. the unclipped SFT-MSE path) pass through unchanged.
+
+    The all-reduce below must stay rank-symmetric: within one fit round either
+    every rank carries the keys (``loss_fn`` emits them whenever ``old_values``
+    is present, zero-filled on fully-masked ranks) or none does. A rank that
+    skips it while peers reduce deadlocks NCCL until the watchdog kills the
+    worker.
+
+    Args:
+        extra_info_dict (dict[str, Any]): Metric dict after micro-batch reduction.
+        device (str | torch.device): Device used for the all-reduce tensor.
+
+    Returns:
+        dict[str, Any]: The updated metric dict with global counts and the clip fraction.
+    """
+    if "reduced_critic_value_valid_count" not in extra_info_dict:
+        return extra_info_dict
+
+    sum_keys = ["reduced_critic_value_clip_count", "reduced_critic_value_valid_count"]
+    values = torch.tensor([extra_info_dict.pop(key, 0.0) for key in sum_keys], dtype=torch.float32, device=device)
+    if dist.is_initialized():
+        dist.all_reduce(values, op=dist.ReduceOp.SUM)
+    clip_count, valid_count = values.tolist()
+    extra_info_dict["reduced_critic_value_clip_count"] = clip_count
+    extra_info_dict["reduced_critic_value_valid_count"] = valid_count
+    extra_info_dict["reduced_critic_value_clip_frac"] = clip_count / valid_count if valid_count > 0 else 0.0
+    return extra_info_dict

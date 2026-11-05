@@ -1175,13 +1175,17 @@ class BaseRLTrainer:
                 "training_tokens",
                 "benchmark_end_time_s",
             }
-            # Keys already carrying a "time/" prefix (phase timers from the
-            # controller) keep their own group; the rest go under response/.
+            # Keys already carrying a "time/" (phase timers from the controller) or
+            # "critic/" (critic health metrics) prefix keep their own group; the
+            # rest go under response/.
+            passthrough_prefixes = ("time/", "critic/")
             response_data_info = {
-                k: v for k, v in data_info.items() if k not in benchmark_data_info_keys and not k.startswith("time/")
+                k: v
+                for k, v in data_info.items()
+                if k not in benchmark_data_info_keys and not k.startswith(passthrough_prefixes)
             }
             all_scalars.update({f"response/{k}": v for k, v in response_data_info.items()})
-            all_scalars.update({k: v for k, v in data_info.items() if k.startswith("time/")})
+            all_scalars.update({k: v for k, v in data_info.items() if k.startswith(passthrough_prefixes)})
             throughput_benchmark = self._compute_benchmark_metrics(
                 data_info,
                 produce_result,
