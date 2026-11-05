@@ -1,4 +1,4 @@
-"""Token-level advantage statistics for PPO step logging."""
+"""Token-level advantage and critic statistics for PPO step logging."""
 
 from __future__ import annotations
 
@@ -74,3 +74,44 @@ class TokenStats:
     def mean(self) -> float:
         """Mean kept-token advantage (0.0 when empty)."""
         return self.sum / self.count if self.count else 0.0
+
+
+def critic_value_stats(
+    values: Sequence[torch.Tensor],
+    returns: Sequence[torch.Tensor],
+    masks: Sequence[torch.Tensor],
+) -> dict[str, float]:
+    """Summarize frozen values against raw session returns over action tokens.
+
+    Call once on restored global rows, not on replicated workers or per-session
+    means. With gamma=lambda=1, returns equal terminal session rewards; explained
+    variance then measures prediction of episode outcomes. Population statistics
+    are token-weighted, and constant returns have explained variance zero.
+
+    Args:
+        values (Sequence[torch.Tensor]): Frozen per-sample value rows.
+        returns (Sequence[torch.Tensor]): Unnormalized per-sample return rows.
+        masks (Sequence[torch.Tensor]): Aligned shifted-label action masks.
+
+    Returns:
+        dict[str, float]: Critic health scalars, empty if no action tokens exist.
+    """
+    if not values:
+        return {}
+    kept_values = torch.cat(
+        [row.detach().flatten().cpu()[mask.flatten()] for row, mask in zip(values, masks)]
+    ).double()
+    kept_returns = torch.cat(
+        [row.detach().flatten().cpu()[mask.flatten()] for row, mask in zip(returns, masks)]
+    ).double()
+    if kept_values.numel() == 0:
+        return {}
+    return_var = kept_returns.var(correction=0).item()
+    residual_var = (kept_returns - kept_values).var(correction=0).item()
+    return {
+        "critic/value_mean": kept_values.mean().item(),
+        "critic/value_std": kept_values.std(correction=0).item(),
+        "critic/return_mean": kept_returns.mean().item(),
+        "critic/return_std": kept_returns.std(correction=0).item(),
+        "critic/explained_variance": 1.0 - residual_var / return_var if return_var > 0 else 0.0,
+    }

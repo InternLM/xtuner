@@ -28,6 +28,8 @@ from torch.testing._internal.common_distributed import DistributedTestBase
 from xtuner.v1.config import AdamWConfig, FSDPConfig
 from xtuner.v1.config.optim import LRConfig
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.loss.critic_loss import CriticLossConfig, CriticLossContext
+from xtuner.v1.loss.utils import sp_split
 from xtuner.v1.model.base import HeadConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense0P6BConfig
 from xtuner.v1.rl.advantage import (
@@ -305,6 +307,7 @@ class TestCriticConstruction(unittest.TestCase):
         self.assertIs(train_engine.call_args.kwargs["fsdp_cfg"], fsdp_cfg)
         self.assertIs(build_scheduler.call_args.args[0], train_engine.return_value.optimizer)
         train_engine.return_value.from_hf.assert_called_once_with("/tmp/critic", strict=True)
+        self.assertIs(worker.loss_cfg, critic_cfg.loss_cfg)
 
 
 class _CustomTokenEstimator(TokenAdvantageEstimator):
@@ -472,7 +475,9 @@ class TestSessionGAEDispatch(unittest.TestCase):
     @staticmethod
     def _controller() -> TrainingController:
         controller = TrainingController.__new__(TrainingController)
-        controller.advantage_estimator = GAEEstimator(reward_scope="session", normalize_actor_advantage=False)
+        controller.advantage_estimator = GAEEstimator(
+            reward_scope="session", gae_gamma=1.0, gae_lambda=1.0, normalize_actor_advantage=True
+        )
         controller.logger = MagicMock()
         return controller
 
@@ -490,8 +495,10 @@ class TestSessionGAEDispatch(unittest.TestCase):
             patch("xtuner.v1.rl.trainer.controller.ray.get", side_effect=lambda value, timeout=None: value),
             patch("xtuner.v1.rl.trainer.controller.ray.put", side_effect=lambda value: value),
         ):
-            stats = controller._prepare_ppo_targets({"rollout_items": rollout_items}, plan, data_replicate_size, {})
-        return stats, workers
+            stats, value_stats = controller._prepare_ppo_targets(
+                {"rollout_items": rollout_items}, plan, data_replicate_size, {}
+            )
+        return stats, value_stats, workers
 
     def test_session_gae_scatters_values_by_pack_plan(self):
         rollout_items = [
@@ -526,7 +533,11 @@ class TestSessionGAEDispatch(unittest.TestCase):
             decoy,
         ]
 
-        stats, workers = self._run(rollout_items, pack_plan, value_batches)
+        stats, value_stats, workers = self._run(rollout_items, pack_plan, value_batches)
+        self.assertAlmostEqual(value_stats["critic/value_mean"], 0.45, places=6)
+        self.assertAlmostEqual(value_stats["critic/return_mean"], 0.0, places=6)
+        # Raw returns [1,1,0,.5,.5,-1,-1,-1], not normalized actor advantages.
+        self.assertAlmostEqual(value_stats["critic/return_std"], (5.5 / 8) ** 0.5, places=6)
 
         expected_advantages, expected_returns = session_token_targets(
             self._controller().advantage_estimator,
@@ -546,6 +557,26 @@ class TestSessionGAEDispatch(unittest.TestCase):
             for local_index, global_index in enumerate(rank.global_indices):
                 torch.testing.assert_close(advantage_rows[local_index], expected_advantages[global_index])
                 torch.testing.assert_close(return_rows[local_index], expected_returns[global_index])
+
+    def test_segment_targets_have_no_session_value_metrics(self) -> None:
+        controller = self._controller()
+        controller.advantage_estimator = GAEEstimator(reward_scope="segment")
+        controller.workers = [
+            SimpleNamespace(
+                critic_collect_values=SimpleNamespace(remote=MagicMock(return_value=None)),
+                critic_compute_segment_targets=SimpleNamespace(remote=MagicMock(return_value=stats)),
+            )
+            for stats in (TokenStats(2.0, 2, 0.5, 1.5), TokenStats.empty())
+        ]
+        with patch("xtuner.v1.rl.trainer.controller.ray.get", side_effect=lambda value, timeout=None: value):
+            stats, value_stats = controller._prepare_ppo_targets({}, PackPlan((), {}), 2, {})
+        self.assertEqual(stats, TokenStats(2.0, 2, 0.5, 1.5))
+        self.assertEqual(value_stats, {})
+        for index, worker in enumerate(controller.workers):
+            worker.critic_collect_values.remote.assert_called_once_with(return_values=False)
+            worker.critic_compute_segment_targets.remote.assert_called_once_with(
+                controller.advantage_estimator, contribute=index == 0
+            )
 
     def test_session_gae_rejects_value_count_mismatch(self):
         rollout_items = [_state(uid=0, rollout_id=10, labels=[-100, 5, 6], reward={"score": 1.0})]
@@ -610,15 +641,20 @@ class TestGAEFitSkipsGroupAdvantages(unittest.TestCase):
                 "_build_pack_plan",
                 return_value=PackPlan((RankPlan((0,), (((0,),),)),), {}),
             ),
-            patch.object(controller, "_prepare_ppo_targets", return_value=TokenStats.empty()),
+            patch.object(
+                controller,
+                "_prepare_ppo_targets",
+                return_value=(TokenStats.empty(), {"critic/value_mean": 0.25}),
+            ),
             patch.object(controller, "_build_trainer_log_info", return_value={}),
             patch.object(controller, "_critic_log_scalars", return_value={}),
             patch("xtuner.v1.rl.trainer.controller.ray.put", side_effect=lambda value: value),
             patch("xtuner.v1.rl.trainer.controller.ray.get", side_effect=lambda value, timeout=None: value),
         ):
-            controller.fit([[state]], pack_max_length=16, rollout_idx=1)
+            _, data_info = controller.fit([[state]], pack_max_length=16, rollout_idx=1)
 
         controller._prepare_group_targets.assert_not_called()
+        self.assertEqual(data_info["critic/value_mean"], 0.25)
 
 
 class _DummyRole(RoleWorker):
@@ -637,14 +673,22 @@ class TestRoleTrainUpdate(unittest.TestCase):
         role.rank = 0
         role.device = torch.device("cpu")
         role.logger = MagicMock()
-        role.loss_cfg = None
+        role.loss_cfg = MagicMock()
+        role.loss_cfg.finalize_metrics.side_effect = lambda metrics, device: CriticLossConfig().finalize_metrics(
+            metrics, "cpu"
+        )
         role._global_train_step = 0
         role.lr_scheduler = MagicMock()
         role.engine = SimpleNamespace(
             train_step=MagicMock(
                 side_effect=lambda **kwargs: {
                     "logs_info": {},
-                    "extra_info": SimpleNamespace(get=lambda: {}),
+                    "extra_info": SimpleNamespace(
+                        get=lambda: {
+                            "reduced_critic_value_clip_count": 2.0,
+                            "reduced_critic_value_valid_count": 5.0,
+                        }
+                    ),
                     "total_loss": 0.0,
                 }
             ),
@@ -657,6 +701,8 @@ class TestRoleTrainUpdate(unittest.TestCase):
         self.assertEqual(role._global_train_step, 1)
         role.lr_scheduler.step.assert_called_once_with()
         self.assertIn("grad_norm", log_item)
+        role.loss_cfg.finalize_metrics.assert_called_once()
+        self.assertAlmostEqual(log_item["reduced_critic_value_clip_frac"], 0.4)
 
         role.engine.step_optimizer = MagicMock(return_value=False)
         RoleWorker._train_update(role, [])
@@ -851,5 +897,25 @@ class TestCriticSPAndSessionTargets(DistributedTestBase):
                 for local_index, row in batch.unpack_rows(full_pack, full_pack.full_data[field]):
                     global_index = rank_plan.global_indices[local_index]
                     torch.testing.assert_close(row.flatten(), expected_rows[global_index])
+
+            # Exercise the actual empty-DP/SP-padded loss path through collective
+            # metric finalization. Every rank must emit keys and join, even when
+            # its shard contains no action tokens.
+            loss_cfg = CriticLossConfig()
+            ctx = loss_cfg.build(full_pack.full_data, sp_mesh=mesh["sp"], device="cpu")
+            CriticLossContext.build_batches([ctx])
+            old = full_pack.full_data["old_values"]
+            offsets = torch.where(old < 20, 0.5, 0.0)
+            hidden = sp_split((old + offsets).unsqueeze(-1), sp_mesh=mesh["sp"], split_dim=1, padding_value=0.0)
+            hidden.requires_grad_(True)
+            loss, (_, extra) = ctx.forward(hidden, torch.ones(1, 1))
+            loss.backward()
+            self.assertTrue(torch.isfinite(hidden.grad).all())
+            if rank in (1, 4, 5):
+                self.assertEqual(extra["reduced_critic_value_valid_count"].item(), 0.0)
+            metrics = loss_cfg.finalize_metrics({key: value.item() for key, value in extra.items()}, "cpu")
+            self.assertEqual(metrics["reduced_critic_value_clip_count"], 2.0)
+            self.assertEqual(metrics["reduced_critic_value_valid_count"], 6.0)
+            self.assertAlmostEqual(metrics["reduced_critic_value_clip_frac"], 1.0 / 3.0)
         finally:
             dist.destroy_process_group()
