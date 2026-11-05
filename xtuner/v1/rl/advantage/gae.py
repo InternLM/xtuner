@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Sequence, cast
 
+import numpy as np
 import torch
 
 from xtuner.v1.data_proto.rl_data import RolloutState
@@ -65,31 +66,31 @@ def action_gae(
             f"{old_values.shape}, {token_rewards.shape}, and {action_mask.shape}"
         )
 
-    flat_values = old_values.detach().float()
-    flat_rewards = token_rewards.detach().to(device=flat_values.device, dtype=torch.float32)
-    flat_mask = action_mask.to(device=flat_values.device).bool()
+    # NumPy float32 scalars preserve the original rounding while avoiding per-token Tensor dispatch.
+    flat_values = old_values.detach().float().cpu().numpy()
+    flat_rewards = token_rewards.detach().to(dtype=torch.float32).cpu().numpy()
+    flat_mask = action_mask.detach().cpu().numpy().astype(bool)
     boundaries = [int(value) for value in cu_seq_lens.detach().cpu().tolist()]
-    flat_advantages = torch.zeros_like(flat_values, dtype=torch.float32)
+    flat_advantages = np.zeros_like(flat_values, dtype=np.float32)
 
     for start, end in zip(boundaries[:-1], boundaries[1:]):
-        action_indices = torch.nonzero(flat_mask[start:end], as_tuple=False).flatten() + start
-        if action_indices.numel() == 0:
+        action_indices = np.flatnonzero(flat_mask[start:end]) + start
+        if action_indices.size == 0:
             continue
-        next_value = torch.zeros((), dtype=torch.float32, device=flat_values.device)
-        next_advantage = torch.zeros((), dtype=torch.float32, device=flat_values.device)
+        next_value = np.float32(0.0)
+        next_advantage = np.float32(0.0)
         trajectory_lambda = gae_lambda
         if length_adaptive_alpha is not None:
-            action_length = int(action_indices.numel())
+            action_length = int(action_indices.size)
             trajectory_lambda = max(0.0, min(1.0, 1.0 - 1.0 / (length_adaptive_alpha * action_length)))
-        for action_idx_tensor in action_indices.flip(0):
-            action_idx = int(action_idx_tensor.item())
+        for action_idx in action_indices[::-1]:
             delta = flat_rewards[action_idx] + gamma * next_value - flat_values[action_idx]
             advantage = delta + gamma * trajectory_lambda * next_advantage
             flat_advantages[action_idx] = advantage
             next_value = flat_values[action_idx]
             next_advantage = advantage
 
-    return flat_advantages
+    return torch.from_numpy(flat_advantages).to(old_values.device)
 
 
 def normalize_with_moments(

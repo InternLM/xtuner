@@ -117,6 +117,31 @@ class TestGAEAdvantageEstimation(unittest.TestCase):
         )
         self.assertEqual(observed.tolist(), [1.0, 0.0, 1.0])
 
+    def test_gae_preserves_float32_recursion_and_length_adaptive_lambda(self):
+        advantages, returns = GAEEstimator(
+            gae_gamma=1.0,
+            gae_lambda=1.0,
+            normalize_actor_advantage=False,
+        ).compute_segment_gae(
+            torch.tensor([0.1, 0.2, 0.3, 1.0, 1.2]),
+            torch.tensor([1.0, -0.5]),
+            torch.tensor([False, True, True, False, True]),
+            torch.tensor([0, 3, 5]),
+        )
+        torch.testing.assert_close(advantages, torch.tensor([0.0, 0.8, 0.7, 0.0, -1.7]))
+        torch.testing.assert_close(returns, torch.tensor([0.0, 1.0, 1.0, 0.0, -0.5]))
+
+        adaptive = action_gae(
+            torch.zeros(3),
+            torch.tensor([0.0, 0.0, 1.0]),
+            torch.ones(3, dtype=torch.bool),
+            torch.tensor([0, 3]),
+            gamma=1.0,
+            gae_lambda=0.95,
+            length_adaptive_alpha=0.5,
+        )
+        torch.testing.assert_close(adaptive, torch.tensor([1.0 / 9.0, 1.0 / 3.0, 1.0]))
+
     def test_session_scope_places_one_reward_on_the_last_segment(self):
         # 行为：session 作用域下 reward 落在会话最后一个分段末尾
         estimator = GAEAdvantageConfig(
