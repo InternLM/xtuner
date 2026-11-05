@@ -447,7 +447,7 @@ class ActorWorker(RoleWorker):
         """Run every policy update, then the SFT tail at its configured
         cadence."""
         for step_indices in batch.plan.steps:
-            packs = list(iter_cpu_packs(batch, step_indices, self._resolve_refs))
+            packs = iter_cpu_packs(batch, step_indices, self._resolve_refs)
             items = self._build_step_input(packs, snapshots_by_pack)
             worker_log_item["train_metrics"].append(self._train_update(items))
             del items
@@ -464,10 +464,11 @@ class ActorWorker(RoleWorker):
 
     def _build_step_input(
         self,
-        full_packs: list[FullPack],
+        full_packs: Iterator[FullPack],
         snapshots_by_pack: dict[tuple[int, ...], ActorSnapshot],
     ) -> list[ModelItem]:
-        """Build and calibrate one optimizer step's model inputs."""
+        """Consume CPU packs lazily and calibrate one optimizer step's device
+        inputs."""
         items: list[ModelItem] = []
         depth_ctx_lists: list[list[MTPLossContext]] = []
         for pack in full_packs:
