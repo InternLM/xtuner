@@ -257,6 +257,9 @@ class RoleWorker(ABC):
         Returns:
             None
         """
+        # HF shard reconstruction uses the training process groups (NCCL).
+        # The host must select this role before any parameter all-gather.
+        self.require_model_residency()
         self.engine.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
 
     def _scheduler_config(self) -> dict | None:
