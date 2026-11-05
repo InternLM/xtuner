@@ -249,14 +249,7 @@ class RolloutState(BaseModel):
         Returns:
             None
         """
-        routed_experts = self.routed_experts
-        if routed_experts is not None:
-            from ray import ObjectRef
-
-            from xtuner.v1.rl.utils.ray_utils import free_object_refs
-
-            if isinstance(routed_experts, (ObjectRef, list)):
-                free_object_refs(routed_experts)
+        # Other samples and the trace store may still borrow these routes.
         self.routed_experts = None
         prompt_ids = self.prompt_ids
         self.tokens = list(prompt_ids) if prompt_ids is not None else None
@@ -342,6 +335,9 @@ def free_rollout_state_refs(rollout_state: RolloutState) -> None:
 
     from xtuner.v1.rl.utils.ray_utils import free_object_refs
 
+    # Routes can be shared with other samples, workers, and the trace store.
+    # Drop this holder before recursively freeing exclusively owned payloads.
+    rollout_state.routed_experts = None
     refs: list[ObjectRef] = []
 
     def clear_object_refs(value: Any) -> Any:

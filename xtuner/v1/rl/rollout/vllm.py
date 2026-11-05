@@ -502,9 +502,12 @@ class vLLMWorker(RolloutWorker):
 
                     data = base64.b64decode(routed_experts)
                     routed_experts = ray.cloudpickle.loads(data)
-                if not isinstance(routed_experts, ray.ObjectRef):
-                    routed_experts = np.asarray(routed_experts)
-                    routed_experts = ray.put(routed_experts)
+                if isinstance(routed_experts, ray.ObjectRef):
+                    raise ValueError(
+                        "vLLM HTTP responses must contain routed-expert arrays, not serialized Ray ObjectRefs; "
+                        "out-of-band ObjectRefs cannot use the rollout's reference-counted lifetime"
+                    )
+                routed_experts = ray.put(np.asarray(routed_experts))
 
         rollout_status = update_status_from_finish_reason(finish_reason)
         if rollout_status == Status.COMPLETED:
