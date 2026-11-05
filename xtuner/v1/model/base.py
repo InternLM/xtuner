@@ -708,11 +708,12 @@ class PrecisionPolicy:
     """
 
     def __init__(self, model: "BaseModel") -> None:
-        self.model = model
+        self._model = model
         self._resolved = False
         self._param_names: frozenset[str] = frozenset()
         self._buffer_names: frozenset[str] = frozenset()
         self._fp32_units: set[nn.Module] = set()
+        self._default_mp_policy: MixedPrecisionPolicy | None = None
 
     @property
     def param_names(self) -> frozenset[str]:
@@ -758,19 +759,30 @@ class PrecisionPolicy:
         """
         self._fp32_units.add(module)
 
-    def mp_policy(self, module: nn.Module, default: MixedPrecisionPolicy) -> MixedPrecisionPolicy:
+    def set_default_mp_policy(self, mp_policy: MixedPrecisionPolicy) -> None:
+        """Record the mixed precision shared by every unit that is not pinned.
+
+        Args:
+            mp_policy (MixedPrecisionPolicy): The model-wide policy built by ``fully_shard``.
+        """
+        self._default_mp_policy = mp_policy
+
+    def mp_policy(self, module: nn.Module) -> MixedPrecisionPolicy:
         """Mixed precision for one FSDP unit.
 
         Args:
             module (nn.Module): The FSDP unit about to be sharded.
-            default (MixedPrecisionPolicy): The policy to use when the unit is not pinned.
 
         Returns:
-            MixedPrecisionPolicy: fp32 in/out for pinned units, ``default`` otherwise.
+            MixedPrecisionPolicy: fp32 in/out for a pinned unit, the model-wide policy otherwise.
         """
         if module in self._fp32_units:
             return MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32)
-        return default
+        assert self._default_mp_policy is not None, (
+            f"{type(self._model).__name__}.fully_shard must call `precision.set_default_mp_policy` "
+            "before sharding any unit."
+        )
+        return self._default_mp_policy
 
     def to_world_replicate(self, name: str, param: nn.Parameter, world_mesh: DeviceMesh) -> nn.Parameter:
         """Rebuild ``param`` as a world-wide ``Replicate`` DTensor.
@@ -784,8 +796,8 @@ class PrecisionPolicy:
             world_mesh (DeviceMesh): The mesh covering every training replica.
 
         Returns:
-            nn.Parameter: ``param`` itself when it is already world-wide ``Replicate``, otherwise a
-            rebuilt parameter.
+            nn.Parameter: ``param`` itself when it is already world-wide ``Replicate``, otherwise a rebuilt
+            parameter.
         """
         if isinstance(param, DTensor):
             if any(not isinstance(placement, Replicate) for placement in param.placements):
@@ -810,7 +822,7 @@ class PrecisionPolicy:
     def _resolve(self) -> None:
         if self._resolved:
             return
-        clean = self.model._clean_param_name
+        clean = self._model._clean_param_name
         actual_params: set[str] = set()
         actual_buffers: set[str] = set()
         declared_params: set[str] = set()
@@ -842,7 +854,7 @@ class PrecisionPolicy:
                     continue
                 yield from walk(child, f"{path}.{name}" if path else name)
 
-        yield from walk(self.model, "")
+        yield from walk(self._model, "")
 
 
 class BaseModel(nn.Module):
@@ -1014,7 +1026,10 @@ class BaseModel(nn.Module):
             for param in self.parameters():
                 param.requires_grad = False
 
-        mp_policy = MixedPrecisionPolicy(param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype)
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
+        )
+        self.precision.set_default_mp_policy(mp_policy)
 
         for module in self.modules():
             if module is self:
@@ -1022,12 +1037,8 @@ class BaseModel(nn.Module):
             if isinstance(module, BaseModel):
                 module.fully_shard(fsdp_config)
 
-        mp_policy = MixedPrecisionPolicy(
-            param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
-        )
         self._fully_shard(
             mesh=self.fsdp_mesh,
-            mp_policy=mp_policy,
             reshard_after_forward=fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
@@ -1037,7 +1048,6 @@ class BaseModel(nn.Module):
     def _fully_shard(
         self,
         mesh: DeviceMesh,
-        mp_policy: MixedPrecisionPolicy,
         reshard_after_forward: bool,
         offload_policy: CPUOffloadPolicy | None,
         module: nn.Module | None = None,
@@ -1075,9 +1085,9 @@ class BaseModel(nn.Module):
         fully_shard(
             target,
             mesh=mesh,
-            # `fp32_lm_head` registers its units on the policy; Dense / MoE no longer compute a
-            # second policy of their own.
-            mp_policy=self.precision.mp_policy(target, mp_policy),
+            # Single owner: `fp32_lm_head` pins units on the policy, every other unit takes the
+            # model-wide default registered by `fully_shard`.
+            mp_policy=self.precision.mp_policy(target),
             reshard_after_forward=reshard_after_forward,
             offload_policy=offload_policy,
             ignored_params=ignored_params if ignored_params else None,

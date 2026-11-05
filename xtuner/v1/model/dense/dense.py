@@ -221,6 +221,7 @@ class Dense(BaseModel):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
+        self.precision.set_default_mp_policy(mp_policy)
         if self.config.head_fp32(self.fsdp_config):
             self.precision.pin_unit(self.lm_head)
             if self.config.tie_word_embeddings:
@@ -250,7 +251,6 @@ class Dense(BaseModel):
             self.layers[str(layer_idx)] = layer
             self._fully_shard(
                 mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-                mp_policy=mp_policy,
                 reshard_after_forward=self.fsdp_config.reshard_after_forward,
                 offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
                 module=layer,
@@ -264,7 +264,6 @@ class Dense(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.embed_tokens,
@@ -272,7 +271,6 @@ class Dense(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.norm,
@@ -280,7 +278,6 @@ class Dense(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.lm_head,
@@ -288,7 +285,6 @@ class Dense(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )

@@ -381,6 +381,7 @@ class InternS1VisionModel(BaseModel):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
+        self.precision.set_default_mp_policy(mp_policy)
 
         # NOTE: 在 cpu_offload 模式下，mesh 应该是 cuda 的，在 meta fully_shard 后在调用 .to_empty(device=cpu)
         self.fsdp_mesh = init_world_mesh()
@@ -421,7 +422,6 @@ class InternS1VisionModel(BaseModel):
 
             self._fully_shard(
                 mesh=self.fsdp_mesh,
-                mp_policy=mp_policy,
                 reshard_after_forward=True,
                 offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
                 module=layer,
@@ -432,7 +432,6 @@ class InternS1VisionModel(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh,
-            mp_policy=mp_policy,
             reshard_after_forward=True,
             offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
         )

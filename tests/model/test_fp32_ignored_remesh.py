@@ -77,13 +77,14 @@ class TestFP32IgnoredRemesh(DeterministicDDPTestCase):
                 torch_compile=False,
             )
         )
+        # `fully_shard` normally registers this; the test drives `_fully_shard` directly.
+        model.precision.set_default_mp_policy(_mp_policy())
         return model
 
     def _call_fully_shard(self, model: MoE, module: nn.Module | None) -> None:
         assert model.fsdp_mesh is not None
         model._fully_shard(
             mesh=model.fsdp_mesh,
-            mp_policy=_mp_policy(),
             reshard_after_forward=True,
             offload_policy=None,
             module=module,

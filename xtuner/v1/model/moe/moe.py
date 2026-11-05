@@ -1437,6 +1437,7 @@ class MoE(BaseModel):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
+        self.precision.set_default_mp_policy(mp_policy)
         checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
 
         for layer_idx, layer in tqdm(self.layers.items(), desc="[FSDP Sharding]"):
@@ -1458,7 +1459,6 @@ class MoE(BaseModel):
 
             self._fully_shard(
                 mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-                mp_policy=mp_policy,
                 reshard_after_forward=reshard_after_forward,
                 offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
                 module=layer,
@@ -1472,7 +1472,6 @@ class MoE(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=mp_policy,
             reshard_after_forward=self.config.embed_reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.embed_tokens,
@@ -1480,7 +1479,6 @@ class MoE(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.norm,
@@ -1488,7 +1486,6 @@ class MoE(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=mp_policy,
             reshard_after_forward=False,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.lm_head,
@@ -1509,7 +1506,6 @@ class MoE(BaseModel):
                 reshard_after_forward = mtp_idx != len(self.mtp_block.layers) - 1
                 self._fully_shard(
                     mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-                    mp_policy=mp_policy,
                     reshard_after_forward=reshard_after_forward,
                     offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
                     module=mtp_layer,
@@ -1526,7 +1522,6 @@ class MoE(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )

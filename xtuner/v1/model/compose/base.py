@@ -116,6 +116,7 @@ class BaseComposeModel(BaseModel):
         # TODO: 判断其余模块是否已经被 fsdp 切分了
 
         mp_policy = MixedPrecisionPolicy(param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype)
+        self.precision.set_default_mp_policy(mp_policy)
 
         self.fsdp_mesh = init_world_mesh()
         # Note: 非常关键，不能删除这个 assert
@@ -123,7 +124,6 @@ class BaseComposeModel(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh,
-            mp_policy=mp_policy,
             reshard_after_forward=fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
         )
