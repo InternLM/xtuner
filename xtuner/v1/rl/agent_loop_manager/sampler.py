@@ -7,7 +7,7 @@ import torch
 from pydantic import BaseModel, ConfigDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import MM_PIXEL_FIELDS, RolloutState, Status
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.dataloader import Dataloader
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
@@ -64,9 +64,10 @@ class SamplerConfig(BaseModel):
 # The best solution should be to start the dataloader using spawn.
 def put_to_ray(data: RolloutState) -> RolloutState:
     if hasattr(data, "mm_info") and data.mm_info is not None:
-        pixel_values = data.mm_info.get("pixel_values", None)
-        if pixel_values is not None:
-            data.mm_info["pixel_values"] = ray.put(pixel_values)
+        for name in MM_PIXEL_FIELDS:
+            value = data.mm_info.get(name, None)
+            if value is not None and not isinstance(value, ray.ObjectRef):
+                data.mm_info[name] = ray.put(value)
     return data
 
 

@@ -38,6 +38,7 @@ from xtuner.v1.rl.utils import (
     get_eos_token,
     register_cpu_resources,
 )
+from xtuner.v1.rl.utils.misc import validate_image_only_rollout
 from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
@@ -1055,6 +1056,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 payload from the original prompt and the request entry
                 ``max_tokens``.
         """
+        validate_image_only_rollout(rollout_state)
         if discard_response:
             rollout_state = reset_rollout_response(rollout_state)
             rollout_state.sample_params = rollout_state.sample_params.model_copy(

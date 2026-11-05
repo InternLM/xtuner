@@ -31,6 +31,7 @@ from typing_extensions import NotRequired
 from transformers import AutoTokenizer
 from xtuner.v1.config.fsdp import FSDPConfig
 from xtuner.v1.config.optim import LRConfig, OptimConfig
+from xtuner.v1.data_proto.rl_data import MM_PIXEL_FIELDS
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.dataloader import Dataloader
@@ -246,6 +247,19 @@ class WorkerLogItem(TypedDict):
     rollout_is_metrics: NotRequired[dict[str, float]]
     train_metrics: List[WorkerTrainLogItem]
     sft_train_metrics: NotRequired[dict[str, float]]
+
+
+def _resolve_multimodal_inputs(seq_ctx: SequenceContext) -> None:
+    """Materialize packed media refs on CPU before device transfer and SP
+    splitting."""
+    for name in MM_PIXEL_FIELDS:
+        value = getattr(seq_ctx, name)
+        if value is None or isinstance(value, torch.Tensor):
+            continue
+        assert isinstance(value, list), f"{name} should be a list of Ray ObjectRef, got {type(value)}"
+        # Batch the object-store fetch; a pack can contain many media refs, including shared repeats.
+        tensors = [torch.as_tensor(item) for item in ray.get(value)]
+        setattr(seq_ctx, name, torch.cat(tensors, dim=0))
 
 
 class TrainingWorker(SingleAcceleratorWorker):
@@ -678,18 +692,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             # update seq_ctx
             seq_ctx = data["seq_ctx"]
             teacher_indices = data.get("teacher_indices")
-            pixel_values = seq_ctx.pixel_values
-            if pixel_values is not None:
-                if not isinstance(pixel_values, np.ndarray):
-                    assert isinstance(pixel_values, list), (
-                        f"pixel_values should be list of tensor, got {type(pixel_values)}"
-                    )
-                    pixel_values = ray.get(list(pixel_values))
-                    pixel_values = [torch.as_tensor(pixel_value) for pixel_value in pixel_values]
-                    pixel_values = torch.cat(pixel_values, dim=0)
-                    seq_ctx.pixel_values = pixel_values
-                else:
-                    raise NotImplementedError("The case where pixel_values is a numpy array is not implemented yet.")
+            _resolve_multimodal_inputs(seq_ctx)
 
             rollout_routed_experts = seq_ctx.rollout_routed_experts
             if rollout_routed_experts is not None:

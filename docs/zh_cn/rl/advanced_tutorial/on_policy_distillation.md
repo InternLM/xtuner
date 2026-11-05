@@ -525,3 +525,31 @@ Training-side Teacher 还会记录：
 - Training-side Teacher 支持 CPU offload，但不支持 disk offload。
 - 当前 Top-K 是 Teacher-selected Top-K，不是 full-vocabulary distillation。
 - Reference Model 和 OPD Teacher 是不同角色；即使 checkpoint 相同，配置语义也不相同。
+
+
+## GLM53 图文训练侧 Teacher
+
+GLM53 的单轮图文 RL/OPD 使用 `RLGlm53VLTokenizeFnConfig`，复用 SFT 的 chat renderer 和 HF processor，
+同时生成 rollout 的原始占位符 prompt 与训练所需的展开 prompt、像素、grid 和逐 token 模态标记：
+
+```python
+from xtuner.v1.datasets.rl_tokenize_fn import RLGlm53VLTokenizeFnConfig
+
+tokenize_fn_cfg = RLGlm53VLTokenizeFnConfig(
+    processor_path=model_path,
+    max_length=max_prompt_length,
+)
+```
+
+在 VLM dataset 配置的 `tokenize_fn` 项中使用上述 `tokenize_fn_cfg`；记录的 `prompt` 为消息列表或包含 `messages`/`tools` 的字典，
+并提供 `data_source`。图片沿用 SFT 的 `image`/`image_url` 格式和 `image_wh` 元数据。
+训练侧的 Student 和 composed Teacher 均须使用 GLM53 视觉组合配置（`Glm53BaseConfig`），
+并按本节已有的 `TrainTeacherConfig` / `DistillationConfig` 方式配置 teacher 与数据源映射。
+rollout 引擎与训练 tokenizer 应使用一致的 processor 配置与图像尺寸预算；文本单独使用时模态标记为 0。
+
+训练输入按 `prompt + response[:-1]` 构造，response 输入位置补 0；packing 的纯文本与 padding 段也补 0。
+Teacher 继承这些视觉输入与 CPU offsets，并重新计算视觉特征，不复用 Student 的 embeddings 或 rollout 路由缓存。
+
+视频的 processor 产物和 Ray 传输支持训练侧回放；当前内置在线 rollout 和 rollout Teacher 请求均不支持视频，
+会在构造请求/评分前显式拒绝 `video_data` 或视频像素输入，防止生成与训练的视觉条件静默错位。
+这不代表已支持在线视频 rollout。单条样本中混合图片和视频的限制与 SFT 相同。
