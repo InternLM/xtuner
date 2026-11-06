@@ -17,7 +17,7 @@ from typing_extensions import Literal, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1._writer import get_writer
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, validate_train_group
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop_manager import (
@@ -39,6 +39,7 @@ from xtuner.v1.rl.replay_buffer import (
     _snapshot_nested_objectrefs,
 )
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
+from xtuner.v1.rl.rollout.trace_store import release_and_discard_rollout_groups
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.rollout.worker_registry import WorkerLifecycleState
 from xtuner.v1.rl.trace import TraceConfig, close_trace, configure_trace
@@ -50,6 +51,7 @@ from xtuner.v1.rl.utils import (
     CPUResourceManager,
     asyncio_run,
     create_task,
+    free_object_refs,
     set_cpu_resource_manager,
     sort_rollout_state_for_deterministic,
 )
@@ -85,16 +87,6 @@ def _trainer_config_requires_rollout_proxy(cfg: "BaseRLTrainerConfig") -> bool:
     return _agent_loop_manager_requires_rollout_proxy(
         cfg.agent_loop_manager_cfg
     ) or _agent_loop_manager_requires_rollout_proxy(cfg.eval_agent_loop_manager_cfg)
-
-
-# 在使用了 trace_store 情况下，我们不能提前释放 obj ref，而是由 trainer 在消费后统一释放
-# 这样可以确保一拆多情况下正确。判断逻辑和 rollout_proxy 一致。
-def _agent_loop_manager_uses_trace_store(
-    cfg: AgentLoopManagerConfig | DisaggAgentLoopManagerConfig | None,
-) -> bool:
-    # Agent loops that require the rollout proxy currently export train traces
-    # through RolloutTraceStore. Those trace refs are shared across segments.
-    return _agent_loop_manager_requires_rollout_proxy(cfg)
 
 
 def _migrate_manager_is_valid_sample_fn(
@@ -562,6 +554,7 @@ class BaseRLTrainer:
     eval_agent_loop_manager: AgentLoopManager
     _debug_train_files: dict[int, Path]
     _distillation: DistillationTrainerAdapter
+    _distillation_config: DistillationConfig | None
 
     def _init_common(self, cfg: BaseRLTrainerConfig, *, meta_path: str, logger_tag: str) -> None:
         distillation_config = cfg.distillation_config
@@ -570,6 +563,7 @@ class BaseRLTrainer:
             distillation_config = distillation_config.resolve_teacher_endpoints(endpoint_map)
 
         self._distillation = DistillationTrainerAdapter(distillation_config)
+        self._distillation_config = distillation_config
 
         check_fa3()
         self._init_work_dir_and_meta(cfg, meta_path)
@@ -670,11 +664,10 @@ class BaseRLTrainer:
         if cfg.train_worker_cfg.seed is None:
             self.logger.warning(f"RLTrainer seed {cfg.seed} is used as train worker seed.")
             cfg.train_worker_cfg.seed = cfg.seed
-        if _agent_loop_manager_uses_trace_store(cfg.agent_loop_manager_cfg):
-            cfg.train_worker_cfg.free_rollout_routed_experts_in_worker = False
         cfg.train_worker_cfg.load_from = cfg.load_from
         cfg.train_worker_cfg.log_dir = log_dir
         cfg.train_worker_cfg.train_teacher_manager_config = self._distillation.train_teacher_manager_config
+        cfg.train_worker_cfg.distillation_config = self._distillation_config
         self._train_worker_cfg = cfg.train_worker_cfg
 
     def _init_rollout_config(self, cfg: BaseRLTrainerConfig, log_dir: Path) -> None:
@@ -903,24 +896,89 @@ class BaseRLTrainer:
         )
         return set(released_session_ids)
 
-    def _release_all_trace_sessions(self) -> None:
-        from xtuner.v1.rl.rollout.trace_store import get_existing_store
+    def _release_train_batch_resources(self, train_batch: list[list[RolloutState]]) -> None:
+        """Release the consumed batch's trace sessions and remaining remote
+        refs.
 
-        store = get_existing_store()
-        if store is None:
-            return
+        Trace-owned routed-expert refs are released with their session; everything
+        else (ordinary routed refs and pixels) is freed once, deduplicated.
 
-        self.logger.info("Release all sessions and free associated resources")
-        ray.get(store.release_all.remote())
-        keys = ray.get(store.list_sessions.remote())
-        # A leftover session key should stay visible without crashing fit()
-        # during teardown.
-        if keys:
-            self.logger.warning(f"Trace store keys not released after release_all: {keys}")
+        Args:
+            train_batch (list[list[RolloutState]]): The batch that was fully consumed.
 
-    def _release_trace_sessions_after_train_batch(self, train_batch: list[list[RolloutState]]) -> None:
-        """Release training traces when no concurrent rollout owner exists."""
-        self._release_all_trace_sessions()
+        Returns:
+            None
+        """
+        released_sessions = self._release_trace_sessions(_trace_session_ids(train_batch))
+        refs: list[ray.ObjectRef] = []
+        for group in train_batch:
+            for state in group:
+                pixels = state.mm_info.get("pixel_values") if state.mm_info is not None else None
+                trace_released = state.session_id is not None and str(state.session_id) in released_sessions
+                routed = None if trace_released else state.routed_experts
+                for value in (pixels, routed):
+                    if isinstance(value, ray.ObjectRef):
+                        refs.append(value)
+                    elif isinstance(value, (list, tuple)):
+                        refs.extend(item for item in value if isinstance(item, ray.ObjectRef))
+        free_object_refs(refs)
+
+    def _prepare_train_batch(
+        self,
+        train_batch: list[list[RolloutState]],
+        train_step: int,
+        produce_result: ProduceBatchResult | None = None,
+    ) -> tuple[int, int]:
+        """Drop invalid groups before training; preserve the labels from batch
+        retrieval.
+
+        Evaluation never enters this path. Staleness is already handled by take_train_batch, and debug replay preserves
+        its saved label masks.
+
+        ``ProduceBatchResult`` production counters and raw rewards describe the producer window (including groups that
+        may not be in this retrieved training batch); ``task_batch_sizes`` records requested buffer counts. Keep those
+        metrics unchanged when this method filters invalid training groups. The dropped groups are reported separately
+        through the returned counts and ``response/invalid_train_groups`` / ``response/invalid_train_samples``.
+        """
+        valid_groups = []
+        rejected_groups = []
+        rejected_samples = 0
+        for group in train_batch:
+            task_name = (group[0].task_name if group else None) or "train"
+            try:
+                validate_train_group(group, task_name=task_name)
+            except ValueError as exc:
+                self.logger.warning(
+                    f"Discard invalid training group: task={task_name!r}, "
+                    f"rollout_ids={[state.rollout_id for state in group]}, reason={exc}"
+                )
+                rejected_groups.append(group)
+                rejected_samples += len(group)
+                continue
+
+            valid_groups.append(group)
+
+        if rejected_groups:
+            asyncio_run(release_and_discard_rollout_groups(rejected_groups))
+        train_batch[:] = valid_groups
+        if produce_result is not None:
+            produce_result.rollout_states[:] = valid_groups
+        if produce_result is not None and produce_result.task_results is not None:
+            kept_states = {id(state) for group in valid_groups for state in group}
+            for result in produce_result.task_results.values():
+                result.rollout_states[:] = [
+                    group for group in result.rollout_states if group and id(group[0]) in kept_states
+                ]
+        self.logger.info(
+            f"Training field check: kept_groups={len(valid_groups)}, "
+            f"discarded_groups={len(rejected_groups)}, discarded_samples={rejected_samples}"
+        )
+        if not valid_groups:
+            raise ValueError(
+                f"No valid training data remains after checking training fields: train_step={train_step}, "
+                f"discarded_groups={len(rejected_groups)}, discarded_samples={rejected_samples}"
+            )
+        return len(rejected_groups), rejected_samples
 
     def _train_one_batch(
         self,
@@ -932,7 +990,9 @@ class BaseRLTrainer:
         onload_train_before_train: bool = False,
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
+        produce_result: ProduceBatchResult | None = None,
     ) -> TrainInfo:
+        dropped_groups, dropped_samples = self._prepare_train_batch(train_batch, train_step, produce_result)
         train_sample_count = sum(len(group) for group in train_batch)
         self.logger.info(f"generate {train_sample_count} samples for training")
 
@@ -963,7 +1023,9 @@ class BaseRLTrainer:
                 raw_rewards_count=raw_rewards_count,
             )
 
-        self._release_trace_sessions_after_train_batch(train_batch)
+        data_info["invalid_train_groups"] = dropped_groups
+        data_info["invalid_train_samples"] = dropped_samples
+        self._release_train_batch_resources(train_batch)
 
         return {
             "data_info": data_info,
@@ -1180,9 +1242,6 @@ class BaseRLTrainer:
         valid_groups = []
 
         for group in data_groups:
-            # 日志需要兼容 recovered/debug 状态；canonical 训练契约由 controller 单独校验。
-            if any(item.status in {Status.ABORTED, Status.FILTERED, Status.FAILED} for item in group):
-                continue
             valid_groups.append(group)
             for data in group:
                 reward = data.reward.get("score") if data.reward is not None else None
@@ -1539,6 +1598,7 @@ class RLColocateTrainer(BaseRLTrainer):
                         onload_train_before_train=True,
                         raw_rewards_sum=produce_result.raw_rewards_sum,
                         raw_rewards_count=produce_result.raw_rewards_count,
+                        produce_result=produce_result,
                     )
                 else:
                     self._save_debug_rollout_batch(train_batch, train_step)
@@ -1698,10 +1758,6 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
         self._cpu_resource_manager.log_registered_summary()
 
-    def _release_trace_sessions_after_train_batch(self, train_batch: list[list[RolloutState]]) -> None:
-        """Release only consumed traces while the background producer runs."""
-        self._release_trace_sessions(_trace_session_ids(train_batch))
-
     def _build_disaggregated_placement_groups(
         self,
         train_resources: AcceleratorResourcesConfig,
@@ -1844,6 +1900,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                             step_timer_dict,
                             raw_rewards_sum=produce_result.raw_rewards_sum,
                             raw_rewards_count=produce_result.raw_rewards_count,
+                            produce_result=produce_result,
                         )
                         sync_model_step = train_step
 

@@ -11,7 +11,12 @@ from pydantic import BaseModel, ConfigDict
 from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
 
-from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, get_group_status
+from xtuner.v1.data_proto.rl_data import (
+    RolloutState,
+    SampleParams,
+    Status,
+    get_group_status,
+)
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.rollout.constants import AGENT_LOOP_RAY_GENERATE_MAX_CONCURRENCY
@@ -285,23 +290,11 @@ class AgentLoop(ABC):
         return self.canonicalize_train_fields(group)
 
     def canonicalize_train_fields(self, group: list[RolloutState]) -> list[RolloutState]:
-        """Canonicalize the training token fields of one rollout group.
+        """Build full, unshifted training fields and write lightweight
+        metadata.
 
-        Prompt+response samples without ``input_ids`` are assembled in place into the
-        unified full-sequence convention: ``input_ids``/``labels``/``logprobs`` share one
-        length, where ``labels[j]`` is the prediction target of the token at position
-        ``j`` and the train controller applies the one-position shift at conversion time.
-        Samples that already carry ``input_ids`` satisfy the convention and are left
-        untouched. Non-completed samples are skipped. Failures mark the single sample as
-        ``Status.FAILED`` instead of raising into the producer. Agentic loops that only
-        need to select their full-sequence states reuse this default validation.
-
-        Args:
-            group (list[RolloutState]): One group of rollout states after generation,
-                judging, and filtering.
-
-        Returns:
-            list[RolloutState]: The same group with canonical training fields.
+        Already assembled sequences are preserved. A construction error marks that sample failed so the producer can
+        discard its group without aborting the produce window.
         """
         for state in group:
             if state.status != Status.COMPLETED:
@@ -310,16 +303,10 @@ class AgentLoop(ABC):
                 if state.input_ids is None:
                     if not state.response:
                         raise ValueError("response must be non-empty")
-                    is_vlm_model = "train_prompt_ids" in state.extra_fields
-                    if is_vlm_model:
-                        # TODO(hha): VLM, 不好的设计，后续要去掉
-                        prompt_ids = state.extra_fields["train_prompt_ids"]
-                    else:
-                        prompt_ids = state.prompt_ids
+                    prompt_ids = state.extra_fields.get("train_prompt_ids", state.prompt_ids)
                     assert prompt_ids is not None and len(prompt_ids) > 0, (
                         f"Prompt ids cannot be None or empty in data: {state}"
                     )
-
                     response_ids: list[int]
                     if state.response_ids is not None:
                         resp_ids_raw = state.response_ids

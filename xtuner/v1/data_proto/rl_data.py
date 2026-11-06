@@ -285,7 +285,7 @@ class RolloutState(BaseModel):
             None
         """
         if self.input_ids is None or self.labels is None or self.train_meta is None:
-            raise ValueError("Training fields and train_meta must be present")
+            raise ValueError("Training input_ids, labels and train_meta must be present")
         expected = self._build_train_meta(
             input_ids=self.input_ids,
             labels=self.labels,
@@ -308,10 +308,12 @@ class RolloutState(BaseModel):
         logprobs: list[float] | None,
         prompt_length: int | None = None,
     ) -> TrainMeta:
-        if len(input_ids) < 2 or len(input_ids) != len(labels):
-            raise ValueError("Training input_ids and labels must be full and aligned")
+        if len(input_ids) < 2:
+            raise ValueError("Training input_ids must contain at least 2 tokens")
+        if len(input_ids) != len(labels):
+            raise ValueError(f"labels length mismatch: {len(labels)} vs input_ids={len(input_ids)}")
         if logprobs is not None and len(logprobs) != len(input_ids):
-            raise ValueError("Full rollout logprobs must align with full input_ids")
+            raise ValueError(f"logprobs length mismatch: {len(logprobs)} vs input_ids={len(input_ids)}")
         response_length = len(self.response_ids or [])
         if response_length > len(labels):
             raise ValueError("Response suffix exceeds full labels")
@@ -514,7 +516,7 @@ def _calculate_effective_response_mask(
     *,
     current_train_step: int,
     token_stale_threshold: int,
-) -> list[int]:
+) -> list[bool]:
     """Calculate the effective response mask of one rollout state without
     mutating it.
 
@@ -541,16 +543,15 @@ def _calculate_effective_response_mask(
     offset = len(labels) - len(response_ids)
     # semantic_mask: labels 中非 -100 的监督位；token_staleness_mask: 逐 token 新鲜度
     # （语义洞位的 staleness 值无意义，乘上 semantic_mask 后自然归零）。
-    semantic_mask = [int(label != -100) for label in labels[offset:]]
+    semantic_mask = [label != -100 for label in labels[offset:]]
     token_staleness_mask = [
-        int(calculate_seq_staleness(response_model_step, current_train_step) < token_stale_threshold)
+        calculate_seq_staleness(response_model_step, current_train_step) < token_stale_threshold
         for response_model_step in response_model_steps
     ]
-    effective_mask = [
-        semantic_mask_value * token_staleness_mask_value
+    return [
+        semantic_mask_value and token_staleness_mask_value
         for semantic_mask_value, token_staleness_mask_value in zip(semantic_mask, token_staleness_mask)
     ]
-    return effective_mask
 
 
 def calculate_group_effective_response_masks(
@@ -558,13 +559,12 @@ def calculate_group_effective_response_masks(
     *,
     current_train_step: int,
     token_stale_threshold: int | None,
-) -> list[list[int] | None]:
+) -> list[list[bool] | None]:
     """Calculate one group's effective response masks under the token-staleness
     policy.
 
     The function is pure: ``group`` is inspected, not modified. Each returned mask is the effective
-    response mask aligned with ``response_ids``; callers bake them into ``labels`` when the train
-    batch is taken, clearing zero-mask supervised positions to ``-100``. The clearing only ever
+    response mask aligned with ``response_ids``; callers bake them into ``labels`` in ``take_train_batch``, clearing zero-mask supervised positions to ``-100``. The clearing only ever
     extends, so masks computed at growing trainer steps converge to the same labels. ``None`` means
     token staleness is disabled or does not apply to that state (no labels, or no ``response_ids`` to
     align with).
@@ -581,7 +581,7 @@ def calculate_group_effective_response_masks(
     if token_stale_threshold is None:
         return [None] * len(group)
 
-    masks: list[list[int] | None] = []
+    masks: list[list[bool] | None] = []
     for item in group:
         if item.labels is None or not item.response_ids or len(item.labels) < len(item.response_ids):
             masks.append(None)
@@ -594,3 +594,46 @@ def calculate_group_effective_response_masks(
             )
         )
     return masks
+
+
+def validate_rollout_group(group: list[RolloutState], *, task_name: str) -> None:
+    """Check producer result structure, final status and existing version
+    bounds.
+
+    This function is read-only: it neither counts tokens nor fills model versions.
+    """
+    allowed = {Status.COMPLETED, Status.FAILED, Status.FILTERED, Status.ABORTED, Status.EXPIRED}
+    for state in group:
+        context = f"task={task_name!r}, group_id={state.group_id}, rollout_id={state.rollout_id}"
+        if state.status not in allowed:
+            raise ValueError(f"{context}: invalid generated status {state.status}")
+        response_length = len(state.response_ids or [])
+        version_length = len(state.response_model_steps or [])
+        if version_length > response_length:
+            raise ValueError(
+                f"{context}: response_model_steps length={version_length}, expected at most response_ids={response_length}"
+            )
+
+
+def validate_train_group(group: list[RolloutState], *, task_name: str) -> None:
+    """Check a completed group's fields immediately before training.
+
+    Group-level conditions stay here; each sample's training-field consistency is
+    owned by ``RolloutState.validate_training``. Raise ValueError so the training
+    boundary can discard the entire group.
+
+    Args:
+        group (list[RolloutState]): Rollout group selected for training.
+        task_name (str): Task name used for error attribution.
+
+    Returns:
+        None
+    """
+    if not group or any(not isinstance(state, RolloutState) or state.status != Status.COMPLETED for state in group):
+        raise ValueError(f"task={task_name!r}: training requires a nonempty COMPLETED rollout group")
+    for state in group:
+        context = f"task={task_name!r}, group_id={state.group_id}, rollout_id={state.rollout_id}"
+        try:
+            state.validate_training()
+        except ValueError as exc:
+            raise ValueError(f"{context}: {exc}") from exc
