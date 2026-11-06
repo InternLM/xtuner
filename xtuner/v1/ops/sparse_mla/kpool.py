@@ -321,8 +321,9 @@ def kpool_topk_indices(
 ) -> Tensor:
     """Build pools (A), score/select pools (B), expand to token ids + tail (C).
 
-    ``scorer="original"`` uses TileLang scoring with the selected TopK kernel;
-    ``"cooperative"`` uses its fused scoring and selection path.
+    The existing default uses LMDeploy operators for GLM-5.3's production
+    geometry. Other geometries, explicit alternative selectors/scorers and SP
+    query balancing retain their TileLang implementation and public API.
 
     Args:
         q (Tensor): Index query, shape ``[1, S, index_n_heads, index_head_dim]``, bf16.
@@ -352,6 +353,30 @@ def kpool_topk_indices(
         raise ValueError("selector is only supported with the original KPool scorer")
     if not math.isfinite(sp_full_pool_work_ratio) or sp_full_pool_work_ratio < 0:
         raise ValueError("sp_full_pool_work_ratio must be finite and nonnegative")
+    if (
+        scorer == "original"
+        and selector == "torch"
+        and not balance_sp
+        and _supports_lmdeploy_kpool(index_head_dim, q.shape[2], index_kpool, index_topk)
+    ):
+        from .lmdeploy_kpool import _kpool_topk_indices
+
+        return _kpool_topk_indices(
+            q,
+            k,
+            gate_scores,
+            weights,
+            kpool_ape,
+            seq_ctx,
+            index_head_dim=index_head_dim,
+            index_topk=index_topk,
+            index_kpool=index_kpool,
+            always_select_tail=always_select_tail,
+            alignment=alignment,
+            query_chunk_size=query_chunk_size,
+            balance_sp=balance_sp,
+            sp_full_pool_work_ratio=sp_full_pool_work_ratio,
+        )
     # SP: queries stay sharded; the key side gathers *before* pooling, because a pool can
     # straddle the shard seam (see build_pools). This costs 2 x [S, index_head_dim] per layer
     # instead of the [P, index_head_dim] a post-pooling gather would move -- the price of
@@ -436,6 +461,10 @@ def kpool_topk_indices(
         always_select_tail=always_select_tail,
         alignment=alignment,
     )
+
+
+def _supports_lmdeploy_kpool(head_dim: int, heads: int, pool_size: int, topk: int) -> bool:
+    return head_dim == 128 and heads in (32, 64, 128) and pool_size == 4 and topk in (2048, 8192)
 
 
 @torch.no_grad()
