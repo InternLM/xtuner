@@ -94,6 +94,17 @@ def _timeout_item() -> AgentRolloutItem:
     return item
 
 
+def _timeout_item_with_tool_calls() -> AgentRolloutItem:
+    item = _timeout_item()
+    item.artifacts = {
+        "messages": [{"messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "function": {"name": "f"}}]},
+        ], "tools": []}],
+    }
+    return item
+
+
 def _completed_item() -> AgentRolloutItem:
     item = AgentRolloutItem(id="item-2", data_source="test", uid=123, instruction="task.md")
     item.status = RolloutStatus.COMPLETED
@@ -132,6 +143,7 @@ class TestTimeoutTraining(unittest.IsolatedAsyncioTestCase):
             "labels": [-100, 5, 6],
             "logprobs": [0.0, 0.1, 0.2],
             "routed_experts": None,
+            "tool_call_count": 2,
         }
 
         with patch(f"{LOOP_MODULE}.get_store", return_value=_fake_store(partial_trace)) as get_store:
@@ -150,7 +162,26 @@ class TestTimeoutTraining(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(kept.routed_experts)
         self.assertTrue(kept.extra_fields["timeout_trained"])
         self.assertEqual(kept.extra_fields["agent_status"], "timeout")
-        self.assertEqual(kept.extra_fields["agent_tool_turns"], 0)
+        # 优先使用 trace store 沿导出链求和的计数(与训练 token 同源)。
+        self.assertEqual(kept.extra_fields["agent_tool_turns"], 2)
+
+    async def test_timeout_tool_turns_is_none_without_store_count(self):
+        # 行为:导出的 tool_call_count 为 None(旧节点缺字段)时,agent_tool_turns 保持
+        # None——trace store 没有记录就不虚构计数,不从 artifacts 估算
+        loop = _make_loop(train_on_timeout=True)
+        state = _make_state(_timeout_item_with_tool_calls())
+        partial_trace = {
+            "input_ids": [1, 2, 3],
+            "labels": [-100, 5, 6],
+            "logprobs": [0.0, 0.1, 0.2],
+            "routed_experts": None,
+            "tool_call_count": None,
+        }
+
+        with patch(f"{LOOP_MODULE}.get_store", return_value=_fake_store(partial_trace)):
+            kept_list = await loop.generate_sample(state)
+
+        self.assertIsNone(kept_list[0].extra_fields["agent_tool_turns"])
 
     async def test_timeout_falls_back_to_failed_without_supervised_tokens(self):
         # 行为:部分轨迹没有 supervised token 时,保留失败并回退 FAILED

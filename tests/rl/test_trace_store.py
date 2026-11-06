@@ -5,13 +5,17 @@ TestRolloutTraceStore —— store actor 的 session 生命周期与引用递归
 TestExportPartialTrainingTrace —— export_partial_training_trace 的部分导出行为
 - test_exports_committed_segments_in_order:
     同一 session 的多个 segment 按写入顺序拼接导出,无 MoE 时 routed_experts 为 None。
-- test_divergent_session_is_rejected:
-    session 出现分叉(重试后轨迹不同)时抛错,而不是把两次尝试拼接在一起。
+- test_divergent_session_exports_latest_chain:
+    session 出现分叉(过期重放复用同一 session id)时导出最新写入的分支链
+    (同一时钟内并列时退回 token 数最多的分支),而不是拒绝或选拼接/最旧链。
+- test_tool_call_count_summed_on_export / ..._legacy_node_reports_unknown:
+    tool_call_count 随 assistant 段写入、沿导出链求和;旧节点缺字段时返回 None。
 - test_empty_session_returns_empty_trace:
     不存在的 session 返回空 trace 而不是报错。
 """
 
 import asyncio
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -153,14 +157,16 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
                 store.insert.remote(
                     "s",
                     "hello ",
-                    TokenizedSegment(text="hello ", token_ids=[1, 2], labels=[-100, 5], logprobs=[0.0, 0.1]),
+                    TokenizedSegment(text="hello ", token_ids=[1, 2], labels=[-100, 5], logprobs=[0.0, 0.1],
+                                     tool_call_count=2),
                 )
             )
             ray.get(
                 store.insert.remote(
                     "s",
                     "hello world",
-                    TokenizedSegment(text="world", token_ids=[3, 4], labels=[6, 7], logprobs=[0.2, 0.3]),
+                    TokenizedSegment(text="world", token_ids=[3, 4], labels=[6, 7], logprobs=[0.2, 0.3],
+                                     tool_call_count=0),
                 )
             )
 
@@ -170,11 +176,84 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
             self.assertEqual(trace["labels"], [-100, 5, 6, 7])
             self.assertEqual(trace["logprobs"], [0.0, 0.1, 0.2, 0.3])
             self.assertIsNone(trace["routed_experts"])
+            self.assertEqual(trace["tool_call_count"], 2)
         finally:
             ray.kill(store)
 
-    def test_divergent_session_is_rejected(self):
-        # 行为:同一 session 出现分叉(重试后轨迹不同)时拒绝导出,而不是拼接两次尝试
+    def test_divergent_session_exports_latest_chain(self):
+        # 行为:同一 session 出现分叉(过期重放复用同一 session id)时导出最新写入的
+        # 分支链 —— 即使旧分支更长。导出链必须与最后一次尝试一致,否则训练 token
+        # 与 rollout 元数据(reward/artifacts)描述的不是同一次尝试。
+        store = RolloutTraceStore.remote()
+        try:
+            ray.get(
+                store.insert.remote(
+                    "s",
+                    "hello ",
+                    TokenizedSegment(text="hello ", token_ids=[1, 2], labels=[-100, 5], logprobs=[0.0, 0.1]),
+                )
+            )
+            # 第一次尝试:长分支,先写入。
+            ray.get(
+                store.insert.remote(
+                    "s",
+                    "hello there friend",
+                    TokenizedSegment(
+                        text="there friend", token_ids=[8, 9, 10, 11], labels=[12, 13, 14, 15],
+                        logprobs=[0.4, 0.5, 0.6, 0.7],
+                    ),
+                )
+            )
+            # 第二次尝试:更短,但更新 —— 在 "hello " 节点下形成兄弟分支。
+            ray.get(
+                store.insert.remote(
+                    "s",
+                    "hello world",
+                    TokenizedSegment(text="world", token_ids=[3, 4], labels=[6, 7], logprobs=[0.2, 0.3]),
+                )
+            )
+            # 分开写入,保证两次尝试的 created_at 不落在同一时刻。
+            time.sleep(0.01)
+
+            trace = ray.get(store.export_partial_training_trace.remote("s"))
+
+            # 最新链是 "hello " + "world",而不是更长的 "there friend" 分支。
+            self.assertEqual(trace["input_ids"], [1, 2, 3, 4])
+            self.assertEqual(trace["labels"], [-100, 5, 6, 7])
+            self.assertIsNone(trace["routed_experts"])
+        finally:
+            ray.kill(store)
+
+    def test_tool_call_count_summed_on_export(self):
+        # 行为:assistant 段携带 tool_call_count,导出时沿链求和;prompt 增量段不参与
+        # (prompt 段全掩码,与真实链路一致)
+        store = RolloutTraceStore.remote()
+        try:
+            ray.get(
+                store.insert.remote(
+                    "s",
+                    "hello ",
+                    TokenizedSegment(text="hello ", token_ids=[1, 2], labels=[-100, -100], logprobs=[0.0, 0.1]),
+                )
+            )
+            ray.get(
+                store.insert.remote(
+                    "s",
+                    "hello world",
+                    TokenizedSegment(text="world", token_ids=[3, 4], labels=[6, 7], logprobs=[0.2, 0.3],
+                                     tool_call_count=3),
+                )
+            )
+
+            trace = ray.get(store.export_partial_training_trace.remote("s"))
+
+            self.assertEqual(trace["tool_call_count"], 3)
+        finally:
+            ray.kill(store)
+
+    def test_tool_call_count_legacy_node_reports_unknown(self):
+        # 行为:链上存在缺 tool_call_count 字段的旧 assistant 段(有可训练 label)时,
+        # 导出返回 None 而不是静默少计
         store = RolloutTraceStore.remote()
         try:
             ray.get(
@@ -191,19 +270,10 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
                     TokenizedSegment(text="world", token_ids=[3, 4], labels=[6, 7], logprobs=[0.2, 0.3]),
                 )
             )
-            # 重试产生第二条不同的 assistant 轨迹,在 "hello " 节点下形成兄弟分支。
-            ray.get(
-                store.insert.remote(
-                    "s",
-                    "hello there",
-                    TokenizedSegment(text="there", token_ids=[8, 9], labels=[10, 11], logprobs=[0.4, 0.5]),
-                )
-            )
 
-            with self.assertRaises(ray.exceptions.RayTaskError) as ctx:
-                ray.get(store.export_partial_training_trace.remote("s"))
+            trace = ray.get(store.export_partial_training_trace.remote("s"))
 
-            self.assertIn("divergent branches", str(ctx.exception))
+            self.assertIsNone(trace["tool_call_count"])
         finally:
             ray.kill(store)
 

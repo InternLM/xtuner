@@ -171,20 +171,6 @@ def _count_tool_turns(messages: list[dict[str, Any]]) -> int:
     )
 
 
-def _count_artifact_tool_turns(artifacts: dict[str, Any]) -> int:
-    trace = artifacts.get("messages")
-    if not isinstance(trace, list):
-        return 0
-    total = 0
-    for segment in trace:
-        if not isinstance(segment, dict):
-            continue
-        messages = segment.get("messages")
-        if isinstance(messages, list):
-            total += _count_tool_turns(messages)
-    return total
-
-
 def _extract_reward_payload(item: AgentRolloutItem) -> dict[str, Any] | None:
     for record in item.judgers.values():
         reward = record.metadata.get("reward")
@@ -440,6 +426,10 @@ class AgentInSandboxLoop(AgentLoop):
         )
         rollout_state.extra_fields[_TIMEOUT_TRAINED_KEY] = True
         rollout_state.extra_fields["agent_session_id"] = rollout_state.session_id
+        # Trace-side count is source-of-truth: it only counts the turns actually
+        # exported (and trained). ``None`` means legacy nodes without the field;
+        # the caller then falls back to a best-effort artifacts count.
+        rollout_state.extra_fields["agent_tool_turns"] = data.get("tool_call_count")
         return rollout_state
 
     async def _try_keep_timeout_sample(
@@ -457,7 +447,6 @@ class AgentInSandboxLoop(AgentLoop):
             )
             return None
         timeout_state.extra_fields["agent_status"] = "timeout"
-        timeout_state.extra_fields["agent_tool_turns"] = _count_artifact_tool_turns(item.artifacts)
         return timeout_state
 
     def _fill_eval_rollout_state(self, rollout_state: RolloutState, item: AgentRolloutItem) -> None:

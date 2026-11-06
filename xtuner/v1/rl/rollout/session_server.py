@@ -509,6 +509,7 @@ class SessionServer:
                 logprobs=output_logprobs,
                 labels=output_token_ids,
                 expert_key=response_expert,
+                tool_call_count=len(assistant_msg.get("tool_calls") or []),
                 length=len(output_token_ids),
             ),
         )
