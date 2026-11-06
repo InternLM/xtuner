@@ -13,7 +13,7 @@ from .qwen3 import Qwen3MoE, Qwen3MoE30BA3Config, Qwen3MoE235BA22Config
 
 
 class Qwen3VLTextMoE(Qwen3MoE):
-    def to_hf_key_list(self, key: str) -> list[str]:
+    def _model_hf_keys(self, key: str) -> list[str]:
         if "layers" in key or "embed_tokens" in key:
             key = "model.language_model." + key
 

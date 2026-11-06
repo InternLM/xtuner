@@ -5,11 +5,12 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from xtuner.v1.model.moe.moe import DenseDecoderLayer, LMHead, MoEBlock, MoEDecoderLayer
+from xtuner.v1.model.moe.moe import DenseDecoderLayer, MoEBlock, MoEDecoderLayer
 from xtuner.v1.module.attention.gated_deltanet import FusedRMSNormGated, GatedDeltaNet, has_fused_rms_norm_gated
 from xtuner.v1.module.attention.mha import MultiHeadAttention
 from xtuner.v1.module.attention.mla import MultiLatentAttention
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEGate, MoEMLP
+from xtuner.v1.module.head import LMHead
 from xtuner.v1.module.linear.linear import _Linear
 from xtuner.v1.module.rms_norm.rms_norm import RMSNorm
 from xtuner.v1.module.rope.rope import FourierEmbedding, Qwen3VLTextRotaryEmbedding, RotaryEmbedding

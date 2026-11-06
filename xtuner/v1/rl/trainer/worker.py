@@ -109,7 +109,7 @@ class WorkerConfig(BaseModel):
     Args:
         model_cfg (TransformerConfig): Model architecture configuration.
         optim_cfg (OptimConfig): Optimizer configuration for training.
-        loss_cfg (BaseRLLossConfig): Loss function configuration for RL training.
+        loss_cfg (BaseRLLossConfig): Policy RL loss configuration.
         lr_cfg (LRConfig): Learning rate scheduler configuration.
         fsdp_cfg (FSDPConfig): Fully Sharded Data Parallel configuration.
         load_from (str | Path): Path to load the main model from.
@@ -505,7 +505,9 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._engine._maybe_precompute_float8_dynamic_scale_for_fsdp()
         old_logprobs_list: list[torch.Tensor] = []
         for seq_ctx, shifted_labels in zip(seq_ctx_list, shifted_labels_list):
-            loss_ctx = self.logprob_cfg.build(data={"shifted_labels": shifted_labels})
+            loss_ctx = self.logprob_cfg.build(
+                data={"shifted_labels": shifted_labels}, sp_mesh=self.sp_mesh, device=DEVICE
+            )
             assert loss_ctx is not None
             output = self._engine.forward_only(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
             old_logprobs_list.append(output["loss"])
@@ -547,7 +549,9 @@ class TrainingWorker(SingleAcceleratorWorker):
         ref_logprobs_list: list[torch.Tensor] = []
         for seq_ctx, shifted_labels in zip(seq_ctx_list, shifted_labels_list):
             with torch.no_grad():
-                loss_ctx = self.logprob_cfg.build(data={"shifted_labels": shifted_labels})
+                loss_ctx = self.logprob_cfg.build(
+                    data={"shifted_labels": shifted_labels}, sp_mesh=self.sp_mesh, device=DEVICE
+                )
                 assert loss_ctx is not None
                 ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
                 ref_logprobs_list.append(ref_output["loss"])
@@ -708,6 +712,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         # 每个 pack 单独从 TrainBatch 物化：CPU 序列、refs 解析、H2D 与 SP split 一次完成，
         # 再把 loss context 建在 CPU 后搬到设备。各阶段共用同一 pack 顺序，collective 对称。
         seq_ctx_list: list[SequenceContext] = []
+        full_labels_list: list[torch.Tensor] = []
         loss_ctx_list: list[BaseRLLossContext] = []
         mtp_loss_ctx_list: list[list[MTPLossContext]] = []
         prepare_inputs_begin = time.perf_counter()
@@ -716,10 +721,9 @@ class TrainingWorker(SingleAcceleratorWorker):
             if self.sp_mesh.size() > 1:
                 seq_ctx = seq_ctx.split(self.sp_mesh)
 
-            loss_ctx = loss_cfg.build(data=full_pack.full_data, device="cpu")
+            # loss builder 收完整数据、内部算全量权重并切到本 rank；调用方不再手工 split。
+            loss_ctx = loss_cfg.build(data=full_pack.full_data, sp_mesh=self.sp_mesh, device=DEVICE)
             assert loss_ctx is not None
-            loss_kwargs = loss_ctx.loss_kwargs
-            loss_kwargs.to(DEVICE)
             if self.mtp_config is not None:
                 mtp_loss_ctxs_per_batch: list[MTPLossContext] = []
                 for mtp_idx in range(self.mtp_config.num_layers):
@@ -730,19 +734,18 @@ class TrainingWorker(SingleAcceleratorWorker):
                     )
                     mtp_ctx = mtp_loss_cfg.build(
                         data={
-                            "shifted_labels": loss_kwargs.shifted_labels,
-                            "seq_ctx": seq_ctx,
-                            "logprobs": loss_kwargs.rollout_logprobs,
+                            **full_pack.full_data,
+                            "logprobs": full_pack.full_data.get("rollout_logprobs"),
                         },
                         sp_mesh=self.sp_mesh,
+                        device=DEVICE,
                     )
                     if mtp_ctx is not None:
                         mtp_loss_ctxs_per_batch.append(mtp_ctx)
                 mtp_loss_ctx_list.append(mtp_loss_ctxs_per_batch)
-            if self.sp_mesh.size() > 1:
-                loss_kwargs.sp_split(self.sp_mesh)
 
             seq_ctx_list.append(seq_ctx)
+            full_labels_list.append(full_pack.full_data["shifted_labels"])
             loss_ctx_list.append(loss_ctx)
         self._pack_time_s = time.perf_counter() - prepare_inputs_begin
         self.logger.debug(f"Rank{self.rank} Rollout {rollout_idx} prepare_inputs elapsed={self._pack_time_s:.4f}s")
@@ -752,7 +755,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         rollout_logprobs_list = [loss_ctx.loss_kwargs.rollout_logprobs for loss_ctx in loss_ctx_list]
 
         # compute old logprobs
-        old_logprobs_list = self.compute_actor_logprobs(seq_ctx_list, shifted_labels_list)
+        old_logprobs_list = self.compute_actor_logprobs(seq_ctx_list, full_labels_list)
         for old_logprobs, loss_ctx in zip(old_logprobs_list, loss_ctx_list):
             loss_ctx.loss_kwargs.old_logprobs = old_logprobs
 
@@ -819,7 +822,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         # compute reference logprobs
         ref_logprobs_list: list[torch.Tensor] | None = None
         if self._has_ref:
-            ref_logprobs_list = self.compute_ref_logprobs(seq_ctx_list, shifted_labels_list)
+            ref_logprobs_list = self.compute_ref_logprobs(seq_ctx_list, full_labels_list)
 
             for i, loss_ctx in enumerate(loss_ctx_list):
                 loss_ctx.loss_kwargs.ref_logprobs = ref_logprobs_list[i]
@@ -958,6 +961,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 if isinstance(v, (torch.Tensor, int, float))
             }
             extra_info_dict = loss_cfg.finalize_metrics(extra_info_dict, DEVICE)
+
             train_step_info.pop("total_loss")  # type: ignore[misc]
             max_memory = DEVICE_MODULE.max_memory_allocated() / (1024**3)  # type: ignore[attr-defined]
             reserved_memory = DEVICE_MODULE.max_memory_reserved() / (1024**3)  # type: ignore[attr-defined]
@@ -1047,7 +1051,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             if self.sp_mesh.size() > 1:
                 seq_ctx = seq_ctx.split(sequence_parallel_mesh=self.sp_mesh)
             seq_ctx_list.append(seq_ctx)
-            loss_ctx = loss_cfg.build(data={"shifted_labels": data["shifted_labels"]}, sp_mesh=self.sp_mesh)
+            loss_ctx = loss_cfg.build(data=data, sp_mesh=self.sp_mesh, device=DEVICE)
             loss_ctx_list.append(loss_ctx)
 
         del data_batch
