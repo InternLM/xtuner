@@ -22,6 +22,8 @@ from .schemas import AgentRolloutItem, RolloutStatus
 
 
 _MISSING = object()
+_TIMEOUT_ERROR_CATEGORIES = ["timeout"]
+_TIMEOUT_TRAINED_KEY = "timeout_trained"
 
 
 def _import_from_path(path: str) -> Any:
@@ -190,9 +192,17 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
     item's sandbox pipeline, then converts the resulting task reward and agent
     transcript back into the standard ``RolloutState`` fields consumed by the
     replay buffer/trainer.
+
+    ``train_on_timeout`` keeps rollouts that failed with an entry timeout as
+    ``COMPLETED`` samples built from their finished turns, using
+    ``timeout_reward`` as the fixed reward. The training benefit depends on the
+    group still having at least two reward-bearing samples; otherwise the
+    group-relative advantage is zero for the kept sample.
     """
 
     max_concurrent_samples: int | None = None
+    train_on_timeout: bool = False
+    timeout_reward: float = -1.0
     mode: Literal["train", "eval"] = "train"
     requires_rollout_proxy: bool = True
 
@@ -206,6 +216,8 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
             judger=judger,
             logger=logger,
             max_concurrent_samples=self.max_concurrent_samples,
+            train_on_timeout=self.train_on_timeout,
+            timeout_reward=self.timeout_reward,
             mode=self.mode,
         )
 
@@ -219,12 +231,16 @@ class AgentInSandboxLoop(AgentLoop):
         judger: Judger | None = None,
         logger=None,
         max_concurrent_samples: int | None = None,
+        train_on_timeout: bool = False,
+        timeout_reward: float = -1.0,
         mode: Literal["train", "eval"] = "train",
     ):
         if hf_checkpoint is None:
             raise ValueError("hf_checkpoint must be provided for AgentInSandboxLoop.")
         super().__init__(rollout_ctl, sample_params, hf_checkpoint, judger, logger)
         self.max_concurrent_samples = max_concurrent_samples
+        self.train_on_timeout = train_on_timeout
+        self.timeout_reward = timeout_reward
         self._sample_semaphore = asyncio.Semaphore(max_concurrent_samples) if max_concurrent_samples else None
         self.mode = mode
 
@@ -235,8 +251,7 @@ class AgentInSandboxLoop(AgentLoop):
             else:
                 async with self._sample_semaphore:
                     samples = await self.generate_sample(state)
-            samples = [await self._teacher_scorer.on_sample_ready(sample) for sample in samples]
-            return samples
+            return [await self._teacher_scorer.on_sample_ready(sample) for sample in samples]
 
         pending_tasks = []
         for state in rollout_state:
@@ -265,6 +280,8 @@ class AgentInSandboxLoop(AgentLoop):
     async def generate_sample(  # type: ignore[override]
         self, rollout_state: RolloutState, **kwargs
     ) -> list[RolloutState]:
+        # Reset the per-attempt marker so a retried sample only reflects this attempt.
+        rollout_state.extra_fields.pop(_TIMEOUT_TRAINED_KEY, None)
         try:
             rollout_item = rollout_state.extra_fields["rollout_item"].model_copy(deep=True)
             if rollout_state.session_id is None:
@@ -323,7 +340,8 @@ class AgentInSandboxLoop(AgentLoop):
             rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"
         if item.status != RolloutStatus.COMPLETED:
             rollout_state.extra_fields["agent_artifacts"] = _to_json_safe(item.artifacts)
-            return [rollout_state]
+            timeout_state = await self._try_keep_timeout_sample(rollout_state, item)
+            return [timeout_state or rollout_state]
 
         segments = _load_train_trace_segments(item.artifacts)
         if not segments:
@@ -373,6 +391,63 @@ class AgentInSandboxLoop(AgentLoop):
 
         rollout_states[0].extra_fields["agent_artifacts"] = _to_json_safe(item.artifacts)
         return rollout_states
+
+    async def _fill_timeout_rollout_state(self, rollout_state: RolloutState) -> RolloutState:
+        """Mark a timed-out sample trainable using its finished turns.
+
+        Marks the sample ``COMPLETED`` with ``finish_reason`` ``"timeout"`` and
+        a fixed reward. The caller falls back to the regular FAILED handling
+        when no trainable turn exists.
+
+        Args:
+            rollout_state (RolloutState): The timed-out rollout state.
+
+        Returns:
+            RolloutState: The rollout state filled with the partial trace.
+        """
+        if rollout_state.session_id is None:
+            raise ValueError("session_id is missing on the timed-out sample")
+        data = await get_store().export_partial_training_trace.remote(str(rollout_state.session_id))
+        input_ids = data["input_ids"]
+        labels = data["labels"]
+        if len(input_ids) < 2 or all(label == -100 for label in labels):
+            raise ValueError("partial trace carries no trainable token")
+
+        rollout_state.status = Status.COMPLETED
+        rollout_state.finish_reason = "timeout"
+        rollout_state.reward = {"score": self.timeout_reward}
+        rollout_state.input_ids = input_ids
+        rollout_state.labels = labels
+        rollout_state.response_ids = [token_id for token_id, label in zip(input_ids[1:], labels[1:]) if label != -100]
+        rollout_state.logprobs = data["logprobs"]
+        rollout_state.routed_experts = data["routed_experts"]
+        rollout_state.response = (
+            self.tokenizer.decode(rollout_state.response_ids) if rollout_state.response_ids else ""
+        )
+        rollout_state.extra_fields[_TIMEOUT_TRAINED_KEY] = True
+        rollout_state.extra_fields["agent_session_id"] = rollout_state.session_id
+        # Trace-side count is source-of-truth: it only counts the turns actually
+        # exported (and trained). ``None`` means legacy nodes without the field;
+        # the caller then falls back to a best-effort artifacts count.
+        rollout_state.extra_fields["agent_tool_turns"] = data.get("tool_call_count")
+        return rollout_state
+
+    async def _try_keep_timeout_sample(
+        self, rollout_state: RolloutState, item: AgentRolloutItem
+    ) -> RolloutState | None:
+        if not (self.train_on_timeout and item.error is not None and item.error.category in _TIMEOUT_ERROR_CATEGORIES):
+            return None
+        try:
+            timeout_state = await self._fill_timeout_rollout_state(rollout_state)
+        except Exception as exc:
+            self.logger.warning(
+                f"[AgentInSandboxLoop] failed to keep timed-out sample trainable "
+                f"(rollout_id={rollout_state.rollout_id}): {exc}",
+                exc_info=True,
+            )
+            return None
+        timeout_state.extra_fields["agent_status"] = "timeout"
+        return timeout_state
 
     def _fill_eval_rollout_state(self, rollout_state: RolloutState, item: AgentRolloutItem) -> None:
         is_success = item.status == RolloutStatus.COMPLETED
