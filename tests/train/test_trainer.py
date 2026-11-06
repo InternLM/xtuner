@@ -381,6 +381,36 @@ class TestTrainerSaveHF(DistributedTestBase):
         # Test resume
         # TODO: It's hard to test the accuracy of resuming in unit test now, need to improve
         # 1. Test auto_resume
+
+        # 1.0 Resuming with the same length restores the saved scheduler state. `warmup_steps`
+        # rounds to 0 for 6 steps and to 1 for 10, so this is also the branch that keeps
+        # `load_state_dict` on the same scheduler layout.
+        same_length_resume = Trainer(
+            load_from=str(self.fake_hf_model_dir),
+            model_cfg=model_cfg,
+            optim_cfg=optim_cfg,
+            fsdp_cfg=fsdp_cfg,
+            dataset_cfg=dataset_cfg,
+            dataloader_cfg=dataloader_cfg,
+            lr_cfg=lr_cfg,
+            tokenizer_path=self.tokenizer_path,
+            global_batch_size=2,
+            total_step=6,
+            work_dir=str(self.work_dir),
+            hf_interval=3,
+            hf_max_keep=2,
+            seed=42,
+            debug=False,
+            checkpoint_interval=2,
+            checkpoint_maxkeep=2,
+            auto_resume=True,
+        )
+        # Construction itself resumes from the checkpoint, so reaching this line means the saved
+        # scheduler state loaded into the freshly built one.
+        assert same_length_resume.cur_step == 6
+
+        # 1.1 Extending the run reschedules the remaining steps instead of restoring a state whose
+        # layout no longer matches (`SequentialLR` vs plain `LambdaLR`).
         resume_trainer1 = Trainer(
             load_from=str(self.fake_hf_model_dir),
             model_cfg=model_cfg,
@@ -406,7 +436,7 @@ class TestTrainerSaveHF(DistributedTestBase):
         resume_trainer1.fit()
         dist.barrier()
 
-        # 1.1 auto_resume twice
+        # 1.2 auto_resume twice
         resume_trainer1_2 = Trainer(
             load_from=str(self.fake_hf_model_dir),
             model_cfg=model_cfg,
@@ -1043,7 +1073,9 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path, capfd):
         assert str(trainer2._load_checkpoint_cfg.checkpoint_path) == str(latest_checkpoint)
         print(f"mock_data_load_state_dict.call_count: {mock_data_load_state_dict.call_count}")
         mock_data_load_state_dict.assert_called_once()
-        mock_lr_load_state_dict.assert_called_once()
+        # The checkpoint was written for total_step=20 and this run has 30. Extending a run
+        # reschedules the remaining steps, so the saved LR state is deliberately not restored.
+        mock_lr_load_state_dict.assert_not_called()
         mock_load_dcp.assert_called_once_with(
             weights_dir=latest_checkpoint / Trainer._SAVE_WEIGHTS_DIR,
             load_states=True,
