@@ -34,6 +34,8 @@ from xtuner.v1.rl.advantage import (
     GAEAdvantageConfig,
     GAEEstimator,
     GRPOAdvantageConfig,
+    DecoupledGAEAdvantageConfig,
+    DecoupledGAEEstimator,
     TokenAdvantageEstimator,
     TokenStats,
     session_token_targets,
@@ -142,7 +144,33 @@ class TestGAEAdvantageEstimation(unittest.TestCase):
         )
         torch.testing.assert_close(adaptive, torch.tensor([1.0 / 9.0, 1.0 / 3.0, 1.0]))
 
-    def test_session_scope_places_one_reward_on_the_last_segment(self):
+    def test_decoupled_gae_runs_two_independent_recursions_with_asymmetric_scales(self):
+        # 行为：actor (gamma=1, lambda=0.95) 与 critic (gamma=1, lambda=1.0) 各自递推，
+        # 正负 advantage 分别按 positive/negative scale 缩放；critic TD(1) 回报 = 终局 reward。
+        estimator = DecoupledGAEAdvantageConfig(
+            normalize_actor_advantage=False,
+            actor_gamma=1.0,
+            actor_lambda=0.95,
+            critic_gamma=1.0,
+            critic_lambda=1.0,
+            actor_positive_scale=2.0,
+            actor_negative_scale=1.0,
+        ).build()
+        self.assertIsInstance(estimator, DecoupledGAEEstimator)
+        actor_advantages, critic_returns = estimator.compute_segment_gae(
+            values=torch.tensor([0.1, 0.2, 0.3, 0.5, 0.2]),
+            scores=torch.tensor([1.0, 0.0]),
+            mask=torch.tensor([False, True, True, True, True]),
+            cu_seq_lens=torch.tensor([0, 3, 5]),
+        )
+        # 轨迹 1（reward=1.0，值 0.1/0.2/0.3）：actor 递推 0.1+0.95*0.7=0.765、0.7，
+        # 均为正 -> 乘 2；轨迹 2（reward=0.0，值 0.5/0.2）：-0.3+0.95*(-0.2)=-0.49、-0.2，
+        # 均为负 -> 不缩放。非动作位保持 0。
+        torch.testing.assert_close(actor_advantages, torch.tensor([0.0, 1.53, 1.4, -0.49, -0.2]))
+        # TD(1) 下每条轨迹的回报收敛到终局 reward：轨迹 1 -> 1.0，轨迹 2 -> 0.0。
+        torch.testing.assert_close(critic_returns, torch.tensor([0.0, 1.0, 1.0, 0.0, 0.0]))
+
+
         # 行为：session 作用域下 reward 落在会话最后一个分段末尾
         estimator = GAEAdvantageConfig(
             gae_lambda=0.0,
