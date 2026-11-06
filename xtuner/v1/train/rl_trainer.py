@@ -28,7 +28,7 @@ from xtuner.v1.rl.agent_loop_manager import (
     ProduceBatchResult,
     ProduceBatchStatus,
 )
-from xtuner.v1.rl.agent_loop_manager.produce_utils import default_should_continue_fn
+from xtuner.v1.rl.agent_loop_manager.produce_utils import default_should_continue_fn, derive_window_means
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.health_manager import RLHealthManager, _NoOpRLHealthManager
@@ -1162,6 +1162,9 @@ class BaseRLTrainer:
         all_scalars["async/expired_samples"] = produce_result.leftover_expired
         all_scalars["async/failed_samples"] = produce_result.failed_samples
         all_scalars["async/filtered_samples"] = produce_result.filtered_samples
+        if produce_result.custom_scalars:
+            for metric_key, metric_value in derive_window_means(produce_result.custom_scalars).items():
+                all_scalars[f"agent/{metric_key}"] = metric_value
 
         if train_info:
             data_info = train_info.get("data_info", {})

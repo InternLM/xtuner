@@ -11,7 +11,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import Status
-from xtuner.v1.rl.agent_loop import AgentLoopConfig, IsValidSampleFn
+from xtuner.v1.rl.agent_loop import (
+    AgentLoopConfig,
+    IsValidSampleFn,
+    collect_agent_loop_metrics,
+    merge_metric_dicts,
+)
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
@@ -399,6 +404,15 @@ class DisaggAgentLoopManager:
                         train_step=train_step + 1,
                         statuses=[Status.COMPLETED, Status.ABORTED, Status.EXPIRED],
                     )
+                    # Only the real return path reaches the trainer's _log_step; draining on
+                    # the EXPIRED_BATCH early return would drop counters without logging them.
+                    window_metrics = merge_metric_dicts(
+                        await asyncio.gather(
+                            *(collect_agent_loop_metrics(task.agent_loop) for task in self.task_runners)
+                        )
+                    )
+                    if window_metrics:
+                        result.custom_scalars = window_metrics
                     return result
             await asyncio.sleep(self._STATUS_POLL_INTERVAL_S)
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, TypeAlias, cast, overload
 
 import ray
@@ -394,6 +394,22 @@ class AgentLoop(ABC):
         finally:
             self._judger_pause_event.clear()
 
+    async def collect_metrics(self) -> dict[str, float]:
+        """Drain custom metrics accumulated since the previous call.
+
+        The default implementation reports nothing. Subclasses that keep
+        counters must follow the drain contract: every call returns the
+        counters accumulated since the previous call and resets them, so
+        repeated calls never re-report an old window. Values must be
+        aggregatable by summation across loops and tasks; report means as a
+        ``<name>_sum`` plus ``<name>_count`` pair so the consumer can derive
+        ``<name>_mean`` at the write boundary.
+
+        Returns:
+            dict[str, float]: Metric name to value for the drained window.
+        """
+        return {}
+
 
 class RouterAgentLoop:
     def __init__(self, workers: list[RayAgentLoopProxy], rollout_ctl: RolloutController):
@@ -438,6 +454,17 @@ class RouterAgentLoop:
             *(worker.pause.remote() for worker in self.workers),
         )
 
+    async def collect_metrics(self) -> dict[str, float]:
+        """Drain and merge the custom metrics of all worker loops.
+
+        Returns:
+            dict[str, float]: Per-key sums over every worker's drained window.
+        """
+        results = await asyncio.gather(
+            *(worker.collect_metrics.remote() for worker in self.workers),
+        )
+        return merge_metric_dicts(results)
+
 
 async def get_agent_loop_rollout_ctl(agent_loop: AgentLoopSpec) -> RolloutController:
     rollout_ctl = getattr(agent_loop, "rollout_ctl", None)
@@ -448,6 +475,37 @@ async def get_agent_loop_rollout_ctl(agent_loop: AgentLoopSpec) -> RolloutContro
     if get_rollout_ctl is None or not hasattr(get_rollout_ctl, "remote"):
         raise AttributeError(f"Agent loop {type(agent_loop)} does not expose rollout_ctl or get_rollout_ctl().")
     return await get_rollout_ctl.remote()
+
+
+def merge_metric_dicts(dicts: Iterable[dict[str, float]]) -> dict[str, float]:
+    """Merge metric dictionaries by per-key summation.
+
+    Args:
+        dicts (Iterable[dict[str, float]]): Metric dictionaries keyed by metric
+            name. Empty dictionaries are skipped.
+
+    Returns:
+        dict[str, float]: Per-key sums over all input dictionaries.
+    """
+    merged: dict[str, float] = {}
+    for metrics in dicts:
+        for key, value in metrics.items():
+            merged[key] = merged.get(key, 0.0) + value
+    return merged
+
+
+async def collect_agent_loop_metrics(agent_loop: AgentLoopSpec) -> dict[str, float]:
+    """Drain the custom metrics of one agent loop.
+
+    Args:
+        agent_loop (AgentLoopSpec): Local loop, Ray actor proxy, or router.
+
+    Returns:
+        dict[str, float]: Metrics reported by the loop for the drained window.
+    """
+    if isinstance(agent_loop, (AgentLoop, RouterAgentLoop)):
+        return await agent_loop.collect_metrics()
+    return await agent_loop.collect_metrics.remote()
 
 
 class AgentLoopActor:
@@ -492,6 +550,10 @@ class AgentLoopActor:
     @ray_method
     async def pause(self) -> None:
         return await self.agent_loop.pause()
+
+    @ray_method
+    async def collect_metrics(self) -> dict[str, float]:
+        return await self.agent_loop.collect_metrics()
 
 
 RayAgentLoop = cast(

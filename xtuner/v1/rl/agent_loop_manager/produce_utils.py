@@ -233,6 +233,9 @@ class ProduceBatchResult:
         produced_samples (int): Number of rollout samples produced in the current produce window.
         produced_tokens (int): Number of response tokens produced in the current produce window.
         produce_time_s (float): Wall-clock production time consumed by the current produce window.
+        custom_scalars (dict[str, float] | None): Agent-loop custom metrics drained for this window,
+            aggregated by summation across loops and tasks. Means ride as ``<name>_sum`` plus
+            ``<name>_count`` pairs; ``derive_window_means`` derives ``<name>_mean`` at write time.
     """
 
     rollout_states: list[list[RolloutState]]
@@ -260,6 +263,31 @@ class ProduceBatchResult:
     produce_time_s: float = 0.0
     task_batch_sizes: dict[str, int] | None = None
     task_results: dict[str, ProduceBatchResult] | None = None
+    # agent-loop custom metrics drained at the end of this produce window
+    custom_scalars: dict[str, float] | None = None
+
+
+def derive_window_means(scalars: dict[str, float]) -> dict[str, float]:
+    """Derive ``<name>_mean`` entries from ``<name>_sum``/``<name>_count``
+    pairs.
+
+    Args:
+        scalars (dict[str, float]): Window scalars carrying ``<name>_sum`` and
+            ``<name>_count`` keys.
+
+    Returns:
+        dict[str, float]: Copy of ``scalars`` with one added ``<name>_mean``
+        entry per complete pair whose count is positive.
+    """
+    derived = dict(scalars)
+    for key, count in scalars.items():
+        if not key.endswith("_count"):
+            continue
+        name = key[: -len("_count")]
+        sum_key = f"{name}_sum"
+        if sum_key in scalars and count > 0:
+            derived[f"{name}_mean"] = scalars[sum_key] / count
+    return derived
 
 
 @dataclass(frozen=True)
