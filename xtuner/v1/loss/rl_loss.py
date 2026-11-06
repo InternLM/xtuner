@@ -9,6 +9,7 @@ from xtuner.v1.rl.utils.misc import gather_logprobs
 from xtuner.v1.utils.device import get_device
 
 from .base_loss_ctx import BaseLossConfig, BaseLossContext, BaseLossKwargs
+from .utils import sp_split
 
 
 DEVICE = get_device()
@@ -52,6 +53,10 @@ class LogProbConfig(BaseLossConfig):
 
 class LogProbKwargs(BaseLossKwargs):
     shifted_labels: torch.Tensor
+
+    def sp_split(self, sp_mesh: DeviceMesh) -> "LogProbKwargs":
+        self.shifted_labels = sp_split(self.shifted_labels, sp_mesh=sp_mesh, split_dim=1, padding_value=-100)
+        return self
 
 
 class LogProbContext(BaseLossContext):
