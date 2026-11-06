@@ -1,9 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 """LMDeploy KPool compression and FP8 selection for GLM-5.3.
 
-Compression reuses LMDeploy's forward operator. Its backward differentiates
-softmax-weighted pooling and the orthonormal Hadamard transform, using a
-straight-through estimator for BF16/FP8 rounding. Integer Top-K IDs remain
+Compression reuses LMDeploy's forward operator. Its backward differentiates softmax-weighted pooling and the
+orthonormal Hadamard transform, using a straight-through estimator for BF16/FP8 rounding. Integer Top-K IDs remain
 nondifferentiable; this backend does not unfreeze the DSA indexer.
 """
 
@@ -113,7 +112,7 @@ def _kpool_topk_indices(
         index_kpool (int): Tokens per pool, currently 4.
         always_select_tail (bool): Append the causal incomplete trailing pool.
         alignment (int): Sparse attention output-width alignment.
-        query_chunk_size (int | None): Bound the score matrix's query dimension.
+        query_chunk_size (int | None): Query row cap, also limited by LMDeploy's logits byte budget.
         balance_sp (bool): Query redistribution is not supported by this backend.
         sp_full_pool_work_ratio (float): Unused without query redistribution.
 
@@ -149,26 +148,31 @@ def _kpool_topk_indices(
     valid = (pool_index >= 0).unsqueeze(-1)
     grouped_k = torch.where(valid, full_k[safe_index], 0)
     grouped_scores = torch.where(valid, full_scores[safe_index], 0)
-    # Generated history is closed by LMDeploy's decode two-pass operation.
-    compressed = lmdeploy_kpool_compress(grouped_k, grouped_scores, kpool_ape, mode="decode")
+    # Decode compression is intentional: SequenceContext has no serving prompt
+    # or chunk schedule. This does not reproduce prefill's online accumulation.
+    # Selection needs only quantized storage, never a differentiable FP32 view.
+    pool_values, pool_scales = _compress_storage(grouped_k, grouped_scores, kpool_ape, "decode", True)
 
-    query = rotate_kpool_query(q.squeeze(0))
-    query_fp8, query_scale = kpool_quantize_fp8(query, block_size=index_head_dim, round_scale=True)
-    head_gate = weights.squeeze(0).float() * q.shape[2] ** -0.5
-    query_weight = (head_gate * query_scale.squeeze(-1) * index_head_dim**-0.5).contiguous()
+    query = q.squeeze(0)
     starts, ends = pool_causal_ranges(seq_ctx, pool_index, query.shape[0], q.device)
     group_lengths = ends - starts
     selected = torch.full((query.shape[0], index_topk // index_kpool), -1, device=q.device, dtype=torch.int32)
     local_columns = _mqa_has_local_columns()
     mqa = _get_deep_gemm().fp8_mqa_logits
-    chunk_size = 1024 if query_chunk_size is None else query_chunk_size
-    pool_scale = compressed.scales.flatten().contiguous()
+    chunk_size = _score_chunk_size(pool_index.shape[0], q.shape[2], query_chunk_size)
+    pool_scale = pool_scales.flatten().contiguous()
     for start in range(0, query.shape[0], chunk_size):
         chunk = slice(start, min(start + chunk_size, query.shape[0]))
+        # Rotation temporarily uses FP32. Chunk it too, rather than retaining
+        # full-sequence FP32 rotation and FP8 quantization intermediates.
+        rotated = rotate_kpool_query(query[chunk].contiguous())
+        query_fp8, query_scale = kpool_quantize_fp8(rotated, block_size=index_head_dim, round_scale=True)
+        head_gate = weights.squeeze(0)[chunk].float() * q.shape[2] ** -0.5
+        query_weight = (head_gate * query_scale.squeeze(-1) * index_head_dim**-0.5).contiguous()
         logits = mqa(
-            query_fp8[chunk].contiguous(),
-            (compressed.values, pool_scale),
-            query_weight[chunk].contiguous(),
+            query_fp8.contiguous(),
+            (pool_values, pool_scale),
+            query_weight,
             starts[chunk].contiguous(),
             ends[chunk].contiguous(),
             clean_logits=False,
@@ -204,18 +208,7 @@ class _LMDeployKPoolCompress(torch.autograd.Function):
     def forward(
         ctx: Any, keys: Tensor, scores: Tensor, ape: Tensor, mode: str, round_scale: bool
     ) -> tuple[Tensor, Tensor, Tensor]:
-        if keys.shape[0] == 0:
-            values = torch.empty((0, keys.shape[-1]), device=keys.device, dtype=torch.float8_e4m3fn)
-            scales = torch.empty((0, 1), device=keys.device, dtype=torch.float32)
-        elif keys.is_cuda:
-            from lmdeploy.pytorch.kernels.cuda.kpool import compress_kpool
-
-            values, scales = compress_kpool(keys, scores, ape, mode=mode, round_scale=round_scale)
-        else:
-            from lmdeploy.pytorch.nn.kpool import kpool_compress, kpool_quantize_fp8
-
-            pooled = kpool_compress(keys, scores, ape, mode=mode)
-            values, scales = kpool_quantize_fp8(pooled, block_size=keys.shape[-1], round_scale=round_scale)
+        values, scales = _compress_storage(keys, scores, ape, mode, round_scale)
         ctx.save_for_backward(keys, scores, ape)
         ctx.set_materialize_grads(False)
         ctx.mark_non_differentiable(values, scales)
@@ -232,6 +225,33 @@ class _LMDeployKPoolCompress(torch.autograd.Function):
         keys, scores, ape = ctx.saved_tensors
         grad_keys, grad_scores, grad_ape = kpool_compress_backward(grad_output, keys, scores, ape)
         return grad_keys, grad_scores, grad_ape, None, None
+
+
+def _compress_storage(
+    keys: Tensor, scores: Tensor, ape: Tensor, mode: str, round_scale: bool
+) -> tuple[Tensor, Tensor]:
+    if keys.shape[0] == 0:
+        return (
+            torch.empty((0, keys.shape[-1]), device=keys.device, dtype=torch.float8_e4m3fn),
+            torch.empty((0, 1), device=keys.device, dtype=torch.float32),
+        )
+    if keys.is_cuda:
+        # This adapter includes LMDeploy's SM90+ fused/reference dispatch.
+        from lmdeploy.pytorch.backends.cuda.kpool import kpool_compress_quantize_cuda
+
+        return kpool_compress_quantize_cuda(keys, scores, ape, mode=mode, round_scale=round_scale)
+    from lmdeploy.pytorch.nn.kpool import kpool_compress, kpool_quantize_fp8
+
+    pooled = kpool_compress(keys, scores, ape, mode=mode)
+    return kpool_quantize_fp8(pooled, block_size=keys.shape[-1], round_scale=round_scale)
+
+
+def _score_chunk_size(pool_count: int, heads: int, query_chunk_size: int | None) -> int:
+    from lmdeploy.pytorch import envs
+    from lmdeploy.pytorch.backends.cuda.nsa import _get_max_score_rows
+
+    budget_rows = _get_max_score_rows(pool_count, envs.dsa_indexer_max_logits_mb * (1 << 20), num_heads=heads)
+    return min(1024 if query_chunk_size is None else query_chunk_size, budget_rows)
 
 
 def _normalized_hadamard(values: Tensor) -> Tensor:

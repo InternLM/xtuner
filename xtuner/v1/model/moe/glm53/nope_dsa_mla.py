@@ -28,6 +28,7 @@ from xtuner.v1.module.linear import build_linear
 from xtuner.v1.module.rms_norm import LayerNorm
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm import gather_for_sequence_parallel
+from xtuner.v1.ops.fp32_linear import fp32_linear
 from xtuner.v1.ops.sparse_mla import (
     KPoolIndexerBackend,
     SparseMLABackend,
@@ -37,7 +38,7 @@ from xtuner.v1.ops.sparse_mla import (
     get_sparse_mla,
 )
 from xtuner.v1.ops.sparse_mla.flash_mla import _FLASH_MLA_HEAD_ALIGNMENT
-from xtuner.v1.ops.sparse_mla.kpool import _supports_lmdeploy_kpool
+from xtuner.v1.ops.sparse_mla.kpool import _lmdeploy_kpool_is_available, _supports_lmdeploy_kpool
 from xtuner.v1.utils.dtensor import materialize_full
 from xtuner.v1.utils.init_weight import init_params
 
@@ -120,7 +121,7 @@ class KPoolIndexer(nn.Module):
 
         q = self.wq_b(q_resid).view(bsz, seq_len, self.index_n_heads, self.index_head_dim)
         projected_k = self.wk(hidden_states)
-        if self._uses_lmdeploy_kpool:
+        if self._uses_lmdeploy_kpool and _lmdeploy_kpool_is_available(q.device):
             norm_weight = materialize_full(self.k_norm.weight, name="indexer.k_norm.weight")
             norm_bias = materialize_full(self.k_norm.bias, name="indexer.k_norm.bias")
             k = F.layer_norm(
@@ -132,8 +133,10 @@ class KPoolIndexer(nn.Module):
             ).to(projected_k.dtype)
             # LMDeploy promotes the checkpoint's head-gate parameters and
             # activations to FP32 before projection, not after a BF16 GEMM.
-            head_weight = materialize_full(self.weights_proj.weight, name="indexer.weights_proj.weight")
-            weights = F.linear(hidden_states.float(), head_weight.float())
+            head_weight = materialize_full(
+                cast(torch.Tensor, self.weights_proj.weight), name="indexer.weights_proj.weight"
+            )
+            weights = fp32_linear(hidden_states, head_weight)
         else:
             k = self.k_norm(projected_k)
             weights = self.weights_proj(hidden_states).float()

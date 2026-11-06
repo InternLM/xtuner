@@ -36,6 +36,7 @@ token id in this module is global. Concretely that splits the work in two:
 """
 
 import math
+from functools import lru_cache
 from typing import Literal
 
 import torch
@@ -358,6 +359,7 @@ def kpool_topk_indices(
         and selector == "torch"
         and not balance_sp
         and _supports_lmdeploy_kpool(index_head_dim, q.shape[2], index_kpool, index_topk)
+        and _lmdeploy_kpool_is_available(q.device)
     ):
         from .lmdeploy_kpool import _kpool_topk_indices
 
@@ -465,6 +467,41 @@ def kpool_topk_indices(
 
 def _supports_lmdeploy_kpool(head_dim: int, heads: int, pool_size: int, topk: int) -> bool:
     return head_dim == 128 and heads in (32, 64, 128) and pool_size == 4 and topk in (2048, 8192)
+
+
+@lru_cache(maxsize=None)
+def _lmdeploy_kpool_is_available(device: torch.device) -> bool:
+    # Resolve at forward time: model construction can happen on CPU/meta before
+    # the process selects its CUDA device. Keep XTuner usable without LMDeploy.
+    if device.type != "cuda" or torch.cuda.get_device_capability(device)[0] < 9:
+        return False
+    try:
+        from lmdeploy.pytorch.backends.cuda.kpool import (
+            _get_deep_gemm,
+            kpool_compress_quantize_cuda,
+            kpool_expand_groups_cuda,
+            kpool_select_groups_cuda,
+        )
+        from lmdeploy.pytorch.backends.cuda.nsa import _get_max_score_rows
+        from lmdeploy.pytorch.kernels.cuda.kpool import rotate_kpool_query
+        from lmdeploy.pytorch.nn.kpool import kpool_quantize_fp8
+
+        _get_deep_gemm()
+        return all(
+            callable(operator)
+            for operator in (
+                kpool_compress_quantize_cuda,
+                kpool_expand_groups_cuda,
+                kpool_select_groups_cuda,
+                _get_max_score_rows,
+                rotate_kpool_query,
+                kpool_quantize_fp8,
+            )
+        )
+    except (ImportError, OSError, AttributeError, RuntimeError):
+        # Optional imports and unavailable DeepGEMM APIs select the original
+        # implementation. Actual operator errors are never caught here.
+        return False
 
 
 @torch.no_grad()

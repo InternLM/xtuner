@@ -1,7 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 """FP8 forward parity, pooling STE gradients and packed KPool boundaries."""
 
+import builtins
+import importlib
 import math
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -9,8 +12,14 @@ from torch import Tensor
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.ops.sparse_mla import get_kpool_topk_indices
-from xtuner.v1.ops.sparse_mla.kpool import build_pool_index, kpool_topk_indices, pool_causal_ranges
+from xtuner.v1.ops.sparse_mla.kpool import (
+    _lmdeploy_kpool_is_available,
+    build_pool_index,
+    kpool_topk_indices,
+    pool_causal_ranges,
+)
 from xtuner.v1.ops.sparse_mla.lmdeploy_kpool import (
+    _score_chunk_size,
     kpool_compress_backward,
     lmdeploy_kpool_compress,
 )
@@ -144,11 +153,137 @@ class TestKPoolCompression:
             for value, reference in zip(actual, expected):
                 torch.testing.assert_close(value.double(), reference, rtol=1e-4, atol=4e-6)
 
+    @pytest.mark.gpu
+    @pytest.mark.parametrize("mode", ["extend", "decode"])
+    @pytest.mark.parametrize("round_scale", [False, True])
+    def test_cuda_forward_matches_torch_reference(self, mode: str, round_scale: bool) -> None:
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA required")
+        reference = pytest.importorskip("lmdeploy.pytorch.nn.kpool")
+        torch.manual_seed(83)
+        keys = torch.randn(31, 4, 128, device="cuda", dtype=torch.bfloat16)
+        scores = torch.randn_like(keys)
+        ape = torch.randn(4, 128, device="cuda")
+        actual = lmdeploy_kpool_compress(keys, scores, ape, mode=mode, round_scale=round_scale)
+        pooled = reference.kpool_compress(keys, scores, ape, mode=mode)
+        values, scales = reference.kpool_quantize_fp8(pooled, block_size=128, round_scale=round_scale)
+        # This reference does not call the fused operator. FP32 accumulation
+        # differences can straddle a BF16/FP8 midpoint; bitwise parity with the
+        # serving operator is checked separately above.
+        torch.testing.assert_close(actual.scales, scales, rtol=0.02, atol=0)
+        torch.testing.assert_close(actual.dequantized, values.float() * scales, rtol=0.15, atol=0.02)
+
+    @pytest.mark.gpu
+    def test_pre_sm90_compression_uses_reference(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA required")
+        backend = pytest.importorskip("lmdeploy.pytorch.backends.cuda.kpool")
+        reference = pytest.importorskip("lmdeploy.pytorch.nn.kpool")
+        keys = torch.randn(3, 4, 128, device="cuda", dtype=torch.bfloat16)
+        scores = torch.randn_like(keys)
+        ape = torch.randn(4, 128, device="cuda")
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (8, 0))
+        with patch.object(backend, "compress_kpool", side_effect=AssertionError("SM90 kernel must not run")):
+            actual = lmdeploy_kpool_compress(keys, scores, ape)
+        pooled = reference.kpool_compress(keys, scores, ape, mode="decode")
+        values, scales = reference.kpool_quantize_fp8(pooled, block_size=128, round_scale=True)
+        assert torch.equal(actual.values.view(torch.uint8), values.view(torch.uint8))
+        assert torch.equal(actual.scales, scales)
+
+
+class TestLMDeployKPoolAvailability:
+    def test_public_selector_preserves_original_path_without_lmdeploy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[bool] = []
+
+        def original_selector(
+            q: Tensor, k: Tensor, weights: Tensor, starts: Tensor, ends: Tensor, topk: int, **kwargs: object
+        ) -> Tensor:
+            calls.append(True)
+            columns = torch.arange(topk)[None]
+            return torch.where(columns < (ends - starts)[:, None], columns + starts[:, None], -1).int()
+
+        implementation = importlib.import_module("xtuner.v1.ops.sparse_mla.kpool")
+        monkeypatch.setattr(implementation, "_lmdeploy_kpool_is_available", lambda device: False)
+        monkeypatch.setattr(implementation, "tilelang_indexer_topk_from_ranges", original_selector)
+        ctx = SequenceContext.from_input_ids((torch.zeros(1, 9, dtype=torch.long),), device="cpu")
+        q = torch.randn(1, 9, 32, 128)
+        k = torch.randn(1, 9, 128)
+        actual = kpool_topk_indices(
+            q,
+            k,
+            torch.randn_like(k),
+            torch.randn(1, 9, 32),
+            torch.randn(4, 128),
+            ctx,
+            index_head_dim=128,
+            index_topk=2048,
+        )
+        assert calls == [True]
+        for row in range(9):
+            valid = actual[row, 0][actual[row, 0] >= 0].sort().values
+            torch.testing.assert_close(valid, torch.arange(row + 1, dtype=torch.int32), atol=0, rtol=0)
+
+    def test_cpu_and_meta_do_not_require_optional_dependencies(self) -> None:
+        assert not _lmdeploy_kpool_is_available(torch.device("cpu"))
+        assert not _lmdeploy_kpool_is_available(torch.device("meta"))
+
+    def test_missing_lmdeploy_falls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        original_import = builtins.__import__
+
+        def without_lmdeploy(name: str, *args: object, **kwargs: object) -> object:
+            if name.startswith("lmdeploy"):
+                raise ModuleNotFoundError("LMDeploy intentionally unavailable")
+            return original_import(name, *args, **kwargs)
+
+        _lmdeploy_kpool_is_available.cache_clear()
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (9, 0))
+        with patch("builtins.__import__", side_effect=without_lmdeploy):
+            assert not _lmdeploy_kpool_is_available(torch.device("cuda", 0))
+        _lmdeploy_kpool_is_available.cache_clear()
+
+    def test_pre_sm90_does_not_import_lmdeploy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _lmdeploy_kpool_is_available.cache_clear()
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (8, 0))
+        with patch("builtins.__import__", side_effect=AssertionError("unexpected optional import")):
+            assert not _lmdeploy_kpool_is_available(torch.device("cuda", 0))
+        _lmdeploy_kpool_is_available.cache_clear()
+
+    @pytest.mark.parametrize("heads", [32, 64, 128])
+    @pytest.mark.parametrize("pools", [257, 32768, 262145])
+    def test_score_chunks_respect_aligned_byte_budget(
+        self, monkeypatch: pytest.MonkeyPatch, heads: int, pools: int
+    ) -> None:
+        envs = pytest.importorskip("lmdeploy.pytorch.envs")
+        monkeypatch.setattr(envs, "dsa_indexer_max_logits_mb", 32)
+        for requested in (None, 7, 16384):
+            rows = _score_chunk_size(pools, heads, requested)
+            block_q = 128 // heads
+            allocated_rows = math.ceil(rows / block_q) * block_q
+            allocated_columns = math.ceil(pools / 256) * 256
+            assert allocated_rows * allocated_columns * 4 <= 32 * (1 << 20)
+            assert 0 < rows <= (1024 if requested is None else requested)
+
+    def test_score_budget_rejects_less_than_one_aligned_block(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        envs = pytest.importorskip("lmdeploy.pytorch.envs")
+        monkeypatch.setattr(envs, "dsa_indexer_max_logits_mb", 1)
+        with pytest.raises(ValueError, match="minimum aligned allocation"):
+            _score_chunk_size(262145, 32, None)
+
 
 class TestLMDeployKPoolIndexer:
-    def test_backend_registration_and_fp32_projection(self) -> None:
+    @pytest.mark.parametrize("autocast", [False, True])
+    @pytest.mark.parametrize("use_lmdeploy", [False, True])
+    @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.gpu)])
+    def test_backend_registration_and_fp32_projection(
+        self, monkeypatch: pytest.MonkeyPatch, autocast: bool, use_lmdeploy: bool, device: str
+    ) -> None:
         from xtuner.v1.model.moe.glm53.nope_dsa_mla import KPoolIndexer
 
+        if device == "cuda" and not torch.cuda.is_available():
+            pytest.skip("CUDA required")
+        monkeypatch.setattr(
+            "xtuner.v1.model.moe.glm53.nope_dsa_mla._lmdeploy_kpool_is_available", lambda device: use_lmdeploy
+        )
         assert get_kpool_topk_indices("tilelang") is kpool_topk_indices
         torch.manual_seed(14)
         module = KPoolIndexer(
@@ -161,21 +296,23 @@ class TestLMDeployKPoolIndexer:
             index_kpool_always_select_tail=True,
             indexer_backend="tilelang",
             alignment=512,
-        ).to(torch.bfloat16)
-        hidden = torch.randn(1, 7, 16, dtype=torch.bfloat16)
-        latent = torch.randn(1, 7, 8, dtype=torch.bfloat16)
+        ).to(device=device, dtype=torch.bfloat16)
+        hidden = torch.randn(1, 7, 16, dtype=torch.bfloat16, device=device)
+        latent = torch.randn(1, 7, 8, dtype=torch.bfloat16, device=device)
         captured: list[Tensor] = []
 
         def capture(q: Tensor, k: Tensor, scores: Tensor, weights: Tensor, *args: object, **kwargs: object) -> Tensor:
             captured.extend((k, weights))
-            return torch.zeros(7, 1, 2560, dtype=torch.int32)
+            return torch.zeros(7, 1, 2560, dtype=torch.int32, device=device)
 
         module._topk_indices_fn = capture
-        seq_ctx = SequenceContext.from_input_ids((torch.zeros(1, 7, dtype=torch.long),), device="cpu")
-        module(hidden, latent, seq_ctx)
+        seq_ctx = SequenceContext.from_input_ids((torch.zeros(1, 7, dtype=torch.long),), device=device)
+        with torch.autocast(device, dtype=torch.bfloat16, enabled=autocast):
+            module(hidden, latent, seq_ctx)
         expected = torch.nn.functional.linear(hidden.float(), module.weights_proj.weight.float())
         assert captured[1].dtype == torch.float32
-        torch.testing.assert_close(captured[1], expected, atol=0, rtol=0)
+        target = expected if use_lmdeploy else module.weights_proj(hidden).float()
+        torch.testing.assert_close(captured[1], target, atol=0, rtol=0)
         assert torch.any(expected != module.weights_proj(hidden).float())
 
     @pytest.mark.gpu
@@ -190,6 +327,11 @@ class TestLMDeployKPoolIndexer:
             return torch.where(columns[None] < lengths[:, None], lengths[:, None] - 1 - columns[None], -1).int()
 
         monkeypatch.setattr(backend, "kpool_select_groups_cuda", reverse_groups)
+        monkeypatch.setattr(
+            importlib.import_module("xtuner.v1.ops.sparse_mla.lmdeploy_kpool"),
+            "lmdeploy_kpool_compress",
+            lambda *args, **kwargs: pytest.fail("Top-K must not allocate an unused dequantized output"),
+        )
         lengths = (9, 17)
         tokens = sum(lengths)
         seq_ctx = SequenceContext.from_input_ids(
