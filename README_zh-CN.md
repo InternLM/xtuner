@@ -60,7 +60,7 @@ XTuner V1 是一个专为超大规模 MoE 模型打造的新一代大模型训�
 
 - **超大规模支持：** 支持高达 1T 参数量的 MoE 模型训练
 - **突破性能瓶颈：** 首次在 200B 以上规模的 MoE 模型上，实现 FSDP 训练吞吐超越传统 3D 并行方案
-- **硬件优化：** 在 Ascend A3 NPU 超节点上，训练效率超越 NVIDIA H800
+- **硬件优化：** 在 Huawei Ascend A3 NPU 超节点上，训练效率超越 NVIDIA H800
 
 
 <div align=center>
