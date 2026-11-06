@@ -16,8 +16,10 @@ Compare applied lr sequences and warmup. Constant lr can simplify an initial dia
 mandatory when another schedule is correctly matched or required to reproduce the target workload.
 
 **P1.3 Dependency/build mismatch.** Record commits or reproducible build identifiers and loaded library
-paths, not just package names. For missing symbols or CUDA build failures, check the actual call site,
-framework version requirements, CUDA/compiler compatibility and library resolution before changing the environment.
+paths; without `.git`, verify a build manifest or archive provenance and content hashes, treating a hash in
+a directory name only as a claimed revision and critical-file checks only as that coverage (otherwise mark
+identity unverified). For missing symbols or CUDA build failures, check the actual call site, framework
+requirements, CUDA/compiler compatibility and library resolution before changing the environment.
 
 **P1.4 Wrong function inspected.** A package version or sibling function can conceal a missing argument.
 Copy the actual call-site import and inspect that callable and its implementation; use a minimal execution
@@ -44,11 +46,20 @@ semantics; do not toggle a structural option just because its name resembles an 
 per-document lengths, selected-token coverage and executed kernels. A long pack alone does not imply long
 documents or sparse execution. Do not generalize one implementation's top-k threshold or KV layout.
 
+**P1.10 Constructor defaults hide submodule drift.** Two configs can compare equal while built submodules
+run different effective hyperparameters — for example a norm left on its class-default eps instead of the
+checkpoint's value, with the printed model repr carrying the evidence. Check the constructor parameters
+actually in effect on the active path, including functional or fused call sites that have no discoverable
+module instance; compare against the intended spec when the config exposes one, else record the effective
+value and where it came from. Do this before blaming kernels when forward loss differs on equal inputs.
+
 ## P2 Comparison contract
 
 **P2.1 Missing effective values.** Track model/data/update/numerics items as default, configured and
 runtime-effective values, with evidence. Include auxiliary losses, frozen/tied parameters and quantization
-state where present. A config-only assumption is unverified.
+state where present. Optimizer parameter-group defaults are version-sensitive (per-group lr fields,
+flatten lr-ratio special cases); diff the constructed param groups across checkouts instead of trusting
+that one config name resolves identically. A config-only assumption is unverified.
 
 **P2.2 Warmup can depend on the horizon.** Changing total steps may change warmup or decay, making later
 updates incomparable. For shared-prefix comparisons, preserve the intended applied schedule on both sides.
@@ -126,13 +137,21 @@ labels and context, and cross-check the consumer entry point. Label-count equali
 order. For tensors created on device, add a first-step consumer probe; unresolved fields block a parity verdict.
 
 **P4.4 Record replay identity.** Record schema, shapes/dtypes, canonical hashes, document/sample order,
-logical-update/microbatch/rank assignment and allowed artifact paths. A file hash identifies that file,
+logical-update/microbatch/rank assignment and allowed artifact paths, plus the step/lr-phase mapping
+between the dump's step numbering and each pipeline's logs (see P2.4). A file hash identifies that file,
 not the tensors a different pipeline eventually consumes. Respect data permissions; no unauthorized copying.
 
 **P4.5 Repacking needs revalidation.** Preserve document boundaries, masking, positions, per-update token
 membership and gradient weighting. Even then kernel shapes/reduction order may change. Re-run input and
 first-step/short checks for the changed pair; reuse an old control only with a documented matching contract.
 Do not assume repacking is numerically neutral.
+
+**P4.6 Replay adapters and configs are pinned to a code version.** After changing model or checkout,
+revalidate adapter import, effective pack contents/order and the trusted actual config in the target
+environment (e.g. `Config.fromfile`, after checking execution side effects); field presence does not prove
+unchanged defaults or semantics, and one field's `hasattr` does not protect another field.
+Successful loading is only a preflight check: do not silently skip required fields, and still verify
+effective values, consumer-side context and the first-step gate.
 
 ## P5 Execution and evidence
 

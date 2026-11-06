@@ -310,6 +310,14 @@ def qwen3_vl_sft_collator(
     return ret
 
 
+def _reuse_single_or_cat(tensors: list[torch.Tensor]) -> torch.Tensor | None:
+    # A single-media pack (the common case) already holds the final tensor; reuse it instead of
+    # paying a full torch.cat copy of every patch. Multi-item packs still cat; empty stays None.
+    if len(tensors) == 1:
+        return tensors[0]
+    return torch.cat(tensors, dim=0) if tensors else None
+
+
 def glm53_vl_sft_collator(
     instances: list[list[Glm53VLDataItem]],
     pack_max_length: int,
@@ -387,23 +395,14 @@ def glm53_vl_sft_collator(
         # before cat and the cross-process IPC: the vision tower's patch_embed casts patches to
         # its parameter dtype anyway, so fp32 media would only double the bytes crossing shm,
         # main-process residency, and H2D. No-op when the dtypes already match.
-        pixel_values: list | torch.Tensor | None
-        pixel_values = [i["pixel_values"].to(media_dtype) for i in instance if "pixel_values" in i]
-        pixel_values = torch.cat(pixel_values, dim=0) if pixel_values else None
-
-        image_grid_thw: list | torch.Tensor | None
-        image_grid_thw = [i["image_grid_thw"] for i in instance if "image_grid_thw" in i]
-        image_grid_thw = torch.cat(image_grid_thw, dim=0) if image_grid_thw else None
-
-        pixel_values_videos: list | torch.Tensor | None
-        pixel_values_videos = [
-            i["pixel_values_videos"].to(media_dtype) for i in instance if "pixel_values_videos" in i
-        ]
-        pixel_values_videos = torch.cat(pixel_values_videos, dim=0) if pixel_values_videos else None
-
-        video_grid_thw: list | torch.Tensor | None
-        video_grid_thw = [i["video_grid_thw"] for i in instance if "video_grid_thw" in i]
-        video_grid_thw = torch.cat(video_grid_thw, dim=0) if video_grid_thw else None
+        pixel_values = _reuse_single_or_cat(
+            [i["pixel_values"].to(media_dtype) for i in instance if "pixel_values" in i]
+        )
+        image_grid_thw = _reuse_single_or_cat([i["image_grid_thw"] for i in instance if "image_grid_thw" in i])
+        pixel_values_videos = _reuse_single_or_cat(
+            [i["pixel_values_videos"].to(media_dtype) for i in instance if "pixel_values_videos" in i]
+        )
+        video_grid_thw = _reuse_single_or_cat([i["video_grid_thw"] for i in instance if "video_grid_thw" in i])
 
         # mm_token_type_ids must track input_ids through the exact same [:, :-1] drop + pad
         # (design doc §8.3). Slice each item to its own (possibly pack-truncated) input_ids

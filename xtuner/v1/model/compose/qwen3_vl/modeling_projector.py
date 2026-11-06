@@ -76,7 +76,7 @@ class Qwen3VLProjector(BaseModel):
             deepstack_projected_features.append(self.deepstack_merger_list[i](deepstack_feature))
         return hidden_states, deepstack_projected_features
 
-    def to_hf_key_list(self, key: str) -> list[str]:
+    def _model_hf_keys(self, key: str) -> list[str]:
         return [self._hf_prefix + key]
 
     # TODO: 暂时不开 checkpoint

@@ -6,7 +6,7 @@ import pydoc
 import re
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from functools import reduce
+from functools import partial, reduce
 from importlib import import_module
 from itertools import chain
 from math import prod
@@ -193,6 +193,72 @@ DEFAULT_FLOAT8_CFG = {
 }
 
 
+class HeadLoadPlan(NamedTuple):
+    allowed_missing: set[str]
+    allowed_extra: set[str]
+
+
+class HeadConfig(PydanticBaseModel):
+    """Output head construction and checkpoint policy."""
+
+    model_config = ConfigDict(title="Head config", extra="forbid", protected_namespaces=())
+
+    type: Literal["lm_head", "value_head"] = "lm_head"
+
+    def build(self, hidden_size: int, vocab_size: int | None = None) -> nn.Linear:
+        from xtuner.v1.module.head import LMHead, ValueHead
+
+        if self.type == "value_head":
+            return ValueHead(hidden_size, bias=False)
+        if vocab_size is None:
+            raise ValueError("vocab_size is required to build an lm_head")
+        return LMHead(hidden_size, vocab_size, bias=False)
+
+    def map_hf_keys(self, runtime_name: str, family_keys: list[str]) -> list[str]:
+        if self.type == "lm_head" or not runtime_name.startswith("lm_head"):
+            return family_keys
+        return [re.sub(r"(^|\.)lm_head(?=\.|$)", r"\1value_head", key) for key in family_keys]
+
+    def validate_checkpoint(self, checkpoint_keys: set[str]) -> None:
+        has_value_head = any(re.search(r"(^|\.)value_head(?=\.|$)", key) for key in checkpoint_keys)
+        if self.type == "lm_head" and has_value_head:
+            raise RuntimeError(
+                "Cannot load a checkpoint containing value_head weights into an actor model: "
+                "the critic checkpoint has no vocabulary head."
+            )
+
+    def load_exceptions(
+        self,
+        head_spec: LoadSpec | None,
+        checkpoint_keys: set[str],
+        actor_hf_keys: list[str],
+    ) -> HeadLoadPlan:
+        if self.type == "lm_head":
+            return HeadLoadPlan(set(), set())
+        if head_spec is None:
+            raise ValueError(
+                "Critic model has head_config.type='value_head' but no load spec for "
+                "'lm_head.weight'. Check model initialization and _init_load_spec()."
+            )
+        value_head_keys = set(head_spec.global_hf_keys)
+        if value_head_keys <= checkpoint_keys:
+            return HeadLoadPlan(set(), set())
+        if value_head_keys & checkpoint_keys:
+            raise RuntimeError("Checkpoint contains only part of the value head")
+        return HeadLoadPlan(value_head_keys, set(actor_hf_keys))
+
+    def init_missing_head(self, head: nn.Linear, hidden_size: int) -> None:
+        from xtuner.v1.utils import init_params
+
+        value_head_std = 1.0 / (hidden_size + 1)
+        init_params(head.weight, partial(nn.init.normal_, mean=0.0, std=value_head_std))
+        log_rank0.info(
+            "Value head (runtime module lm_head) is initialized with "
+            f"Normal(mean=0, std={value_head_std:.6g}) because the checkpoint has no value_head weights; "
+            "the rest of the model is loaded from the checkpoint."
+        )
+
+
 class TransformerConfig(XTunerBaseModelConfig):
     """Base transformer configuration with unified RoPE parameters.
 
@@ -223,6 +289,7 @@ class TransformerConfig(XTunerBaseModelConfig):
     linear_attention: Annotated[GatedDeltaNetConfig | KDAConfig | None, Parameter(group="model")] = None
     mlp_bias: Annotated[bool, Parameter(group="model")] = False
     tie_word_embeddings: Annotated[bool, Parameter(group="model")] = False
+    head_config: Annotated[HeadConfig, Parameter(group="model")] = Field(default_factory=HeadConfig)
     model_type: Annotated[str | None, Parameter(group="model")] = None  # TODO: yehaochen maybe should be removed
     generate_config: GenerateConfig | None = None
     return_hidden_states: Annotated[bool, Parameter(group="model")] = False
@@ -398,6 +465,39 @@ class TransformerConfig(XTunerBaseModelConfig):
                 "sliding_attention" if i >= self.max_window_layers else "full_attention"
                 for i in range(self.num_hidden_layers)
             ]
+
+    def build_head(self) -> nn.Linear:
+        """Build the output head from ``head_config``.
+
+        Returns:
+            nn.Linear: LMHead for "lm_head", ValueHead (out_features=1) for "value_head".
+        """
+        return self.head_config.build(self.hidden_size, self.vocab_size)
+
+    @property
+    def tie_head(self) -> bool:
+        """Whether the current output head can share embedding weights."""
+        return self.head_config.type == "lm_head" and self.tie_word_embeddings
+
+    @model_validator(mode="after")
+    def _untie_value_head(self) -> Self:
+        # ``tie_word_embeddings`` is the single source of truth for weight tying;
+        # a value head can never tie with the embeddings, so normalize it here.
+        if self.head_config.type == "value_head" and self.tie_word_embeddings:
+            log_rank0.info(
+                "head_config.type='value_head' can never tie with the embeddings; "
+                "normalizing tie_word_embeddings=True to False."
+            )
+            self.tie_word_embeddings = False
+        return self
+
+    def head_fp32(self, fsdp_cfg: FSDPConfig) -> bool:
+        """Whether the output head runs in float32 under FSDP.
+
+        A value head reads the dedicated ``fp32_value_head`` switch instead of
+        ``fp32_lm_head``.
+        """
+        return fsdp_cfg.fp32_value_head if self.head_config.type == "value_head" else fsdp_cfg.fp32_lm_head
 
 
 class ModelOutputs(PydanticBaseModel):
@@ -589,8 +689,12 @@ class BaseModel(nn.Module):
     ) -> tuple[
         Annotated[set[str], "loaded keys"], Annotated[set[str], "unloaded keys"], Annotated[set[str], "missing keys"]
     ]:
-        # Recompute from the complete HF key list and the current runtime layout.
-        # `__init__` still initializes the mapping for consumers that read it before checkpoint I/O.
+        """Load checkpoint parameters.
+
+        ``loaded_keys`` contains only runtime parameters read from the
+        checkpoint. A randomly initialized critic head is removed from
+        ``unloaded_keys`` and ``missing_keys`` but is not reported as loaded.
+        """
         self._init_load_spec()
         self._assert_load_spec_initialized()
         self._hf_path = Path(hf_path)
@@ -599,8 +703,9 @@ class BaseModel(nn.Module):
             hf_path = str(hf_path)
 
         hf_loader = HFCheckpointLoader(hf_path)
-        loaded_keys, unloaded_keys, missing_keys = self._load_params(hf_loader, strict=strict)
-        return loaded_keys, unloaded_keys, missing_keys
+        head_load = self._prepare_head_load(hf_loader)
+        loaded_keys, unloaded_keys, missing_keys = self._load_params(hf_loader, strict=strict, head_load=head_load)
+        return self._finish_head_load(head_load, loaded_keys, unloaded_keys, missing_keys)
 
     def scale_and_reduce_grad(self):
         return
@@ -611,7 +716,67 @@ class BaseModel(nn.Module):
         return cal_grad_norm(grads, dtype=dtype)
 
     def to_hf_key_list(self, key: str) -> list[str]:
+        """Convert an internal parameter name to the actual HuggingFace key
+        names.
+
+        This is the full mapping used by checkpoint I/O and test utilities:
+        model-family rules come from the ``_model_hf_keys`` hook (prefixes,
+        layer renames, tie-time lm_head -> embed_tokens), and value-head
+        critic models additionally rename ``lm_head.*`` to ``value_head.*``.
+
+        Args:
+            key (str): Internal parameter name.
+
+        Returns:
+            list[str]: HF key names as they appear in the checkpoint.
+        """
+        hf_keys = self._model_hf_keys(key)
+        head_cfg = getattr(self.config, "head_config", None)
+        if head_cfg is None:
+            return hf_keys
+        return head_cfg.map_hf_keys(self._clean_param_name(key), hf_keys)
+
+    def _model_hf_keys(self, key: str) -> list[str]:
+        """Model-family internal-name -> HF-key rules; subclasses override
+        this."""
         raise NotImplementedError()
+
+    def _prepare_head_load(self, checkpoint_loader: HFCheckpointLoader) -> HeadLoadPlan:
+        """Validate checkpoint role and compute head-only strict exemptions."""
+        head_cfg = getattr(self.config, "head_config", None)
+        if head_cfg is None:
+            return HeadLoadPlan(set(), set())
+        checkpoint_keys = set(checkpoint_loader.weight_map)
+        head_cfg.validate_checkpoint(checkpoint_keys)
+        return head_cfg.load_exceptions(
+            self.load_spec_mapping.get("lm_head.weight"),
+            checkpoint_keys,
+            self._model_hf_keys("lm_head.weight"),
+        )
+
+    @torch.no_grad()
+    def _finish_head_load(
+        self,
+        head_load: HeadLoadPlan,
+        loaded_keys: set[str],
+        unloaded_keys: set[str],
+        missing_keys: set[str],
+    ) -> tuple[set[str], set[str], set[str]]:
+        """Initialize an entirely absent critic head and reconcile key sets."""
+        if not head_load.allowed_missing:
+            return loaded_keys, unloaded_keys, missing_keys
+
+        lm_head = getattr(self, "lm_head", None)
+        if not isinstance(lm_head, nn.Linear):
+            raise TypeError(
+                "Cannot initialize critic value head: config has head_config.type='value_head' "
+                "but model.lm_head is not nn.Linear."
+            )
+        head_cfg = getattr(self.config, "head_config")
+        head_cfg.init_missing_head(lm_head, getattr(self.config, "hidden_size"))
+        unloaded_keys.discard("lm_head.weight")
+        missing_keys -= head_load.allowed_missing
+        return loaded_keys, unloaded_keys, missing_keys
 
     def trainable_parameters(self):
         params = [(name, param) for name, param in self.named_parameters() if param.requires_grad]
@@ -1062,7 +1227,7 @@ class BaseModel(nn.Module):
             return get_rope_embedding(config=config)
 
     def _init_load_spec(self) -> None:
-        if self.__class__.to_hf_key_list is BaseModel.to_hf_key_list:
+        if self.__class__._model_hf_keys is BaseModel._model_hf_keys:
             self.load_spec_mapping = {}
             return
 
@@ -1678,7 +1843,7 @@ class BaseModel(nn.Module):
             raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
 
         with open(hf_dir / "model.safetensors.index.json", "w") as f:
-            index = {"weight_map": dict(weight_map), "metadata": {}}
+            index = {"weight_map": dict(weight_map)}
             json.dump(index, f, indent=2, ensure_ascii=False)
 
     def _save_hf(
@@ -1783,24 +1948,35 @@ class BaseModel(nn.Module):
 
             # write or overwrite `model.safetensors.index.json`
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
-                index = {"weight_map": weight_map, "metadata": {}}
+                index = {"weight_map": weight_map}
                 json.dump(index, f, indent=2, ensure_ascii=False)
 
         if dist.is_initialized():
             torch.distributed.barrier()
 
-    def _load_params(self, checkpoint_loader: HFCheckpointLoader, strict=True) -> tuple:
-        matched_hf_keys: set[str] = set(checkpoint_loader.weight_map)
-        expected_hf_keys: set[str] = set(chain(*map(self.to_hf_key_list, self.state_dict())))
+    def _load_params(
+        self,
+        checkpoint_loader: HFCheckpointLoader,
+        strict: bool = True,
+        head_load: HeadLoadPlan | None = None,
+    ) -> tuple:
+        # The load spec (with hf_key_mapping applied) is the single source of truth
+        # for the expected HF key set; strict checks and the copy loop below share it.
+        present_hf_keys: set[str] = set(checkpoint_loader.weight_map)
+        expected_hf_keys: set[str] = {key for spec in self.load_spec_mapping.values() for key in spec.global_hf_keys}
         expected_keys = set(self.state_dict())
+        if head_load is None:
+            head_load = self._prepare_head_load(checkpoint_loader)
+        allowed_missing = head_load.allowed_missing
+        allowed_extra = head_load.allowed_extra
 
-        if strict and matched_hf_keys != expected_hf_keys:
-            _missing_keys = expected_hf_keys - matched_hf_keys
-            if _missing_keys:
-                raise RuntimeError(f"Missing keys in checkpoint: {_missing_keys}. ")
-            unexpected_keys = matched_hf_keys - expected_hf_keys
-            if unexpected_keys:
-                raise RuntimeError(f"Unexpected keys in checkpoint: {unexpected_keys}. ")
+        if strict:
+            _missing_keys = expected_hf_keys - present_hf_keys - allowed_missing
+            _unexpected_keys = present_hf_keys - expected_hf_keys - allowed_extra
+            if _missing_keys or _unexpected_keys:
+                raise RuntimeError(
+                    f"Missing keys in checkpoint: {_missing_keys or '{}'}. Unexpected keys: {_unexpected_keys or '{}'}."
+                )
 
         missing_keys: set[str] = set()
         loaded_keys: set[str] = set()
@@ -1838,11 +2014,22 @@ class BaseModel(nn.Module):
             torch.accelerator.synchronize()
             torch.cpu.synchronize()
 
-        if missing_keys and strict:
-            raise RuntimeError(f"Internal error, Missing keys in checkpoint: {missing_keys}")
-
-        if (unloaded_keys := (expected_keys - loaded_keys)) and strict:
-            raise RuntimeError(f"Internal error, Unloaded keys in model: {unloaded_keys}")
+        unloaded_keys = expected_keys - loaded_keys
+        if strict:
+            # Only value-head keys that will be randomly initialized are exempt;
+            # backbone gaps stay strict errors, and unloaded params are not
+            # marked loaded prematurely.
+            bad_missing = missing_keys - allowed_missing
+            bad_unloaded = {
+                name
+                for name in unloaded_keys
+                if not set(self.load_spec_mapping[name].global_hf_keys) <= allowed_missing
+            }
+            if bad_missing or bad_unloaded:
+                raise RuntimeError(
+                    f"Internal error, Missing keys in checkpoint: {bad_missing or '{}'}; "
+                    f"Unloaded keys in model: {bad_unloaded or '{}'}"
+                )
 
         return loaded_keys, unloaded_keys, missing_keys
 

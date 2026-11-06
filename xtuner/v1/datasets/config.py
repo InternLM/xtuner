@@ -3,7 +3,7 @@ import os
 import pydoc
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Iterable, Literal, Optional, Protocol, Union, runtime_checkable
+from typing import Annotated, Iterable, Literal, Optional, Protocol, Union, overload, runtime_checkable
 
 import torch
 from cyclopts import Parameter
@@ -327,6 +327,9 @@ class DataloaderConfig(BaseDataloaderConfig):
         Parameter(help="path to sampler order .npy (mmap read); required when pack_level='preset'"),
     ] = None
     round_up: Annotated[bool, Parameter(help="enable or disable round up mode")] = True
+    sp_media_dedup: Annotated[
+        bool, Parameter(help="Only the SP leader builds a runtime loader; broadcast complete batches")
+    ] = False
 
     @staticmethod
     def _force_preset_pack_settings(dataset_config_list: "DatasetConfigList") -> "DatasetConfigList":
@@ -389,6 +392,9 @@ class DataloaderConfig(BaseDataloaderConfig):
                 raise ValueError("group_by_length must be False when pack_level is none.")
         return data
 
+    # Without an SP mesh, build always returns a loader. Only SP followers may
+    # return None; preserve the non-optional contract for existing callers.
+    @overload
     def build(
         self,
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
@@ -398,7 +404,33 @@ class DataloaderConfig(BaseDataloaderConfig):
         seed: int,
         shuffle: bool = True,
         total_step: int | None = None,
-    ) -> Dataloader:
+        sp_mesh: None = None,
+    ) -> Dataloader: ...
+
+    @overload
+    def build(
+        self,
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        dp_mesh: DeviceMesh | None,
+        global_batch_size: int,
+        micro_batch_size: int,
+        seed: int,
+        shuffle: bool = True,
+        total_step: int | None = None,
+        sp_mesh: DeviceMesh | None = None,
+    ) -> Dataloader | None: ...
+
+    def build(
+        self,
+        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        dp_mesh: DeviceMesh | None,
+        global_batch_size: int,
+        micro_batch_size: int,
+        seed: int,
+        shuffle: bool = True,
+        total_step: int | None = None,
+        sp_mesh: DeviceMesh | None = None,
+    ) -> Dataloader | None:
         if self.dataset_config_list is None:
             raise ValueError("dataset_config_list is required.")
 
@@ -486,6 +518,16 @@ class DataloaderConfig(BaseDataloaderConfig):
             packed_samples = len(dataset)
             logger.info(f"[Dataset] (Original) {ori_samples} samples.")
             logger.info(f"[Dataset] (Packed) {packed_samples} samples.")
+
+        # 所有 rank 先完成原有数据准备及 collective，避免 follower 提前退出造成缺员。
+        # 下面才是本地 sampler/collator/DataLoader 组装；follower 改从 SP 广播接收完整 batch。
+        # Everything above must run on ALL ranks (JSONL loading, tokenization/packing cache
+        # sync and their collectives); only the sampler/collator/DataLoader assembly below
+        # is rank-local. With SP batch dedup the SP-group followers skip that assembly and
+        # get complete batches from the per-step broadcast instead (no stub loader).
+        if self.sp_media_dedup and sp_mesh is not None and sp_mesh.size() > 1:
+            if sp_mesh.get_local_rank() != 0:
+                return None
 
         sampler: LengthGroupedSampler | ParallelSampler | RandomSampler | SequentialSampler | PresetSampler
         if self.sampler_type == "preset":

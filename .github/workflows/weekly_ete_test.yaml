@@ -175,7 +175,8 @@ jobs:
         (needs.build_image.result == 'success' || inputs.skip_build)
       }}
     runs-on: ${{ github.event.inputs.runner_label || 'h_cluster_ete' }}
-    timeout-minutes: 1440
+    # Self-hosted job limit. 1440 (1 day) was cancelling long weekly runs.
+    timeout-minutes: 10080
     env:
       CI_ETE_TRAIN_IMAGE: >-
         ${{

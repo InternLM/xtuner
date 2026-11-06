@@ -9,6 +9,7 @@ from xtuner.v1.rl.utils.misc import gather_logprobs
 from xtuner.v1.utils.device import get_device
 
 from .base_loss_ctx import BaseLossConfig, BaseLossContext, BaseLossKwargs
+from .utils import sp_split
 
 
 DEVICE = get_device()
@@ -23,17 +24,39 @@ class LogProbConfig(BaseLossConfig):
     def _loss_kwargs_cls(self) -> type["LogProbKwargs"]:
         return LogProbKwargs
 
-    def build(self, data: dict, sp_mesh: DeviceMesh | None = None) -> "LogProbContext | None":
+    def build(
+        self,
+        data: dict,
+        sp_mesh: DeviceMesh | None = None,
+        device: str | torch.device | None = None,
+    ) -> "LogProbContext | None":
+        """Build a log-prob context from full labels.
+
+        Args:
+            data (dict): Data dict containing full ``shifted_labels``.
+            sp_mesh (DeviceMesh | None): Sequence parallel mesh.
+            device (str | torch.device): Device of the returned labels.
+
+        Returns:
+            LogProbContext | None: The local context, or None without labels.
+        """
         if "shifted_labels" not in data:
             return None
+        if device is None:
+            device = DEVICE
         loss_kwargs = LogProbKwargs(shifted_labels=data["shifted_labels"])
         if sp_mesh is not None and sp_mesh.size() > 1:
             loss_kwargs = loss_kwargs.sp_split(sp_mesh)
+        loss_kwargs.shifted_labels = loss_kwargs.shifted_labels.to(device)
         return self.loss_ctx_cls(self, loss_kwargs)
 
 
 class LogProbKwargs(BaseLossKwargs):
     shifted_labels: torch.Tensor
+
+    def sp_split(self, sp_mesh: DeviceMesh) -> "LogProbKwargs":
+        self.shifted_labels = sp_split(self.shifted_labels, sp_mesh=sp_mesh, split_dim=1, padding_value=-100)
+        return self
 
 
 class LogProbContext(BaseLossContext):
@@ -108,8 +131,13 @@ class TopKLogProbConfig(BaseLossConfig):
     def _loss_kwargs_cls(self) -> type[BaseLossKwargs]:
         return BaseLossKwargs
 
-    def build(self, data: dict, sp_mesh: DeviceMesh | None = None) -> "TopKLogProbContext":
-        del data, sp_mesh
+    def build(
+        self,
+        data: dict,
+        sp_mesh: DeviceMesh | None = None,
+        device: torch.device | str | None = None,
+    ) -> "TopKLogProbContext":
+        del data, sp_mesh, device
         return self.loss_ctx_cls(self, self._loss_kwargs_cls())
 
 

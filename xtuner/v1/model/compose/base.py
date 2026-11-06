@@ -172,7 +172,7 @@ class BaseComposeModel(BaseModel):
 
         if dist.get_rank() == 0:
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
-                json.dump({"weight_map": weight_map_dict, "metadata": {}}, f, indent=4)
+                json.dump({"weight_map": weight_map_dict}, f, indent=4)
         dist.barrier()
 
     def async_save_hf(

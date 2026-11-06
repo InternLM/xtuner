@@ -93,7 +93,8 @@ jobs:
   ete_test:
     if: ${{!cancelled() }}
     runs-on: ${{ github.event.inputs.runner_label || 'h_cluster_ete' }}
-    timeout-minutes: 1440
+    # Self-hosted job limit. 1440 (1 day) was cancelling long ETE runs.
+    timeout-minutes: 10080
     steps:
       - name: Clean workdir
         run: sudo git clean -ffdx
