@@ -52,12 +52,20 @@ def _register_hc_params(module: torch.nn.Module, *, site: str, mhc_cfg: MHCConfi
     # fp32: the 20-iteration Sinkhorn loop is bf16-NaN-prone (design doc 3.5.3). Declaring the
     # dtype here is not what keeps it -- `fully_shard` upcasts every trainable parameter to an
     # fp32 master and then casts to `MixedPrecisionPolicy.param_dtype` for the forward. What
-    # keeps `base`/`scale` in fp32 compute is `Glm53TextMoEConfig.hf_save_cfg.fp32_keys_pattern`,
-    # which excludes them from FSDP entirely; `fn` is intentionally not pinned (`hc_pre` casts
-    # it to the activation dtype anyway).
+    # keeps `base`/`scale` in fp32 compute is `fp32_param_names` below, which excludes them from
+    # FSDP entirely; `fn` is intentionally not pinned (`hc_pre` casts it to the activation dtype
+    # anyway, and ignored parameters are replicated rather than sharded).
+    #
+    # Declared per instance, not on the class: the MTP layer builds with `mhc_cfg=None` and has no
+    # `hc_*` parameters at all, so a class-level declaration would fail resolution for it.
     module.register_parameter(f"hc_{site}_fn", torch.nn.Parameter(torch.zeros(mix, hc_dim, dtype=torch.float32)))
     module.register_parameter(f"hc_{site}_base", torch.nn.Parameter(torch.zeros(mix, dtype=torch.float32)))
     module.register_parameter(f"hc_{site}_scale", torch.nn.Parameter(torch.ones(3, dtype=torch.float32)))
+    setattr(
+        module,
+        "fp32_param_names",
+        (*getattr(module, "fp32_param_names", ()), f"hc_{site}_base", f"hc_{site}_scale"),
+    )
 
 
 def _init_hc_params(module: torch.nn.Module) -> None:

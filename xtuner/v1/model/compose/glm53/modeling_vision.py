@@ -39,6 +39,7 @@ def _vision_embed_before_sp() -> bool:
     # Default 0: shard-then-embed. Set XTUNER_GLM53_VISION_EMBED_BEFORE_SP=1 for parity.
     return os.getenv("XTUNER_GLM53_VISION_EMBED_BEFORE_SP", "0") == "1"
 
+
 # The block forward is the whole ViT layer (norm -> attn -> norm -> clamped-SwiGLU MLP); compiling
 # it is what fuses the clamp/activation elementwise chain. `fullgraph=False`: the attention
 # dispatches into a kernel (flash/eager) that dynamo cannot trace through, and under SP the block
@@ -405,6 +406,7 @@ class Glm53VisionModel(BaseModel):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype, cast_forward_inputs=False
         )
+        self.precision.set_default_mp_policy(mp_policy)
         # Recompute the ViT blocks, following `vision_recompute_ratio` exactly as qwen3_vl does.
         # The tower runs over *raw* patches, and a packed VL sample carries far more of them than
         # the LLM sequence has tokens (a 8192-token pack was measured at ~14.7k patches), so 24
@@ -421,14 +423,12 @@ class Glm53VisionModel(BaseModel):
             for block in self.blocks:
                 self._fully_shard(
                     mesh=self.fsdp_mesh,
-                    mp_policy=mp_policy,
                     reshard_after_forward=True,
                     offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
                     module=block,
                 )
             self._fully_shard(
                 mesh=self.fsdp_mesh,
-                mp_policy=mp_policy,
                 reshard_after_forward=True,
                 offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
             )

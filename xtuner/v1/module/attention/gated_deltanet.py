@@ -166,6 +166,10 @@ class GatedDeltaNet(nn.Module):
 
         A = torch.empty(self.num_v_heads).uniform_(0, 16)
         self.A_log = nn.Parameter(torch.log(A))
+        # Qwen3.5 keeps the per-head decay and the gated-RMSNorm weight in fp32 upstream; read by
+        # `BaseModel.precision`. Names are runtime names, so they do not follow the HF `linear_attn`
+        # namespace this module maps to on save.
+        self.fp32_param_names = ("A_log", "norm.weight")
 
         # Resolved at build time so `XTUNER_HF_IMPL` selects the HF-native fla call patterns
         # (same convention as `get_attn_impl_fn`).

@@ -116,6 +116,7 @@ class BaseComposeModel(BaseModel):
         # TODO: 判断其余模块是否已经被 fsdp 切分了
 
         mp_policy = MixedPrecisionPolicy(param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype)
+        self.precision.set_default_mp_policy(mp_policy)
 
         self.fsdp_mesh = init_world_mesh()
         # Note: 非常关键，不能删除这个 assert
@@ -123,7 +124,6 @@ class BaseComposeModel(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh,
-            mp_policy=mp_policy,
             reshard_after_forward=fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
         )
@@ -298,7 +298,12 @@ class BaseComposeModel(BaseModel):
         return self.language_model.post_micro_batch_forward(batch_outputs)
 
     def scale_and_reduce_grad(self):
+        # Every sub-model plus the compose root's own declarations: before this, only the language
+        # model was forwarded, so a pinned vision/projector parameter had no owner to reduce it.
         self.language_model.scale_and_reduce_grad()
+        self.vision_tower.scale_and_reduce_grad()
+        self.multi_modal_projector.scale_and_reduce_grad()
+        super().scale_and_reduce_grad()
 
     @override
     def build_loss_ctx_batch(  # type: ignore[override]
