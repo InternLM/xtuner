@@ -67,7 +67,10 @@ class TestIndexerSPPartition:
             balanced_query_partition((0, 15), 4, 4)
 
 
-def _cpu_selector(q, k, weights, starts, ends, topk, query_chunk_size=None):
+def _cpu_selector(q, k, weights, starts, ends, topk, query_chunk_size=None, *, selector="torch"):
+    # `selector` mirrors `tilelang_indexer_topk_from_ranges`'s signature; this CPU stand-in computes
+    # the same top-k regardless of which GPU selector the caller asked for.
+    del selector
     scores = torch.einsum("qhd,kd->qhk", q.float(), k.float()).relu()
     scores = torch.einsum("qhk,qh->qk", scores, weights)
     ids = torch.arange(k.shape[0])
