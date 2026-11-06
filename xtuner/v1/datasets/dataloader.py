@@ -70,6 +70,21 @@ class Dataloader(torch.utils.data.DataLoader, BaseDataloader):
         self._init_total_samples = 0
         self._local_samples = 0
 
+    def will_consume_base_seed(self) -> bool:
+        """Report whether the next underlying iterator creation draws a base
+        seed.
+
+        XTuner's generator-based __iter__ defers PyTorch iterator creation until
+        next(). Check before that fetch. Persistent workers reuse the underlying
+        iterator across epochs without drawing another base seed.
+
+        Returns:
+            bool: Whether a new underlying iterator will consume a base seed.
+        """
+        # 首次创建或非 persistent 重建会抽取；persistent 跨 epoch 复用不重抽。
+        # Keep the dependency on PyTorch's private iterator state inside the loader.
+        return not self.persistent_workers or self._iterator is None
+
     def load_state_dict(self, state_dict: dict) -> None:
         sampler: ParallelSampler | LengthGroupedSampler | PresetSampler = self.sampler  # type: ignore[assignment]
         dataset = self.dataset

@@ -25,7 +25,6 @@ from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     SampleParams,
     Status,
-    reset_rollout_response,
     update_status_from_finish_reason,
 )
 from xtuner.v1.rl.trace.rollout_api import (
@@ -1031,7 +1030,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             if rollout_state.status == Status.FAILED:
                 error_msg = rollout_state.error_msg
                 status = rollout_state.status
-                reset_rollout_response(rollout_state)
+                rollout_state.reset_response()
                 rollout_state.status = status
                 rollout_state.error_msg = error_msg
                 rollout_state.sample_params = rollout_state.sample_params.model_copy(
@@ -1056,14 +1055,14 @@ class RolloutWorker(SingleAcceleratorWorker):
                 ``max_tokens``.
         """
         if discard_response:
-            rollout_state = reset_rollout_response(rollout_state)
+            rollout_state.reset_response()
             rollout_state.sample_params = rollout_state.sample_params.model_copy(
                 update={"max_tokens": request_max_tokens}
             )
             rollout_state.status = Status.INIT
         elif not self.enable_partial_rollout and rollout_state.status == Status.ABORTED:
             # ABORTED samples can be replayed; without partial rollout, rerun from the original prompt.
-            rollout_state = reset_rollout_response(rollout_state)
+            rollout_state.reset_response()
             rollout_state.sample_params = rollout_state.sample_params.model_copy(
                 update={"max_tokens": request_max_tokens}
             )

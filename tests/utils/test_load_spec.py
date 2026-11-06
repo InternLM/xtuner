@@ -707,6 +707,9 @@ class TestBaseModelHFSave:
             def to_hf_key_list(self, key: str) -> list[str]:
                 return [key]
 
+            def _model_hf_keys(self, key: str) -> list[str]:
+                return [key]
+
         model = BufferModel()
 
         [(names, tensors)] = list(

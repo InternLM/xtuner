@@ -42,7 +42,7 @@ MOE_EP_COMPILE_CFG.pop("xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDeco
 
 
 class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
-    def to_hf_key_list(self, key: str) -> list[str]:
+    def _model_hf_keys(self, key: str) -> list[str]:
         # Handle MTP parameters
         if key.startswith("mtp_block."):
             # Remove "mtp_block." prefix

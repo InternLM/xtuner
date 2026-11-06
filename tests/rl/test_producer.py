@@ -54,7 +54,6 @@ def make_rollout_state(
         tokens=[uid],
         response="" if status in (Status.ABORTED, Status.EXPIRED) else f"response {uid}",
         response_ids=[],
-        response_mask=[],
         finish_reason="abort" if status == Status.ABORTED else "stop",
         reward={"score": reward_score} if reward_score is not None else None,
         seq_staleness=seq_staleness,
@@ -279,7 +278,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             tokens=[1, 11],
             response="old response",
             response_ids=[11],
-            response_mask=[1],
+            labels=[1],
             response_model_steps=[3],
             logprobs=[0.1],
             finish_reason="stop",
@@ -385,6 +384,27 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.failed_samples, 1)
         self.assertEqual(result.filtered_samples, 1)
+
+    async def test_producer_does_not_require_training_fields(self):
+        strategy = SyncProduceStrategyConfig().build()
+        ctx = self._build_context(
+            strategy, "eval_or_custom_loop", self._build_agent_loop(), self._build_sampler(), batch_size=1
+        )
+        state = make_rollout_state(1)
+        self.assertIsNone(state.input_ids)
+        self.assertIsNone(state.labels)
+        self.assertTrue(await ctx.put_generated_group([state]))
+        self.assertEqual(len(self.replay_buffer), 1)
+
+    async def test_inactive_loop_result_is_rejected_before_insertion(self):
+        strategy = SyncProduceStrategyConfig().build()
+        agent_loop = self._build_agent_loop()
+        state = make_rollout_state(1, status=Status.INIT)
+        agent_loop.generate_group = AsyncMock(return_value=[state])
+        ctx = self._build_context(strategy, "bad_status", agent_loop, self._build_sampler(), batch_size=1)
+        result = await ctx.generate_group([state])
+        self.assertFalse(await ctx.put_generated_group(result))
+        self.assertEqual(len(self.replay_buffer), 0)
 
     async def test_put_generated_group_releases_non_retryable_trace_sessions(self):
         # FAILED / FILTERED 不进入 replay buffer，必须在丢弃 RolloutState 前释放对应 trace session。
@@ -760,15 +780,15 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         expired = make_rollout_state(900)
         expired.response = "expired response"
         expired.response_ids = [11]
+        expired.labels = [1]
         expired.response_model_steps = [0]
-        expired.response_mask = None
         expired.reward = {"score": 0.1}
         fresh = make_rollout_state(901)
         fresh.group_id = expired.group_id
         fresh.response = "fresh response"
         fresh.response_ids = [21]
+        fresh.labels = [1]
         fresh.response_model_steps = [5]
-        fresh.response_mask = None
         fresh.logprobs = [-0.2]
         fresh.reward = {"score": 0.9}
 

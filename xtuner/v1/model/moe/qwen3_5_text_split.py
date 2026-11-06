@@ -19,7 +19,7 @@ from .moe import MoE
 # You can sue `xtuner/tools/model_converters/split_qwen3_5_moe_fused_experts.py` to convert the official weight
 # to split format.
 class Qwen3_5_VLTextMoESplit(MoE):
-    def to_hf_key_list(self, key: str) -> list[str]:
+    def _model_hf_keys(self, key: str) -> list[str]:
         # Handle MTP parameters
         if key.startswith("mtp_block."):
             # Remove "mtp_block." prefix
