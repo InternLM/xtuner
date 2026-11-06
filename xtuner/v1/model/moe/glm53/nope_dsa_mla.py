@@ -28,6 +28,7 @@ from xtuner.v1.module.linear import build_linear
 from xtuner.v1.module.rms_norm import LayerNorm
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm import gather_for_sequence_parallel
+from xtuner.v1.ops.fp32_linear import fp32_linear
 from xtuner.v1.ops.sparse_mla import (
     KPoolIndexerBackend,
     SparseMLABackend,
@@ -37,6 +38,7 @@ from xtuner.v1.ops.sparse_mla import (
     get_sparse_mla,
 )
 from xtuner.v1.ops.sparse_mla.flash_mla import _FLASH_MLA_HEAD_ALIGNMENT
+from xtuner.v1.ops.sparse_mla.kpool import _lmdeploy_kpool_is_available, _supports_lmdeploy_kpool
 from xtuner.v1.utils.dtensor import materialize_full
 from xtuner.v1.utils.init_weight import init_params
 
@@ -88,6 +90,11 @@ class KPoolIndexer(nn.Module):
         # Resolved once here (not per forward call), mirroring GLM-5.2's
         # get_dsa_topk_indices(indexer_backend) precomputation.
         self._topk_indices_fn = get_kpool_topk_indices(indexer_backend)
+        self._uses_lmdeploy_kpool = (
+            indexer_backend == "tilelang"
+            and not balance_sp
+            and _supports_lmdeploy_kpool(index_head_dim, index_n_heads, index_kpool, index_topk)
+        )
 
         self.wq_b = build_linear(q_lora_rank, index_n_heads * index_head_dim, bias=False)
         self.wk = build_linear(hidden_size, index_head_dim, bias=False)
@@ -113,9 +120,27 @@ class KPoolIndexer(nn.Module):
         kpool_ape = materialize_full(self.index_kpool_compress_ape, name="indexer.index_kpool_compress_ape")
 
         q = self.wq_b(q_resid).view(bsz, seq_len, self.index_n_heads, self.index_head_dim)
-        k = self.k_norm(self.wk(hidden_states))
+        projected_k = self.wk(hidden_states)
+        if self._uses_lmdeploy_kpool and _lmdeploy_kpool_is_available(q.device):
+            norm_weight = materialize_full(self.k_norm.weight, name="indexer.k_norm.weight")
+            norm_bias = materialize_full(self.k_norm.bias, name="indexer.k_norm.bias")
+            k = F.layer_norm(
+                projected_k.float(),
+                self.k_norm.normalized_shape,
+                norm_weight.float(),
+                norm_bias.float(),
+                self.k_norm.eps,
+            ).to(projected_k.dtype)
+            # LMDeploy promotes the checkpoint's head-gate parameters and
+            # activations to FP32 before projection, not after a BF16 GEMM.
+            head_weight = materialize_full(
+                cast(torch.Tensor, self.weights_proj.weight), name="indexer.weights_proj.weight"
+            )
+            weights = fp32_linear(hidden_states, head_weight)
+        else:
+            k = self.k_norm(projected_k)
+            weights = self.weights_proj(hidden_states).float()
         gate_scores = F.linear(hidden_states, gate_weight)
-        weights = self.weights_proj(hidden_states).float()
 
         topk_ids = self._topk_indices_fn(
             q,
