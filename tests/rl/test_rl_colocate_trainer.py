@@ -183,6 +183,39 @@ class TestRLColocateTrainer(unittest.TestCase):
         )
         return trainer
 
+    def test_serving_baseline_precedes_first_rollout_and_scrape_precedes_offload(self) -> None:
+        for start_step in (0, 5):
+            with self.subTest(start_step=start_step):
+                tokens = 100.0
+                sample = SimpleNamespace(group_id=1, rollout_id=1, session_id=None)
+
+                async def produce_batch(batch_size: int, **kwargs) -> ProduceBatchResult:
+                    nonlocal tokens
+                    tokens += 40.0
+                    return ProduceBatchResult(rollout_states=[[sample]])
+
+                trainer = self._make_trainer(
+                    SimpleNamespace(produce_batch=produce_batch), total_train_steps=start_step + 1
+                )
+                trainer._cur_step = start_step
+                trainer._train_one_batch = MagicMock(return_value={})
+
+                async def scrape() -> dict[str, dict[str, float]]:
+                    trainer._train_one_batch.assert_not_called()
+                    return {"a": {"generation_tokens": tokens}}
+
+                trainer.rollout_controller.collect_server_metrics = SimpleNamespace(remote=scrape)
+                with (
+                    patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
+                    patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
+                ):
+                    trainer.fit()
+                self.assertEqual(trainer._cur_step, start_step + 1)
+                self.assertEqual(
+                    trainer._log_step.call_args.kwargs["serving_step_values"],
+                    {"generation_tokens": 40.0, "window_steps": 1.0},
+                )
+
     def test_fit_accepts_async_strategy_manager_on_colocate_path(self):
         # 验证 colocate fit 可以通过公开入口消费 async manager 产出的 batch。
         replay_buffer = AsyncReplayBufferConfig().build()
