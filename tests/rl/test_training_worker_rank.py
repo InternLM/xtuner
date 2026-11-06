@@ -20,10 +20,10 @@ import torch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, TeacherTargets
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter, RolloutTeacherConfig
-from xtuner.v1.rl.loss import DistillationLossConfig, GRPOLossConfig
-from xtuner.v1.rl.trainer.pack import RankPlan, RLDataPacker
+from xtuner.v1.rl.loss import CriticLossConfig, DistillationLossConfig, GRPOLossConfig
+from xtuner.v1.rl.trainer.actor_worker import ActorWorker
+from xtuner.v1.rl.trainer.pack import RankPlan, RLDataPacker, TokenBatchProto
 from xtuner.v1.rl.trainer.train_batch import TrainBatch, get_train_seq_ctx
-from xtuner.v1.rl.trainer.worker import TrainingWorker
 
 
 def _rollout_distillation_config(loss_config: DistillationLossConfig) -> DistillationConfig:
@@ -94,7 +94,7 @@ def _make_batch(
         distillation_config=distillation_config,
     )
     if advantages is not None:
-        batch.install_advantages(advantages)
+        batch.set_advantages(advantages)
         batch.require_targets("actor")
     return batch
 
@@ -397,6 +397,28 @@ class TestTrainBatchPack(unittest.TestCase):
         self.assertTrue(torch.all(pack.full_data["shifted_labels"] == -100))
         self.assertTrue(torch.all(pack.full_data["advantages"] == 0))
 
+    def test_empty_pack_skips_unused_critic_targets(self):
+        batch = _make_batch([], pack_max_length=16)
+        pack = batch.materialize(())
+
+        self.assertIsNone(pack.full_data["returns"])
+        self.assertIsNone(pack.full_data["old_values"])
+
+    def test_empty_pack_builds_critic_loss_with_required_targets(self):
+        batch = _make_batch(
+            [],
+            pack_max_length=16,
+            pack_loss_keys=["returns", "old_values"],
+        )
+        pack = batch.materialize(())
+
+        ctx = CriticLossConfig().build(pack.full_data, device="cpu")
+
+        self.assertIsNotNone(ctx)
+        torch.testing.assert_close(pack.full_data["returns"], torch.zeros(1, 16))
+        torch.testing.assert_close(pack.full_data["old_values"], torch.zeros(1, 16))
+        self.assertEqual(int(ctx.loss_kwargs.loss_weight.sum()), 0)
+
     def test_rollout_logprobs_template_key_on_empty_pack(self):
         batch = _make_batch([], pack_max_length=16, pack_loss_keys=["rollout_logprobs"])
         pack = batch.materialize(())
@@ -501,7 +523,7 @@ class TestConfiguredTeacherLossKeys(unittest.TestCase):
             train_teachers=[object()],
             loss_config=SimpleNamespace(uses_sampled_token_targets=True),
         )
-        worker = TrainingWorker.__new__(TrainingWorker)
+        worker = ActorWorker.__new__(ActorWorker)
         for config, expected in (
             (None, []),
             (topk, ["teacher_logprobs", "target_token_ids"]),
@@ -510,8 +532,70 @@ class TestConfiguredTeacherLossKeys(unittest.TestCase):
         ):
             with self.subTest(config=config):
                 worker.config = SimpleNamespace(distillation_config=config)
-                self.assertEqual(worker._configured_teacher_loss_keys(), expected)
+                self.assertEqual(worker.teacher_loss_keys(), expected)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTrainBatchTargets(unittest.TestCase):
+    """S4 target installation and trajectory export on the complete CPU batch."""
+
+    def _batch(self) -> TrainBatch:
+        state = _make_state(uid=1, response_ids=[20, 21], supervised_mask=[1, 0])
+        return _make_batch([state], pack_max_length=4)
+
+    def test_set_old_values_and_ppo_targets_round_trip(self):
+        batch = self._batch()
+        batch.set_old_values([torch.tensor([0.1, 0.2, 0.3, 0.4])])
+        batch.set_ppo_targets(
+            TokenBatchProto.concat([torch.tensor([1.0, 2.0, 3.0, 4.0])]),
+            TokenBatchProto.concat([torch.tensor([5.0, 6.0, 7.0, 8.0])]),
+        )
+        batch.require_targets("critic")
+
+        pack = batch.materialize((0,))
+        torch.testing.assert_close(pack.full_data["old_values"], torch.tensor([[0.1, 0.2, 0.3, 0.4]]))
+        # advantages are zeroed at ignored positions; returns are installed verbatim.
+        torch.testing.assert_close(pack.full_data["advantages"], torch.tensor([[0.0, 0.0, 3.0, 0.0]]))
+        torch.testing.assert_close(pack.full_data["returns"], torch.tensor([[5.0, 6.0, 7.0, 8.0]]))
+
+    def test_require_targets_rejects_incomplete_critic_targets(self):
+        batch = self._batch()
+        batch.set_old_values([torch.tensor([0.1, 0.2, 0.3, 0.4])])
+        with self.assertRaisesRegex(ValueError, "returns"):
+            batch.require_targets("critic")
+
+    def test_set_ppo_targets_validates_lengths_before_writing(self):
+        batch = self._batch()
+        with self.assertRaisesRegex(ValueError, "returns row"):
+            batch.set_ppo_targets(
+                TokenBatchProto.concat([torch.tensor([1.0, 2.0, 3.0, 4.0])]),
+                TokenBatchProto.concat([torch.tensor([1.0])]),
+            )
+        self.assertIsNone(batch._samples[0].advantages)
+        self.assertIsNone(batch._samples[0].returns)
+
+    def test_trajectory_data_exports_complete_rows_and_boundaries(self):
+        first = _make_state(uid=1, response_ids=[20, 21], supervised_mask=[1, 0])
+        second = _make_state(uid=2, response_ids=[30, 31, 32])
+        second.reward = {"score": 2.0}
+        batch = _make_batch([first, second], pack_max_length=9)
+        batch.set_old_values([torch.tensor([0.1, 0.2, 0.3, 0.4]), torch.tensor([0.5, 0.6, 0.7, 0.8, 0.9])])
+
+        trajectory = batch.trajectory_data()
+
+        torch.testing.assert_close(trajectory["values"], torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]))
+        self.assertEqual(trajectory["scores"].tolist(), [1.0, 2.0])
+        self.assertEqual(trajectory["mask"].tolist(), [False, False, True, False, False, False, True, True, True])
+        self.assertEqual(trajectory["cu_seq_lens"].tolist(), [0, 4, 9])
+
+    def test_trajectory_data_requires_reward_score(self):
+        state = _make_state(uid=1, response_ids=[20, 21])
+        state.reward = None
+        batch = _make_batch([state], pack_max_length=4)
+        batch.set_old_values([torch.tensor([0.1, 0.2, 0.3, 0.4])])
+
+        with self.assertRaisesRegex(ValueError, "reward score"):
+            batch.trajectory_data()

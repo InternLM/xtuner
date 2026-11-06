@@ -30,6 +30,9 @@ class MixedDtypeModel(BaseModel):
     def to_hf_key_list(self, key: str) -> list[str]:
         return [key]
 
+    def _model_hf_keys(self, key: str) -> list[str]:
+        return [key]
+
 
 class ExpertShardModel(BaseModel):
     def __init__(self, ep_group: dist.ProcessGroup, ep_rank: int) -> None:

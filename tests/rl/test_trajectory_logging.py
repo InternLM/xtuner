@@ -346,7 +346,8 @@ class TestTrajectoryLogging(unittest.TestCase):
         self.assertIsNone(row["agent"]["artifacts"])
 
     def test_invalid_train_group_is_filtered_before_saving(self):
-        # 非法组在进入轨迹保存前由 _prepare_train_batch 过滤，落盘层不再重复检查。
+        # 行为：非法组在进入轨迹保存前由 _prepare_train_batch 过滤——
+        # 它原地裁剪 train_batch，落盘层不再重复检查（防御职责上移一层）。
         bad = self._make_rollout(
             rollout_id=20,
             session_id=123,
@@ -356,14 +357,16 @@ class TestTrajectoryLogging(unittest.TestCase):
         )
         good = self._make_rollout(
             rollout_id=21,
-            session_id=123,
+            session_id=124,
             reward=2.0,
             artifacts=None,
             status=Status.COMPLETED,
         )
+        # COMPLETED 样本还需通过结构校验与 train meta 校验（正常由 agent_loop
+        # canonicalize_train_fields 调用 set_training_fields 发布）才会被保留。
         good.input_ids = [1, 2, 3]
         good.labels = [-100, 2, 3]
-        good.response_model_steps = [0, 0]
+        good.response_model_steps = [0, 0]  # 与 response_ids 等长（版本数校验）
         good.set_training_fields(input_ids=good.input_ids, labels=good.labels, logprobs=None)
         batch = [[bad], [good]]
 

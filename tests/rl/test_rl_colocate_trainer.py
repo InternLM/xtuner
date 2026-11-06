@@ -92,7 +92,7 @@ def _build_fake_agent_loop():
             state.response_ids = [1, 2, 3]
             state.response = "ok"
             state.reward = {"score": 1.0}
-            state.response_model_steps = [model_step] * 3
+            state.response_model_steps = [model_step] * len(state.response_ids)
             state.input_ids = [10, 11, 1, 2, 3]
             state.labels = [-100, -100, 1, 2, 3]
             state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=None)
@@ -266,7 +266,7 @@ class TestRLColocateTrainer(unittest.TestCase):
             state = _FakeRolloutState(train_step)
             state.status = Status.COMPLETED
             state.response_ids = [1, 2, 3]
-            state.response_model_steps = [model_step] * 3
+            state.response_model_steps = [model_step] * len(state.response_ids)
             state.input_ids = [10, 11, 1, 2, 3]
             state.labels = [-100, -100, 1, 2, 3]
             state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=None)
