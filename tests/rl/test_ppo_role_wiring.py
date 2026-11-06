@@ -720,6 +720,15 @@ class _DummyRole(RoleWorker):
 class TestRoleTrainUpdate(unittest.TestCase):
     """RoleWorker._train_update owns the global step and scheduler stepping."""
 
+    # CPU has no accelerator memory probes; keep the real update and metric paths.
+    @patch(
+        "xtuner.v1.rl.trainer.role_worker.DEVICE_MODULE",
+        new=SimpleNamespace(
+            reset_peak_memory_stats=MagicMock(),
+            max_memory_allocated=MagicMock(return_value=0),
+            max_memory_reserved=MagicMock(return_value=0),
+        ),
+    )
     def test_steps_scheduler_only_for_applied_updates(self):
         role = _DummyRole.__new__(_DummyRole)
         role.role_name = "actor"
