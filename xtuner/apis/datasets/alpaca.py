@@ -28,7 +28,6 @@ def alpaca_enzh_dataset(
         path=path_en,
         max_length=max_length,
         prompt_template=prompt_template,
-        shuffle_before_pack=True,
         remove_unused_columns=remove_unused_columns,
         pack_to_max_length=pack_to_max_length,
     )
@@ -37,7 +36,6 @@ def alpaca_enzh_dataset(
         path=path_zh,
         max_length=max_length,
         prompt_template=prompt_template,
-        shuffle_before_pack=True,
         remove_unused_columns=remove_unused_columns,
         pack_to_max_length=pack_to_max_length,
     )
