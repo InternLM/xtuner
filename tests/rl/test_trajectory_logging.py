@@ -32,6 +32,7 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
             rollout_id=7,
             session_id=12345678901234567890,
             message=[{"role": "user", "content": "test"}],
+            prompt_ids=[1],
             num_tokens=1,
             extra_fields={},
         )
@@ -273,6 +274,54 @@ class TestTrajectoryLogging(unittest.TestCase):
             [first_artifacts, second_artifacts],
         )
         self.assertEqual([path.name for path in self.output_dir.glob("*.jsonl")], ["eval_rollout_1.jsonl"])
+
+    def test_train_and_eval_use_train_meta_with_legacy_fallback(self):
+        state = self._make_rollout(
+            rollout_id=30,
+            session_id=123,
+            reward=1.0,
+            artifacts=None,
+            segment_index=1,
+            segment_count=2,
+        )
+        state.prompt_ids = [98, 99, 100]
+        state.response_model_steps = [1, 1]
+        state.set_training_fields(
+            input_ids=[98, 99, 100, 10, 11],
+            labels=[-100, -100, -100, 10, 11],
+            logprobs=None,
+        )
+        self.assertEqual(state.train_meta.prompt_length, 3)
+        self.assertEqual(state.num_tokens, 4)
+
+        train_path = self.output_dir / "train_rollout_1.jsonl"
+        eval_path = self.output_dir / "eval_rollout_1.jsonl"
+        self.trainer._save_trajectories([[state]], train_path)
+        self.trainer._save_eval_trajectories([[state]], eval_path)
+        for path in (train_path, eval_path):
+            _, row = self._load_jsonl(path)
+            self.assertEqual(row["prompt_len"], 3)
+            self.assertEqual(row["response_len"], 2)
+            self.assertEqual(row["agent"]["segment_index"], 1)
+
+        legacy = self._make_rollout(
+            rollout_id=31,
+            session_id=123,
+            reward=1.0,
+            artifacts=None,
+            segment_index=2,
+            segment_count=3,
+        )
+        self.assertIsNone(legacy.train_meta)
+        legacy_train_path = self.output_dir / "train_rollout_2.jsonl"
+        legacy_eval_path = self.output_dir / "eval_rollout_2.jsonl"
+        self.trainer._save_trajectories([[legacy]], legacy_train_path)
+        self.trainer._save_eval_trajectories([[legacy]], legacy_eval_path)
+        for path in (legacy_train_path, legacy_eval_path):
+            _, row = self._load_jsonl(path)
+            self.assertEqual(row["prompt_len"], 1)
+            self.assertEqual(row["response_len"], 2)
+            self.assertEqual(row["agent"]["segment_index"], 2)
 
     def test_non_agent_rollout_keeps_null_agent_metadata(self):
         data = RolloutState(

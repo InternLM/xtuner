@@ -598,9 +598,9 @@ async def take_train_batch(
                 current_train_step=current_train_step,
                 token_stale_threshold=task.token_stale_threshold,
             )
-            for rollout_state, effective_mask in zip(group, effective_masks):
-                if effective_mask is not None:
-                    rollout_state.response_mask = effective_mask
+            for item, mask in zip(group, effective_masks):
+                if mask is not None:
+                    item.apply_response_mask([bool(value) for value in mask])
 
     if hasattr(progress, "mark_consumed"):
         progress.mark_consumed(consumed_counts)

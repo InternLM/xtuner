@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 
@@ -109,6 +110,25 @@ class TeacherTargets(BaseModel):
         return self
 
 
+@dataclass(frozen=True)
+class TrainMeta:
+    """Lightweight training summary owned and published by ``RolloutState``.
+
+    ``num_tokens`` stays a ``RolloutState`` field (the single shifted training length);
+    this record only carries prompt/response shape, supervision count, layout and
+    presence flags. It is a plain frozen dataclass so Ray/debug snapshots can rebuild it
+    with ``dataclasses.replace``.
+    """
+
+    prompt_length: int
+    response_length: int
+    supervised_tokens: int  # count(full labels[1:] != -100)
+    position_layout: Literal["1d", "mrope_3d"]
+    has_rollout_logprobs: bool
+    has_routed_experts: bool
+    segment_index: int | None
+
+
 class RolloutState(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
@@ -140,15 +160,16 @@ class RolloutState(BaseModel):
     teacher_targets: TeacherTargets | None = None
     routed_experts: np.ndarray | RayObjectRef | list[RayObjectRef] | None = None
     finish_reason: str | None = None
-    # response_mask: 记录response_ids中哪个token算loss, 与response_ids长度相同，每轮rollout在 agent_loop.generate 中覆盖写
-    response_mask: list[int] | None = None
     # response_model_steps：记录 response_ids 中每个 token 来自哪个 model_step，与 response_ids 长度相同。
+    # 环境/工具等非模型生成位沿用所在 rollout cycle 的 model_step 占位（勿填 0，避免污染 min() 语义）。
     response_model_steps: list[int] | None = None
     # 记录该样本过期程度，即最早生成 token 的模型版本与当前训练步数的差值，数值越大表示越过期。
     seq_staleness: int = 0
 
     input_ids: list[int] | None = None
     labels: list[int] | None = None
+    # 训练字段的唯一摘要；只有 set_training_fields / apply_response_mask / reset_response 维护它。
+    train_meta: TrainMeta | None = None
 
     #  --- Judger 输出 ---
     reward: dict[str, Any] | None = None
@@ -170,6 +191,148 @@ class RolloutState(BaseModel):
             self.rollout_id = self.uid
         else:
             self.uid = self.rollout_id
+
+    def set_training_fields(self, *, input_ids: list[int], labels: list[int], logprobs: list[float] | None) -> None:
+        """Validate and publish the full, unshifted training fields.
+
+        Args:
+            input_ids (list[int]): Full training sequence.
+            labels (list[int]): Per-position targets, aligned with ``input_ids``.
+            logprobs (list[float] | None): Full rollout logprobs, aligned with ``input_ids``.
+
+        Returns:
+            None
+        """
+        # 复制轻量 token lists，避免调用方随后修改别名污染已发布字段。
+        ids = list(input_ids)
+        target_labels = list(labels)
+        full_logprobs = list(logprobs) if logprobs is not None else None
+        meta = self._build_train_meta(input_ids=ids, labels=target_labels, logprobs=full_logprobs)
+        # 验证成功后才赋值：训练字段、训练长度和摘要一起发布。
+        self.input_ids = ids
+        self.labels = target_labels
+        self.logprobs = full_logprobs
+        self.num_tokens = len(ids) - 1
+        self.train_meta = meta
+
+    def apply_response_mask(self, effective_mask: list[bool]) -> None:
+        """Bake one effective response mask into ``labels``.
+
+        The mask aligns with ``response_ids``; positions that are not kept become ignore
+        tokens. Length, prompt length and existing semantic holes are preserved.
+
+        Args:
+            effective_mask (list[bool]): Per-response-token keep mask.
+
+        Returns:
+            None
+        """
+        if self.labels is None or self.train_meta is None:
+            raise ValueError("Training fields must be published before applying a response mask")
+        if len(effective_mask) != len(self.response_ids or []):
+            raise ValueError("Response mask must align with response_ids")
+        labels = list(self.labels)
+        start = len(labels) - len(effective_mask)
+        for index, keep in enumerate(effective_mask):
+            if not keep:
+                labels[start + index] = -100
+        self.labels = labels
+        self.train_meta = replace(self.train_meta, supervised_tokens=sum(label != -100 for label in labels[1:]))
+        # 不重新推导 prompt_length：缺失显式 prompt 时，mask 后的非监督位计数会变大。
+
+    def reset_response(self) -> None:
+        """Invalidate the response and its training products before
+        regeneration.
+
+        Retry/expiry policy stays with the caller; this method only clears this sample.
+
+        Returns:
+            None
+        """
+        routed_experts = self.routed_experts
+        if routed_experts is not None:
+            from ray import ObjectRef
+
+            from xtuner.v1.rl.utils.ray_utils import free_object_refs
+
+            if isinstance(routed_experts, (ObjectRef, list)):
+                free_object_refs(routed_experts)
+        self.routed_experts = None
+        prompt_ids = self.prompt_ids
+        self.tokens = list(prompt_ids) if prompt_ids is not None else None
+        self.response = ""
+        self.response_ids = []
+        self.logprobs = []
+        self.teacher_targets = None
+        self.finish_reason = None
+        self.response_model_steps = []
+        self.reward = None
+        self.error_msg = None
+        # input_ids/labels 是上一轮 canonicalize 的产物，必须一并清掉，否则重生成后
+        # 基类 canonicalize 见 input_ids 非空会跳过重建，留下跨轮错位的训练字段。
+        self.input_ids = None
+        self.labels = None
+        self.num_tokens = None
+        self.train_meta = None
+        # 保留 prompt / multimodal 上下文；不在此选择 status 或改 partial-rollout 策略。
+
+    def validate_training(self) -> None:
+        """Check this sample's training fields against its published summary.
+
+        Read-only: it neither repairs data nor changes group status.
+
+        Returns:
+            None
+        """
+        if self.input_ids is None or self.labels is None or self.train_meta is None:
+            raise ValueError("Training fields and train_meta must be present")
+        expected = self._build_train_meta(
+            input_ids=self.input_ids,
+            labels=self.labels,
+            logprobs=self.logprobs,
+            prompt_length=self.train_meta.prompt_length,
+        )
+        if self.num_tokens != len(self.input_ids) - 1 or self.train_meta != expected:
+            raise ValueError("Training fields and metadata are inconsistent")
+        if len(self.response_model_steps or []) != len(self.response_ids or []):
+            raise ValueError(
+                f"response_model_steps length={len(self.response_model_steps or [])}, "
+                f"expected response_ids={len(self.response_ids or [])}"
+            )
+
+    def _build_train_meta(
+        self,
+        *,
+        input_ids: list[int],
+        labels: list[int],
+        logprobs: list[float] | None,
+        prompt_length: int | None = None,
+    ) -> TrainMeta:
+        if len(input_ids) < 2 or len(input_ids) != len(labels):
+            raise ValueError("Training input_ids and labels must be full and aligned")
+        if logprobs is not None and len(logprobs) != len(input_ids):
+            raise ValueError("Full rollout logprobs must align with full input_ids")
+        response_length = len(self.response_ids or [])
+        if response_length > len(labels):
+            raise ValueError("Response suffix exceeds full labels")
+        kept = sum(label != -100 for label in labels[1:])
+        if prompt_length is None:
+            # prompt_len 统计原始输入 prompt 长度（VLM 的 prompt 在 train_prompt_ids）；
+            # prompt_ids 缺失时退回 shifted_labels 的非监督位计数。
+            prompt_ids = self.extra_fields.get("train_prompt_ids") or self.prompt_ids
+            prompt_length = len(prompt_ids) if prompt_ids else len(input_ids) - 1 - kept
+        if prompt_length < 0:
+            raise ValueError("prompt_length must be nonnegative")
+        position_ids = self.position_ids
+        return TrainMeta(
+            prompt_length=prompt_length,
+            response_length=response_length,
+            supervised_tokens=kept,
+            position_layout="mrope_3d" if position_ids is not None and position_ids.ndim == 3 else "1d",
+            has_rollout_logprobs=logprobs is not None,
+            has_routed_experts=self.routed_experts is not None,
+            segment_index=self.extra_fields.get("agent_trace_segment_index"),
+        )
 
 
 def free_rollout_state_refs(rollout_state: RolloutState) -> None:
@@ -258,29 +421,24 @@ def update_status_from_finish_reason(finish_reason: str | None) -> Status:
         return Status.FAILED
 
 
-def reset_rollout_response(rollout_state: RolloutState) -> RolloutState:
-    routed_experts = getattr(rollout_state, "routed_experts", None)
-    if routed_experts is not None:
-        from ray import ObjectRef
-
-        from xtuner.v1.rl.utils.ray_utils import free_object_refs
-
-        if isinstance(routed_experts, (ObjectRef, list)):
-            free_object_refs(routed_experts)
-        rollout_state.routed_experts = None
-    prompt_ids = getattr(rollout_state, "prompt_ids", None)
-    rollout_state.tokens = list(prompt_ids) if prompt_ids is not None else None
-    rollout_state.response = ""
-    rollout_state.response_ids = []
-    rollout_state.logprobs = []
-    rollout_state.teacher_targets = None
-    rollout_state.routed_experts = None
-    rollout_state.finish_reason = None
-    rollout_state.response_mask = None
-    rollout_state.response_model_steps = []
-    rollout_state.reward = None
-    rollout_state.error_msg = None
-    return rollout_state
+def is_valid_for_training(group_data_items: list[RolloutState], logger) -> bool:
+    """Check group status and the canonical training contract of every
+    state."""
+    is_abort = any(item.status == Status.ABORTED for item in group_data_items)
+    is_filtered = any(item.status == Status.FILTERED for item in group_data_items)
+    is_failed = any(item.status == Status.FAILED for item in group_data_items)
+    if is_filtered or is_failed or is_abort:
+        logger.warning(
+            f"Invalid dataflow group found during training, rollout state filtered: {is_filtered}, failed: {is_failed}, aborted: {is_abort}."
+        )
+        return False
+    for item in group_data_items:
+        try:
+            item.validate_training()
+        except ValueError as exc:
+            logger.warning(f"Invalid canonical training state for rollout_id={item.rollout_id}: {exc}")
+            return False
+    return True
 
 
 def get_group_status(rollout_states: list[RolloutState]) -> Status:
@@ -357,25 +515,33 @@ def _calculate_effective_response_mask(
     current_train_step: int,
     token_stale_threshold: int,
 ) -> list[int]:
-    """Calculate the response mask after applying token staleness.
+    """Calculate the effective response mask of one rollout state without
+    mutating it.
+
+    Every loop writes ``response_ids`` under one convention: the contiguous suffix of ``input_ids`` after
+    the prompt (env-injected or tool tokens included), so response token ``j`` maps to labels position
+    ``len(labels) - len(response_ids) + j``. The effective mask follows the reasoning-RL rule
+    ``effective = semantic_mask * token_staleness_mask``: the semantic mask is recovered from
+    ``labels != -100`` on the response region (semantic holes stay supervised-out regardless of staleness),
+    and staleness is evaluated per token via ``response_model_steps``.
 
     Args:
-        rollout_state (RolloutState): Rollout sample whose response token provenance is evaluated.
+        rollout_state (RolloutState): Rollout sample to inspect; left unmodified.
         current_train_step (int): Trainer step that will consume the sample.
         token_stale_threshold (int): Maximum token staleness, measured in trainer steps, allowed for training.
 
     Returns:
-        list[int]: The semantic response mask intersected with the token-staleness mask.
+        list[int]: The effective mask aligned with ``response_ids``.
     """
+    labels = cast(list[int], rollout_state.labels)
     response_ids = cast(list[int], rollout_state.response_ids)
     response_model_steps = cast(list[int], rollout_state.response_model_steps)
 
-    # semantic mask: 在 agent_loop 中根据是否是 LLM 产生的 token 来 mask 的结果
-    semantic_mask = rollout_state.response_mask
-    if semantic_mask is None:
-        semantic_mask = [1] * len(response_ids)
-
-    # token_staleness_mask: 根据 token 的新鲜程度来 mask
+    # response_ids 是 input_ids 去掉 prompt 前缀的连续后缀，offset 即 prompt 长度。
+    offset = len(labels) - len(response_ids)
+    # semantic_mask: labels 中非 -100 的监督位；token_staleness_mask: 逐 token 新鲜度
+    # （语义洞位的 staleness 值无意义，乘上 semantic_mask 后自然归零）。
+    semantic_mask = [int(label != -100) for label in labels[offset:]]
     token_staleness_mask = [
         int(calculate_seq_staleness(response_model_step, current_train_step) < token_stale_threshold)
         for response_model_step in response_model_steps
@@ -393,25 +559,38 @@ def calculate_group_effective_response_masks(
     current_train_step: int,
     token_stale_threshold: int | None,
 ) -> list[list[int] | None]:
-    """Calculate token-staleness masks for the applicable states in a group.
+    """Calculate one group's effective response masks under the token-staleness
+    policy.
 
-    Each ``None`` means that token staleness is disabled or does not apply to
-    that state. Agentic groups currently return one ``None`` per state.
+    The function is pure: ``group`` is inspected, not modified. Each returned mask is the effective
+    response mask aligned with ``response_ids``; callers bake them into ``labels`` when the train
+    batch is taken, clearing zero-mask supervised positions to ``-100``. The clearing only ever
+    extends, so masks computed at growing trainer steps converge to the same labels. ``None`` means
+    token staleness is disabled or does not apply to that state (no labels, or no ``response_ids`` to
+    align with).
+
+    Args:
+        group (list[RolloutState]): Rollout group to inspect; left unmodified.
+        current_train_step (int): Trainer step that will consume the group.
+        token_stale_threshold (int | None): Maximum token staleness, measured in trainer
+            steps, allowed for training. ``None`` disables token staleness.
+
+    Returns:
+        list[list[int] | None]: Per-state effective masks.
     """
     if token_stale_threshold is None:
         return [None] * len(group)
-    if any(item.input_ids is not None or item.labels is not None for item in group):
-        return [None] * len(group)
 
-    return [
-        (
-            None
-            if not item.response_ids or (item.response_mask is not None and not any(item.response_mask))
-            else _calculate_effective_response_mask(
+    masks: list[list[int] | None] = []
+    for item in group:
+        if item.labels is None or not item.response_ids or len(item.labels) < len(item.response_ids):
+            masks.append(None)
+            continue
+        masks.append(
+            _calculate_effective_response_mask(
                 item,
                 current_train_step=current_train_step,
                 token_stale_threshold=token_stale_threshold,
             )
         )
-        for item in group
-    ]
+    return masks
