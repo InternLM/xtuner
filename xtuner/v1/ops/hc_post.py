@@ -1,31 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""Fused Triton kernel for the GLM-5.3-Flash & DeepSeek-V4-Flash Hyper-
-Connections ``hc_post``.
+"""Fused mHC post with FP32 coefficients and a single final activation cast.
 
-``hc_post`` re-expands a single-stream block output into ``hc_mult`` streams::
-
-    mixed[h_out, d] = sum_{h_in} comb[h_in, h_out] * residual[h_in, d]   # H×H mix
-    out[h_out, d]   = post[h_out] * x[d] + mixed[h_out, d]               # rank-1 add
-
-with ``H = hc_mult`` small (4 in the release). The reference PyTorch form
-(:func:`xtuner.v1.module.decoder_layer.mhc.hc_post`) deliberately avoids
-``torch.matmul`` because the ``K = H = 4`` contraction is below Hopper's wgmma
-tile floor and cuBLAS falls back to a slow CUDA-core GEMM. It instead uses a
-broadcast-multiply + reduce-sum that ``inductor`` fuses into a single kernel.
-
-That fused kernel is still memory-bound and, worse, re-reads ``residual`` once
-per ``h_out`` (4×): each output element ``[h_out, d]`` is its own reduction
-thread, so ``residual[:, d]`` is loaded ``H_out`` times and the ``1 GB``
-(fp32, pack=16384) residual blows past L2. This kernel instead assigns one
-program to a whole token's ``[H_out, BLOCK_D]`` tile and reads ``residual``
-exactly once, doing the 4×4 mix in registers. Measured ~21× on the forward,
-~7× on fwd+bwd vs the eager reference, and slightly *closer* to the fp32 ground
-truth than the reference (more of the accumulation stays in fp32).
-
-Numerics differ from the reference by ~1 bf16 ULP (different but equally valid
-reduction order), so the caller (``xtuner.v1.module.decoder_layer.mhc.hc_post``)
-only takes this path for CUDA bf16 inputs and keeps the eager fp32-accumulate
-path everywhere else.
+Accumulate post*x followed by source streams in index order, matching LMDeploy's post expansion. Backward retains
+coefficient precision for the same contract.
 """
 
 import torch
@@ -70,30 +47,17 @@ if _HAS_TRITON:
         db = tl.program_id(1)
         doff = db * BLOCK_D + tl.arange(0, BLOCK_D)
         dm = doff < D
-        hidx = tl.arange(0, H)
         xt = tl.load(x_ptr + t * D + doff, mask=dm, other=0.0).to(tl.float32)
-        # residual[h, d] for all h, read once → [H, BLOCK_D]
-        res = tl.load(
-            res_ptr + t * H * D + hidx[:, None] * D + doff[None, :],
-            mask=dm[None, :],
-            other=0.0,
-        ).to(tl.float32)
         for ho in range(H):
-            # comb_col = comb[:, ho]; mix reduces over the first (h_in) axis,
-            # matching the reference's ``comb.transpose(-1, -2)`` contraction.
-            comb_col = tl.load(comb_ptr + t * H * H + hidx * H + ho).to(tl.float32)
-            acc = tl.sum(comb_col[:, None] * res, axis=0)
-            # Replicate the reference's bf16 rounding boundaries (mixed.to(bf16),
-            # bf16 ``post * x``) so the only residual delta vs eager is reduction
-            # order, not an extra fp32 carry.
-            acc = acc.to(tl.bfloat16).to(tl.float32)
+            # Match rollout: retain FP32 coefficients and accumulate post*x first,
+            # followed by source streams in order, with only the final BF16 cast.
             p = tl.load(post_ptr + t * H + ho).to(tl.float32)
-            prod = (p * xt).to(tl.bfloat16).to(tl.float32)
-            tl.store(
-                out_ptr + t * H * D + ho * D + doff,
-                (prod + acc).to(out_ptr.dtype.element_ty),
-                mask=dm,
-            )
+            acc = p * xt
+            for hi in range(H):
+                c = tl.load(comb_ptr + t * H * H + hi * H + ho).to(tl.float32)
+                r = tl.load(res_ptr + t * H * D + hi * D + doff, mask=dm, other=0.0).to(tl.float32)
+                acc += c * r
+            tl.store(out_ptr + t * H * D + ho * D + doff, acc, mask=dm)
 
     @triton.jit
     def _hc_post_bwd_dpar_kernel(
@@ -176,13 +140,11 @@ if _HAS_TRITON:
         n = 1
         for b in batch:
             n *= b
-        dt = residual.dtype
         xf = x.reshape(n, D).contiguous()
         rf = residual.reshape(n, H, D).contiguous()
-        # Round post/comb to the activation dtype, mirroring the reference's
-        # ``post.to(residual.dtype)`` / ``comb.to(residual.dtype)``.
-        pf = post.to(dt).reshape(n, H).contiguous()
-        cf = comb.to(dt).reshape(n, H, H).contiguous()
+        # Preserve coefficient precision in both forward and its VJP.
+        pf = post.reshape(n, H).contiguous()
+        cf = comb.reshape(n, H, H).contiguous()
         out = torch.empty_like(rf)
         grid = (n, triton.cdiv(D, _BLOCK_D))
         _hc_post_fwd_kernel[grid](xf, rf, pf, cf, out, D, H=H, BLOCK_D=_BLOCK_D)
@@ -200,12 +162,11 @@ if _HAS_TRITON:
         n = 1
         for b in batch:
             n *= b
-        dt = residual.dtype
         g = grad_out.reshape(n, H, D).contiguous()
         xf = x.reshape(n, D).contiguous()
         rf = residual.reshape(n, H, D).contiguous()
-        pf = post.to(dt).reshape(n, H).contiguous()
-        cf = comb.to(dt).reshape(n, H, H).contiguous()
+        pf = post.reshape(n, H).contiguous()
+        cf = comb.reshape(n, H, H).contiguous()
 
         gx = torch.empty_like(xf)
         gres = torch.empty_like(rf)
