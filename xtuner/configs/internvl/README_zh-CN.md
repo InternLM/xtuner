@@ -28,7 +28,7 @@ InternVL-2 系列基于以下设计:
 
 ### 数据准备
 
-如果你也想使用 LLaVA SFT 数据集进行训练，请参考[文档](../../../docs/zh_cn/user_guides/dataset_prepare.md#llava-dataset) 准备数据。
+如果你也想使用 LLaVA SFT 数据集进行训练，请参考[文档](../../../docs/zh_cn/legacy/user_guides/dataset_prepare.md#llava-dataset) 准备数据。
 
 对于自定义数据，支持多种 json 和 jsonl 格式，内部数据组织可以参考 LLaVA SFT 格式，且支持数据采样操作。
 
@@ -99,7 +99,7 @@ python xtuner/configs/internvl/v1_5/convert_to_official.py xtuner/configs/intern
 
 ### 数据准备
 
-如果你也想使用 LLaVA SFT 数据集进行训练，请参考[文档](../../../docs/zh_cn/user_guides/dataset_prepare.md#llava-dataset) 准备数据。
+如果你也想使用 LLaVA SFT 数据集进行训练，请参考[文档](../../../docs/zh_cn/legacy/user_guides/dataset_prepare.md#llava-dataset) 准备数据。
 
 对于自定义数据，支持多种 json 和 jsonl 格式，内部数据组织可以参考 LLaVA SFT 格式，且支持数据采样操作。
 
