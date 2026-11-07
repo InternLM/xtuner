@@ -69,6 +69,8 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _make_loop(mode: str = "train") -> AgentInSandboxLoop:
         loop = AgentInSandboxLoop.__new__(AgentInSandboxLoop)
+        loop._closing = False
+        loop._active_runs = set()
         loop.mode = mode
         loop.tokenizer = MagicMock()
         loop.tokenizer.apply_chat_template.side_effect = lambda messages, **_: f"rendered-{messages[-1]['content']}\n"
