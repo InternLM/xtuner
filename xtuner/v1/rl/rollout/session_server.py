@@ -348,7 +348,7 @@ class SessionServer:
                 msg["content"], _ = _strip_stop_word(msg["content"], self.stop_word)
 
         prompt_text = self.tokenizer.apply_chat_template(
-            canonicalize_messages_for_chat_template(openai_messages),
+            canonicalize_messages_for_chat_template(openai_messages, tokenizer=self.tokenizer),
             tools=openai_tools,
             add_generation_prompt=True,
             tokenize=False,
@@ -439,7 +439,10 @@ class SessionServer:
 
         # Render OpenAI prompts for the prefix-cache key boundary.
         old_prompt = self.tokenizer.apply_chat_template(
-            canonicalize_messages_for_chat_template(messages), tools=tools, add_generation_prompt=True, tokenize=False
+            canonicalize_messages_for_chat_template(messages, tokenizer=self.tokenizer),
+            tools=tools,
+            add_generation_prompt=True,
+            tokenize=False,
         )
         if output_token_ids is None:
             raise RuntimeError(
@@ -450,7 +453,7 @@ class SessionServer:
         full_messages = [*messages, assistant_msg]
         new_prompt = (
             self.tokenizer.apply_chat_template(
-                canonicalize_messages_for_chat_template(full_messages),
+                canonicalize_messages_for_chat_template(full_messages, tokenizer=self.tokenizer),
                 tools=tools,
                 add_generation_prompt=False,
                 tokenize=False,
