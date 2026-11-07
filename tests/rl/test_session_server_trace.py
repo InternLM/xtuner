@@ -1,3 +1,4 @@
+import copy
 import json
 import unittest
 from types import SimpleNamespace
@@ -5,9 +6,14 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from aiohttp import ClientConnectionResetError, web
 from aiohttp.test_utils import TestClient, TestServer
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
 
+from transformers import PreTrainedTokenizerFast
 from xtuner.v1.rl.rollout import session_server as session_server_module
+from xtuner.v1.rl.rollout.chat_template import canonicalize_messages_for_chat_template
 from xtuner.v1.rl.rollout.session_server import SessionServer
+from xtuner.v1.rl.rollout.trace_store import Trie
 
 
 class TestSessionServerTraceHandling(unittest.IsolatedAsyncioTestCase):
@@ -308,6 +314,143 @@ class TestSessionServerTraceHandling(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(response.prepare_calls), 1)
         self.assertEqual(len(response.write_calls), 1)
         self.session_server.on_response.assert_awaited_once()
+
+
+class TestAnthropicToolTrace(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _events(parts: list[str], name: str = "Write") -> list[dict]:
+        events = [
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "tool_use", "id": "call_1", "name": name, "input": {}},
+            }
+        ]
+        for index, part in enumerate(parts):
+            events.append(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": part},
+                    "output_ids": [index + 10],
+                    "output_token_logprobs": [[-0.25, index + 10]],
+                }
+            )
+        events.extend(
+            [
+                {"type": "content_block_stop", "index": 0},
+                {"type": "message_delta", "delta": {"stop_reason": "max_tokens"}},
+                {"type": "message_stop"},
+            ]
+        )
+        return events
+
+    def test_tool_arguments_and_tokens_survive_stream_aggregation(self) -> None:
+        cases = [
+            (['{"path": "a.py",', '"content": "unfinished'], '{"path": "a.py","content": "unfinished'),
+            (['{"command": "printf \\', '"你好'], '{"command": "printf \\"你好'),
+            (['{"path": "a.py",', '"content": "ok"}'], {"path": "a.py", "content": "ok"}),
+            (["{}"], {}),
+            ([""], {}),
+        ]
+        for parts, expected in cases:
+            with self.subTest(parts=parts):
+                events = self._events(parts)
+                original = copy.deepcopy(events)
+                response = SessionServer._parse_anthropic_stream(events)
+                self.assertIsNotNone(response)
+                self.assertEqual(response["content"][0]["input"], expected)
+                self.assertNotIn("_partial_json", response["content"][0])
+                self.assertEqual(response["output_ids"], list(range(10, 10 + len(parts))))
+                self.assertEqual(response["output_token_logprobs"], [[-0.25, i + 10] for i in range(len(parts))])
+                self.assertEqual(response["stop_reason"], "max_tokens")
+                self.assertEqual(events, original)
+
+    def test_missing_message_stop_remains_incomplete(self) -> None:
+        self.assertIsNone(SessionServer._parse_anthropic_stream(self._events(['{"path": "unfinished'])[:-1]))
+
+    def test_missing_output_ids_still_fails(self) -> None:
+        events = self._events(['{"path": "unfinished'])
+        for event in events:
+            event.pop("output_ids", None)
+        with self.assertRaisesRegex(RuntimeError, "without output_ids"):
+            SessionServer._parse_anthropic_stream(events)
+
+    async def test_truncated_tool_trace_matches_recorded_message(self) -> None:
+        # Exercise the real HF renderer without downloading a model or starting Ray.
+        tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]")),
+            chat_template=(
+                "{% for message in messages %}{{ message['role'] }}:{{ message.get('content') or '' }}"
+                "{% for call in message.get('tool_calls', []) %}{{ call['function'] | tojson }}{% endfor %}"
+                "<eos>{% endfor %}{% if add_generation_prompt %}assistant:{% endif %}"
+            ),
+        )
+        request = {
+            "model": "test-model",
+            "max_tokens": 8192,
+            "session_id": "truncated-tool",
+            "messages": [{"role": "user", "content": "Run the tool"}],
+        }
+        for name, parts in (
+            ("Write", ['{"path": "a.py",', '"content": "unfinished']),
+            ("Bash", ['{"command": "printf \\', '"你好']),
+        ):
+            with self.subTest(name=name):
+                trie = Trie()
+                server = SessionServer.__new__(SessionServer)
+                server.tokenizer = tokenizer
+                server.stop_word = "<eos>"
+                server.enable_return_routed_experts = False
+                server.store = SimpleNamespace(
+                    search=SimpleNamespace(
+                        remote=AsyncMock(side_effect=lambda session_id, key, **kwargs: trie.search(key, **kwargs))
+                    ),
+                    insert=SimpleNamespace(
+                        remote=AsyncMock(side_effect=lambda session_id, key, value: trie.insert(key, value))
+                    ),
+                )
+                response = SessionServer._parse_anthropic_stream(self._events(parts, name))
+                await server.on_response(response, session_server_module.FMT_ANTHROPIC, request)
+
+                # The agent transcript keeps invalid arguments as the original string,
+                # independently of SessionServer's Anthropic -> OpenAI conversion.
+                recorded_messages = [
+                    *request["messages"],
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": name, "arguments": "".join(parts)},
+                            }
+                        ],
+                    },
+                ]
+                original = copy.deepcopy(recorded_messages)
+                lookup_key = tokenizer.apply_chat_template(
+                    canonicalize_messages_for_chat_template(recorded_messages),
+                    add_generation_prompt=False,
+                    tokenize=False,
+                ).rstrip()
+                matched, nodes = trie.search(lookup_key, filter_none=True)
+                self.assertEqual(matched, lookup_key)
+                segment = nodes[-1].value
+                self.assertEqual(segment.token_ids, [10, 11])
+                self.assertEqual(segment.labels, [10, 11])
+                self.assertEqual(segment.logprobs, [-0.25, -0.25])
+                self.assertEqual(recorded_messages, original)
+
+                # Matching must not collapse a genuinely different malformed call.
+                recorded_messages[-1]["tool_calls"][0]["function"]["arguments"] += "different"
+                different_key = tokenizer.apply_chat_template(
+                    canonicalize_messages_for_chat_template(recorded_messages),
+                    add_generation_prompt=False,
+                    tokenize=False,
+                ).rstrip()
+                self.assertNotEqual(trie.search(different_key, filter_none=True)[0], different_key)
 
 
 if __name__ == "__main__":
