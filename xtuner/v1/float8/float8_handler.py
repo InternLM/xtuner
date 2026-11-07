@@ -42,6 +42,11 @@ class Float8Handler:
     fsdp_mesh: Optional[DeviceMesh] = None
     tilewise_reduce_mesh_devided_64: Optional[DeviceMesh] = None
     tilewise_reduce_mesh_mapping: Dict[Tuple[int, int], DeviceMesh] = {}
+    # Decoupled EP/FSDP layout only: routed experts are FSDP-sharded on `expert_fsdp_mesh`
+    # (efsdp, strided by ep) instead of `fsdp_mesh`, so they need their own reduce meshes.
+    expert_fsdp_mesh: Optional[DeviceMesh] = None
+    expert_tilewise_reduce_mesh_devided_64: Optional[DeviceMesh] = None
+    expert_tilewise_reduce_mesh_mapping: Optional[Dict[Tuple[int, int], DeviceMesh]] = None
 
     def __init__(
         self,
@@ -113,7 +118,12 @@ class Float8Handler:
         return RuntimeLayout.from_dtensor(tensor).shard_size(dim)
 
     @staticmethod
-    def pad_for_fsdp(model: nn.Module, fsdp_mesh: DeviceMesh, callback_after_pad: Callable | None = None):
+    def pad_for_fsdp(
+        model: nn.Module,
+        fsdp_mesh: DeviceMesh,
+        callback_after_pad: Callable | None = None,
+        expert_fsdp_mesh: DeviceMesh | None = None,
+    ):
         from xtuner.v1.float8.float8_gmm_tile_wise import TileWiseFloat8GroupedLinear
         from xtuner.v1.float8.float8_linear_tensor_wise import TensorWiseFloat8Linear
         from xtuner.v1.float8.float8_linear_tile_wise import TileWiseFloat8Linear
@@ -131,19 +141,101 @@ class Float8Handler:
                 else:
                     tensor_size = module.weight.size()
                     parallel_size = 1
-                padded_out_features = Float8Handler.get_num_features_after_pad(tensor_size, 0, fsdp_mesh.size(-1))
+                num_fsdp_chunks = fsdp_mesh.size(-1)
+                if expert_fsdp_mesh is not None and isinstance(module, TileWiseFloat8GroupedLinear):
+                    # Decoupled EP/FSDP: routed experts are sharded `efsdp` ways, not `dp_shard` ways.
+                    num_fsdp_chunks = expert_fsdp_mesh.size(-1)
+                padded_out_features = Float8Handler.get_num_features_after_pad(tensor_size, 0, num_fsdp_chunks)
                 padded_out_features *= parallel_size
                 module.pad_for_fsdp(padded_out_features=padded_out_features)
 
         if callback_after_pad is not None:
             callback_after_pad()
 
-    def build_reduce_mesh(self, model: nn.Module, fsdp_mesh: DeviceMesh):
+    def build_reduce_mesh(self, model: nn.Module, fsdp_mesh: DeviceMesh, expert_fsdp_mesh: DeviceMesh | None = None):
         self.fsdp_mesh = fsdp_mesh
+        self.expert_fsdp_mesh = expert_fsdp_mesh
         if self.is_tilewise_fp8:
+            if expert_fsdp_mesh is not None:
+                self._build_decoupled_reduce_meshes(model, fsdp_mesh, expert_fsdp_mesh)
+                return
             if fsdp_mesh.size(-1) >= 2:
                 self._build_reduce_mesh_devided_64(fsdp_mesh)
             self._build_reduce_mesh_mapping(model, fsdp_mesh)
+
+    def _build_decoupled_reduce_meshes(
+        self, model: nn.Module, fsdp_mesh: DeviceMesh, expert_fsdp_mesh: DeviceMesh
+    ) -> None:
+        # Decoupled EP/FSDP layout (root mesh `(replicate, efsdp, ep)`):
+        #   * dense fp8 weights are sharded over `dp_shard` = flatten(efsdp, ep): consecutive FSDP
+        #     shards live on consecutive ranks (stride 1);
+        #   * routed-expert fp8 weights are sharded over `efsdp`, whose ranks are `ep` apart.
+        # Each class gets its own "reduce max" meshes, built with the matching rank stride.
+        from xtuner.v1.float8.float8_gmm_tile_wise import TileWiseFloat8GroupedLinear
+        from xtuner.v1.float8.float8_linear_tile_wise import TileWiseFloat8Linear
+
+        world_size = dist.get_world_size()
+        dense_shard_size = fsdp_mesh.size(-1)
+        expert_shard_size = expert_fsdp_mesh.size(-1)
+        expert_stride = world_size // expert_fsdp_mesh.size()  # == ep_size
+
+        self.tilewise_reduce_mesh_devided_64 = (
+            self._build_strided_reduce_mesh(2, 1) if dense_shard_size >= 2 and dense_shard_size % 2 == 0 else None
+        )
+        self.expert_tilewise_reduce_mesh_devided_64 = (
+            self._build_strided_reduce_mesh(2, expert_stride)
+            if expert_shard_size >= 2 and expert_shard_size % 2 == 0
+            else None
+        )
+        self.tilewise_reduce_mesh_mapping = self._build_strided_reduce_mesh_mapping(
+            model, (TileWiseFloat8Linear,), dense_shard_size, 1
+        )
+        self.expert_tilewise_reduce_mesh_mapping = self._build_strided_reduce_mesh_mapping(
+            model, (TileWiseFloat8GroupedLinear,), expert_shard_size, expert_stride
+        )
+
+    @staticmethod
+    def _build_strided_reduce_mesh(num_ranks: int, stride: int) -> DeviceMesh:
+        # Groups of `num_ranks` ranks spaced `stride` apart, e.g. (r, r + stride, ...).
+        world_size = dist.get_world_size()
+        assert world_size % (num_ranks * stride) == 0, (world_size, num_ranks, stride)
+        return init_device_mesh(
+            "cuda",
+            (world_size // (num_ranks * stride), num_ranks, stride),
+            mesh_dim_names=("_", "tilewise_reduce", "ep_or_tp"),
+        )["tilewise_reduce"]
+
+    def _build_strided_reduce_mesh_mapping(
+        self, model: nn.Module, module_types: Tuple[type, ...], shard_size: int, stride: int
+    ) -> Dict[Tuple[int, int], DeviceMesh]:
+        SHARD_DIM = 0
+        mapping: Dict[Tuple[int, int], DeviceMesh] = {}
+        for module in model.modules():
+            if not isinstance(module, module_types):
+                continue
+            assert isinstance(module.weight, DTensor), (
+                "`build_reduce_mesh` should be called after apply fully_shard to the model."
+            )
+            local_shape = module.weight._local_tensor.shape
+            if local_shape[SHARD_DIM] >= 128:
+                assert local_shape[SHARD_DIM] % 128 in (0, 64), (
+                    f"Currently only local_shape[SHARD_DIM] % 128 == 0 or "
+                    f"local_shape[SHARD_DIM] % 128 == 64 is supported, got {local_shape}. Please contact us."
+                )
+                continue
+            assert 128 % local_shape[SHARD_DIM] == 0, (
+                f"Currently only local_shape[SHARD_DIM] % 128 == 0 is supported, got {local_shape}. Please contact us."
+            )
+            reduce_world_size = 128 // local_shape[SHARD_DIM]
+            if local_shape in mapping:
+                assert mapping[local_shape].size() == reduce_world_size
+                continue
+            assert shard_size >= reduce_world_size and shard_size % reduce_world_size == 0, (
+                f"Expect FSDP shard size >= reduce_world_size and shard size % reduce_world_size == 0, "
+                f"got shard size = {shard_size}, reduce_world_size = {reduce_world_size}. Please contact us."
+            )
+            mapping[local_shape] = self._build_strided_reduce_mesh(reduce_world_size, stride)
+        return mapping
 
     def _build_reduce_mesh_devided_64(self, fsdp_mesh: DeviceMesh):
         # 为了支持 moe 参数被 fsdp 和 ep 切成 dout = n * 128 + 64 (n >= 1) 的情况
@@ -221,9 +313,26 @@ class Float8Handler:
 
         for m in models:
             if self.is_tilewise_fp8:
-                precompute_tilewise_float8_scale_for_fsdp(
-                    m, self.tilewise_reduce_mesh_mapping, self.tilewise_reduce_mesh_devided_64
-                )
+                if self.expert_tilewise_reduce_mesh_mapping is None:
+                    precompute_tilewise_float8_scale_for_fsdp(
+                        m, self.tilewise_reduce_mesh_mapping, self.tilewise_reduce_mesh_devided_64
+                    )
+                else:
+                    from xtuner.v1.float8.float8_gmm_tile_wise import TileWiseFloat8GroupedLinear
+                    from xtuner.v1.float8.float8_linear_tile_wise import TileWiseFloat8Linear
+
+                    precompute_tilewise_float8_scale_for_fsdp(
+                        m,
+                        self.tilewise_reduce_mesh_mapping,
+                        self.tilewise_reduce_mesh_devided_64,
+                        module_types=(TileWiseFloat8Linear,),
+                    )
+                    precompute_tilewise_float8_scale_for_fsdp(
+                        m,
+                        self.expert_tilewise_reduce_mesh_mapping,
+                        self.expert_tilewise_reduce_mesh_devided_64,
+                        module_types=(TileWiseFloat8GroupedLinear,),
+                    )
             if self.is_tensorwise_fp8:
                 assert self.fsdp_mesh is not None, "FSDP mesh must be set for tensorwise float8 training."
                 precompute_tensorwise_float8_scale_for_fsdp(m, self.fsdp_mesh)
