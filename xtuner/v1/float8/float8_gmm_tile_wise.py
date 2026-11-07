@@ -346,7 +346,16 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
                 f"but got {weight.shape}."
             )
 
-    def forward(self, input: torch.Tensor, tokens_per_expert, decoding: bool = False) -> torch.Tensor:
+    def forward(
+        self,
+        input: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+        *,
+        trainable_weight: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if trainable_weight is not None:
+            raise NotImplementedError("FP8 grouped linear does not support a trainable weight override yet")
+
         weight = self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
 
         self._check_shape(weight)
