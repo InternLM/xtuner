@@ -274,19 +274,10 @@ def qwen3_vl_sft_collator(
         for data in instance:
             num_img_tokens.append(data.get("num_img_tokens", [0]))
 
-        pixel_values: list | torch.Tensor | None
-        pixel_values = [i["pixel_values"] for i in instance if "pixel_values" in i]
-        if pixel_values:
-            pixel_values = torch.cat(pixel_values, dim=0)
-        else:
-            pixel_values = None
-
-        image_grid_thw: list | torch.Tensor | None
-        image_grid_thw = [i["image_grid_thw"] for i in instance if "image_grid_thw" in i]
-        if image_grid_thw:
-            image_grid_thw = torch.cat(image_grid_thw, dim=0)
-        else:
-            image_grid_thw = None
+        # Same single-media reuse as the glm53 path (_reuse_single_or_cat): a reused tensor shares
+        # storage with its source, so downstream consumers must keep media tensors read-only.
+        pixel_values = _reuse_single_or_cat([i["pixel_values"] for i in instance if "pixel_values" in i])
+        image_grid_thw = _reuse_single_or_cat([i["image_grid_thw"] for i in instance if "image_grid_thw" in i])
 
         if position_ids is not None:
             seq_ctx.position_ids = position_ids  # type: ignore
