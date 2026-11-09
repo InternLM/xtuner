@@ -34,8 +34,8 @@ NNODE = int(os.environ.get("WORLD_SIZE", "1"))
 
 # basic settings
 experimental_name = "glm53_dapo_gsm8k"
-total_train_steps = 100
-evaluate_step = 10
+total_train_steps = 15
+evaluate_step = 15
 train_optimizer_steps = 1
 train_batch_size = 64 * train_optimizer_steps
 prompt_repeat_k = 5
