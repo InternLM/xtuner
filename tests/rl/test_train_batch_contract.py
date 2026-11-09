@@ -11,6 +11,7 @@ import torch
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, validate_rollout_group, validate_train_group
 from xtuner.v1.rl.agent_loop_manager.produce_utils import ProduceBatchResult, _TaskRunner, take_train_batch
 from xtuner.v1.rl.agent_loop_manager.producer import ProduceProgress
+from xtuner.v1.rl.distillation import DistillationTrainerAdapter
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.train.rl_trainer import BaseRLTrainer
@@ -287,8 +288,9 @@ class TestBatchLifecycle(unittest.TestCase):
 
         controller = TrainingController.__new__(TrainingController)
         controller.workers = workers
+        controller.distillation = DistillationTrainerAdapter(None)
         controller.logger = MagicMock()
-        states = [object(), object(), object()]
+        states = [canonical_state(uid=index) for index in range(3)]
         plan = PackPlan(
             ranks=(
                 RankPlan(global_indices=(2, 0), steps=(((0, 1),),)),
@@ -306,7 +308,12 @@ class TestBatchLifecycle(unittest.TestCase):
 
         self.assertEqual(calls["release"], 2)
         self.assertEqual([rank.global_indices for _, rank in calls["load"]], [(2, 0), (1,)])
-        self.assertEqual(calls["load"][0][0], [("put", [states[2], states[0]])])
+        shipped = calls["load"][0][0][0][1]
+        self.assertEqual(len(shipped), 2)
+        for original, slim in zip((states[2], states[0]), shipped):
+            self.assertIsNot(slim, original)
+            self.assertEqual(slim.input_ids, original.input_ids)
+            self.assertEqual(slim.response, None)
 
     def test_loaded_batch_releases_on_failure(self):
         from xtuner.v1.rl.trainer.pack import PackPlan, RankPlan
@@ -317,6 +324,7 @@ class TestBatchLifecycle(unittest.TestCase):
         worker.release_train_batch = SimpleNamespace(remote=lambda: released.append(True))
         controller = TrainingController.__new__(TrainingController)
         controller.workers = [worker]
+        controller.distillation = DistillationTrainerAdapter(None)
         controller.logger = MagicMock()
         plan = PackPlan(ranks=(RankPlan(global_indices=(0,), steps=(((0,),),)),), metrics={})
 
@@ -325,7 +333,7 @@ class TestBatchLifecycle(unittest.TestCase):
             patch("xtuner.v1.rl.trainer.controller.ray.get", side_effect=lambda value, timeout=None: value),
             self.assertRaises(RuntimeError),
         ):
-            with controller._loaded_batch([object()], plan, self._batch_attr(), data_replicate_size=1):
+            with controller._loaded_batch([canonical_state()], plan, self._batch_attr(), data_replicate_size=1):
                 raise RuntimeError("boom")
 
         self.assertEqual(released, [True])
@@ -397,3 +405,75 @@ class TestPackPlanDispatch(unittest.TestCase):
             ]
         )
         self.assertEqual([row.tolist() for row in rows], [[0.0], [1.0], [2.0]])
+
+
+class TestTrainingPayloadSlimming(unittest.TestCase):
+    """``RolloutState.training_copy`` ships only what training workers read."""
+
+    def heavy_state(self):
+        state = canonical_state(uid=7)
+        state.message = [{"role": "user", "content": "long prompt" * 100}]
+        state.prompt_ids = [10, 11]
+        state.tokens = [10, 11, 20, 21]
+        state.tools = [{"type": "function", "function": {"name": "search"}}]
+        state.tool_choice = "auto"
+        state.tool_calls = [{"name": "search", "arguments": "{}"}]
+        state.reward_model = {"ground_truth": "42"}
+        state.extra_fields = {
+            "origin_data_source": "gsm8k",
+            "agent_messages": [{"role": "assistant", "content": "long trace" * 100}],
+            "agent_artifacts": {"log": "x" * 1000},
+        }
+        return state
+
+    def test_training_copy_strips_trainer_only_payloads(self):
+        state = self.heavy_state()
+        slim = state.training_copy()
+
+        self.assertIsNot(slim, state)
+        self.assertEqual(slim.message, [])
+        for field in (
+            "prompt_ids",
+            "tokens",
+            "tools",
+            "tool_choice",
+            "response",
+            "tool_calls",
+            "reward_model",
+            "response_model_steps",
+        ):
+            self.assertIsNone(getattr(slim, field), field)
+        self.assertEqual(slim.extra_fields, {})
+
+    def test_training_copy_keeps_training_payloads(self):
+        state = self.heavy_state()
+        slim = state.training_copy()
+
+        self.assertEqual(slim.input_ids, state.input_ids)
+        self.assertEqual(slim.labels, state.labels)
+        self.assertEqual(slim.logprobs, state.logprobs)
+        self.assertEqual(slim.reward, state.reward)
+        self.assertEqual(slim.train_meta, state.train_meta)
+        self.assertEqual(slim.rollout_id, state.rollout_id)
+        self.assertEqual(slim.group_id, state.group_id)
+        self.assertEqual(slim.seq_staleness, state.seq_staleness)
+
+    def test_training_copy_does_not_mutate_original(self):
+        state = self.heavy_state()
+        slim = state.training_copy(extra_field_keys=("origin_data_source",))
+
+        self.assertEqual(state.message, [{"role": "user", "content": "long prompt" * 100}])
+        self.assertEqual(state.response, "answer")
+        self.assertEqual(state.extra_fields["agent_artifacts"], {"log": "x" * 1000})
+        self.assertEqual(slim.extra_fields, {"origin_data_source": "gsm8k"})
+
+    def test_training_copy_missing_extra_field_key_maps_to_none(self):
+        slim = self.heavy_state().training_copy(extra_field_keys=("origin_data_source", "absent"))
+        self.assertEqual(slim.extra_fields, {"origin_data_source": "gsm8k", "absent": None})
+
+    def test_adapter_needs_rollout_extra_fields(self):
+        self.assertFalse(DistillationTrainerAdapter(None).needs_rollout_extra_fields)
+        self.assertFalse(DistillationTrainerAdapter(SimpleNamespace(train_teachers=[])).needs_rollout_extra_fields)
+        self.assertTrue(
+            DistillationTrainerAdapter(SimpleNamespace(train_teachers=["teacher"])).needs_rollout_extra_fields
+        )

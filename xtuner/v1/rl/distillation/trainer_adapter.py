@@ -15,6 +15,10 @@ from .config import DistillationConfig, RolloutTeacherScorerConfig, TrainTeacher
 if TYPE_CHECKING:
     from xtuner.v1.rl.trainer.worker import WorkerLogItem
 
+# ``extra_fields`` keys the training workers read when routing distillation
+# targets to train teachers; see ``RolloutState.training_copy``.
+ROLLOUT_TRAINING_EXTRA_FIELDS: tuple[str, ...] = ("origin_data_source",)
+
 
 class DistillationTrainerAdapter:
     """Adapt distillation semantics to the Trainer integration points.
@@ -45,6 +49,16 @@ class DistillationTrainerAdapter:
         if self._config is None:
             return 1.0
         return self._config.loss_config.task_adv_weight
+
+    @property
+    def needs_rollout_extra_fields(self) -> bool:
+        """Whether training workers consume ``extra_fields`` for distillation.
+
+        Train-teacher routing reads ``origin_data_source`` inside the training
+        workers, so those keys must survive payload slimming; without train
+        teachers the workers never touch ``extra_fields``.
+        """
+        return self._config is not None and bool(self._config.train_teachers)
 
     def rollout_teacher_targets(
         self,
