@@ -105,7 +105,7 @@ class SwapAdamW(AdamW):
 
         NOTE: the engine only reaches this method through ``TrainEngine.load_dcp``, which fixes
         ``StateDictOptions(cpu_offload=True)``: the incoming moments are CPU ``DTensor``s (CPU local tensors before
-        this PR), ``step`` is a plain CPU tensor, and they are the very objects held in ``self.state``
+        this PR), ``step`` is a plain CPU tensor, and checkpoint wrappers share the local storage in ``self.state``
         (``.to("cpu")`` is a no-op on CPU tensors), so ``dcp.load`` has already written the checkpoint into these
         buffers. The ``copy_`` below is therefore a self-copy on the DCP path; it is kept so externally built
         ``state_dict``s load correctly as well.

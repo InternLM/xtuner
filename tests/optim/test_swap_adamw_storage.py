@@ -269,6 +269,24 @@ class TestSwapAdamWStorageCPU:
             saved_moments["exp_avg"]._local_tensor.untyped_storage()
             is saved_moments["exp_avg_sq"]._local_tensor.untyped_storage()
         )
+        # Restore the serialized checkpoint through main's in-place loader, not just torch.load.
+        for state in optimizer.state.values():
+            for value in state.values():
+                if value is not None:
+                    optimizer._to_local_tensor(value).zero_()
+        events.clear()
+        optimizer.register_load_state_dict_pre_hook(lambda optim, state: events.append("load-pre"))
+        optimizer.register_load_state_dict_post_hook(lambda optim: events.append("load-post"))
+        optimizer.load_state_dict(restored)
+        assert events == ["load-pre", "load-post"]
+        assert cpu_allocation == allocations
+        for index, (param, original) in enumerate(zip(params, originals)):
+            for key, value in original.items():
+                assert optimizer.state[param][key] is value
+                if value is not None:
+                    torch.testing.assert_close(
+                        optimizer._to_local_tensor(value), optimizer._to_local_tensor(restored["state"][index][key])
+                    )
 
     @pytest.mark.parametrize("amsgrad", [False, True])
     def test_multiple_steps_match_adamw(self, amsgrad: bool) -> None:
@@ -306,6 +324,16 @@ def _check_math(device: str, amsgrad: bool) -> None:
     optimizer = SwapAdamW(params, **kwargs)
     expected = torch.optim.AdamW(reference, **kwargs)
     for step in range(4):
+        if step == 2:
+            stream = io.BytesIO()
+            torch.save(optimizer.state_dict(), stream)
+            stream.seek(0)
+            restored = torch.load(stream, weights_only=False)
+            originals = [optimizer.state[p].copy() for p in params]
+            optimizer.load_state_dict({**restored, "state": {}})
+            optimizer.load_state_dict(restored)
+            for p, original in zip(params, originals):
+                assert all(optimizer.state[p][key] is value for key, value in original.items())
         for i, (p, q) in enumerate(zip(params, reference)):
             p.grad = None if step == 1 and i == 0 else torch.randn_like(p)
             q.grad = None if p.grad is None else p.grad.clone()

@@ -1,4 +1,5 @@
-"""Bounded pinned allocations with ordinary views that retain CUDA event ownership."""
+"""Bounded pinned allocations with ordinary views that retain CUDA event
+ownership."""
 
 from bisect import bisect_left, insort
 

@@ -1,4 +1,5 @@
-"""CPU model destinations with bounded pinned storage, retaining Module/FSDP move hooks."""
+"""CPU model destinations with bounded pinned storage, retaining Module/FSDP
+move hooks."""
 
 from typing import Any
 
