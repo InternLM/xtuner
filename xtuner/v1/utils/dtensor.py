@@ -11,6 +11,45 @@ from torch.utils._foreach_utils import (
 )
 
 
+def dtensor_checkpoint_view(tensor: torch.Tensor) -> torch.Tensor:
+    """Make an offset DTensor serializable without copying its local storage.
+
+    PyTorch 2.10 copies the local storage offset into the storage-less DTensor
+    wrapper. Tensor serialization then mistakes its nonzero data_ptr for real
+    storage. At the checkpoint boundary, use a zero-offset wrapper around the
+    *same* local tensor and spec. Ordinary views keep their pinned allocator
+    event ownership, and torch.save still deduplicates their shared storage.
+
+    This is a checkpoint-only view, not an autograd operation. Call it after
+    detaching model state; keep_vars=True state dictionaries must stay untouched.
+    DTensor operations (including detach) may construct offset wrappers again.
+
+    Args:
+        tensor (torch.Tensor): Detached model tensor or optimizer state tensor.
+
+    Returns:
+        torch.Tensor: A plain DTensor checkpoint wrapper, or the original tensor
+        when no workaround is needed.
+    """
+    if type(tensor) is not DTensor or tensor.storage_offset() == 0:
+        return tensor
+    if tensor.requires_grad:
+        raise ValueError("DTensor checkpoint views require detached tensors")
+    result = torch.Tensor._make_wrapper_subclass(
+        DTensor,
+        tensor.shape,
+        strides=tensor.stride(),
+        storage_offset=0,
+        dtype=tensor.dtype,
+        layout=tensor.layout,
+        device=tensor.device,
+        requires_grad=False,
+    )
+    result._local_tensor = tensor._local_tensor
+    result._spec = tensor._spec
+    return cast(DTensor, result)
+
+
 def materialize_full(param: torch.Tensor, *, name: str = "") -> torch.Tensor:
     """Unwrap a parameter into a plain, whole :class:`torch.Tensor` for a
     kernel that does not understand :class:`DTensor` (Triton, FLA, an absorbed-
