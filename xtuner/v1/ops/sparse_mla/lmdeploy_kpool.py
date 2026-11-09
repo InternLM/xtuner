@@ -1,5 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""LMDeploy FP8 KPool forward for the frozen GLM-5.3 DSA indexer."""
+"""LMDeploy FP8 KPool forward for the frozen GLM-5.3 DSA indexer.
+
+The adapter uses internal LMDeploy APIs verified at revision
+3228395546dfb2f6427faf39ec0c0c285f4c378a. The public entry point and optional
+dependency fallback live in :mod:`xtuner.v1.ops.sparse_mla.kpool`.
+"""
 
 import torch
 from torch import Tensor
@@ -43,7 +48,9 @@ def _kpool_topk_indices(
         index_kpool (int): Tokens per pool, currently 4.
         always_select_tail (bool): Append the causal incomplete trailing pool.
         alignment (int): Sparse attention output-width alignment.
-        query_chunk_size (int | None): Query row cap, also limited by LMDeploy's logits byte budget.
+        query_chunk_size (int | None): Query row cap; the logits budget from
+            ``LMDEPLOY_DSA_INDEXER_MAX_LOGITS_MB`` also bounds padded backing
+            storage for the active compact or legacy MQA API.
         balance_sp (bool): Query redistribution is not supported by this backend.
         sp_full_pool_work_ratio (float): Unused without query redistribution.
 

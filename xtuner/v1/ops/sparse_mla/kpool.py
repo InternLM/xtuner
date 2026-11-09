@@ -4,8 +4,11 @@ F5.a).
 
 GLM-5.3-Flash's indexer scores *pools* of ``index_kpool`` (4) consecutive tokens instead of
 individual tokens, then expands the selected pools back into raw token ids and appends the
-current (still-incomplete) trailing pool as a "tail". The production path below has three
-segments:
+current (still-incomplete) trailing pool as a "tail".
+
+The ``tilelang`` entry point uses LMDeploy FP8 operators for supported GLM-5.3 geometry
+when the CUDA device and optional dependencies are compatible. Its original TileLang
+implementation remains the fallback and has three segments:
 
   A. :func:`build_pools`    -- ``O(S * Di)`` pool construction, pure PyTorch.
   B. the per-query top-k over pools -- reuses
@@ -322,9 +325,17 @@ def kpool_topk_indices(
 ) -> Tensor:
     """Build pools (A), score/select pools (B), expand to token ids + tail (C).
 
-    The existing default uses LMDeploy operators for GLM-5.3's production
-    geometry. Other geometries, explicit alternative selectors/scorers and SP
-    query balancing retain their TileLang implementation and public API.
+    The ``tilelang`` entry point uses LMDeploy FP8 operators for head dimension
+    128, 32/64/128 heads, pool size 4 and Top-K 2048/8192 on compatible SM90+
+    devices. Missing optional LMDeploy/DeepGEMM APIs, other geometries,
+    alternative selectors/scorers and SP query balancing use the original
+    TileLang implementation. The backend name and output contract are unchanged.
+
+    LMDeploy compression uses decode's two-pass order for all closed pools;
+    serving prompt prefill uses online extend order. Packed document boundaries
+    do not encode that serving schedule, so full prefill/decode parity is not
+    guaranteed. Selection returns integer IDs under ``torch.no_grad()`` and
+    does not provide a differentiable indexer training path.
 
     Args:
         q (Tensor): Index query, shape ``[1, S, index_n_heads, index_head_dim]``, bf16.
@@ -338,8 +349,12 @@ def kpool_topk_indices(
         seq_ctx (SequenceContext): Packed-sequence and SP metadata.
         index_head_dim (int): Indexer head dimension (scaling only; kernel infers dims from q/k).
         index_topk (int): Semantic token budget (e.g. 2048); must be divisible by ``index_kpool``.
+        index_kpool (int): Number of consecutive tokens per pool.
         always_select_tail (bool): Whether to append the incomplete trailing pool.
         alignment (int): Output width alignment (FlashMLA: 512; TileLang: 64).
+        query_chunk_size (int | None): Query row cap. The LMDeploy path also
+            limits logits storage with ``LMDEPLOY_DSA_INDEXER_MAX_LOGITS_MB``.
+        scorer (Literal["original", "cooperative"]): Original or cooperative pool scorer.
         selector (Literal["torch", "deep_select"]): TopK kernel for original TileLang scoring.
         balance_sp (bool): Redistribute query scoring work with neighbor P2P, then
             restore attention ownership before token expansion and tail selection.
