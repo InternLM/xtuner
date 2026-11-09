@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import Status
@@ -24,6 +24,7 @@ from .produce_utils import (
     _TaskRunner,
     _TaskSamplerView,
     allocate_task_batch_sizes,
+    check_timeout_training_rerollout,
     get_pending_task_counts,
     manager_state_path,
     refresh_for_all_tasks,
@@ -93,6 +94,11 @@ class TaskSpecConfig(BaseModel):
     is_valid_sample_fn: IsValidSampleFn | None = None
     produce_strategy_config: ProduceStrategyConfig = SyncProduceStrategyConfig()
     sampler_config: SamplerConfig
+
+    @model_validator(mode="after")
+    def _check_timeout_training_rerollout(self) -> TaskSpecConfig:
+        check_timeout_training_rerollout(self.agent_loop_config, self.produce_strategy_config)
+        return self
 
 
 class AgentLoopManagerConfig(BaseModel):
