@@ -108,7 +108,10 @@ class RecordingProvisioner:
 
 
 def spec(**overrides: Any) -> SandboxSpec:
-    return SandboxSpec(image="agent", **overrides)
+    # `SandboxPool._create` requires a user (or SANDBOX_PROVIDER_USER); these tests use a fake
+    # provider, so supply one instead of depending on the environment.
+    options: dict[str, Any] = {"image": "agent", "user": "test-user", **overrides}
+    return SandboxSpec(**options)
 
 
 def pool(provider: FakeProvider, sandbox_spec: SandboxSpec, **overrides: Any) -> SandboxPool:
@@ -138,8 +141,8 @@ async def test_group_creation_provisioning_primary_api_and_release_order() -> No
         provider,
         spec(
             dependencies={
-                "db": SandboxSpec(image="database"),
-                "target": SandboxSpec(image="target"),
+                "db": spec(image="database"),
+                "target": spec(image="target"),
             },
             provisioner=provisioner_cfg,
         ),
@@ -186,7 +189,7 @@ async def test_provision_failure_rolls_back_whole_attempt_before_retry(monkeypat
     sandbox_pool = pool(
         provider,
         spec(
-            dependencies={"target": SandboxSpec(image="target")},
+            dependencies={"target": spec(image="target")},
             provisioner=provisioner,
         ),
         max_attempts=2,
@@ -212,7 +215,7 @@ async def test_create_failure_rolls_back_only_returned_members(fail_image: str) 
     provider = FakeProvider(events, fail_image=fail_image)
     sandbox_pool = pool(
         provider,
-        spec(dependencies={"db": SandboxSpec(image="database"), "target": SandboxSpec(image="target")}),
+        spec(dependencies={"db": spec(image="database"), "target": spec(image="target")}),
         max_attempts=1,
     )
 
@@ -231,7 +234,7 @@ async def test_unhealthy_member_rolls_back_the_group(monkeypatch: pytest.MonkeyP
     provider = FakeProvider(events)
     sandbox_pool = pool(
         provider,
-        spec(dependencies={"target": SandboxSpec(image="target")}),
+        spec(dependencies={"target": spec(image="target")}),
         max_attempts=1,
     )
 
@@ -252,7 +255,7 @@ async def test_cancellation_cleans_up_all_returned_members() -> None:
     provider = FakeProvider(events, health_gate_image="agent")
     sandbox_pool = pool(
         provider,
-        spec(dependencies={"target": SandboxSpec(image="target")}),
+        spec(dependencies={"target": spec(image="target")}),
         max_attempts=1,
     )
 
@@ -292,7 +295,7 @@ async def test_rate_limiter_is_acquired_for_every_physical_create(monkeypatch: p
     sandbox_pool = SandboxPool(
         provider=provider,
         specs={
-            "main": spec(dependencies={"db": SandboxSpec(image="database"), "target": SandboxSpec(image="target")})
+            "main": spec(dependencies={"db": spec(image="database"), "target": spec(image="target")})
         },
         creates_per_sec=1.0,
     )
