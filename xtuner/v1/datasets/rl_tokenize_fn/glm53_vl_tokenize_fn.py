@@ -23,6 +23,8 @@ class RLGlm53VLTokenizeFunction(Glm53VLTokenizeFunction):
     Video outputs are for training replay; built-in online rollout transports reject them explicitly.
     """
 
+    supports_fake_data_fallback = False
+
     # 复用 SFT 的渲染和多模态展开，只在外层适配 RL 的输入、缓存和 RolloutState。
     def __init__(
         self, *args: Any, ignore_multimodal_info: bool = False, data_judger_mapping: dict | None = None, **kwargs: Any

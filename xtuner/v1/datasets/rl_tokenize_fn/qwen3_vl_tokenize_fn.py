@@ -61,6 +61,8 @@ def replace_image_context_and_collect_media_data(
 
 
 class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
+    supports_fake_data_fallback = False
+
     def __init__(self, *args, ignore_multimodal_info: bool = False, data_judger_mapping: dict | None = None, **kwargs):
         self.ignore_multimodal_info = ignore_multimodal_info
         self.data_judger_mapping = data_judger_mapping
