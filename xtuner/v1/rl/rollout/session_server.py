@@ -297,8 +297,9 @@ class SessionServer:
         fields.
 
         When ``trace_enabled`` is False (evaluate mode), forward the request
-        as-is with parameter-name hygiene only — no token-in-token-out
-        rewrite — so the upstream worker handles tokenization on its own.
+        without token-in-token-out rewriting, so the upstream worker handles
+        tokenization. Parameter names are normalized, and routed experts are
+        forced off when the engine was started without routed-expert support.
 
         Args:
             req_body (dict): The original client request body.

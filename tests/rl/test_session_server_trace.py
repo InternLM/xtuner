@@ -72,6 +72,17 @@ class TestSessionServerTraceHandling(unittest.IsolatedAsyncioTestCase):
         forwarded = await server.on_request(request, session_server_module.FMT_OPENAI, trace_enabled=False)
         self.assertIs(forwarded["return_routed_experts"], False)
 
+    async def test_evaluation_preserves_client_routed_experts_opt_out(self) -> None:
+        server = SessionServer.__new__(SessionServer)
+        server.enable_return_routed_experts = True
+        request = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "pong"}],
+            "return_routed_experts": False,
+        }
+        forwarded = await server.on_request(request, session_server_module.FMT_OPENAI, trace_enabled=False)
+        self.assertIs(forwarded["return_routed_experts"], False)
+
     async def asyncSetUp(self):
         self.upstream_status = 200
         self.upstream_body = b'{"choices":[{"message":{"role":"assistant","content":"ok"}}]}'
