@@ -2182,12 +2182,16 @@ class BaseModel(nn.Module):
 
             for name, child in module.named_children():
                 _prefix = f"{module_prefix}.{name}" if module_prefix else name
-                _load_params_from_module(child, _prefix)  # type: ignore
+                _load_params_from_module(child, _prefix)  # type: ignore  # noqa: F821
 
-        with profile_time_and_memory("[HF loading cost]"):
-            _load_params_from_module(self, "")  # type: ignore
-            torch.accelerator.synchronize()
-            torch.cpu.synchronize()
+        try:
+            with profile_time_and_memory("[HF loading cost]"):
+                _load_params_from_module(self, "")  # type: ignore
+                torch.accelerator.synchronize()
+                torch.cpu.synchronize()
+        finally:
+            # Break the recursive closure cycle so it does not retain the loader or model until cyclic GC.
+            del _load_params_from_module
 
         unloaded_keys = expected_keys - loaded_keys
         if strict:
