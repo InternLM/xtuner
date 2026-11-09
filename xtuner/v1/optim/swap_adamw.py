@@ -2,9 +2,12 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 import torch
+from torch.distributed.tensor import DTensor
 from torch.optim.adam import adam as torch_adam
 
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
+from xtuner.v1.utils.dtensor import dtensor_checkpoint_view
+from xtuner.v1.utils.pinned_memory import allocate_pinned_like
 
 from .adamw import AdamW
 
@@ -22,6 +25,12 @@ class SwapAdamW(AdamW):
 
     For sharded (``DTensor``) parameters each state entry is a ``DTensor`` with the same mesh and placements as its
     parameter, so every rank checkpoints only its own shard.
+
+    Moments share pinned slabs of at most 1 GiB (larger moments stay standalone) to avoid per-tensor host allocator
+    rounding. Small slabs allocate only their used bytes. Save the complete state dict
+    (torch.save deduplicates storages) or use DCP (its filesystem writer compacts individual views). Saving each
+    moment separately with raw torch.save requires a compact clone at the serialization boundary, otherwise each
+    write includes its whole slab. No checkpoint copies are made by state_dict() or during optimizer steps.
     """
 
     _state_keys = ("exp_avg", "exp_avg_sq", "max_exp_avg_sq")
@@ -57,6 +66,26 @@ class SwapAdamW(AdamW):
         )
         self._swap_optimizer_times = swap_optimizer_times
         self._init_swap_states()
+
+    def state_dict(self) -> dict[str, Any]:
+        """Return serializable checkpoint views without copying tensor storage.
+
+        Run the standard pre/post hooks first. Copy the per-parameter dictionaries
+        before replacing offset DTensor wrappers, since Optimizer.state_dict
+        otherwise shares those dictionaries with the live optimizer state.
+
+        Returns:
+            dict[str, Any]: Optimizer checkpoint with the usual state/group layout.
+        """
+        result = super().state_dict()
+        result["state"] = {
+            key: {
+                name: dtensor_checkpoint_view(value) if isinstance(value, torch.Tensor) else value
+                for name, value in state.items()
+            }
+            for key, state in result["state"].items()
+        }
+        return result
 
     def put_state_to_device(self, device: torch.device | str) -> bool:
         """Keep the canonical optimizer state on the host."""
@@ -203,22 +232,29 @@ class SwapAdamW(AdamW):
             end="",
         )
 
+        # Plan from metadata only: never materialize per-parameter states before allocating the slabs.
+        requests: list[tuple[torch.Tensor, str, torch.Tensor]] = []
         for group in self.param_groups:
             amsgrad = bool(group["amsgrad"])
             for param in group["params"]:
                 state = self.state[param]
+                local_param = self._to_local_tensor(param)
                 for key in self._state_keys:
                     if key == "max_exp_avg_sq" and not amsgrad:
                         state[key] = None
                     else:
-                        # empty_like keeps DTensor global metadata.
-                        state_tensor = torch.empty_like(
-                            param, device="cpu", memory_format=torch.preserve_format, pin_memory=True
-                        )
-                        self._to_local_tensor(state_tensor).zero_()
-                        state[key] = state_tensor
+                        requests.append((param, key, local_param))
                 # Keep per-parameter step semantics consistent with torch.optim.AdamW.
                 state["step"] = torch.tensor(0.0, dtype=torch.float32, device="cpu")
+
+        cpu_tensors = allocate_pinned_like([local_param for _, _, local_param in requests], zero=True)
+        for (param, key, _), cpu_tensor in zip(requests, cpu_tensors):
+            state_tensor = cpu_tensor
+            if isinstance(param, DTensor):
+                # from_local moves CPU tensors to the mesh device, undoing offload. Construct directly
+                # with the existing global spec, including nonuniform/empty local shard metadata.
+                state_tensor = DTensor(cpu_tensor, param._spec, requires_grad=False)
+            self.state[param][key] = state_tensor
 
         DEVICE_MODULE.synchronize()
 
