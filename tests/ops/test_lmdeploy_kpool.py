@@ -120,6 +120,18 @@ class TestKPoolCompression:
 
 
 class TestLMDeployKPoolAvailability:
+    def test_bf16_override_skips_optional_backend_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("XTUNER_GLM53_KPOOL_BF16", "1")
+        _lmdeploy_kpool_is_available.cache_clear()
+        try:
+            with (
+                patch.object(torch.cuda, "get_device_capability", side_effect=AssertionError("unexpected CUDA probe")),
+                patch("builtins.__import__", side_effect=AssertionError("unexpected optional import")),
+            ):
+                assert not _lmdeploy_kpool_is_available(torch.device("cuda", 0))
+        finally:
+            _lmdeploy_kpool_is_available.cache_clear()
+
     @pytest.mark.gpu
     @pytest.mark.parametrize("local_columns", [False, True])
     @pytest.mark.parametrize("pools", [1024, 1025])
@@ -241,6 +253,67 @@ class TestLMDeployKPoolAvailability:
 
 
 class TestLMDeployKPoolIndexer:
+    @pytest.mark.parametrize("autocast", [False, True])
+    @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.gpu)])
+    def test_bf16_override_restores_projection_and_selector(
+        self, monkeypatch: pytest.MonkeyPatch, autocast: bool, device: str
+    ) -> None:
+        from xtuner.v1.model.moe.glm53.nope_dsa_mla import KPoolIndexer
+
+        if device == "cuda" and not torch.cuda.is_available():
+            pytest.skip("CUDA required")
+        monkeypatch.setenv("XTUNER_GLM53_KPOOL_BF16", "1")
+        _lmdeploy_kpool_is_available.cache_clear()
+        try:
+            torch.manual_seed(85)
+            module = KPoolIndexer(
+                hidden_size=16,
+                q_lora_rank=8,
+                index_head_dim=128,
+                index_n_heads=32,
+                index_topk=2048,
+                index_kpool=4,
+                index_kpool_always_select_tail=True,
+                indexer_backend="tilelang",
+                alignment=512,
+            ).to(device=device, dtype=torch.bfloat16)
+            hidden = torch.randn(1, 9, 16, dtype=torch.bfloat16, device=device)
+            latent = torch.randn(1, 9, 8, dtype=torch.bfloat16, device=device)
+            with torch.autocast(device, dtype=torch.bfloat16, enabled=autocast):
+                expected_keys = module.k_norm(module.wk(hidden))
+                expected_weights = module.weights_proj(hidden).float()
+            calls: list[bool] = []
+
+            def original_selector(
+                q: Tensor, k: Tensor, weights: Tensor, starts: Tensor, ends: Tensor, topk: int, **kwargs: object
+            ) -> Tensor:
+                assert q.dtype == torch.bfloat16
+                assert k.dtype == expected_keys.dtype
+                calls.append(True)
+                columns = torch.arange(topk, device=q.device)[None]
+                return torch.where(columns < (ends - starts)[:, None], columns + starts[:, None], -1).int()
+
+            def checked_selection(
+                q: Tensor, k: Tensor, scores: Tensor, weights: Tensor, *args: object, **kwargs: object
+            ) -> Tensor:
+                torch.testing.assert_close(k, expected_keys, atol=0, rtol=0)
+                torch.testing.assert_close(weights, expected_weights, atol=0, rtol=0)
+                return kpool_topk_indices(q, k, scores, weights, *args, **kwargs)
+
+            implementation = importlib.import_module("xtuner.v1.ops.sparse_mla.kpool")
+            monkeypatch.setattr(implementation, "tilelang_indexer_topk_from_ranges", original_selector)
+            module._topk_indices_fn = checked_selection
+            ctx = SequenceContext.from_input_ids((torch.zeros(1, 9, dtype=torch.long),), device=device)
+            with torch.autocast(device, dtype=torch.bfloat16, enabled=autocast):
+                result = module(hidden, latent, ctx)
+            assert calls == [True]
+            for row in range(9):
+                valid = result[row, 0][result[row, 0] >= 0].sort().values
+                wanted = torch.arange(row + 1, dtype=torch.int32, device=device)
+                torch.testing.assert_close(valid, wanted, atol=0, rtol=0)
+        finally:
+            _lmdeploy_kpool_is_available.cache_clear()
+
     @pytest.mark.gpu
     @pytest.mark.parametrize("query_chunk_size", [7, 257])
     def test_query_quantization_and_mqa_logits(self, monkeypatch: pytest.MonkeyPatch, query_chunk_size: int) -> None:
@@ -369,6 +442,8 @@ class TestLMDeployKPoolIndexer:
     def test_preserves_lmdeploy_group_order_and_compact_tails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         if not torch.cuda.is_available():
             pytest.skip("CUDA required")
+        if not _lmdeploy_kpool_is_available(torch.device("cuda", torch.cuda.current_device())):
+            pytest.skip("Requires the LMDeploy FP8 path, compatible dependencies and SM90+")
         backend = pytest.importorskip("lmdeploy.pytorch.backends.cuda.kpool")
         from lmdeploy.pytorch.nn.kpool import kpool_expand_selected_groups
 
@@ -404,6 +479,8 @@ class TestLMDeployKPoolIndexer:
     def test_empty_local_queries(self) -> None:
         if not torch.cuda.is_available():
             pytest.skip("CUDA required")
+        if not _lmdeploy_kpool_is_available(torch.device("cuda", torch.cuda.current_device())):
+            pytest.skip("Requires the LMDeploy FP8 path, compatible dependencies and SM90+")
         seq_ctx = SequenceContext.from_input_ids((torch.zeros(1, 1, dtype=torch.long),), device="cuda")
         result = kpool_topk_indices(
             torch.empty(1, 0, 32, 128, device="cuda", dtype=torch.bfloat16),
@@ -423,6 +500,8 @@ class TestLMDeployKPoolIndexer:
     def test_packed_selection_is_causal_and_matches_fp8_scores(self, query_chunk_size: int) -> None:
         if not torch.cuda.is_available():
             pytest.skip("CUDA required")
+        if not _lmdeploy_kpool_is_available(torch.device("cuda", torch.cuda.current_device())):
+            pytest.skip("Requires the LMDeploy FP8 path, compatible dependencies and SM90+")
         pytest.importorskip("lmdeploy.pytorch.nn.kpool")
         from lmdeploy.pytorch.kernels.cuda.kpool import compress_kpool, rotate_kpool_query
         from lmdeploy.pytorch.nn.kpool import kpool_quantize_fp8, kpool_score

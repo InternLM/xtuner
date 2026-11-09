@@ -39,6 +39,7 @@ token id in this module is global. Concretely that splits the work in two:
 """
 
 import math
+import os
 from functools import lru_cache
 from typing import Literal
 
@@ -331,6 +332,11 @@ def kpool_topk_indices(
     alternative selectors/scorers and SP query balancing use the original
     TileLang implementation. The backend name and output contract are unchanged.
 
+    Set ``XTUNER_GLM53_KPOOL_BF16=1`` before process startup to retain the
+    original BF16 key normalization, head projection, pooling and selection
+    even when LMDeploy is available. The default is ``0`` (FP8 when supported).
+    This controls XTuner only; rollout precision is configured separately.
+
     LMDeploy compression uses decode's two-pass order for all closed pools;
     serving prompt prefill uses online extend order. Packed document boundaries
     do not encode that serving schedule, so full prefill/decode parity is not
@@ -486,6 +492,11 @@ def _supports_lmdeploy_kpool(head_dim: int, heads: int, pool_size: int, topk: in
 
 @lru_cache(maxsize=None)
 def _lmdeploy_kpool_is_available(device: torch.device) -> bool:
+    """Check whether the optional FP8 path is enabled and supported on this
+    device."""
+    # Set before startup: force the original BF16 preparation and TileLang selector.
+    if os.environ.get("XTUNER_GLM53_KPOOL_BF16", "0").lower() in {"1", "true", "yes", "on"}:
+        return False
     # Resolve at forward time: model construction can happen on CPU/meta before
     # the process selects its CUDA device. Keep XTuner usable without LMDeploy.
     if device.type != "cuda" or torch.cuda.get_device_capability(device)[0] < 9:
