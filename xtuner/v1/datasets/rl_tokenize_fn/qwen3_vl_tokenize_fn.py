@@ -1,11 +1,14 @@
 import os
 from typing import Any, cast
 
+from PIL import UnidentifiedImageError
+
 from xtuner.v1.data_proto.rl_data import RolloutState
 
 from ...data_proto.rl_data import MultimodalInfo
 from ..data_item import CacheItem
 from ..mllm_tokenize_fn.qwen3_vl_tokenize_fn import Qwen3VLTokenizeFnConfig, Qwen3VLTokenizeFunction, QwenVL3DataItem
+from .failed_image import failed_image_rollout
 
 
 def _tensor_to_numpy(value):
@@ -84,7 +87,19 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
                 messages = messages[1:]
             messages = [{"role": "system", "content": system_prompt}] + messages
 
-        data = super().__call__({"messages": messages, "tools": tools}, media_root=media_root)
+        try:
+            data = super().__call__({"messages": messages, "tools": tools}, media_root=media_root)
+        except (FileNotFoundError, UnidentifiedImageError) as error:
+            if self.state != "runtime":
+                raise
+            return failed_image_rollout(
+                error,
+                item=item,
+                messages=messages,
+                image_paths=self._image_path,
+                media_root=media_root,
+                data_judger_mapping=self.data_judger_mapping,
+            )
 
         if self.state == "cache":
             # If return RolloutState, the cache speed will be slow because of serialization problem

@@ -5,6 +5,7 @@ import copy
 from typing import Any, cast
 
 import torch
+from PIL import UnidentifiedImageError
 
 from transformers import PreTrainedTokenizerBase
 from xtuner.v1.data_proto.rl_data import MultimodalInfo, RolloutState
@@ -15,6 +16,8 @@ from xtuner.v1.datasets.mllm_tokenize_fn.glm53_vl_tokenize_fn import (
     Glm53VLTokenizeFunction,
 )
 from xtuner.v1.datasets.mllm_tokenize_fn.image_data_uri import is_data_uri
+
+from .failed_image import failed_image_rollout
 
 
 class RLGlm53VLTokenizeFunction(Glm53VLTokenizeFunction):
@@ -43,7 +46,19 @@ class RLGlm53VLTokenizeFunction(Glm53VLTokenizeFunction):
             messages.insert(0, {"role": "system", "content": self.system_message})
         sft_item = {"messages": messages, "tools": tools}
         # 2. 复用 SFT 父类：runtime 生成展开后的训练 token 和媒体字段，cache 只计算长度等元信息。
-        data = super().__call__(sft_item, media_root=media_root)
+        try:
+            data = super().__call__(sft_item, media_root=media_root)
+        except (FileNotFoundError, UnidentifiedImageError) as error:
+            if self.state != "runtime":
+                raise
+            return failed_image_rollout(
+                error,
+                item=item,
+                messages=messages,
+                image_paths=self._image_path,
+                media_root=media_root,
+                data_judger_mapping=self.data_judger_mapping,
+            )
         num_tokens = data["num_tokens"]
         too_long = self.max_length is not None and num_tokens > self.max_length
         # 3. 与 Qwen3VL 一样，缓存阶段只返回长度等元信息，避免序列化完整 RolloutState。
