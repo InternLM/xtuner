@@ -9,7 +9,7 @@ from torch import nn
 from xtuner.v1.float8 import Float8Config, ScalingGranularity
 from xtuner.v1.float8.fsdp_utils import WeightWithDynamicTilewiseFloat8CastTensor
 from xtuner.v1.float8.triton_kernels.per_block_quant_gemm import per_block_quant_torch
-from xtuner.v1.model.base import BaseModel, HFSaveCfg, XTunerBaseModelConfig
+from xtuner.v1.model.base import BaseModel, XTunerBaseModelConfig
 from xtuner.v1.rl.weight_update.data import RolloutBackend, RolloutWeightUpdateInfo, RolloutWeightUpdateTarget
 from xtuner.v1.rl.weight_update.weight_iterator import WeightIterator
 from xtuner.v1.utils import get_device
@@ -19,12 +19,10 @@ from xtuner.v1.utils.load_spec import LoadSpec, ShardDescriptor
 
 class MixedDtypeModel(BaseModel):
     def __init__(self) -> None:
-        config = XTunerBaseModelConfig(
-            hf_save_cfg=HFSaveCfg(fp32_keys_pattern=[r"fp32_weight"]),
-        )
-        super().__init__(config)
+        super().__init__(XTunerBaseModelConfig())
         self.bf16_weight = nn.Parameter(torch.ones(2, device=get_device(), dtype=torch.bfloat16))
         self.fp32_weight = nn.Parameter(torch.ones(2, device=get_device(), dtype=torch.float32))
+        self.fp32_param_names = ("fp32_weight",)
         self._init_load_spec()
 
     def to_hf_key_list(self, key: str) -> list[str]:
