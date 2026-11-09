@@ -134,6 +134,9 @@ class BaseProduceContext:
         *,
         enable_partial_rollout: bool = False,
     ) -> list[RolloutState]:
+        # 已知失败的输入整组短路，交给既有丢弃和补采流程，不进入 agent loop。
+        if any(item.status == Status.FAILED for item in rollout_state):
+            return rollout_state
         # strategy 不关心 agent_loop 是 ray actor 还是本地对象。
         # Trace viewer uses this producer-side future step to group samples by
         # the training step they are being generated for.
