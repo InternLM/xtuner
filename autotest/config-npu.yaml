@@ -26,6 +26,41 @@ default_config:
                 - HF_HUB_OFFLINE=1
 
 case: 
+    npu-glm5-3-flash-sft-25B:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_glm53_25b.py
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+            resource:
+                image: ccr-deeplink/a3_cann9_0_fla_npu:transformers517_0.0.1-20261023T023705Z
+                num_nodes: 1
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/GLM-5.3-Flash-25B
+                    - ALPACA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - XTUNER_ACTIVATION_OFFLOAD=0
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+                    - LD_PRELOAD=/usr/local/Ascend/ascend-toolkit/latest/arm64-linux/lib64/libjemalloc.so
+                    - LD_LIBRARY_PATH="/usr/local/Ascend/cann-9.0.0/opp/vendors/custom_transformer/op_api/lib:${LD_LIBRARY_PATH}"
+            assert_info:
+                base_metric: npu-glm5-3-flash-sft-25B/tracker.jsonl
+                check_metrics:
+                    grad_norm:
+                        threshold: 0.35
+                        aggregate: 80
+                    loss/local_loss: 0.008
+                    loss/reduced_llm_loss: 0.008
+                    loss/reduced_mtp_loss:
+                        threshold: 0.015
+                        aggregate: 80
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
     qwen3:
         -
             type: sft
