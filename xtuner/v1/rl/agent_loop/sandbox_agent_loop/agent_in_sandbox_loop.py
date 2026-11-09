@@ -418,7 +418,11 @@ class AgentInSandboxLoop(AgentLoop):
         rollout_state.reward = {"score": self.timeout_reward}
         rollout_state.input_ids = input_ids
         rollout_state.labels = labels
-        rollout_state.response_ids = [token_id for token_id, label in zip(input_ids[1:], labels[1:]) if label != -100]
+        # Unified response_ids convention (same as the normal path): the contiguous suffix of
+        # input_ids after the prompt, so downstream mask offsets (len(labels) - len(response_ids))
+        # stay valid for multi-turn traces with masked tool-result segments in between.
+        prompt_len = len(rollout_state.prompt_ids or [])
+        rollout_state.response_ids = list(input_ids[prompt_len:])
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
         rollout_state.response = (

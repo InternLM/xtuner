@@ -77,8 +77,11 @@ def _make_loop(**kwargs) -> AgentInSandboxLoop:
 
 
 def _make_state(result: AgentRolloutItem) -> RolloutState:
+    # Fake traces start with a one-token prompt, so ``response_ids`` (the contiguous
+    # suffix after the prompt) is ``input_ids[1:]``.
     return RolloutState(
         message=[{"role": "user", "content": "hi"}],
+        prompt_ids=[1],
         session_id=123,
         extra_fields={"rollout_item": AgentRolloutItem(
             id="src", data_source="test", uid=123, instruction="task.md", pipeline=_FakeRunner(result)
@@ -157,6 +160,7 @@ class TestTimeoutTraining(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kept.reward, {"score": -1.0})
         self.assertEqual(kept.input_ids, [1, 2, 3])
         self.assertEqual(kept.labels, [-100, 5, 6])
+        # response_ids 是 prompt 之后的连续后缀,与正常路径一致(而非按 label 过滤)。
         self.assertEqual(kept.response_ids, [2, 3])
         self.assertEqual(kept.logprobs, [0.0, 0.1, 0.2])
         self.assertIsNone(kept.routed_experts)
