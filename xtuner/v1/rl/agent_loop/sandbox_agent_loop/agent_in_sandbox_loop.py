@@ -413,16 +413,20 @@ class AgentInSandboxLoop(AgentLoop):
         if len(input_ids) < 2 or all(label == -100 for label in labels):
             raise ValueError("partial trace carries no trainable token")
 
-        rollout_state.status = Status.COMPLETED
-        rollout_state.finish_reason = "timeout"
-        rollout_state.reward = {"score": self.timeout_reward}
+        # The chain must start with this sample's prompt; downstream offsets assume it.
+        prompt_ids = rollout_state.prompt_ids or []
+        if prompt_ids and input_ids[: len(prompt_ids)] != prompt_ids:
+            raise ValueError(
+                "partial trace does not start with this sample's prompt: "
+                f"trace_len={len(input_ids)} prompt_len={len(prompt_ids)}"
+            )
+
         rollout_state.input_ids = input_ids
         rollout_state.labels = labels
         # Unified response_ids convention (same as the normal path): the contiguous suffix of
         # input_ids after the prompt, so downstream mask offsets (len(labels) - len(response_ids))
         # stay valid for multi-turn traces with masked tool-result segments in between.
-        prompt_len = len(rollout_state.prompt_ids or [])
-        rollout_state.response_ids = list(input_ids[prompt_len:])
+        rollout_state.response_ids = list(input_ids[len(prompt_ids) :])
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
         rollout_state.response = (
@@ -431,9 +435,11 @@ class AgentInSandboxLoop(AgentLoop):
         rollout_state.extra_fields[_TIMEOUT_TRAINED_KEY] = True
         rollout_state.extra_fields["agent_session_id"] = rollout_state.session_id
         # Trace-side count is source-of-truth: it only counts the turns actually
-        # exported (and trained). ``None`` means legacy nodes without the field;
-        # the caller then falls back to a best-effort artifacts count.
+        # exported (and trained). ``None`` means legacy nodes without the field.
         rollout_state.extra_fields["agent_tool_turns"] = data.get("tool_call_count")
+        rollout_state.status = Status.COMPLETED
+        rollout_state.finish_reason = "timeout"
+        rollout_state.reward = {"score": self.timeout_reward}
         return rollout_state
 
     async def _try_keep_timeout_sample(

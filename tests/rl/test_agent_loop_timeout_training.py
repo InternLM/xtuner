@@ -9,10 +9,14 @@ TestTimeoutTraining —— 超时样本的生成与保留训练行为
     开关打开且错误为 entry timeout 时,已完成 turn 的部分轨迹被保留为 COMPLETED 样本,
     finish_reason="timeout",reward 固定为 timeout_reward,训练字段全部填充并带
     timeout_trained 标记。
-- test_timeout_falls_back_to_failed_without_supervised_tokens:
-    部分轨迹没有 supervised token(labels 全 -100)时回退 FAILED。
-- test_timeout_falls_back_with_single_token_trace:
-    input_ids 只有 1 个 token 时回退 FAILED(训练侧要求长度 > 1)。
+- test_timeout_tool_turns_is_none_without_store_count:
+    导出链缺少 tool_call_count 时 agent_tool_turns 保持 None,不从 artifacts 估算。
+- test_timeout_falls_back_without_trainable_trace:
+    单 token 或 labels 全 -100 的部分轨迹没有可训练 token 时回退 FAILED。
+- test_timeout_prompt_mismatch_falls_back_to_failed:
+    导出链起始 prompt 与本样本 prompt_ids 不一致时回退 FAILED。
+- test_timeout_decode_failure_keeps_state_failed:
+    保留流程中任何一步失败时样本保持 FAILED,不会被标成 COMPLETED 或写入固定 reward。
 - test_non_timeout_failure_keeps_failed:
     非 timeout 失败不触发保留,也不查询 trace store。
 - test_timeout_without_flag_keeps_failed:
@@ -29,7 +33,7 @@ TestTeacherScoring —— teacher scoring 对超时样本的处理
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import AgentInSandboxLoop
@@ -187,29 +191,66 @@ class TestTimeoutTraining(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(kept_list[0].extra_fields["agent_tool_turns"])
 
-    async def test_timeout_falls_back_to_failed_without_supervised_tokens(self):
-        # 行为:部分轨迹没有 supervised token 时,保留失败并回退 FAILED
+    async def test_timeout_prompt_mismatch_falls_back_to_failed(self):
+        # 行为:导出链的起始 prompt 与本样本 prompt_ids 不一致时视为串会话,回退 FAILED
         loop = _make_loop(train_on_timeout=True)
         state = _make_state(_timeout_item())
-        partial_trace = {"input_ids": [1], "labels": [-100], "logprobs": [0.0], "routed_experts": None}
+        state.prompt_ids = [99]  # 与 partial_trace 的 [1, 2, 3] 首 token 不符
+        partial_trace = {
+            "input_ids": [1, 2, 3],
+            "labels": [-100, 5, 6],
+            "logprobs": [0.0, 0.1, 0.2],
+            "routed_experts": None,
+        }
 
         with patch(f"{LOOP_MODULE}.get_store", return_value=_fake_store(partial_trace)):
             failed_list = await loop.generate_sample(state)
 
         self.assertEqual(len(failed_list), 1)
         self.assertEqual(failed_list[0].status, Status.FAILED)
+        self.assertIsNone(failed_list[0].input_ids)
+        self.assertNotIn("timeout_trained", failed_list[0].extra_fields)
 
-    async def test_timeout_falls_back_with_single_token_trace(self):
-        # 行为:input_ids 只有 1 个 token 时训练侧不会接受,回退 FAILED
+    async def test_timeout_decode_failure_keeps_state_failed(self):
+        # 行为:落盘前任何一步失败(这里让 decode 抛错)都不能留下 COMPLETED 状态和固定 reward
         loop = _make_loop(train_on_timeout=True)
+        loop.tokenizer.decode = Mock(side_effect=RuntimeError("decode boom"))
         state = _make_state(_timeout_item())
-        partial_trace = {"input_ids": [5], "labels": [5], "logprobs": [0.0], "routed_experts": None}
+        partial_trace = {
+            "input_ids": [1, 2, 3],
+            "labels": [-100, 5, 6],
+            "logprobs": [0.0, 0.1, 0.2],
+            "routed_experts": None,
+        }
 
         with patch(f"{LOOP_MODULE}.get_store", return_value=_fake_store(partial_trace)):
             failed_list = await loop.generate_sample(state)
 
-        self.assertEqual(len(failed_list), 1)
-        self.assertEqual(failed_list[0].status, Status.FAILED)
+        failed = failed_list[0]
+        self.assertEqual(failed.status, Status.FAILED)
+        self.assertEqual(failed.extra_fields["agent_status"], "failed")
+        self.assertIsNone(failed.reward)
+        self.assertNotIn("timeout_trained", failed.extra_fields)
+
+    async def test_timeout_falls_back_without_trainable_trace(self):
+        # 行为:单 token 或 labels 全 -100 的部分轨迹没有可训练 token,回退 FAILED
+        cases = {
+            "single_token": {"input_ids": [5], "labels": [5], "logprobs": [0.0], "routed_experts": None},
+            "all_masked": {
+                "input_ids": [1, 2, 3],
+                "labels": [-100, -100, -100],
+                "logprobs": [0.0, 0.1, 0.2],
+                "routed_experts": None,
+            },
+        }
+        for name, partial_trace in cases.items():
+            with self.subTest(name):
+                loop = _make_loop(train_on_timeout=True)
+                state = _make_state(_timeout_item())
+                with patch(f"{LOOP_MODULE}.get_store", return_value=_fake_store(partial_trace)):
+                    failed_list = await loop.generate_sample(state)
+                self.assertEqual(len(failed_list), 1)
+                self.assertEqual(failed_list[0].status, Status.FAILED)
 
     async def test_non_timeout_failure_keeps_failed(self):
         # 行为:错误 category 非 timeout 时不触发保留,也不查询 trace store
