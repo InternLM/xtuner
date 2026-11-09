@@ -49,6 +49,52 @@ def _stat_tensor(values: list[float]) -> torch.Tensor:
     return torch.tensor(values).float() if values else torch.tensor([0.0]).float()
 
 
+class _PreparedFitSession:
+    """One training step prepared by ``TrainingController.prepare_fit``.
+
+    The session holds everything the CPU preparation phase produced (flat
+    rollout items, pack plan, batch attributes) so the trainer can decide when
+    the NPU phases start: typically the rollout engine offload and this
+    preparation run concurrently, then ``fit`` executes the worker-side batch
+    load and the actor/critic updates.
+    """
+
+    def __init__(
+        self,
+        controller: TrainingController,
+        prepared: _PreparedBatch,
+        pack_plan: PackPlan,
+        data_replicate_size: int,
+    ):
+        self._controller = controller
+        self._prepared = prepared
+        self._pack_plan = pack_plan
+        self._data_replicate_size = data_replicate_size
+
+    def fit(
+        self,
+        *,
+        raw_rewards_sum: float = 0.0,
+        raw_rewards_count: int = 0,
+    ) -> tuple[list[WorkerLogItem], dict[str, float]]:
+        """Execute the NPU phases of the prepared step.
+
+        Args:
+            raw_rewards_sum (float): Sum of raw rewards for logging.
+            raw_rewards_count (int): Number of raw rewards for logging.
+
+        Returns:
+            tuple[list[WorkerLogItem], dict[str, float]]: Worker log items and trainer metrics.
+        """
+        return self._controller._execute_fit(
+            self._prepared,
+            self._pack_plan,
+            self._data_replicate_size,
+            raw_rewards_sum,
+            raw_rewards_count,
+        )
+
+
 def _summarize_process_group_results(results: list[dict[str, Any]]) -> str:
     if not results:
         return "ranks=0"
@@ -549,6 +595,36 @@ class TrainingController:
             finally:
                 refs_by_dp.clear()
 
+    def prepare_fit(
+        self,
+        rollout_groups: list[list[RolloutState]],
+        pack_max_length: int,
+        rollout_idx: int,
+    ) -> _PreparedFitSession:
+        """Run the CPU-side preparation for one training step.
+
+        Everything here is driver/CPU work over the rollout states: sample
+        flattening, reward clustering and pack planning. The trainer can run
+        it concurrently with rollout-engine offload; the worker-side batch
+        load and the actor/critic updates only start when the returned
+        session's ``fit`` is called.
+
+        Args:
+            rollout_groups (list[list[RolloutState]]): Rollout groups selected for training.
+            pack_max_length (int): Maximum tokens per packed sequence.
+            rollout_idx (int): Global rollout (train step) id used for logging.
+
+        Returns:
+            _PreparedFitSession: Prepared step awaiting ``fit`` for the NPU phases.
+        """
+        prepared = self._prepare_rollout_items(rollout_groups, rollout_idx)
+        if not prepared["rollout_items"]:
+            raise ValueError(f"Rollout {rollout_idx} has no valid training samples")
+        worker_cfg = ray.get(self.workers[0].get_worker_cfg.remote())  # type: ignore[attr-defined]
+        data_replicate_size = ray.get(self.workers[0].get_data_replicate_size.remote())  # type: ignore[attr-defined]
+        pack_plan = self._build_pack_plan(prepared["rollout_items"], pack_max_length, worker_cfg, data_replicate_size)
+        return _PreparedFitSession(self, prepared, pack_plan, data_replicate_size)
+
     def fit(
         self,
         rollout_groups: list[list[RolloutState]],
@@ -557,17 +633,19 @@ class TrainingController:
         raw_rewards_sum: float = 0.0,
         raw_rewards_count: int = 0,
     ) -> tuple[list[WorkerLogItem], dict[str, float]]:
+        session = self.prepare_fit(rollout_groups, pack_max_length, rollout_idx)
+        return session.fit(raw_rewards_sum=raw_rewards_sum, raw_rewards_count=raw_rewards_count)
+
+    def _execute_fit(
+        self,
+        prepared: _PreparedBatch,
+        pack_plan: PackPlan,
+        data_replicate_size: int,
+        raw_rewards_sum: float,
+        raw_rewards_count: int,
+    ) -> tuple[list[WorkerLogItem], dict[str, float]]:
         timers: dict[str, float] = {}
-        prepared = self._prepare_rollout_items(rollout_groups, rollout_idx)
         rollout_items = prepared["rollout_items"]
-        if not rollout_items:
-            raise ValueError(f"Rollout {rollout_idx} has no valid training samples")
-
-        worker_cfg = ray.get(self.workers[0].get_worker_cfg.remote())  # type: ignore[attr-defined]
-        data_replicate_size = ray.get(self.workers[0].get_data_replicate_size.remote())  # type: ignore[attr-defined]
-
-        pack_plan = self._build_pack_plan(rollout_items, pack_max_length, worker_cfg, data_replicate_size)
-
         sample_advantages: list[float] | None = None
         token_stats: TokenStats | None = None
         critic_log_infos: list[WorkerLogItem] | None = None
