@@ -511,7 +511,10 @@ class SessionServer:
                 tokenize=False,
             )
         ).rstrip()
-        assert new_prompt.startswith(old_prompt) and new_prompt.endswith(self.stop_word)
+        # Templates such as GLM's do not append tokenizer.eos_token to assistant turns.
+        # Rendered text defines cache boundaries; raw output IDs define the training trace.
+        if not new_prompt.startswith(old_prompt):
+            raise RuntimeError("SessionServer response template does not preserve the generation prompt prefix.")
 
         # Re-derive the input delta the worker processed. on_request no longer
         # persists it (that would leave a None-expert placeholder in the store),
