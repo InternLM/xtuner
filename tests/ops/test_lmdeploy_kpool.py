@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""FP8 forward parity, pooling STE gradients and packed KPool boundaries."""
+"""FP8 forward parity, logits storage budgets and packed KPool boundaries."""
 
 import builtins
 import importlib
@@ -19,112 +19,45 @@ from xtuner.v1.ops.sparse_mla.kpool import (
     pool_causal_ranges,
 )
 from xtuner.v1.ops.sparse_mla.lmdeploy_kpool import (
+    _compress_storage,
+    _kpool_topk_indices,
     _score_chunk_size,
-    kpool_compress_backward,
-    lmdeploy_kpool_compress,
 )
-
-
-def _oracle_gradients(keys: Tensor, scores: Tensor, ape: Tensor, grad: Tensor) -> tuple[Tensor, ...]:
-    values = [value.detach().double().requires_grad_() for value in (keys, scores, ape)]
-    width = keys.shape[-1]
-    # Explicit FP64 matrix multiplication is independent of the butterfly and
-    # the analytical softmax backward in the implementation.
-    matrix = torch.tensor(
-        [[(-1.0) ** ((row & column).bit_count()) for column in range(width)] for row in range(width)],
-        device=keys.device,
-        dtype=torch.float64,
-    ) / math.sqrt(width)
-    probabilities = (values[1] + values[2]).softmax(dim=1)
-    pooled = (probabilities * values[0]).sum(dim=1)
-    rotated = pooled @ matrix
-    return torch.autograd.grad((rotated * grad.double()).sum(), values)
-
-
-class TestKPoolCompressionBackward:
-    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-    def test_matches_independent_fp64_autograd(self, dtype: torch.dtype) -> None:
-        torch.manual_seed(10)
-        keys = torch.randn(7, 4, 8).to(dtype)
-        scores = torch.randn_like(keys)
-        ape = torch.randn(4, 8)
-        grad = torch.randn(7, 8)
-        actual = kpool_compress_backward(grad, keys, scores, ape)
-        expected = _oracle_gradients(keys, scores, ape, grad)
-        for result, reference, original in zip(actual, expected, (keys, scores, ape)):
-            assert result.dtype == original.dtype
-            torch.testing.assert_close(result.float(), reference.float(), rtol=0.008, atol=0.002)
-        if dtype == torch.float32:
-            for result, reference in zip(actual, expected):
-                torch.testing.assert_close(result.double(), reference, rtol=2e-5, atol=2e-6)
-
-    def test_zero_gradient_and_empty_groups(self) -> None:
-        for groups in (0, 3):
-            keys = torch.randn(groups, 4, 8)
-            scores = torch.randn_like(keys)
-            ape = torch.randn(4, 8)
-            result = kpool_compress_backward(torch.zeros(groups, 8), keys, scores, ape)
-            for value in result:
-                assert torch.count_nonzero(value) == 0
-            assert result[2].shape == ape.shape
-
-    def test_score_gradient_has_softmax_shift_invariance(self) -> None:
-        torch.manual_seed(11)
-        keys = torch.randn(5, 4, 8)
-        scores = torch.randn_like(keys)
-        ape = torch.randn(4, 8)
-        grad = torch.randn(5, 8)
-        result = kpool_compress_backward(grad, keys, scores, ape)
-        shifted = kpool_compress_backward(grad, keys, scores + torch.randn(5, 1, 8), ape)
-        torch.testing.assert_close(result[1].sum(dim=1), torch.zeros(5, 8), atol=1e-6, rtol=0)
-        for actual, expected in zip(result, shifted):
-            torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
 
 
 class TestKPoolCompression:
     @pytest.mark.parametrize("mode", ["extend", "decode"])
-    def test_cpu_forward_and_autograd_contract(self, mode: str) -> None:
-        pytest.importorskip("lmdeploy.pytorch.nn.kpool")
-        from lmdeploy.pytorch.nn.kpool import kpool_compress, kpool_quantize_fp8
-
+    def test_cpu_forward_matches_reference(self, mode: str) -> None:
+        reference = pytest.importorskip("lmdeploy.pytorch.nn.kpool")
         torch.manual_seed(12)
-        keys = torch.randn(5, 4, 8, requires_grad=True)
-        scores = torch.randn(5, 4, 8, requires_grad=True)
-        ape = torch.randn(4, 8, requires_grad=True)
-        result = lmdeploy_kpool_compress(keys, scores, ape, mode=mode)
-        pooled = kpool_compress(keys.detach(), scores.detach(), ape.detach(), mode=mode)
-        values, scales = kpool_quantize_fp8(pooled, block_size=8, round_scale=True)
-        assert torch.equal(result.values.view(torch.uint8), values.view(torch.uint8))
-        assert torch.equal(result.scales, scales)
-        assert torch.equal(result.dequantized, values.float() * scales)
-        assert result.dequantized.requires_grad
-        assert not result.values.requires_grad
-        assert not result.scales.requires_grad
-        grad = torch.randn_like(result.dequantized)
-        actual = torch.autograd.grad(result.dequantized, (keys, scores, ape), grad)
-        for value, expected in zip(actual, _oracle_gradients(keys, scores, ape, grad)):
-            torch.testing.assert_close(value.double(), expected, rtol=2e-5, atol=2e-6)
+        keys = torch.randn(5, 4, 8)
+        scores = torch.randn_like(keys)
+        ape = torch.randn(4, 8)
+        values, scales = _compress_storage(keys, scores, ape, mode, True)
+        pooled = reference.kpool_compress(keys, scores, ape, mode=mode)
+        expected_values, expected_scales = reference.kpool_quantize_fp8(pooled, block_size=8, round_scale=True)
+        assert torch.equal(values.view(torch.uint8), expected_values.view(torch.uint8))
+        assert torch.equal(scales, expected_scales)
 
     @pytest.mark.parametrize("mode", ["extend", "decode"])
-    def test_cpu_empty_groups(self, mode: str) -> None:
-        pytest.importorskip("lmdeploy.pytorch.nn.kpool")
-        keys = torch.empty(0, 4, 8, requires_grad=True)
-        scores = torch.empty_like(keys, requires_grad=True)
-        ape = torch.randn(4, 8, requires_grad=True)
-        result = lmdeploy_kpool_compress(keys, scores, ape, mode=mode)
-        assert result.values.shape == (0, 8)
-        result.dequantized.sum().backward()
-        torch.testing.assert_close(ape.grad, torch.zeros_like(ape))
+    def test_empty_groups(self, mode: str) -> None:
+        keys = torch.empty(0, 4, 8)
+        scores = torch.empty_like(keys)
+        values, scales = _compress_storage(keys, scores, torch.randn(4, 8), mode, True)
+        assert values.shape == (0, 8) and values.dtype == torch.float8_e4m3fn
+        assert scales.shape == (0, 1) and scales.dtype == torch.float32
 
     def test_rejects_invalid_inputs_before_optional_import(self) -> None:
         with pytest.raises(ValueError, match="matching"):
-            lmdeploy_kpool_compress(torch.zeros(2, 4, 8), torch.zeros(2, 4, 7), torch.zeros(4, 8))
+            _compress_storage(torch.zeros(2, 4, 8), torch.zeros(2, 4, 7), torch.zeros(4, 8), "decode", True)
         with pytest.raises(ValueError, match="power-of-two"):
-            lmdeploy_kpool_compress(torch.zeros(2, 4, 7), torch.zeros(2, 4, 7), torch.zeros(4, 7))
+            _compress_storage(torch.zeros(2, 4, 7), torch.zeros(2, 4, 7), torch.zeros(4, 7), "decode", True)
         with pytest.raises(ValueError, match="mode"):
-            lmdeploy_kpool_compress(torch.zeros(2, 4, 8), torch.zeros(2, 4, 8), torch.zeros(4, 8), mode="invalid")
+            _compress_storage(torch.zeros(2, 4, 8), torch.zeros(2, 4, 8), torch.zeros(4, 8), "invalid", True)
         with pytest.raises(TypeError, match="expects"):
-            lmdeploy_kpool_compress(torch.zeros(2, 4, 8, dtype=torch.int32), torch.zeros(2, 4, 8), torch.zeros(4, 8))
+            _compress_storage(
+                torch.zeros(2, 4, 8, dtype=torch.int32), torch.zeros(2, 4, 8), torch.zeros(4, 8), "decode", True
+            )
 
     @pytest.mark.gpu
     @pytest.mark.parametrize("mode", ["extend", "decode"])
@@ -133,25 +66,17 @@ class TestKPoolCompression:
     def test_cuda_forward_is_bitwise_lmdeploy(self, mode: str, dtype: torch.dtype, round_scale: bool) -> None:
         if not torch.cuda.is_available():
             pytest.skip("CUDA required")
-        pytest.importorskip("lmdeploy.pytorch.kernels.cuda.kpool")
-        from lmdeploy.pytorch.kernels.cuda.kpool import compress_kpool
-
+        backend = pytest.importorskip("lmdeploy.pytorch.backends.cuda.kpool")
         torch.manual_seed(13)
-        keys = torch.randn(31, 4, 128, dtype=dtype, device="cuda", requires_grad=True)
-        scores = torch.randn_like(keys, requires_grad=True)
-        ape = torch.randn(4, 128, device="cuda", requires_grad=True)
-        values, scales = compress_kpool(keys, scores, ape, mode=mode, round_scale=round_scale)
-        result = lmdeploy_kpool_compress(keys, scores, ape, mode=mode, round_scale=round_scale)
-        assert torch.equal(result.values.view(torch.uint8), values.view(torch.uint8))
-        assert torch.equal(result.scales, scales)
-        grad = torch.randn_like(result.dequantized)
-        actual = torch.autograd.grad(result.dequantized, (keys, scores, ape), grad)
-        expected = _oracle_gradients(keys, scores, ape, grad)
-        for value, reference in zip(actual, expected):
-            torch.testing.assert_close(value.float(), reference.float(), rtol=0.01, atol=0.005)
-        if dtype == torch.float32:
-            for value, reference in zip(actual, expected):
-                torch.testing.assert_close(value.double(), reference, rtol=1e-4, atol=4e-6)
+        keys = torch.randn(31, 4, 128, dtype=dtype, device="cuda")
+        scores = torch.randn_like(keys)
+        ape = torch.randn(4, 128, device="cuda")
+        expected_values, expected_scales = backend.kpool_compress_quantize_cuda(
+            keys, scores, ape, mode=mode, round_scale=round_scale
+        )
+        values, scales = _compress_storage(keys, scores, ape, mode, round_scale)
+        assert torch.equal(values.view(torch.uint8), expected_values.view(torch.uint8))
+        assert torch.equal(scales, expected_scales)
 
     @pytest.mark.gpu
     @pytest.mark.parametrize("mode", ["extend", "decode"])
@@ -164,14 +89,17 @@ class TestKPoolCompression:
         keys = torch.randn(31, 4, 128, device="cuda", dtype=torch.bfloat16)
         scores = torch.randn_like(keys)
         ape = torch.randn(4, 128, device="cuda")
-        actual = lmdeploy_kpool_compress(keys, scores, ape, mode=mode, round_scale=round_scale)
+        values, scales = _compress_storage(keys, scores, ape, mode, round_scale)
         pooled = reference.kpool_compress(keys, scores, ape, mode=mode)
-        values, scales = reference.kpool_quantize_fp8(pooled, block_size=128, round_scale=round_scale)
-        # This reference does not call the fused operator. FP32 accumulation
-        # differences can straddle a BF16/FP8 midpoint; bitwise parity with the
-        # serving operator is checked separately above.
-        torch.testing.assert_close(actual.scales, scales, rtol=0.02, atol=0)
-        torch.testing.assert_close(actual.dequantized, values.float() * scales, rtol=0.15, atol=0.02)
+        expected_values, expected_scales = reference.kpool_quantize_fp8(
+            pooled, block_size=128, round_scale=round_scale
+        )
+        # FP32 accumulation can straddle BF16/FP8 rounding boundaries. Serving
+        # operator bitwise parity is checked separately above.
+        torch.testing.assert_close(scales, expected_scales, rtol=0.02, atol=0)
+        torch.testing.assert_close(
+            values.float() * scales, expected_values.float() * expected_scales, rtol=0.15, atol=0.02
+        )
 
     @pytest.mark.gpu
     def test_pre_sm90_compression_uses_reference(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -184,14 +112,52 @@ class TestKPoolCompression:
         ape = torch.randn(4, 128, device="cuda")
         monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (8, 0))
         with patch.object(backend, "compress_kpool", side_effect=AssertionError("SM90 kernel must not run")):
-            actual = lmdeploy_kpool_compress(keys, scores, ape)
+            values, scales = _compress_storage(keys, scores, ape, "decode", True)
         pooled = reference.kpool_compress(keys, scores, ape, mode="decode")
-        values, scales = reference.kpool_quantize_fp8(pooled, block_size=128, round_scale=True)
-        assert torch.equal(actual.values.view(torch.uint8), values.view(torch.uint8))
-        assert torch.equal(actual.scales, scales)
+        expected_values, expected_scales = reference.kpool_quantize_fp8(pooled, block_size=128, round_scale=True)
+        assert torch.equal(values.view(torch.uint8), expected_values.view(torch.uint8))
+        assert torch.equal(scales, expected_scales)
 
 
 class TestLMDeployKPoolAvailability:
+    @pytest.mark.gpu
+    @pytest.mark.parametrize("local_columns", [False, True])
+    @pytest.mark.parametrize("pools", [1024, 1025])
+    def test_logits_budget_bounds_actual_storage(
+        self, monkeypatch: pytest.MonkeyPatch, local_columns: bool, pools: int
+    ) -> None:
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA required")
+        backend = pytest.importorskip("lmdeploy.pytorch.backends.cuda.kpool")
+        envs = pytest.importorskip("lmdeploy.pytorch.envs")
+        if local_columns and not backend._mqa_has_local_columns():
+            pytest.skip("Compact MQA API unavailable")
+        monkeypatch.setattr(envs, "dsa_indexer_max_logits_mb", 1)
+        rows = _score_chunk_size(pools, 32, None, local_columns=local_columns)
+        keys = torch.zeros(pools, 128, device="cuda", dtype=torch.float8_e4m3fn)
+        scales = torch.ones(pools, device="cuda")
+
+        def allocate(query_rows: int) -> Tensor:
+            return backend._get_deep_gemm().fp8_mqa_logits(
+                torch.zeros(query_rows, 32, 128, device="cuda", dtype=torch.float8_e4m3fn),
+                (keys, scales),
+                torch.ones(query_rows, 32, device="cuda"),
+                torch.zeros(query_rows, device="cuda", dtype=torch.int32),
+                torch.full((query_rows,), pools, device="cuda", dtype=torch.int32),
+                clean_logits=False,
+                **({"max_seqlen_k": pools} if local_columns else {}),
+            )
+
+        # Check the real backing allocation, including hidden guard columns
+        # and padded rows, for a full chunk and an unaligned final chunk.
+        for query_rows in (rows, 7):
+            logits = allocate(query_rows)
+            assert logits.untyped_storage().nbytes() <= 1 << 20
+        if not local_columns and pools == 1024:
+            # Review regression: 4096 tokens give 1024 pools. The old compact
+            # formula chose 256 rows, whose legacy backing store is 1.25 MiB.
+            assert allocate(256).untyped_storage().nbytes() == 5 * (1 << 18)
+
     def test_public_selector_preserves_original_path_without_lmdeploy(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[bool] = []
 
@@ -250,27 +216,111 @@ class TestLMDeployKPoolAvailability:
 
     @pytest.mark.parametrize("heads", [32, 64, 128])
     @pytest.mark.parametrize("pools", [257, 32768, 262145])
+    @pytest.mark.parametrize("local_columns", [False, True])
     def test_score_chunks_respect_aligned_byte_budget(
-        self, monkeypatch: pytest.MonkeyPatch, heads: int, pools: int
+        self, monkeypatch: pytest.MonkeyPatch, heads: int, pools: int, local_columns: bool
     ) -> None:
         envs = pytest.importorskip("lmdeploy.pytorch.envs")
         monkeypatch.setattr(envs, "dsa_indexer_max_logits_mb", 32)
         for requested in (None, 7, 16384):
-            rows = _score_chunk_size(pools, heads, requested)
+            rows = _score_chunk_size(pools, heads, requested, local_columns=local_columns)
             block_q = 128 // heads
             allocated_rows = math.ceil(rows / block_q) * block_q
-            allocated_columns = math.ceil(pools / 256) * 256
+            allocated_columns = math.ceil(pools / 256) * 256 if local_columns else math.ceil((pools + 256) / 64) * 64
             assert allocated_rows * allocated_columns * 4 <= 32 * (1 << 20)
             assert 0 < rows <= (1024 if requested is None else requested)
 
-    def test_score_budget_rejects_less_than_one_aligned_block(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize("local_columns", [False, True])
+    def test_score_budget_rejects_less_than_one_aligned_block(
+        self, monkeypatch: pytest.MonkeyPatch, local_columns: bool
+    ) -> None:
         envs = pytest.importorskip("lmdeploy.pytorch.envs")
         monkeypatch.setattr(envs, "dsa_indexer_max_logits_mb", 1)
         with pytest.raises(ValueError, match="minimum aligned allocation"):
-            _score_chunk_size(262145, 32, None)
+            _score_chunk_size(262145, 32, None, local_columns=local_columns)
 
 
 class TestLMDeployKPoolIndexer:
+    @pytest.mark.gpu
+    @pytest.mark.parametrize("query_chunk_size", [7, 257])
+    def test_query_quantization_and_mqa_logits(self, monkeypatch: pytest.MonkeyPatch, query_chunk_size: int) -> None:
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA required")
+        backend = pytest.importorskip("lmdeploy.pytorch.backends.cuda.kpool")
+        from lmdeploy.pytorch.kernels.cuda.kpool import compress_kpool, rotate_kpool_query
+        from lmdeploy.pytorch.nn.kpool import kpool_quantize_fp8, kpool_score
+
+        local_columns = backend._mqa_has_local_columns()
+        torch.manual_seed(84)
+        lengths = (2051, 13)
+        tokens = sum(lengths)
+        ctx = SequenceContext.from_input_ids(
+            tuple(torch.zeros(1, length, dtype=torch.long) for length in lengths), device="cuda"
+        )
+        q = torch.randn(1, tokens, 32, 128, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(1, tokens, 128, device="cuda", dtype=torch.bfloat16)
+        scores = torch.randn_like(k)
+        weights = torch.randn(1, tokens, 32, device="cuda")
+        ape = torch.randn(4, 128, device="cuda")
+        pool_index = build_pool_index(ctx, tokens, 4, q.device)
+        valid = (pool_index >= 0).unsqueeze(-1)
+        keys = torch.where(valid, k[0, pool_index.clamp_min(0)], 0)
+        gates = torch.where(valid, scores[0, pool_index.clamp_min(0)], 0)
+        expected_kv, expected_ks = compress_kpool(keys, gates, ape, mode="decode", round_scale=True)
+        expected_qv, expected_qs = kpool_quantize_fp8(rotate_kpool_query(q[0]), round_scale=True)
+        real_mqa = backend._get_deep_gemm().fp8_mqa_logits
+        offset = 0
+        errors: list[Tensor] = []
+        magnitudes: list[Tensor] = []
+
+        def checked_mqa(
+            query_fp8: Tensor,
+            kv: tuple[Tensor, Tensor],
+            query_weight: Tensor,
+            starts: Tensor,
+            ends: Tensor,
+            **kwargs: object,
+        ) -> Tensor:
+            nonlocal offset
+            chunk = slice(offset, offset + query_fp8.shape[0])
+            assert torch.equal(query_fp8.view(torch.uint8), expected_qv[chunk].view(torch.uint8))
+            assert torch.equal(kv[0].view(torch.uint8), expected_kv.view(torch.uint8))
+            assert torch.equal(kv[1], expected_ks.flatten())
+            expected_weight = weights[0, chunk] * 32**-0.5 * expected_qs[chunk].squeeze(-1) * 128**-0.5
+            torch.testing.assert_close(query_weight, expected_weight, atol=0, rtol=0)
+            logits = real_mqa(query_fp8, kv, query_weight, starts, ends, **kwargs)
+            reference = kpool_score(
+                expected_qv[chunk], expected_qs[chunk], expected_kv, expected_ks, weights[0, chunk] * 32**-0.5
+            )
+            columns = torch.arange(logits.shape[1], device=q.device)[None]
+            columns = columns + starts[:, None] if local_columns else columns.expand(logits.shape[0], -1)
+            mask = (columns >= starts[:, None]) & (columns < ends[:, None])
+            expected = reference.gather(1, columns.clamp_max(reference.shape[1] - 1).long())
+            actual_valid, expected_valid = logits[mask].double(), expected[mask].double()
+            errors.append((actual_valid - expected_valid).square().sum())
+            magnitudes.append((actual_valid.square() + expected_valid.square()).sum())
+            offset += query_fp8.shape[0]
+            return logits
+
+        monkeypatch.setattr(backend._get_deep_gemm(), "fp8_mqa_logits", checked_mqa)
+        result = _kpool_topk_indices(
+            q,
+            k,
+            scores,
+            weights,
+            ape,
+            ctx,
+            index_head_dim=128,
+            index_topk=2048,
+            query_chunk_size=query_chunk_size,
+        )
+        assert offset == tokens
+        assert result.shape == (tokens, 1, 2560)
+        # DeepGEMM's own simulated-FP8 reference uses calc_diff < 5e-6:
+        # sum((actual - expected)^2) / sum(actual^2 + expected^2).
+        # A pointwise relative tolerance is unstable around signed cancellation.
+        assert torch.stack(errors).sum() <= 5e-6 * torch.stack(magnitudes).sum()
+
     @pytest.mark.parametrize("autocast", [False, True])
     @pytest.mark.parametrize("use_lmdeploy", [False, True])
     @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.gpu)])
@@ -327,11 +377,6 @@ class TestLMDeployKPoolIndexer:
             return torch.where(columns[None] < lengths[:, None], lengths[:, None] - 1 - columns[None], -1).int()
 
         monkeypatch.setattr(backend, "kpool_select_groups_cuda", reverse_groups)
-        monkeypatch.setattr(
-            importlib.import_module("xtuner.v1.ops.sparse_mla.lmdeploy_kpool"),
-            "lmdeploy_kpool_compress",
-            lambda *args, **kwargs: pytest.fail("Top-K must not allocate an unused dequantized output"),
-        )
         lengths = (9, 17)
         tokens = sum(lengths)
         seq_ctx = SequenceContext.from_input_ids(

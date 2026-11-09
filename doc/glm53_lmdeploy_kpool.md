@@ -38,8 +38,10 @@ internal LMDeploy helpers; the commit above identifies the verified interface.
 - Pool size: 4; token budget: 2048 or 8192.
 - Query chunks are capped at 1024 rows by default (or the configured row cap),
   then limited by `LMDEPLOY_DSA_INDEXER_MAX_LOGITS_MB` (LMDeploy default: 512 MiB).
-  LMDeploy's helper accounts for DeepGEMM's query/head and 256-column alignment;
-  a budget smaller than one aligned block raises an error. This budget bounds
+  The allocation limit follows the active DeepGEMM API: compact columns use
+  `align(N, 256)`, while legacy absolute columns use `align(N + 256, 64)`.
+  Both pad query rows to `128 / heads`; a budget smaller than one aligned block
+  raises an error. This budget bounds
   logits, not total operator memory. Query rotation/quantization is chunked too.
 - Packed pools restart at document boundaries. Keys and compression gates
   gather across sequence parallelism before pools are built; query outputs
@@ -56,47 +58,18 @@ internal LMDeploy helpers; the commit above identifies the verified interface.
   difference is explicit; full forward equality for every prefill/decode
   schedule is not claimed.
 
-## Compression backward
+## Frozen indexer and forward-only scope
 
-`lmdeploy_kpool_compress(keys, scores, ape, mode="decode")` returns a
-`KPoolCompression` with three fields:
-
-| Field | Contract |
-| --- | --- |
-| `dequantized` | FP32 values with a custom first-order backward |
-| `values` | Nondifferentiable E4M3FN storage from LMDeploy |
-| `scales` | Nondifferentiable FP32 quantization scales from LMDeploy |
-
-CUDA compression uses LMDeploy's own SM90+ fused/reference dispatcher. CPU
-compression uses its reference implementation. Empty groups return correctly shaped empty
+`_compress_storage()` returns only E4M3FN values and FP32 scales. CUDA
+compression uses LMDeploy's SM90+ fused/reference dispatcher; CPU compression
+uses its reference implementation. Empty groups return correctly shaped empty
 outputs without invoking the reference implementation's ambiguous reshape.
-The no-grad Top-K path requests only FP8 storage/scales and does not allocate the
-FP32 dequantized output; the differentiable compression API remains unchanged.
 
-Backward uses an explicit straight-through estimator for BF16/FP8 rounding.
-For `p = softmax(scores + ape)` and `z = sum(p * keys)` over pool slots:
-
-```text
-dz = normalized_hadamard(doutput)
-dkeys = p * dz
-dscores = p * (keys - z) * dz
-dape = sum(dscores over groups)
-```
-
-Arithmetic is FP32 and returned gradients use the corresponding input dtypes.
-This is a surrogate derivative, not the mathematical derivative of the
-discrete quantizer. Higher-order derivatives are unsupported. Tests compare
-the first-order gradients with independent FP64 autograd using an explicit
-Hadamard matrix. Tests check bitwise wrapper parity with the serving operator
-and independently compare fused compression against LMDeploy's PyTorch reference
-for both modes and scale-rounding settings. The latter allows rounding-boundary
-differences; mathematical equivalence does not imply bitwise reference parity.
-
-Top-K IDs remain discrete and nondifferentiable. GLM-5.3's DSA indexer remains
-frozen, and `freeze_dsa_indexer=False` remains unsupported. Native GRPO runs
-exercise the new selection forward and the existing attention backward;
-compression backward is validated separately. A lower mismatch metric alone
-does not establish nonzero learning or model quality.
+Top-K selection runs under `torch.no_grad()`. The DSA indexer stays frozen and
+`freeze_dsa_indexer=False` remains unsupported. There is no differentiable
+compression API or custom backward in this adapter. GRPO still uses the
+existing attention/MoE backward, and a lower mismatch metric does not establish
+nonzero learning or model quality.
 
 ## Tests
 
@@ -107,6 +80,13 @@ python -m pytest tests/ops/test_lmdeploy_kpool.py -m 'not gpu' -q
 python -m pytest tests/ops/test_lmdeploy_kpool.py -m gpu -q
 CUDA_VISIBLE_DEVICES=0,1 python -m pytest tests/ops/test_lmdeploy_kpool_sp.py -q
 ```
+
+Forward tests compare pool FP8 values/scales bitwise with the serving operator
+and independently with its PyTorch reference for both compression modes and
+scale-rounding settings. Query FP8 payloads/scaled weights are checked at the
+actual MQA call, and valid causal logits are compared against Torch FP8 scoring.
+Storage-budget tests inspect `logits.untyped_storage().nbytes()` for compact and
+legacy APIs, including the 4096-token/32-head/1-MiB regression and short tails.
 
 The two-GPU test covers pools crossing a shard seam, packed document boundaries,
 global token IDs, causal tails and local query ownership, comparing against an
@@ -124,3 +104,11 @@ MoE-only scope and rollout settings for both native RL runs. Compare the
 per-step `mismatch/mismatch_k3_kl` and record generated lengths and timing.
 Native runs generate their own trajectories; this is not a fixed-token causal
 ablation or a complete-model quality benchmark.
+
+A three-step MoE-only GRPO check of commit `75aeaec1` on 8 H200 GPUs compared
+against the pre-adapter baseline `c93eb15d` using the same five-layer checkpoint,
+seed 123, EP4/SP1 training and TP1/EP4 rollout. Mean
+`mismatch/mismatch_k3_kl` was `3.7143783866e-4` for the baseline and
+`3.4190760300e-4` with the adapter (7.95% lower). Each step had 64 responses.
+The runs generated independent trajectories and had zero rewards/losses/gradient
+norms. This measures forward mismatch; it does not validate indexer learning.

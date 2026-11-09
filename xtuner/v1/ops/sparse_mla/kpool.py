@@ -482,7 +482,6 @@ def _lmdeploy_kpool_is_available(device: torch.device) -> bool:
             kpool_expand_groups_cuda,
             kpool_select_groups_cuda,
         )
-        from lmdeploy.pytorch.backends.cuda.nsa import _get_max_score_rows
         from lmdeploy.pytorch.kernels.cuda.kpool import rotate_kpool_query
         from lmdeploy.pytorch.nn.kpool import kpool_quantize_fp8
 
@@ -493,7 +492,6 @@ def _lmdeploy_kpool_is_available(device: torch.device) -> bool:
                 kpool_compress_quantize_cuda,
                 kpool_expand_groups_cuda,
                 kpool_select_groups_cuda,
-                _get_max_score_rows,
                 rotate_kpool_query,
                 kpool_quantize_fp8,
             )

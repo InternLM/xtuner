@@ -1,83 +1,14 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""LMDeploy KPool compression and FP8 selection for GLM-5.3.
-
-Compression reuses LMDeploy's forward operator. Its backward differentiates softmax-weighted pooling and the
-orthonormal Hadamard transform, using a straight-through estimator for BF16/FP8 rounding. Integer Top-K IDs remain
-nondifferentiable; this backend does not unfreeze the DSA indexer.
-"""
-
-from typing import Any, NamedTuple
+"""LMDeploy FP8 KPool forward for the frozen GLM-5.3 DSA indexer."""
 
 import torch
 from torch import Tensor
-from torch.autograd.function import once_differentiable
 from torch.nn import functional as F
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.ops.comm import gather_for_sequence_parallel
 
 from .kpool import build_pool_index, kpool_output_width, pool_causal_ranges
-
-
-class KPoolCompression(NamedTuple):
-    """Compression outputs, including a differentiable dequantized view.
-
-    The FP8 values and scales are nondifferentiable metadata. Consumers that
-    train pooling must use ``dequantized`` rather than quantized storage.
-    """
-
-    dequantized: Tensor
-    values: Tensor
-    scales: Tensor
-
-
-def lmdeploy_kpool_compress(
-    keys: Tensor,
-    scores: Tensor,
-    ape: Tensor,
-    *,
-    mode: str = "decode",
-    round_scale: bool = True,
-) -> KPoolCompression:
-    """Run LMDeploy compression with an explicit first-order STE backward.
-
-    Args:
-        keys (Tensor): Keys shaped ``[groups, pool_size, head_dim]``.
-        scores (Tensor): Compression logits with the same shape as keys.
-        ape (Tensor): Position bias shaped ``[pool_size, head_dim]``.
-        mode (str): LMDeploy's ``extend`` online or ``decode`` two-pass order.
-        round_scale (bool): Round FP8 scales to powers of two.
-
-    Returns:
-        KPoolCompression: FP32 dequantized values, FP8 storage and FP32 scales.
-    """
-    _validate_compression(keys, scores, ape, mode)
-    return KPoolCompression(*_LMDeployKPoolCompress.apply(keys, scores, ape, mode, round_scale))
-
-
-def kpool_compress_backward(
-    grad_output: Tensor, keys: Tensor, scores: Tensor, ape: Tensor
-) -> tuple[Tensor, Tensor, Tensor]:
-    """Differentiate weighted pooling and rotation, treating rounding as STE.
-
-    Args:
-        grad_output (Tensor): Gradient of rotated pooled values, ``[groups, head_dim]``.
-        keys (Tensor): Original keys, ``[groups, pool_size, head_dim]``.
-        scores (Tensor): Original logits with the same shape as keys.
-        ape (Tensor): Position bias, ``[pool_size, head_dim]``.
-
-    Returns:
-        tuple[Tensor, Tensor, Tensor]: Key, score and position-bias gradients
-        in their respective input dtypes.
-    """
-    # The normalized Walsh-Hadamard matrix is symmetric and orthonormal.
-    grad_pooled = _normalized_hadamard(grad_output.float()).unsqueeze(1)
-    probabilities = (scores.float() + ape.float()).softmax(dim=1)
-    pooled = (probabilities * keys.float()).sum(dim=1, keepdim=True)
-    grad_keys = probabilities * grad_pooled
-    grad_scores = probabilities * (keys.float() - pooled) * grad_pooled
-    grad_ape = grad_scores.sum(dim=0)
-    return grad_keys.to(keys.dtype), grad_scores.to(scores.dtype), grad_ape.to(ape.dtype)
 
 
 @torch.no_grad()
@@ -159,7 +90,7 @@ def _kpool_topk_indices(
     selected = torch.full((query.shape[0], index_topk // index_kpool), -1, device=q.device, dtype=torch.int32)
     local_columns = _mqa_has_local_columns()
     mqa = _get_deep_gemm().fp8_mqa_logits
-    chunk_size = _score_chunk_size(pool_index.shape[0], q.shape[2], query_chunk_size)
+    chunk_size = _score_chunk_size(pool_index.shape[0], q.shape[2], query_chunk_size, local_columns=local_columns)
     pool_scale = pool_scales.flatten().contiguous()
     for start in range(0, query.shape[0], chunk_size):
         chunk = slice(start, min(start + chunk_size, query.shape[0]))
@@ -203,33 +134,10 @@ def _kpool_topk_indices(
     return F.pad(token_ids, (0, output_width - token_ids.shape[1]), value=-1).unsqueeze(1)
 
 
-class _LMDeployKPoolCompress(torch.autograd.Function):
-    @staticmethod
-    def forward(
-        ctx: Any, keys: Tensor, scores: Tensor, ape: Tensor, mode: str, round_scale: bool
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        values, scales = _compress_storage(keys, scores, ape, mode, round_scale)
-        ctx.save_for_backward(keys, scores, ape)
-        ctx.set_materialize_grads(False)
-        ctx.mark_non_differentiable(values, scales)
-        return values.float() * scales, values, scales
-
-    @staticmethod
-    @once_differentiable
-    def backward(
-        ctx: Any, grad_output: Tensor | None, grad_values: Tensor | None, grad_scales: Tensor | None
-    ) -> tuple[Tensor | None, Tensor | None, Tensor | None, None, None]:
-        del grad_values, grad_scales
-        if grad_output is None:
-            return None, None, None, None, None
-        keys, scores, ape = ctx.saved_tensors
-        grad_keys, grad_scores, grad_ape = kpool_compress_backward(grad_output, keys, scores, ape)
-        return grad_keys, grad_scores, grad_ape, None, None
-
-
 def _compress_storage(
     keys: Tensor, scores: Tensor, ape: Tensor, mode: str, round_scale: bool
 ) -> tuple[Tensor, Tensor]:
+    _validate_compression(keys, scores, ape, mode)
     if keys.shape[0] == 0:
         return (
             torch.empty((0, keys.shape[-1]), device=keys.device, dtype=torch.float8_e4m3fn),
@@ -246,24 +154,24 @@ def _compress_storage(
     return kpool_quantize_fp8(pooled, block_size=keys.shape[-1], round_scale=round_scale)
 
 
-def _score_chunk_size(pool_count: int, heads: int, query_chunk_size: int | None) -> int:
+def _score_chunk_size(pool_count: int, heads: int, query_chunk_size: int | None, *, local_columns: bool) -> int:
     from lmdeploy.pytorch import envs
-    from lmdeploy.pytorch.backends.cuda.nsa import _get_max_score_rows
 
-    budget_rows = _get_max_score_rows(pool_count, envs.dsa_indexer_max_logits_mb * (1 << 20), num_heads=heads)
+    # DeepGEMM attention.hpp: compact columns align N to 256; the absolute
+    # column API adds a 256-column guard before aligning its row stride to 64.
+    # Both APIs pad query rows to block_q, even for the final short chunk.
+    # https://github.com/deepseek-ai/DeepGEMM/blob/88965b078186ee7510ab9fc4f1d5ebc19adfa8d1/csrc/apis/attention.hpp#L155-L171
+    block_q = 128 // heads
+    stride = ((pool_count + 255) // 256 * 256) if local_columns else ((pool_count + 256 + 63) // 64 * 64)
+    minimum_bytes = block_q * stride * 4
+    budget = envs.dsa_indexer_max_logits_mb * (1 << 20)
+    budget_rows = budget // minimum_bytes * block_q
+    if budget_rows == 0:
+        raise ValueError(
+            f"DSA score budget {budget} bytes is smaller than the minimum aligned allocation {minimum_bytes} bytes. "
+            "Increase LMDEPLOY_DSA_INDEXER_MAX_LOGITS_MB."
+        )
     return min(1024 if query_chunk_size is None else query_chunk_size, budget_rows)
-
-
-def _normalized_hadamard(values: Tensor) -> Tensor:
-    width = values.shape[-1]
-    output = values
-    stride = 1
-    while stride < width:
-        paired = output.reshape(*output.shape[:-1], width // (2 * stride), 2, stride)
-        left, right = paired.unbind(dim=-2)
-        output = torch.cat((left + right, left - right), dim=-1).reshape_as(output)
-        stride *= 2
-    return output * width**-0.5
 
 
 def _validate_compression(keys: Tensor, scores: Tensor, ape: Tensor, mode: str) -> None:
