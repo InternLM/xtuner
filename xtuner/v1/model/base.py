@@ -13,7 +13,7 @@ from itertools import chain
 from math import prod
 from pathlib import Path
 from shutil import copy, copytree, rmtree
-from typing import Annotated, Any, Generator, Iterable, Literal, Mapping, NamedTuple, Sequence, cast
+from typing import Annotated, Any, Generator, Iterable, Literal, Mapping, NamedTuple, Sequence, TypeVar, cast
 
 import torch
 import torch.distributed as dist
@@ -49,6 +49,7 @@ from xtuner.v1.module.attention import GatedDeltaNetConfig, KDAConfig, MHAConfig
 from xtuner.v1.module.rope import RopeParametersConfig, RopeScalingConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, log_rank0, profile_time_and_memory
 from xtuner.v1.utils.compile import MaybeCompile, is_compiled_function, maybe_compile
+from xtuner.v1.utils.dtensor import dtensor_checkpoint_view
 from xtuner.v1.utils.load_spec import (
     HFSavePlan,
     LoadSpec,
@@ -56,6 +57,7 @@ from xtuner.v1.utils.load_spec import (
 )
 from xtuner.v1.utils.loader import HFCheckpointLoader
 from xtuner.v1.utils.misc import FunctionEnum, FunctionType, get_function_full_qualname, get_function_type
+from xtuner.v1.utils.model_offload import offload_to_pinned_cpu
 from xtuner.v1.utils.process import (
     get_async_hf_save_file_lock_slots,
     get_async_hf_writer_join_timeout,
@@ -69,6 +71,7 @@ logger = get_logger()
 
 DEVICE_MODULE = get_torch_device_module()
 DEVICE = get_device()
+_StateDictT = TypeVar("_StateDictT", bound=dict[str, Any])
 
 
 class DataBatchInfo(TypedDict):
@@ -892,6 +895,47 @@ class BaseModel(nn.Module):
 
         self._compile_cfg = self._resolve_compile_cfg(self.config)
         self._float8_handler: Float8Handler | None = None
+
+    @overload
+    def state_dict(
+        self, *args: Any, destination: _StateDictT, prefix: str = "", keep_vars: bool = False
+    ) -> _StateDictT: ...
+
+    @overload
+    def state_dict(
+        self, *args: Any, destination: None = None, prefix: str = "", keep_vars: bool = False
+    ) -> dict[str, Any]: ...
+
+    def state_dict(
+        self, *args: Any, destination: Any = None, prefix: str = "", keep_vars: bool = False
+    ) -> dict[str, Any]:
+        """Return checkpoint-safe DTensor views without copying pooled storage.
+
+        Args:
+            args (Any): Deprecated positional state_dict arguments accepted by PyTorch.
+            destination (Any): Optional destination mapping, retaining its metadata and identity.
+            prefix (str): Prefix for this model's state keys.
+            keep_vars (bool): Preserve live autograd objects unchanged. This also retains PyTorch's
+                serialization limitation for DTensors with nonzero local storage offsets.
+
+        Returns:
+            dict[str, Any]: State mapping after normal PyTorch hooks, with detached offset DTensors
+            represented by checkpoint-only wrappers sharing the original local storage.
+        """
+        effective_destination = args[0] if args else destination
+        previous = dict(effective_destination) if effective_destination is not None else {}
+        result = super().state_dict(*args, destination=destination, prefix=prefix, keep_vars=keep_vars)
+        effective_prefix = args[1] if len(args) > 1 else prefix
+        effective_keep_vars = args[2] if len(args) > 2 else keep_vars
+        if not effective_keep_vars:
+            for key, value in result.items():
+                if (
+                    key.startswith(effective_prefix)
+                    and isinstance(value, torch.Tensor)
+                    and (key not in previous or value is not previous[key])
+                ):
+                    result[key] = dtensor_checkpoint_view(value)
+        return result
 
     def set_hf(self, hf_path: str | Path):
         self._hf_path = Path(hf_path)
@@ -2375,7 +2419,10 @@ class BaseModel(nn.Module):
     def to_device(self, device: torch.device | str):
         if self.fsdp_config is not None and self.fsdp_config.cpu_offload:
             return
-        self.to(device, non_blocking=True)
+        if torch.device(device).type == "cpu":
+            offload_to_pinned_cpu(self)
+        else:
+            self.to(device, non_blocking=True)
         DEVICE_MODULE.synchronize()
         return
 
