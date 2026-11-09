@@ -1,18 +1,23 @@
 """Canonical field validation, staleness metadata and reusable packing layouts."""
 
 import asyncio
+import time
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
+import pytest
+import ray
 import torch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, validate_rollout_group, validate_train_group
 from xtuner.v1.rl.agent_loop_manager.produce_utils import ProduceBatchResult, _TaskRunner, take_train_batch
 from xtuner.v1.rl.agent_loop_manager.producer import ProduceProgress
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
-from xtuner.v1.rl.trainer.controller import TrainingController
+from xtuner.v1.rl.trainer.controller import TRAIN_RAY_GET_TIMEOUT, TrainingController
+from xtuner.v1.rl.trainer.pack import PackPlan, RankPlan
 from xtuner.v1.train.rl_trainer import BaseRLTrainer
 
 
@@ -323,6 +328,7 @@ class TestBatchLifecycle(unittest.TestCase):
         with (
             patch("xtuner.v1.rl.trainer.controller.ray.put", side_effect=lambda value: value),
             patch("xtuner.v1.rl.trainer.controller.ray.get", side_effect=lambda value, timeout=None: value),
+            patch("xtuner.v1.rl.trainer.controller.ray.wait", return_value=([None], [])),
             self.assertRaises(RuntimeError),
         ):
             with controller._loaded_batch([object()], plan, self._batch_attr(), data_replicate_size=1):
@@ -359,6 +365,195 @@ class TestBatchLifecycle(unittest.TestCase):
         self.assertIn(plain_ref, freed)
         self.assertIn(pixel_ref, freed)
         self.assertNotIn(trace_ref, freed)
+
+
+class TestFailedBatchCleanup:
+    @staticmethod
+    def _controller() -> tuple[TrainingController, PackPlan]:
+        controller = TrainingController.__new__(TrainingController)
+        controller.workers = [MagicMock() for _ in range(4)]
+        controller.logger = MagicMock()
+        plan = PackPlan(ranks=(RankPlan(global_indices=(0,), steps=(((0,),),)),), metrics={})
+        return controller, plan
+
+    @pytest.mark.parametrize("stage", ["body", "load_result", "load_submission"])
+    @pytest.mark.parametrize("submission_error", [None, RuntimeError, ray.exceptions.RayError])
+    def test_primary_error_does_not_wait_for_pending_peer(
+        self, stage: str, submission_error: type[Exception] | None
+    ) -> None:
+        controller, plan = self._controller()
+        primary = RuntimeError("training failed")
+        workers = controller.workers
+        loads = [worker.load_train_batch.remote.return_value for worker in workers]
+        releases = [worker.release_train_batch.remote.return_value for worker in workers]
+        ready = [releases[0], releases[2], releases[3]]
+        if submission_error is not None:
+            workers[0].release_train_batch.remote.side_effect = submission_error("submission failed")
+            ready.remove(releases[0])
+        if stage == "load_submission":
+            workers[1].load_train_batch.remote.side_effect = primary
+
+        def get(handles: object, timeout: float | None = None) -> None:
+            if handles == loads:
+                if stage == "load_result":
+                    raise primary
+                return
+            # A blocked synchronous actor can never execute its queued release.
+            # Fail immediately if cleanup tries to get that ref, even in a list.
+            assert not isinstance(handles, list), "cleanup must only inspect ready refs"
+            assert handles in ready
+            assert timeout == 0
+            if handles is releases[2]:
+                raise ray.exceptions.RayError("release failed")
+
+        context = controller._loaded_batch([object()], plan, TestBatchLifecycle._batch_attr(), 4)
+        frame = context.gen.gi_frame
+        assert frame is not None
+        with (
+            patch("xtuner.v1.rl.trainer.controller.ray.put", return_value=object()),
+            patch("xtuner.v1.rl.trainer.controller.ray.get", side_effect=get) as get_mock,
+            patch("xtuner.v1.rl.trainer.controller.ray.wait", return_value=(ready, [releases[1]])) as wait,
+            pytest.raises(RuntimeError) as raised,
+        ):
+            with context:
+                assert stage == "body", "failed loads must not enter training"
+                raise primary
+
+        assert raised.value is primary
+        for worker in workers:
+            worker.release_train_batch.remote.assert_called_once_with()
+        submitted = releases if submission_error is None else releases[1:]
+        wait.assert_called_once_with(submitted, num_returns=len(submitted), timeout=0)
+        expected_gets = [] if stage == "load_submission" else [call(loads, timeout=TRAIN_RAY_GET_TIMEOUT)]
+        assert get_mock.call_args_list == expected_gets + [call(ref, timeout=0) for ref in ready]
+        warnings = str(controller.logger.warning.call_args_list)
+        assert "pending" in warnings
+        assert "release failed" in warnings
+        if submission_error is not None:
+            assert "submission failed" in warnings
+        # Even a retained generator frame must not own the batch object refs.
+        assert frame.f_locals["refs_by_dp"] == []
+
+    @pytest.mark.parametrize("failure", ["all_submissions", "wait"])
+    def test_cleanup_dispatch_errors_preserve_primary(self, failure: str) -> None:
+        controller, plan = self._controller()
+        primary = ValueError("training failed")
+        if failure == "all_submissions":
+            for worker in controller.workers:
+                worker.release_train_batch.remote.side_effect = RuntimeError("submission failed")
+        with (
+            patch("xtuner.v1.rl.trainer.controller.ray.put", return_value=object()),
+            patch("xtuner.v1.rl.trainer.controller.ray.get"),
+            patch(
+                "xtuner.v1.rl.trainer.controller.ray.wait", side_effect=ray.exceptions.RayError("wait failed")
+            ) as wait,
+            pytest.raises(ValueError) as raised,
+        ):
+            with controller._loaded_batch([object()], plan, TestBatchLifecycle._batch_attr(), 4):
+                raise primary
+        assert raised.value is primary
+        for worker in controller.workers:
+            worker.release_train_batch.remote.assert_called_once_with()
+        assert wait.call_count == (failure == "wait")
+        assert controller.logger.warning.called
+
+    @pytest.mark.parametrize("failure", [None, "submission", "result"])
+    def test_success_path_still_awaits_cleanup_and_propagates_errors(self, failure: str | None) -> None:
+        controller, plan = self._controller()
+        error = RuntimeError("cleanup failed")
+        releases = [worker.release_train_batch.remote.return_value for worker in controller.workers]
+        if failure == "submission":
+            controller.workers[0].release_train_batch.remote.side_effect = error
+        with (
+            patch("xtuner.v1.rl.trainer.controller.ray.put", return_value=object()),
+            patch(
+                "xtuner.v1.rl.trainer.controller.ray.get", side_effect=[None, error if failure == "result" else None]
+            ) as get,
+            patch("xtuner.v1.rl.trainer.controller.ray.wait") as wait,
+        ):
+            context = controller._loaded_batch([object()], plan, TestBatchLifecycle._batch_attr(), 4)
+            frame = context.gen.gi_frame
+            assert frame is not None
+
+            def run() -> None:
+                with context:
+                    pass
+
+            if failure is None:
+                run()
+            else:
+                with pytest.raises(RuntimeError) as raised:
+                    run()
+                assert raised.value is error
+            assert frame.f_locals["refs_by_dp"] == []
+            wait.assert_not_called()
+            if failure != "submission":
+                assert get.call_args == call(releases, timeout=TRAIN_RAY_GET_TIMEOUT)
+
+    def test_real_ray_blocked_synchronous_peer(self, tmp_path: Path) -> None:
+        if ray.is_initialized():
+            pytest.skip("requires an isolated local Ray runtime")
+
+        @ray.remote(num_cpus=1)
+        class Worker:
+            def load_train_batch(self, *args: object) -> None:
+                self.loaded = True
+
+            def release_train_batch(self) -> None:
+                self.loaded = False
+
+            def fail(self) -> None:
+                raise RuntimeError("primary training failure")
+
+            def block(self, started_path: str) -> None:
+                from pathlib import Path
+                from threading import Event
+
+                Path(started_path).touch()
+                Event().wait()
+
+        workers = []
+        try:
+            ray.init(address="local", num_cpus=2, num_gpus=0, include_dashboard=False)
+            workers = [Worker.remote(), Worker.remote()]
+            # Pay actor startup costs outside the short regression timeout.
+            ray.get([worker.load_train_batch.remote() for worker in workers], timeout=30)
+            controller, plan = self._controller()
+            controller.workers = workers
+            started = tmp_path / "blocked"
+            primary = None
+            with (
+                patch("xtuner.v1.rl.trainer.controller.TRAIN_RAY_GET_TIMEOUT", 10),
+                patch("xtuner.v1.rl.trainer.controller.ray.get", wraps=ray.get) as get,
+                patch("xtuner.v1.rl.trainer.controller.ray.wait", wraps=ray.wait) as wait,
+                pytest.raises(ray.exceptions.RayTaskError) as raised,
+            ):
+                with controller._loaded_batch([object()], plan, TestBatchLifecycle._batch_attr(), 2):
+                    blocked = workers[1].block.remote(str(started))
+                    deadline = time.monotonic() + 10
+                    while not started.exists():
+                        assert time.monotonic() < deadline, "peer did not enter its blocking method"
+                        time.sleep(0.01)
+                    try:
+                        ray.get(workers[0].fail.remote(), timeout=10)
+                    except ray.exceptions.RayTaskError as exc:
+                        primary = exc
+                        raise
+            assert primary is not None and raised.value is primary
+            assert "primary training failure" in str(primary)
+            wait.assert_called_once()
+            assert wait.call_args.kwargs == {"num_returns": 2, "timeout": 0}
+            # First get loads the batch, second observes the primary failure.
+            # Any subsequent gets must be nonblocking individual ready results.
+            for get_call in get.call_args_list[2:]:
+                assert isinstance(get_call.args[0], ray.ObjectRef)
+                assert get_call.kwargs == {"timeout": 0}
+            assert ray.wait([blocked], timeout=0) == ([], [blocked])
+            assert "pending" in str(controller.logger.warning.call_args_list)
+        finally:
+            for worker in workers:
+                ray.kill(worker, no_restart=True)
+            ray.shutdown()
 
 
 class TestPackPlanDispatch(unittest.TestCase):
