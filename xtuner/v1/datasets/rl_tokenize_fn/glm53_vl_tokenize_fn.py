@@ -80,6 +80,12 @@ class RLGlm53VLTokenizeFunction(Glm53VLTokenizeFunction):
         extra.update(raw_prompt=raw_prompt, train_prompt_ids=data["input_ids"])
         # 5. 父类 __call__ 的媒体收集阶段已记录路径；补齐相对路径供 rollout 加载，图片 data URI 保持原样。
         if self._image_path:
+            # 导出实际生效的 HF 图片预算（含默认值）；GLM 的旧配置名 pixels 实际以视觉 token 为单位。
+            # 只携带 processor 语义，请求层再转换为推理后端的字段结构。
+            extra["image_processor_kwargs"] = {
+                "min_image_tokens": self.image_processor.min_image_tokens,
+                "max_image_tokens": self.image_processor.max_image_tokens,
+            }
             extra["image_data"] = [
                 path if is_data_uri(path) else get_image_path(path, media_root) for path in self._image_path
             ]

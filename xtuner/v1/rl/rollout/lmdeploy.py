@@ -1,4 +1,5 @@
 import json
+import copy
 import os
 from argparse import Namespace
 from pathlib import Path
@@ -299,6 +300,10 @@ class LMDeployWorker(RolloutWorker):
             if sample_params.min_tokens > 0:
                 lmdeploy_sample_params["min_new_tokens"] = sample_params.min_tokens
             payload.update(lmdeploy_sample_params)
+        # 两种请求（token IDs / messages）共用；复制后避免请求级修改污染后续轮次或其他样本。
+        image_options = rollout_state.extra_fields.get("image_processor_kwargs")
+        if image_options is not None:
+            payload["mm_processor_kwargs"] = {"image": copy.deepcopy(image_options)}
         return payload
 
     def _sleep(self, level: int = 1):
