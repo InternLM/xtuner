@@ -192,6 +192,47 @@ class RolloutState(BaseModel):
         else:
             self.uid = self.rollout_id
 
+    # Trainer-only payloads stripped by ``training_copy``; the training workers
+    # materialize ids/labels/logprobs/positions and reward scores only.
+    _TRAINER_ONLY_FIELDS = (
+        "prompt_ids",
+        "tokens",
+        "tools",
+        "tool_choice",
+        "response",
+        "tool_calls",
+        "reward_model",
+        "response_model_steps",
+    )
+
+    def training_copy(self, extra_field_keys: tuple[str, ...] = ()) -> "RolloutState":
+        """Return a shallow copy without trainer-only payloads.
+
+        A ``RolloutState`` crosses the Ray object store twice per step: once
+        when rollout workers hand it to the trainer, and once per DP rank when
+        the trainer ships training batches to the training workers. The
+        training workers only build CPU training tensors from
+        ``input_ids``/``labels``/``logprobs``/``position_ids``/``mm_info``/
+        ``routed_experts``/``teacher_targets`` and ``reward["score"]``, so the
+        conversation text, per-turn engine inputs, tool schemas and judger
+        payloads are dead weight on that second crossing. The trainer keeps
+        the original states for trajectory dumping, reward bookkeeping and
+        resource release; this copy is what the training workers receive.
+
+        Args:
+            extra_field_keys (tuple[str, ...]): ``extra_fields`` keys the
+                training workers still need (e.g. distillation data-source
+                routing); all other keys are dropped.
+
+        Returns:
+            RolloutState: Shallow copy sharing every training payload with the
+            original; trainer-only fields are emptied.
+        """
+        update: dict[str, Any] = {field: None for field in self._TRAINER_ONLY_FIELDS}
+        update["message"] = []  # message is the only non-optional stripped field
+        update["extra_fields"] = {key: self.extra_fields.get(key) for key in extra_field_keys}
+        return self.model_copy(update=update)
+
     def set_training_fields(self, *, input_ids: list[int], labels: list[int], logprobs: list[float] | None) -> None:
         """Validate and publish the full, unshifted training fields.
 

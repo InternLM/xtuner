@@ -15,7 +15,7 @@ from .rollout_teacher_manager import (
     RolloutTeacherScorer,
 )
 from .train_teacher_manager import TrainTeacherManager, TrainTeacherOutputs, TrainTeacherTimings
-from .trainer_adapter import DistillationTrainerAdapter
+from .trainer_adapter import DistillationTrainerAdapter, ROLLOUT_TRAINING_EXTRA_FIELDS
 
 
 __all__ = [
