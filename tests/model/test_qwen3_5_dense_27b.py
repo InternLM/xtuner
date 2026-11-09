@@ -1,5 +1,7 @@
 import os
 import unittest
+from contextlib import ExitStack
+from unittest.mock import Mock, patch
 
 import parametrize
 import torch
@@ -7,8 +9,9 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from packaging.version import Version
-from transformers import __version__ as transformers_version
 
+from transformers import __version__ as transformers_version
+from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model import Qwen3_5_VLDense27BConfig
@@ -16,7 +19,6 @@ from xtuner.v1.model.dense.qwen3_5_text import Qwen3_5_VLTextDense27BConfig, Qwe
 from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig
 from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.module.rope import RopeParametersConfig
-from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.utils.test_utils import init_data_mesh
 
 
@@ -111,6 +113,34 @@ class TestQwen3_5_VLDense27BConfig(unittest.TestCase):
             model_off = Qwen3_5_VLTextDense27BConfig().build()
         self.assertIsNone(model_off.mtp_block)
 
+    def test_mtp_sharding_uses_precision_policy_signature(self) -> None:
+        from xtuner.v1.config import FSDPConfig
+
+        with torch.device("meta"):
+            model = _tiny_qwen3_8_text_config().build()
+        model.fsdp_mesh = Mock()
+        assert model.mtp_block is not None
+        # Real FSDP installs these methods. Keep this API regression CPU-only.
+        with ExitStack() as stack:
+            for module in [model, *model.layers.values(), *model.mtp_block.layers]:
+                stack.enter_context(patch.object(module, "set_modules_to_forward_prefetch", create=True))
+            stack.enter_context(patch.object(model, "_init_device_mesh"))
+            stack.enter_context(patch.object(model, "_init_load_spec"))
+            stack.enter_context(patch.object(model, "_to_empty_meta"))
+            stack.enter_context(patch("torch.distributed.get_rank", return_value=0))
+            stack.enter_context(
+                patch(
+                    "xtuner.v1.model.dense.dense.apply_activation_checkpointing", side_effect=lambda layer, **_: layer
+                )
+            )
+            # autospec rejects the removed mp_policy keyword even without GPUs.
+            shard = stack.enter_context(patch.object(type(model), "_fully_shard", autospec=True))
+            model.fully_shard(FSDPConfig(recompute_ratio=0.0))
+
+        mtp_calls = [call for call in shard.call_args_list if call.kwargs.get("module") is model.mtp_block.layers[0]]
+        self.assertEqual(len(mtp_calls), 1)
+        self.assertNotIn("mp_policy", mtp_calls[0].kwargs)
+
 
 @unittest.skipIf(
     Version(transformers_version) < Version("5.8.0"),
@@ -129,7 +159,6 @@ class TestQwen3_8_VLDense27B(DeterministicDDPTestCase):
     def test_decoder_layer_bitwise_parity(self, device, layer_idx):
         from transformers import Qwen3_5Config
         from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5DecoderLayer, Qwen3_5RMSNorm
-
         from xtuner.v1.utils import HFCheckpointLoader
 
         self.create_pg(device)
@@ -215,7 +244,6 @@ class TestQwen3_8_VLDense27B(DeterministicDDPTestCase):
         """
         from transformers import Qwen3_5Config
         from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5DecoderLayer, Qwen3_5RMSNorm
-
         from xtuner.v1.module.mtp import MTPConfig
         from xtuner.v1.module.mtp.utils import roll_sequence_context
         from xtuner.v1.utils import HFCheckpointLoader
@@ -283,9 +311,7 @@ class TestQwen3_8_VLDense27B(DeterministicDDPTestCase):
                 position_embeddings=(cos, sin),
                 seq_ctx=seq_ctx,
             )[0]["hidden_states"]
-            loss_xt = F.cross_entropy(
-                F.linear(o_xt, model.lm_head.weight).reshape(-1, cfg.vocab_size), labels
-            )
+            loss_xt = F.cross_entropy(F.linear(o_xt, model.lm_head.weight).reshape(-1, cfg.vocab_size), labels)
             loss_xt.backward()
 
         out_diff = (o_hf.float() - o_xt.float().reshape(o_hf.shape)).abs().max().item()
@@ -298,7 +324,6 @@ class TestQwen3_8_VLDense27B(DeterministicDDPTestCase):
 
     def _patch_fast_pos_embed_interpolate(self) -> None:
         from transformers.vision_utils import get_vision_bilinear_indices_and_weights
-
         from xtuner.v1.model.compose.qwen3_vl.modeling_vision import Qwen3VLVisionModel
 
         def _interp(self, grid_thw):
@@ -313,7 +338,6 @@ class TestQwen3_8_VLDense27B(DeterministicDDPTestCase):
 
     def _tokenize_qwen3vl(self, raw_data: dict) -> dict:
         from transformers import AutoTokenizer
-
         from xtuner.v1.datasets import Qwen3VLTokenizeFnConfig
 
         tokenizer = AutoTokenizer.from_pretrained(QWEN3_8_27B_PATH)
@@ -329,7 +353,6 @@ class TestQwen3_8_VLDense27B(DeterministicDDPTestCase):
 
     def _full_model_loss(self, model, sample_type: str, device: str, sp_size: int) -> torch.Tensor:
         from transformers import Qwen3_5ForConditionalGeneration
-
         from xtuner.v1.data_proto.utils import pad_to_multiple_of
         from xtuner.v1.utils.test_utils import init_data_mesh
 
