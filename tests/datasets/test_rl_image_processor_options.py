@@ -58,15 +58,15 @@ def teacher_payload(options=None, backend="lmdeploy"):
     "options", [{"min_image_tokens": 64, "max_image_tokens": 64}, {"min_pixels": 4096, "max_pixels": 16384}]
 )
 @pytest.mark.parametrize("return_token_ids", [True, False])
-def test_both_payload_paths_copy_options(options, return_token_ids):
+def test_both_payload_paths_forward_options(options, return_token_ids):
+    original = dict(options)
     state = RolloutState(message=[], prompt_ids=[1], extra_fields={"image_processor_kwargs": options})
     payload = actor_payload(state, return_token_ids)
     scored = teacher_payload(options)
     assert payload["mm_processor_kwargs"] == scored["mm_processor_kwargs"] == {"image": options}
-    json.dumps(payload)
-    payload["mm_processor_kwargs"]["image"].clear()
-    scored["mm_processor_kwargs"]["image"].clear()
-    assert options
+    assert json.loads(json.dumps(payload))["mm_processor_kwargs"] == {"image": original}
+    assert json.loads(json.dumps(scored))["mm_processor_kwargs"] == {"image": original}
+    assert options == original
     assert actor_payload(state, return_token_ids)["mm_processor_kwargs"] == {"image": options}
 
 

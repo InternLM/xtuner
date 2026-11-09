@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import math
 import os
 import time
@@ -213,7 +212,7 @@ class RolloutTeacherClient:
         if image_data:
             payload["image_data"] = image_data
         if image_processor_kwargs is not None and self.backend == "lmdeploy":
-            payload["mm_processor_kwargs"] = {"image": copy.deepcopy(image_processor_kwargs)}
+            payload["mm_processor_kwargs"] = {"image": image_processor_kwargs}
         if self.target_config.uses_topk_targets:
             payload["top_logprobs_num"] = cast(int, self.target_config.top_k)
         return payload
