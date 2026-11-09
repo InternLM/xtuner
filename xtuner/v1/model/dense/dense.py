@@ -446,7 +446,6 @@ class Dense(BaseModel):
                 reshard_after_forward = mtp_idx != len(self.mtp_block.layers) - 1
                 self._fully_shard(
                     mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-                    mp_policy=mp_policy,
                     reshard_after_forward=reshard_after_forward,
                     offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
                     module=mtp_layer,
