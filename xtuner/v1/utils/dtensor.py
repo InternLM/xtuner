@@ -35,7 +35,8 @@ def dtensor_checkpoint_view(tensor: torch.Tensor) -> torch.Tensor:
         return tensor
     if tensor.requires_grad:
         raise ValueError("DTensor checkpoint views require detached tensors")
-    result = torch.Tensor._make_wrapper_subclass(
+    # The Tensor builtin exists at runtime but is absent from the torch 2.6 type stubs.
+    result = torch.Tensor._make_wrapper_subclass(  # type: ignore[attr-defined]
         DTensor,
         tensor.shape,
         strides=tensor.stride(),
