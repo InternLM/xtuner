@@ -1,3 +1,8 @@
+---
+name: xtuner-unit-test
+description: Run XTuner unit tests with the user-specified Python and lmdeploy environment. Use when selecting, running, or rerunning XTuner pytest tests and inspecting failures.
+---
+
 # XTuner Unit Test
 
 Run XTuner tests with the user-specified Python and lmdeploy environment. Never report success
