@@ -1,6 +1,9 @@
 import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
+from uuid import uuid4
+
+import ray
 
 from xtuner.v1.rl.utils.misc import (
     check_chat_completions,
@@ -25,13 +28,22 @@ class RolloutProxyManager(RolloutWorkerLifecycleListener):
     _CHECK_INTERVAL_SECONDS = 3.0
 
     def __init__(self, config: "RolloutConfig"):
+        self._turn_resume = getattr(config, "turn_resume_wait_timeout", None) is not None
         self._model_name = config.model_name
         self._routed_proxy_url = config.routed_proxy_url
         self._routed_proxy_admin_url = config.routed_proxy_admin_url
         self._registered_session_urls: set[str] = set()
         self._logger = get_logger(log_dir=config.worker_log_dir, tag="RolloutProxyManager")
+        self._affinity = None
+        if config.session_affinity:
+            from .affinity_router import SessionAffinityService
+
+            self._affinity = SessionAffinityService(ray.util.get_node_ip_address())
 
     def replace_registered_session_urls(self, session_urls: Iterable[str]) -> None:
+        if self._affinity is not None:
+            self._affinity.invoke("replace_backends", session_urls)
+            session_urls = [self._affinity.url]
         model_name = self._get_model_name()
         delete_from_routedapiproxy(self._routed_proxy_admin_url, model_name)
         self._registered_session_urls.clear()
@@ -55,13 +67,32 @@ class RolloutProxyManager(RolloutWorkerLifecycleListener):
         """Remove inactive request entrypoints from routed API proxy."""
         for worker in group.workers:
             if worker.is_request_entrypoint:
-                self._delete_session_url(worker.session_url)
+                if self._affinity is not None:
+                    self._affinity.invoke("set_backend", worker.session_url, False)
+                else:
+                    self._delete_session_url(worker.session_url)
 
     def on_worker_group_active(self, group: "WorkerGroup") -> None:
         """Register active request entrypoints to routed API proxy."""
         for worker in group.workers:
             if worker.is_request_entrypoint:
-                self._register_session_url(worker.session_url)
+                if self._affinity is not None:
+                    self._affinity.invoke("set_backend", worker.session_url, True)
+                else:
+                    self._register_session_url(worker.session_url)
+
+    def retire_sessions(self, session_ids) -> None:
+        if self._affinity is not None:
+            self._affinity.invoke("retire_sessions", session_ids)
+
+    def close(self) -> None:
+        try:
+            for url in list(self._registered_session_urls):
+                self._delete_session_url(url, raise_on_error=True)
+        finally:
+            if self._affinity is not None:
+                self._affinity.close()
+                self._affinity = None
 
     def _register_session_url(
         self,
@@ -107,10 +138,28 @@ class RolloutProxyManager(RolloutWorkerLifecycleListener):
         self._logger.info(
             f"Validating routed API proxy chat completions: url={self._routed_proxy_url}, model={model_name}"
         )
-        for attempt in range(1, self._CHECK_ATTEMPTS + 1):
-            if check_chat_completions(self._routed_proxy_url, model_name):
+        attempts = 1 if self._turn_resume else self._CHECK_ATTEMPTS
+        for attempt in range(1, attempts + 1):
+            if self._turn_resume:
+                from .trace_store import get_existing_store
+
+                session_id = str(uuid4())
+                try:
+                    succeeded = check_chat_completions(
+                        self._routed_proxy_url, model_name, max_tokens=1024, session_id=session_id
+                    )
+                finally:
+                    store = get_existing_store()
+                    try:
+                        if store is not None:
+                            ray.get(store.release_sessions.remote([session_id]))
+                    finally:
+                        self.retire_sessions([session_id])
+            else:
+                succeeded = check_chat_completions(self._routed_proxy_url, model_name)
+            if succeeded:
                 return
-            if attempt < self._CHECK_ATTEMPTS:
+            if attempt < attempts:
                 self._logger.warning(
                     f"check chat completions failed for routed API proxy {self._routed_proxy_url}, "
                     f"retrying {attempt}/{self._CHECK_ATTEMPTS - 1} after {self._CHECK_INTERVAL_SECONDS}s"

@@ -16,7 +16,7 @@ import ray
 import requests  # type: ignore[import-untyped]
 from cyclopts import Group, Parameter
 from packaging.version import Version
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from typing_extensions import Annotated
 
@@ -331,6 +331,9 @@ class RolloutConfig(BaseModel):
             help="Timeout duration (in seconds) for rollout requests.",
         ),
     ] = 1200.0
+    turn_resume_wait_timeout: float | None = Field(default=None, gt=0)
+    turn_resume_initially_closed: bool = False
+
     session_server_timeout: Annotated[
         float,
         Parameter(
@@ -431,6 +434,10 @@ class RolloutConfig(BaseModel):
             help="Number of consecutive health check failures required before marking a worker inactive.",
         ),
     ] = 3
+    session_affinity: bool = Field(
+        default=False,
+        description="Pin external HTTP sessions to one concrete DP SessionServer.",
+    )
     enable_proxy: Annotated[
         bool,
         Parameter(
@@ -796,6 +803,8 @@ class RolloutWorker(SingleAcceleratorWorker):
                 host=self.host,
                 port=self.session_server_port,
                 request_timeout=self.config.session_server_timeout,
+                turn_resume_wait_timeout=self.config.turn_resume_wait_timeout,
+                turn_resume_initially_closed=self.config.turn_resume_initially_closed,
                 enable_return_routed_experts=self.enable_return_routed_experts,
             )
         )
@@ -807,6 +816,9 @@ class RolloutWorker(SingleAcceleratorWorker):
             raise RuntimeError(
                 f"Request-entrypoint rollout worker rank={self.rank} did not start session server during init."
             )
+
+    def get_session_server(self):
+        return self.session_server_actor
 
     def _stop_session_server(self) -> None:
         if self.session_server_actor is not None:
