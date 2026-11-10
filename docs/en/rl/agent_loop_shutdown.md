@@ -10,8 +10,11 @@ Both RL trainers close their training and evaluation loop managers when `fit()`
 exits, including after an error. A disaggregated trainer stops its background
 producer first. A loop that owns sessions, background tasks or external clients
 should override `close()` to stop admitting work, wait for active work to clean
-up and close its clients. Bound any external I/O in the hook. Close failures are
-logged and do not replace the training result.
+up and close its clients. Bound any external I/O in the hook. All enabled managers
+are given a chance to close. Close failures are logged; after otherwise successful
+training, the first close failure is raised so the run cannot report success with
+unreleased resources. If training already raised or was cancelled, that original
+exception remains primary and the close failures remain in the logs.
 
 The built-in sandbox loop rejects new runs, cancels active runners and waits
 for their `finally` blocks to release their pools.

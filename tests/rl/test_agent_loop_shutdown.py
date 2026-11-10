@@ -70,7 +70,7 @@ class TestLoopShutdown(unittest.IsolatedAsyncioTestCase):
                 started.set()
                 await asyncio.Event().wait()
 
-        pool = sandbox_fixtures.pool(Provider(events), sandbox_fixtures.spec(user="test"))
+        pool = sandbox_fixtures.pool(Provider(events), sandbox_fixtures.spec())
         runner = Runner(pool=pool, infer=SandboxStage(pre=[Block()]), validate=Judger("score", SandboxStage()))
         item = AgentRolloutItem(
             id="shutdown", data_source="test", instruction="task.md", task_root=Path("/tmp"), uid=1, pipeline=runner
@@ -117,6 +117,9 @@ class TestTrainerShutdown(unittest.TestCase):
                                 with self.assertRaises(type(outcome)) as caught:
                                     trainer.fit()
                                 self.assertIs(caught.exception, outcome)
+                            elif cleanup_fails:
+                                with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
+                                    trainer.fit()
                             else:
                                 trainer.fit()
                             close_trace.assert_called_once()
@@ -126,6 +129,32 @@ class TestTrainerShutdown(unittest.TestCase):
                         trainer._exp_tracker.close.assert_called_once()
                         if trainer_type is RLColocateTrainer:
                             trainer.rl_health_manager.stop.assert_called_once()
+
+    def test_fit_propagates_eval_close_error_or_cancellation(self) -> None:
+        for trainer_type in (RLColocateTrainer, RLDisaggregatedTrainer):
+            for failure in (RuntimeError("eval cleanup failed"), asyncio.CancelledError()):
+                with self.subTest(trainer=trainer_type.__name__, failure=type(failure).__name__):
+                    trainer = trainer_type.__new__(trainer_type)
+                    trainer.logger = MagicMock()
+                    trainer._enable_evaluate = True
+                    trainer.agent_loop_manager = SimpleNamespace(close=AsyncMock())
+                    trainer.eval_agent_loop_manager = SimpleNamespace(close=AsyncMock(side_effect=failure))
+                    trainer.rl_health_manager = MagicMock()
+                    trainer._exp_tracker = MagicMock()
+                    fit_mock = AsyncMock if trainer_type is RLDisaggregatedTrainer else MagicMock
+                    trainer._fit = fit_mock()
+                    with patch("xtuner.v1.train.rl_trainer.close_trace") as close_trace:
+                        with self.assertRaises(type(failure)) as caught:
+                            trainer.fit()
+                        # gather materializes a new CancelledError for a cancelled child.
+                        if not isinstance(failure, asyncio.CancelledError):
+                            self.assertIs(caught.exception, failure)
+                        close_trace.assert_called_once()
+                    trainer.agent_loop_manager.close.assert_awaited_once()
+                    trainer.eval_agent_loop_manager.close.assert_awaited_once()
+                    trainer._exp_tracker.close.assert_called_once()
+                    if trainer_type is RLColocateTrainer:
+                        trainer.rl_health_manager.stop.assert_called_once()
 
     def test_fit_skips_eval_manager_when_evaluation_is_disabled(self):
         trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
