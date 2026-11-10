@@ -1,5 +1,7 @@
 import copy
 import json
+import re
+import time
 from functools import reduce
 from http import HTTPStatus
 from operator import add
@@ -13,6 +15,7 @@ from transformers import AutoTokenizer
 from xtuner.v1.utils import get_logger
 
 from .chat_template import canonicalize_messages_for_chat_template
+from .request_gate import RequestGate, RequestLease, SettlementReceipt
 from .trace_store import TokenizedSegment, get_store
 
 
@@ -20,7 +23,7 @@ FMT_OPENAI = "openai"
 FMT_ANTHROPIC = "anthropic"
 
 # Fields the SessionServer consumes locally and never forwards upstream.
-_SESSION_SERVER_ONLY_KEYS = {"session_id"}
+_SESSION_SERVER_ONLY_KEYS = {"session_id", "_xt_request_id", "_xt_model_step"}
 
 
 def _normalize_path(req_path: str) -> str:
@@ -43,6 +46,35 @@ def _detect_format(req_path: str) -> str:
 
 def _is_error_payload(payload: dict) -> bool:
     return payload.get("error") is not None or payload.get("type") == "error" or payload.get("object") == "error"
+
+
+def _is_lmdeploy_context_rejection(status: int, body: bytes) -> bool:
+    """Recognize the pinned LMDeploy's input check before engine generation.
+
+    A finished HTTP error alone does not prove that backend execution ended.
+    LMDeploy bc2c8da's AsyncEngine rejects input_len >= session_len before
+    submitting generation. Its OpenAI response has no stable machine error code,
+    so match that specific payload conservatively; unknown errors stay unsafe.
+    """
+    if status != HTTPStatus.BAD_REQUEST:
+        return False
+    try:
+        payload = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return False
+    if not isinstance(payload, dict) or (
+        payload.get("object") != "error"
+        or payload.get("type") != "invalid_request_error"
+        or payload.get("code") != 400
+        or "choices" in payload
+        or not isinstance(payload.get("message"), str)
+    ):
+        return False
+    match = re.fullmatch(
+        r"Input length \(([0-9]{1,20})\) must be smaller than the model context length \(([0-9]{1,20})\)\.",
+        payload["message"],
+    )
+    return match is not None and int(match[1]) >= int(match[2]) > 0
 
 
 class _UpstreamResponseError(RuntimeError):
@@ -267,6 +299,8 @@ class SessionServer:
         read_bufsize (int): Buffer limit for line reader in ClientSession. Default is 64MB (2**26).
     """
 
+    request_gate: RequestGate | None = None
+
     def __init__(
         self,
         worker_base_url: str,
@@ -276,6 +310,8 @@ class SessionServer:
         request_timeout: float = 1200.0,
         read_bufsize: int = 2**26,
         enable_return_routed_experts: bool = False,
+        turn_resume_wait_timeout: float | None = None,
+        turn_resume_initially_closed: bool = False,
     ):
         self.worker_base_url = worker_base_url.rstrip("/")
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -284,6 +320,12 @@ class SessionServer:
         self.request_timeout = request_timeout
         self.read_bufsize = read_bufsize
         self.enable_return_routed_experts = enable_return_routed_experts
+        self.turn_resume_wait_timeout = turn_resume_wait_timeout
+        self.turn_resume_initially_closed = turn_resume_initially_closed
+        self.request_gate = (
+            RequestGate(wait_timeout=turn_resume_wait_timeout, initially_open=not turn_resume_initially_closed)
+            if turn_resume_wait_timeout is not None else None
+        )
         self.store = get_store()
         self.stop_word = self.tokenizer.eos_token or ""
 
@@ -414,6 +456,14 @@ class SessionServer:
             dict: The (possibly trimmed) response — currently unused by the
             caller but kept for symmetry.
         """
+        if orig_req_body.get("_xt_request_id") is not None and (
+            not worker_resp.get("choices")
+            or any(c.get("finish_reason") not in {"stop", "length", "tool_calls"} for c in worker_resp["choices"])
+        ):
+            raise RuntimeError(
+                "Backend returned an unsuccessful generation terminal: "
+                + str([c.get("finish_reason") for c in worker_resp.get("choices", [])])
+            )
         session_id = orig_req_body["session_id"]
 
         if fmt == FMT_ANTHROPIC:
@@ -487,8 +537,9 @@ class SessionServer:
             if delta_len > 0:
                 delta_expert = ray.put(raw_routed_expert[prefix_len : prefix_len + delta_len])
             response_expert = ray.put(raw_routed_expert[prefix_len + delta_len :])
-        elif self.enable_return_routed_experts and _bool_request_value(
-            orig_req_body.get("return_routed_experts"), True
+        elif self.enable_return_routed_experts and (
+            orig_req_body.get("_xt_request_id") is not None
+            or _bool_request_value(orig_req_body.get("return_routed_experts"), True)
         ):
             raise RuntimeError(
                 "SessionServer response is missing routed_experts, but enable_return_routed_experts is True."
@@ -503,7 +554,13 @@ class SessionServer:
             await self.store.insert.remote(
                 session_id,
                 key=old_prompt,
-                value=TokenizedSegment(text=delta_text, token_ids=delta_ids, expert_key=delta_expert),
+                value=TokenizedSegment(
+                    text=delta_text,
+                    token_ids=delta_ids,
+                    expert_key=delta_expert,
+                    request_id=orig_req_body.get("_xt_request_id"),
+                    model_step=orig_req_body.get("_xt_model_step"),
+                ),
             )
         await self.store.insert.remote(
             session_id,
@@ -514,6 +571,8 @@ class SessionServer:
                 logprobs=output_logprobs,
                 labels=output_token_ids,
                 expert_key=response_expert,
+                request_id=orig_req_body.get("_xt_request_id"),
+                model_step=orig_req_body.get("_xt_model_step"),
                 length=len(output_token_ids),
             ),
         )
@@ -549,8 +608,40 @@ class SessionServer:
         get_logger().info("SessionServer stopped.")
 
     async def _handle_request(self, request: web.Request) -> web.Response:
+        path = request.match_info["path"]
+        if self.request_gate is None or not _is_generation_endpoint(request.method, path):
+            return await self._forward_request(request)
+        fmt = _detect_format(path)
+        if fmt != FMT_OPENAI:
+            return web.json_response(
+                _error_payload(fmt, "turn-resume supports OpenAI chat completions only", 400), status=400
+            )
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            return web.json_response(_error_payload(fmt, "Invalid generation JSON", 400), status=400)
+        if not isinstance(body, dict) or body.get("stream") or not _request_uses_trace_store(body):
+            return web.json_response(
+                _error_payload(fmt, "turn-resume requires nonstream traced generation", 400), status=400
+            )
+        async with self.request_gate.request(str(body["session_id"])) as lease:
+            started = time.perf_counter()
+            try:
+                return await self._forward_request(request, lease)
+            except BaseException as exc:
+                get_logger().error(
+                    f"request_forward_failed id={lease.request_id} exception={type(exc).__name__} "
+                    f"elapsed_s={time.perf_counter() - started:.6f} "
+                    f"settlement_recorded={lease.settlement is not None}"
+                )
+                raise
+
+    async def _forward_request(self, request: web.Request, lease: RequestLease | None = None) -> web.Response:
         """Proxy handler: detect format, run hooks, forward, stream back."""
 
+        request_start = time.perf_counter()
+        prepare_s = 0.0
+        trace_s = 0.0
         req_path = request.match_info["path"]
         is_generation_endpoint = _is_generation_endpoint(request.method, req_path)
         fmt = _detect_format(req_path)
@@ -607,6 +698,9 @@ class SessionServer:
                             request_data["tools"] = filtered
                         else:
                             request_data.pop("tools", None)
+                    if lease is not None:
+                        request_data["_xt_request_id"] = lease.request_id
+                        request_data["_xt_model_step"] = lease.model_step
                     orig_req_body = copy.deepcopy(request_data)
 
                     trace_enabled = _request_uses_trace_store(request_data)
@@ -619,13 +713,19 @@ class SessionServer:
                     orig_return_token_ids = _bool_request_value(request_data.get("return_token_ids"), False)
                     orig_return_routed_experts = _bool_request_value(request_data.get("return_routed_experts"), True)
 
+                    prepare_start = time.perf_counter()
                     request_data = await self.on_request(request_data, fmt, trace_enabled=trace_enabled)
+                    prepare_s = time.perf_counter() - prepare_start
                     request_body = json.dumps(request_data).encode("utf-8")
             except (json.JSONDecodeError, UnicodeDecodeError):
                 pass
             except Exception as exc:
                 message = f"SessionServer request hook failed: {type(exc).__name__}: {exc}"
                 get_logger().error(message)
+                if lease is not None:
+                    # Request preparation failed before any backend send.
+                    get_logger().error(f"request_terminal id={lease.request_id} outcome=not_started")
+                    lease.settlement = SettlementReceipt(True, True, "not_started")
                 return web.json_response(_error_payload(fmt, message), status=500)
 
         trace_active = is_generation_endpoint and trace_enabled
@@ -660,6 +760,7 @@ class SessionServer:
             else None
         )
 
+        forward_start = time.perf_counter()
         timeout = ClientTimeout(total=self.request_timeout, sock_connect=30)
         async with ClientSession(read_bufsize=self.read_bufsize, timeout=timeout) as client:
             async with client.request(
@@ -750,6 +851,7 @@ class SessionServer:
                         body=final_raw_response,
                     )
 
+        forward_s = time.perf_counter() - forward_start
         # Apply abstract on_response processing
         response_data: Optional[dict] = None
         skip_done = bool(is_stream and not trace_response)
@@ -782,9 +884,48 @@ class SessionServer:
 
             if response_data is not None:
                 try:
+                    trace_start = time.perf_counter()
                     await self.on_response(response_data, fmt, orig_req_body)
+                    trace_s = time.perf_counter() - trace_start
+                    if lease is not None and any(
+                        c.get("finish_reason") not in {"stop", "length", "tool_calls"}
+                        for c in response_data.get("choices", [])
+                    ):
+                        raise RuntimeError("Unsuccessful backend generation terminal")
                 except Exception as exc:
                     session_error_msg = f"SessionServer response hook failed: {type(exc).__name__}: {exc}"
+
+        if lease is not None:
+            complete = (
+                not is_stream
+                and is_success_response
+                and response_data is not None
+                and not _is_error_payload(response_data)
+                and bool(response_data.get("choices"))
+                and all(c.get("finish_reason") is not None for c in response_data["choices"])
+            )
+            terminal = "trace_committed" if complete and not session_error_msg else "failed"
+            # A known pre-generation rejection is a safely ended failed attempt,
+            # not a successful trace and not an ambiguous in-flight request.
+            rejected_before_generation = not is_stream and _is_lmdeploy_context_rejection(
+                upstream_status, raw_response
+            )
+            backend_ended = complete or rejected_before_generation
+            get_logger().info(f"request_terminal id={lease.request_id} outcome={terminal} backend_ended={backend_ended}")
+            if rejected_before_generation:
+                get_logger().info(
+                    f"request_rejected_before_generation id={lease.request_id} reason=context_length_exceeded"
+                )
+            get_logger().info(
+                f"request_timing id={lease.request_id} prepare_s={prepare_s:.6f} "
+                f"forward_s={forward_s:.6f} trace_s={trace_s:.6f} "
+                f"total_s={time.perf_counter() - request_start:.6f}"
+            )
+            lease.settlement = SettlementReceipt(backend_ended, True, terminal)
+            if terminal == "trace_committed":
+                payload = json.loads(response.body)
+                payload["id"] = lease.request_id
+                response.body = json.dumps(payload).encode("utf-8")
 
         if session_error_msg:
             get_logger().error(session_error_msg)
@@ -1121,6 +1262,8 @@ class SessionServerActor:
         port: int,
         request_timeout: float,
         enable_return_routed_experts: bool = False,
+        turn_resume_wait_timeout: float | None = None,
+        turn_resume_initially_closed: bool = False,
     ):
         self.worker_base_url = worker_base_url
         self.tokenizer_path = tokenizer_path
@@ -1128,6 +1271,8 @@ class SessionServerActor:
         self.port = port
         self.request_timeout = request_timeout
         self.enable_return_routed_experts = enable_return_routed_experts
+        self.turn_resume_wait_timeout = turn_resume_wait_timeout
+        self.turn_resume_initially_closed = turn_resume_initially_closed
         self.server: SessionServer | None = None
 
     @property
@@ -1145,9 +1290,31 @@ class SessionServerActor:
             port=self.port,
             request_timeout=self.request_timeout,
             enable_return_routed_experts=self.enable_return_routed_experts,
+            turn_resume_wait_timeout=self.turn_resume_wait_timeout,
+            turn_resume_initially_closed=self.turn_resume_initially_closed,
         )
         await self.server.start()
         return self.server.url
+
+    def _gate(self) -> RequestGate:
+        if self.server is None or self.server.request_gate is None:
+            raise RuntimeError("turn-resume gate is not enabled")
+        return self.server.request_gate
+
+    async def request_status(self):
+        return self._gate().snapshot()
+
+    async def seal_requests(self, epoch: int):
+        await self._gate().seal(epoch)
+
+    async def drain_requests(self, timeout: float):
+        return await self._gate().drain(timeout)
+
+    async def install_request_version(self, epoch: int, model_step: int):
+        await self._gate().install_version(epoch, model_step)
+
+    async def reopen_requests(self, epoch: int):
+        await self._gate().reopen(epoch)
 
     async def stop(self) -> None:
         if self.server is not None:

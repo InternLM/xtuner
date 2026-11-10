@@ -332,6 +332,28 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(discarded.routed_experts)
         self.assertEqual(discarded.extra_fields, {})
 
+    async def test_complete_provenance_does_not_erase_generated_token_count(self):
+        task_name = "complete_provenance"
+        agent = self._build_agent_loop()
+
+        async def generate(group, **kwargs):
+            group[0].response_ids = [11, 12, 13]
+            group[0].response_model_steps = [0, 1, 1]
+            return group
+
+        agent.generate_group = generate
+        ctx = self._build_context(
+            SyncProduceStrategyConfig().build(), task_name, agent, self._build_sampler(), batch_size=1
+        )
+        ctx.progress.add_produced = MagicMock()
+        state = make_rollout_state(1, status=Status.COMPLETED, reward_score=1.0)
+        state.response_ids = [11]
+        state.response_model_steps = [0]
+        group = await ctx.generate_group([state])
+        self.assertTrue(await ctx.put_generated_group(group))
+        ctx.progress.add_produced.assert_called_once_with(task_name, samples=1, tokens=2)
+        self.assertEqual(group[0].response_model_steps, [0, 1, 1])
+
     async def test_generation_filters_only_completed_group(self):
         # 过滤由 AgentLoop generation 执行；Producer 只处理返回状态和数据所有权。
         task_name = "test_valid_completed_only"
