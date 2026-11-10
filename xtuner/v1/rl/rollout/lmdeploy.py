@@ -44,6 +44,8 @@ def run_lmdeploy_server_wrapper(lmdeploy_config_namespace: Namespace):
 class LMDeployWorker(RolloutWorker):
     """A Ray actor that runs a text generation server using LMDeploy."""
 
+    supports_routed_experts_start_len: bool = True
+
     def __init__(
         self,
         config: RolloutConfig,
@@ -259,6 +261,9 @@ class LMDeployWorker(RolloutWorker):
                 )
             )
             payload.update(lmdeploy_sample_params)
+            start_len = self._get_routed_experts_start_len(rollout_state)
+            if start_len:
+                payload["routed_experts_start_len"] = start_len
         else:
             payload = {
                 "model": self.model_name,
