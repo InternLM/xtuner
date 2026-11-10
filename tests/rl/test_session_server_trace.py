@@ -17,6 +17,7 @@ class TestSessionServerTraceHandling(unittest.IsolatedAsyncioTestCase):
         server.tokenizer.apply_chat_template.return_value = "rendered tool prompt"
         server.tokenizer.encode.return_value = [11, 12, 13]
         server.stop_word = "<eos>"
+        server.enable_return_routed_experts = True
         server.store = SimpleNamespace(search=SimpleNamespace(remote=AsyncMock(return_value=("", []))))
         request = {
             "model": "test-model",
@@ -35,6 +36,52 @@ class TestSessionServerTraceHandling(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(forwarded["tool_choice"], request["tool_choice"])
         self.assertTrue(forwarded["return_logprob"])
         self.assertEqual(request["messages"], [{"role": "user", "content": "Run pwd"}])
+
+    async def test_routed_experts_flag_follows_engine_configuration(self):
+        request = {
+            "model": "test-model",
+            "session_id": "dense-session",
+            "messages": [{"role": "user", "content": "pong"}],
+            "max_tokens": 16,
+        }
+        for enabled in (False, True):
+            server = SessionServer.__new__(SessionServer)
+            server.tokenizer = Mock()
+            server.tokenizer.apply_chat_template.return_value = "rendered prompt"
+            server.tokenizer.encode.return_value = [11, 12]
+            server.stop_word = "<eos>"
+            server.enable_return_routed_experts = enabled
+            server.store = SimpleNamespace(search=SimpleNamespace(remote=AsyncMock(return_value=("", []))))
+            for trace_enabled in (True, False):
+                with self.subTest(enabled=enabled, trace_enabled=trace_enabled):
+                    forwarded = await server.on_request(
+                        {**request}, session_server_module.FMT_OPENAI, trace_enabled=trace_enabled
+                    )
+                    # A dense engine rejects return_routed_experts=True with HTTP 400.
+                    self.assertIs(forwarded["return_routed_experts"], enabled)
+
+    async def test_dense_evaluation_request_overrides_client_routed_experts_flag(self):
+        server = SessionServer.__new__(SessionServer)
+        server.enable_return_routed_experts = False
+        request = {
+            "model": "test-model",
+            "session_id": "dense-eval",
+            "messages": [{"role": "user", "content": "pong"}],
+            "return_routed_experts": True,
+        }
+        forwarded = await server.on_request(request, session_server_module.FMT_OPENAI, trace_enabled=False)
+        self.assertIs(forwarded["return_routed_experts"], False)
+
+    async def test_evaluation_preserves_client_routed_experts_opt_out(self) -> None:
+        server = SessionServer.__new__(SessionServer)
+        server.enable_return_routed_experts = True
+        request = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "pong"}],
+            "return_routed_experts": False,
+        }
+        forwarded = await server.on_request(request, session_server_module.FMT_OPENAI, trace_enabled=False)
+        self.assertIs(forwarded["return_routed_experts"], False)
 
     async def asyncSetUp(self):
         self.upstream_status = 200
