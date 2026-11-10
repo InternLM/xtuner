@@ -72,6 +72,12 @@ def _ensure_det_cudnn_runtime() -> None:
     _det_runtime_checked = True
 
 
+def _get_available_cuda_memory(device) -> int:
+    free_bytes, _ = torch.cuda.mem_get_info(device)
+    cached_bytes = torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
+    return free_bytes + cached_bytes
+
+
 def _check_accum_workspace(n_splits: int, seqlen_k_rounded: int, head_dim_rounded: int, device) -> None:
     """Clear error instead of a raw CUDA OOM when the sliced accumulator cannot
     fit.
@@ -80,10 +86,12 @@ def _check_accum_workspace(n_splits: int, seqlen_k_rounded: int, head_dim_rounde
     per CTA of a launch (chunk=128 slices at 16K/512-dim is 4 GiB; 512K/576-dim would be 144 GiB).
     """
     workspace_bytes = 4 * n_splits * seqlen_k_rounded * head_dim_rounded
-    free_bytes, _ = torch.cuda.mem_get_info(device)
-    if workspace_bytes > free_bytes:
+    available_bytes = _get_available_cuda_memory(device)
+    if workspace_bytes > available_bytes:
         if n_splits == 1:
             hint = "Even a single per-CTA slice does not fit; run with XTUNER_DETERMINISTIC=false."
+        elif n_splits == 4:
+            hint = "Even the minimum of 4 per-CTA slices does not fit; run with XTUNER_DETERMINISTIC=false."
         else:
             hint = (
                 "Reduce `chunk` in flash_attn_bwd_sm90_multilaunch (fewer slices per launch, "
@@ -92,7 +100,8 @@ def _check_accum_workspace(n_splits: int, seqlen_k_rounded: int, head_dim_rounde
         raise RuntimeError(
             f"deterministic DSA backward needs {workspace_bytes / 2**30:.2f} GiB for the per-CTA "
             f"FP32 accumulator ({n_splits} slices x {seqlen_k_rounded} kv x {head_dim_rounded} dim "
-            f"x 4 bytes) but only {free_bytes / 2**30:.2f} GiB is free. {hint}"
+            f"x 4 bytes) but only {available_bytes / 2**30:.2f} GiB is available, including reusable "
+            f"PyTorch allocator cache. {hint}"
         )
 
 
@@ -482,11 +491,13 @@ def flash_attn_bwd_sm90_multilaunch(
     a launch) plus one reduced accumulator of `4 * round_up(S_k, 64) *
     round_up(D, 32)` bytes. That is 4 GiB at the GLM-5.3 CI shape (S_k=16K,
     D=512) but grows linearly with S_k (144 GiB at S_k=512K, D=576 with
-    chunk=128). The driver therefore halves the per-launch query count (and the
-    slice count) until the workspace fits 80% of the free memory — longer
-    sequences run as more, smaller launches instead of erroring. Only when a
-    single slice still does not fit does `_check_accum_workspace` raise a clear
-    error instead of a raw CUDA OOM.
+    chunk=128). The driver therefore reduces the per-launch query count in
+    four-query steps until the workspace fits 80% of available memory, including
+    the reusable PyTorch allocator cache — longer sequences run as more, smaller
+    launches instead of erroring. Four slices are the minimum multi-launch
+    granularity so topk_length slices stay 16-byte aligned. If four slices still
+    do not fit, `_check_accum_workspace` raises a clear error instead of a raw
+    CUDA OOM.
 
     Cost (CI shape 16384 q x 16384 kv x 64 heads x 512 dim x topk 2048, H200,
     same-source A/B — see PR discussion R2): single-layer backward 57ms vs stock
@@ -506,17 +517,17 @@ def flash_attn_bwd_sm90_multilaunch(
     # by blockIdx which is unique within the launch, so privacy holds regardless
     # of scheduling).
     n_splits = min(chunk, total_S_q)
-    # Auto-shrink the launch granularity until the FP32 slice workspace fits a
-    # budget of 80% free memory: chunk=128 at 512K/576-dim would need 144 GiB,
-    # which op-level users cannot remediate by hand. Halving n_splits also halves
-    # the per-launch query count below (launch count grows proportionally), so
-    # slice privacy — one slice per CTA of a launch — is preserved by
-    # construction. `_check_accum_workspace` remains as the final guard for the
-    # n_splits==1 case.
-    free_bytes, _ = torch.cuda.mem_get_info(device)
-    budget = int(free_bytes * 0.8)
-    while n_splits > 1 and 4 * n_splits * seqlen_k_rounded * head_dim_rounded > budget:
-        n_splits //= 2
+    if total_S_q >= 4:
+        # Multi-launch slices start at multiples of four queries, keeping int32
+        # topk_length slices aligned to the 16-byte boundary required by CuTe.
+        n_splits = max(4, n_splits // 4 * 4)
+    # Auto-shrink in four-query steps until the FP32 slice workspace fits 80% of
+    # available memory. Four slices are the minimum multi-launch granularity;
+    # smaller workspaces are rejected instead of producing misaligned slices.
+    available_bytes = _get_available_cuda_memory(device)
+    budget = int(available_bytes * 0.8)
+    while n_splits > 4 and 4 * n_splits * seqlen_k_rounded * head_dim_rounded > budget:
+        n_splits -= 4
     _check_accum_workspace(n_splits, seqlen_k_rounded, head_dim_rounded, device)
     dkv_accum = torch.zeros(
         1,
