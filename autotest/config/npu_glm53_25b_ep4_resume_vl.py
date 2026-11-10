@@ -79,7 +79,7 @@ trainer = TrainerConfig(
     total_step=20,
     work_dir=f"{os.environ['WORK_DIR']}",
     seed=0,
-    dist_backend="nccl",
+    dist_backend="hccl",
     resume_cfg=ResumeConfig(auto_resume=True),
     checkpoint_interval=10,
     checkpoint_maxkeep=2,
