@@ -1,7 +1,8 @@
 """Complete-turn admission barrier; forwarding alone certifies settlement.
 
-Adapted from sandbox_rl's pre-fd76fba agents/request_gate.py atomic admission.
-Unlike that HTTP gate, an unconfirmed backend request poisons this barrier.
+Admission-accounting reference: matrix72c/sandbox_rl before fd76fba,
+src/sandbox_rl/agents/request_gate.py. This native condition/lease implementation
+adds explicit backend/trace settlement; an unknown outcome poisons the barrier.
 """
 
 from __future__ import annotations

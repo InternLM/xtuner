@@ -3,6 +3,7 @@ import unittest
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+
 from xtuner.v1.rl.rollout.request_gate import RequestGate
 from xtuner.v1.rl.rollout.session_server import SessionServer
 
@@ -28,8 +29,9 @@ class ForwardingTests(unittest.IsolatedAsyncioTestCase):
                 request.transport.close()
                 return web.Response()
             if self.upstream_error is not None:
-                return web.Response(status=self.upstream_status, body=self.upstream_error,
-                                    content_type="application/json")
+                return web.Response(
+                    status=self.upstream_status, body=self.upstream_error, content_type="application/json"
+                )
             return web.json_response(
                 dict(
                     id="backend-id",
@@ -169,8 +171,8 @@ class ForwardingTests(unittest.IsolatedAsyncioTestCase):
             (400, b'{"message":"backend execution failed","code":400,"object":"error"}'),
             (400, b'{"detail":"context length exceeded"}'),
             (400, b'{"message":null,"type":"invalid_request_error","code":400,"object":"error"}'),
-            (400, b'incomplete json'),
-            (400, context_error.replace(b'262369', b'100')),
+            (400, b"incomplete json"),
+            (400, context_error.replace(b"262369", b"100")),
         ]
         for status, payload in cases:
             with self.subTest(status=status, payload=payload):

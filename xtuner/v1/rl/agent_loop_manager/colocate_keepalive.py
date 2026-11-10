@@ -4,6 +4,7 @@ The native asyncio_run loop is stable but stops during synchronous training.
 This adapter keeps tool/client tasks progressing without enabling GPU inference.
 Only the strategy's existing _PendingTasks owns live generation tasks.
 """
+
 import asyncio
 import threading
 
@@ -55,9 +56,7 @@ class ColocateKeepaliveManager:
         return await self._owner.call(self._inner._keepalive.pause(self._inner._rollout_controller))
 
     async def publish_initial_version(self, model_step):
-        return await self._owner.call(
-            self._inner._keepalive.resume(self._inner._rollout_controller, model_step)
-        )
+        return await self._owner.call(self._inner._keepalive.resume(self._inner._rollout_controller, model_step))
 
     async def save(self, *args, **kwargs):
         return await self._owner.call(self._inner.save(*args, **kwargs))
@@ -71,8 +70,10 @@ class ColocateKeepaliveManager:
         self._closed = True
 
         async def cleanup():
-            cancellations = [asyncio.create_task(task.produce_strategy._pending_tasks.cancel_all())
-                             for task in self._inner.task_runners]
+            cancellations = [
+                asyncio.create_task(task.produce_strategy._pending_tasks.cancel_all())
+                for task in self._inner.task_runners
+            ]
             if cancellations:
                 _, pending = await asyncio.wait(cancellations, timeout=120)
                 if pending:
@@ -86,6 +87,7 @@ class ColocateKeepaliveManager:
                 _, pending = await asyncio.wait(remaining, timeout=30)
                 if pending:
                     raise TimeoutError("Agent client teardown exceeded 30 seconds")
+
         try:
             await self._owner.call(cleanup())
         finally:
@@ -116,6 +118,7 @@ def build_keepalive_manager(config, **kwargs):
         for task in inner.task_runners:
             task.produce_strategy.retain_live_tasks = True
         return inner
+
     try:
         inner = owner.submit(build()).result()
     except BaseException:

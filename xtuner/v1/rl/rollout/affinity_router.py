@@ -3,19 +3,30 @@
 The mapping names a concrete DP entrypoint, not an EP group. This module never
 generates tokens, retries a POST, or changes cache/trace/version state.
 """
+
 from __future__ import annotations
 
 import asyncio
-from collections import Counter
 import logging
 import threading
+from collections import Counter
 
 import aiohttp
 from aiohttp import web
 
 
-_HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-                "te", "trailer", "transfer-encoding", "upgrade", "host", "content-length"}
+_HOP_HEADERS = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "host",
+    "content-length",
+}
 
 
 def _headers(headers):
@@ -60,15 +71,18 @@ class SessionAffinityRouter:
             raise web.HTTPGone(text='{"error":{"code":"session_retired"}}', content_type="application/json")
         url = self.bindings.get(sid) if sid is not None else None
         if url is not None and url not in self.backends:
-            raise web.HTTPServiceUnavailable(text='{"error":{"code":"session_backend_unavailable"}}',
-                                             content_type="application/json")
+            raise web.HTTPServiceUnavailable(
+                text='{"error":{"code":"session_backend_unavailable"}}', content_type="application/json"
+            )
         if url is None:
             if not self.backends:
-                raise web.HTTPServiceUnavailable(text='{"error":{"code":"no_active_backend"}}',
-                                                 content_type="application/json")
+                raise web.HTTPServiceUnavailable(
+                    text='{"error":{"code":"no_active_backend"}}', content_type="application/json"
+                )
             if sid is not None and len(self.bindings) + len(self.retired) >= self.max_sessions:
-                raise web.HTTPServiceUnavailable(text='{"error":{"code":"session_capacity_exhausted"}}',
-                                                 content_type="application/json")
+                raise web.HTTPServiceUnavailable(
+                    text='{"error":{"code":"session_capacity_exhausted"}}', content_type="application/json"
+                )
             url = min(self.backends, key=lambda u: (self.inflight[u], self.assigned[u], u))
             if sid is not None:
                 self.bindings[sid] = url
@@ -84,7 +98,9 @@ class SessionAffinityRouter:
         if request.method == "GET" and request.path in {"/v1/models", "/models"}:
             body, sid = b"", None
         elif request.method == "POST" and request.path in {
-            "/v1/chat/completions", "/v1/messages", "/v1/messages/count_tokens",
+            "/v1/chat/completions",
+            "/v1/messages",
+            "/v1/messages/count_tokens",
         }:
             body = await request.read()
             try:
@@ -94,15 +110,21 @@ class SessionAffinityRouter:
                     raise ValueError("missing session_id")
                 sid = str(sid)
             except (ValueError, TypeError, AttributeError):
-                raise web.HTTPBadRequest(text='{"error":{"code":"valid_session_id_required"}}',
-                                         content_type="application/json")
+                raise web.HTTPBadRequest(
+                    text='{"error":{"code":"valid_session_id_required"}}', content_type="application/json"
+                )
         else:
             raise web.HTTPNotFound()
         url = self.acquire(sid)  # No await between selection, binding and load reservation.
         downstream = None
         try:
-            async with self.client.request(request.method, url + str(request.rel_url), data=body,
-                                           headers=_headers(request.headers), allow_redirects=False) as upstream:
+            async with self.client.request(
+                request.method,
+                url + str(request.rel_url),
+                data=body,
+                headers=_headers(request.headers),
+                allow_redirects=False,
+            ) as upstream:
                 downstream = web.StreamResponse(status=upstream.status, headers=_headers(upstream.headers))
                 await downstream.prepare(request)
                 async for chunk in upstream.content.iter_any():
@@ -115,15 +137,19 @@ class SessionAffinityRouter:
                 if request.transport is not None:
                     request.transport.close()
                 return downstream
-            raise web.HTTPBadGateway(text='{"error":{"code":"session_backend_transport_error"}}',
-                                     content_type="application/json")
+            raise web.HTTPBadGateway(
+                text='{"error":{"code":"session_backend_transport_error"}}', content_type="application/json"
+            )
         finally:
             self.inflight[url] -= 1
 
     async def start(self, host, port=0):
-        self.client = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=30),
-                                           connector=aiohttp.TCPConnector(limit=0),
-                                           auto_decompress=False, trust_env=False)
+        self.client = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=None, sock_connect=30),
+            connector=aiohttp.TCPConnector(limit=0),
+            auto_decompress=False,
+            trust_env=False,
+        )
         app = web.Application(client_max_size=16 * 1024**2)
         app.router.add_route("*", "/{path:.*}", self.handle)
         self.runner = web.AppRunner(app, handler_cancellation=True, shutdown_timeout=10, access_log=None)
@@ -160,6 +186,7 @@ class SessionAffinityService:
     def invoke(self, method, *args):
         async def run():
             return getattr(self.router, method)(*args)
+
         return self.call(run())
 
     def close(self):
