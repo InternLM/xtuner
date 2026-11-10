@@ -8,7 +8,7 @@ import ray
 import torch
 import torch.distributed as dist
 from mmengine.runner import set_random_seed
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ray.actor import ActorClass, ActorProxy
 from torch.distributed.device_mesh import init_device_mesh
 from typing_extensions import NotRequired
@@ -26,6 +26,7 @@ from xtuner.v1.rl.distillation import (
 )
 from xtuner.v1.rl.loss import BaseRLLossConfig
 from xtuner.v1.rl.utils import SingleAcceleratorWorker
+from xtuner.v1.rl.weight_update.frozen_mtp import FrozenMTPConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
@@ -139,6 +140,7 @@ class WorkerConfig(BaseModel):
     profile_memory: bool = False
     offload_rollout_routed_experts: bool = False
     train_teacher_manager_config: TrainTeacherManagerConfig | None = None
+    frozen_mtp: FrozenMTPConfig | None = None
 
     # sft config
     sft_dataloader_cfg: DataloaderConfig | None = None
@@ -149,6 +151,12 @@ class WorkerConfig(BaseModel):
     # The critic is hosted in this actor process. A configured critic selects
     # the critic training flow; GAE is selected by the advantage estimator.
     critic_cfg: CriticWorkerConfig | None = None
+
+    @model_validator(mode="after")
+    def _validate_frozen_mtp(self):
+        if self.frozen_mtp is not None:
+            self.frozen_mtp.validate_model(self.model_cfg)
+        return self
 
     def build(
         self,
