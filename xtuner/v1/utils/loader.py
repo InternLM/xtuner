@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from typing import Literal
 
 import torch
@@ -78,11 +79,48 @@ class HFCheckpointLoader:
         self.buffer = None
 
     def is_key_exist(self, key: str) -> bool:
-        return key in self.weight_map
+        return key in self.weight_map or self._resolve_fused_mtp_expert(key) is not None
+
+    def _resolve_fused_mtp_expert(self, key: str) -> tuple[str, int, str] | None:
+        """Resolve only MTP expert aliases in unquantized safetensors sources.
+
+        Qwen3.5 checkpoints can store [experts, 2*intermediate, hidden]
+        gate/up and [experts, hidden, intermediate] down tensors while the
+        native MTP load spec addresses per-expert matrices.
+        """
+        if not self.use_safetensors:
+            return None
+        match = re.fullmatch(r"(mtp\.layers\.\d+\.mlp\.experts)\.(\d+)\.(gate|up|down)_proj\.weight", key)
+        if match is None:
+            return None
+        prefix, expert, part = match.groups()
+        fused = prefix + (".down_proj" if part == "down" else ".gate_up_proj")
+        return (fused, int(expert), part) if fused in self.weight_map else None
+
+    def _load_fused_mtp_expert(self, key: str) -> torch.Tensor | None:
+        resolved = self._resolve_fused_mtp_expert(key)
+        if resolved is None:
+            return None
+        fused, expert, part = resolved
+        path = os.path.join(self.model_path, self.weight_map[fused])
+        if path not in self._safetensor_cache:
+            self._safetensor_cache[path] = safe_open(path, framework="pt")
+        view = self._safetensor_cache[path].get_slice(fused)
+        shape = view.get_shape()
+        if len(shape) != 3 or expert >= shape[0]:
+            raise ValueError(f"Invalid fused MTP expert shape/index for {key}: {shape}")
+        if view.get_dtype() not in {"BF16", "F16", "F32"}:
+            raise ValueError(f"Fused MTP aliases require unquantized floating weights: {fused}")
+        if part == "down":
+            return view[expert]
+        if shape[1] % 2:
+            raise ValueError(f"Fused MTP gate/up dimension must be even: {fused}")
+        half = shape[1] // 2
+        return view[expert, :half] if part == "gate" else view[expert, half:]
 
     def load(self, key) -> torch.Tensor | None:
         if key not in self.weight_map:
-            return None
+            return self._load_fused_mtp_expert(key)
 
         _file = self.weight_map[key]
 
