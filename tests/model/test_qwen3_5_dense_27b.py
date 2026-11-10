@@ -1,5 +1,7 @@
 import os
 import unittest
+from contextlib import ExitStack
+from unittest.mock import Mock, patch
 
 import parametrize
 import torch
@@ -110,6 +112,34 @@ class TestQwen3_5_VLDense27BConfig(unittest.TestCase):
         with torch.device("meta"):
             model_off = Qwen3_5_VLTextDense27BConfig().build()
         self.assertIsNone(model_off.mtp_block)
+
+    def test_mtp_sharding_uses_precision_policy_signature(self) -> None:
+        from xtuner.v1.config import FSDPConfig
+
+        with torch.device("meta"):
+            model = _tiny_qwen3_8_text_config().build()
+        model.fsdp_mesh = Mock()
+        assert model.mtp_block is not None
+        # Real FSDP installs these methods. Keep this API regression CPU-only.
+        with ExitStack() as stack:
+            for module in [model, *model.layers.values(), *model.mtp_block.layers]:
+                stack.enter_context(patch.object(module, "set_modules_to_forward_prefetch", create=True))
+            stack.enter_context(patch.object(model, "_init_device_mesh"))
+            stack.enter_context(patch.object(model, "_init_load_spec"))
+            stack.enter_context(patch.object(model, "_to_empty_meta"))
+            stack.enter_context(patch("torch.distributed.get_rank", return_value=0))
+            stack.enter_context(
+                patch(
+                    "xtuner.v1.model.dense.dense.apply_activation_checkpointing", side_effect=lambda layer, **_: layer
+                )
+            )
+            # autospec rejects the removed mp_policy keyword even without GPUs.
+            shard = stack.enter_context(patch.object(type(model), "_fully_shard", autospec=True))
+            model.fully_shard(FSDPConfig(recompute_ratio=0.0))
+
+        mtp_calls = [call for call in shard.call_args_list if call.kwargs.get("module") is model.mtp_block.layers[0]]
+        self.assertEqual(len(mtp_calls), 1)
+        self.assertNotIn("mp_policy", mtp_calls[0].kwargs)
 
 
 @unittest.skipIf(
@@ -527,13 +557,12 @@ class TestQwen3_8MTPSequenceParallel(DeterministicDDPTestCase):
             float((sp_gradients[name] - expected).norm() / expected.norm().clamp_min(1e-12))
             for name, expected in baseline_gradients.items()
         )
+        # F.cosine_similarity clamps the norm product at 1e-8; GDN dt_bias/A_log grads in this
+        # tiny model are ~1e-9, so compute the cosine directly.
         min_cosine_similarity = min(
             float(
-                F.cosine_similarity(
-                    sp_gradients[name].flatten(),
-                    expected.flatten(),
-                    dim=0,
-                )
+                (sp_gradients[name].flatten() @ expected.flatten())
+                / (sp_gradients[name].norm() * expected.norm()).clamp_min(1e-30)
             )
             for name, expected in baseline_gradients.items()
         )

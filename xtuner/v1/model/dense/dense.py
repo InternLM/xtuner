@@ -369,7 +369,11 @@ class Dense(BaseModel):
         for layer_idx in tqdm(shuffled_layers_idxs, desc="[FSDP Sharding]"):
             layer = self.layers[str(int(layer_idx))]
             layer_idx = int(layer_idx)
-            if layer_idx < num_recompute_layers:
+            if (
+                self._should_recompute(layer_idx=layer_idx, mtp_idx=None)
+                if self.mtp_block is not None
+                else layer_idx < num_recompute_layers
+            ):
                 layer = apply_activation_checkpointing(
                     layer,
                     preserve_rng_state=checkpoint_preserve_rng_state,
@@ -409,7 +413,6 @@ class Dense(BaseModel):
                 reshard_after_forward = mtp_idx != len(self.mtp_block.layers) - 1
                 self._fully_shard(
                     mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-                    mp_policy=mp_policy,
                     reshard_after_forward=reshard_after_forward,
                     offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
                     module=mtp_layer,
