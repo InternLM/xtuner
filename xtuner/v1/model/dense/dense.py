@@ -360,8 +360,6 @@ class Dense(BaseModel):
             if self.config.tie_word_embeddings:
                 # Tied weights are the same tensor, so the embedding unit must compute in fp32 too.
                 self.precision.pin_unit(self.embed_tokens)
-        num_recompute_layers = int(self.config.num_hidden_layers * self.fsdp_config.recompute_ratio)
-
         generator = torch.Generator()
         generator.manual_seed(dist.get_rank())
         shuffled_layers_idxs = torch.randperm(len(self.layers), generator=generator)
@@ -369,11 +367,7 @@ class Dense(BaseModel):
         for layer_idx in tqdm(shuffled_layers_idxs, desc="[FSDP Sharding]"):
             layer = self.layers[str(int(layer_idx))]
             layer_idx = int(layer_idx)
-            if (
-                self._should_recompute(layer_idx=layer_idx, mtp_idx=None)
-                if self.mtp_block is not None
-                else layer_idx < num_recompute_layers
-            ):
+            if self._should_recompute(layer_idx=layer_idx, mtp_idx=None):
                 layer = apply_activation_checkpointing(
                     layer,
                     preserve_rng_state=checkpoint_preserve_rng_state,
@@ -402,9 +396,7 @@ class Dense(BaseModel):
         last_decoder_layer = list(self.layers.values())[-1]
         if self.mtp_block is not None:
             for mtp_idx, mtp_layer in enumerate(self.mtp_block.layers):
-                if self._should_recompute(layer_idx=None, mtp_idx=mtp_idx) or (
-                    self.config.mtp_config is not None and self.config.mtp_config.share_weights
-                ):  # share mtp head must recompute
+                if self._should_recompute(layer_idx=None, mtp_idx=mtp_idx):
                     mtp_layer = apply_activation_checkpointing(
                         mtp_layer,
                         preserve_rng_state=checkpoint_preserve_rng_state,
@@ -471,9 +463,11 @@ class Dense(BaseModel):
         """Treat decoder layers and MTP layers as one sequence for FSDP
         recompute.
 
-        ``recompute_ratio`` applies to ``num_hidden_layers + mtp_layers``. The last
-        layer in that sequence is never checkpointed. ``share_weights`` MTP still
-        forces checkpointing at the call site, matching MoE.
+        ``recompute_ratio`` applies to ``num_hidden_layers + mtp_layers``. Decoder
+        layers keep the legacy rule (``layer_idx < int(num_hidden_layers * ratio)``
+        when MTP is absent). The last MTP layer is never checkpointed, and
+        ``share_weights`` MTP always recomputes (one physical layer runs D times),
+        matching MoE.
         """
         num_layers = self.config.num_hidden_layers
         if self.config.mtp_config is not None:
@@ -486,14 +480,15 @@ class Dense(BaseModel):
         num_recompute_layers = int(total_layers * recompute_ratio)
 
         if layer_idx is not None:
-            global_idx = layer_idx
-        else:
-            assert mtp_idx is not None, "Either layer_idx or mtp_idx must be provided"
-            global_idx = num_layers + mtp_idx
+            # Decoder layer: identical to the legacy pre-MTP rule when mtp is absent.
+            return layer_idx < num_recompute_layers
 
-        if global_idx == total_layers - 1:
+        assert mtp_idx is not None, "Either layer_idx or mtp_idx must be provided"
+        if self.config.mtp_config is not None and self.config.mtp_config.share_weights:
+            return True
+        if mtp_idx == mtp_layers - 1:
             return False
-        return global_idx < num_recompute_layers
+        return num_layers + mtp_idx < num_recompute_layers
 
     # TODO: 支持 tp
     def _init_device_mesh(self, fsdp_config: FSDPConfig):

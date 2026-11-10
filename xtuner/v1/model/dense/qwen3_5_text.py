@@ -21,6 +21,10 @@ class Qwen3_5_VLTextDense(Qwen3VLTextDense):
         if key.startswith("mtp_block."):
             key = key.replace("mtp_block.", "", 1)
             key = re.sub(r"layers\.(\d+)\.decoder_layer\.", r"layers.\1.", key)
+            # The MTP decoder copies the last main layer's type, so apply the same
+            # ``self_attn -> linear_attn`` rename keyed on that layer type.
+            if self.config.layers_type[-1] == "linear_attention":
+                key = key.replace("self_attn", "linear_attn")
             if ".enorm." in key:
                 key = re.sub(r"layers\.\d+\.enorm\.", "pre_fc_norm_embedding.", key)
             elif ".hnorm." in key:
