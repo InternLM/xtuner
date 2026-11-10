@@ -96,6 +96,34 @@ def _single_rank_rollout_info(*, backend: RolloutBackend) -> RolloutWeightUpdate
     )
 
 
+class FrozenMTPModel(MixedDtypeModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.mtp_block = nn.Module()
+        self.mtp_block.weight = nn.Parameter(
+            torch.ones(2, device=get_device(), dtype=torch.bfloat16), requires_grad=False
+        )
+        self._init_load_spec()
+
+
+class TestFrozenMTPWeightUpdate:
+    def test_frozen_mtp_parameters_remain_in_native_batches(self) -> None:
+        model = FrozenMTPModel()
+        iterator = WeightIterator(
+            config=SimpleNamespace(update_weight_bucket_size_in_gb=1, model_cfg=None),
+            engine=SimpleNamespace(model=model),
+            rollout_info=_single_rank_rollout_info(backend="pytorch"),
+            global_hf_keys_mapping_cache={},
+        )
+
+        batches = list(iterator.iter_hf_batches(final_update=True))
+        state_dict = {name: tensor for batch in batches for name, tensor in batch.state_dict.items()}
+
+        assert not model.mtp_block.weight.requires_grad
+        assert set(state_dict) == {"bf16_weight", "fp32_weight", "mtp_block.weight"}
+        assert batches[-1].finished
+
+
 def test_hf_weight_update_batches_have_one_dtype() -> None:
     model = MixedDtypeModel()
     rollout_info = _single_rank_rollout_info(backend="pytorch")
