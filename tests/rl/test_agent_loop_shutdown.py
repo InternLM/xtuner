@@ -55,6 +55,7 @@ class TestLoopShutdown(unittest.IsolatedAsyncioTestCase):
         await actor.close()
         actor.agent_loop.close.assert_awaited_once()
 
+    @patch.dict("os.environ", {"SANDBOX_PROVIDER_USER": "test"})
     async def test_sandbox_close_waits_for_original_runner_finally_once(self):
         events = []
         started, deleting, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
