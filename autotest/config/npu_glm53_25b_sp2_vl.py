@@ -80,5 +80,5 @@ trainer = TrainerConfig(
     total_epoch=1,
     work_dir=f"{os.environ['WORK_DIR']}",
     seed=0,
-    dist_backend="npu:hccl",
+    dist_backend="nccl",
 )
