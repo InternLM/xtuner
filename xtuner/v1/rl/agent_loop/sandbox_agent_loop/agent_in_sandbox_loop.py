@@ -312,8 +312,9 @@ class AgentInSandboxLoop(AgentLoop):
             self._fill_eval_rollout_state(rollout_state, item)
             return [rollout_state]
 
-        # prompt_ids 切片只对纯文本 trace 成立；train_prompt_ids（VLM 扩充版 prompt）一旦存在，
-        # trace input_ids 与 prompt_ids 的长度约定即失效，宁可快速失败也不静默产出错位训练字段。
+        # agentic trace 只保存模型实际消费的纯文本 token；train_prompt_ids（VLM 扩充版
+        # prompt）一旦存在，trace input_ids 无法与多模态 prompt 对齐，宁可快速失败也不
+        # 静默产出错位训练字段。
         assert "train_prompt_ids" not in rollout_state.extra_fields, (
             f"Agentic trace rollout does not support multimodal samples, rollout_id={rollout_state.rollout_id}"
         )
@@ -370,11 +371,11 @@ class AgentInSandboxLoop(AgentLoop):
             data = await trace_store.export_training_trace.remote(str(rollout_state.session_id), prompt_text)
             segment_state.input_ids = data["input_ids"]
             segment_state.labels = data["labels"]
-            # Unified response_ids convention: the contiguous suffix of input_ids after the prompt
-            # (env-injected tokens included), aligned with response_model_steps for per-token
-            # staleness; also the token count used by rollout throughput logging.
-            prompt_len = len(segment_state.prompt_ids or [])
-            segment_state.response_ids = list(data["input_ids"][prompt_len:])
+            # response_ids 只用于日志/吞吐等可观测性：按监督 label 过滤，避免依赖 dataset 侧
+            # prompt_ids 与 trace prompt 的渲染一致（agent 请求带 system/tools，二者并不相同）。
+            segment_state.response_ids = [
+                token_id for token_id, label in zip(data["input_ids"][1:], data["labels"][1:]) if label != -100
+            ]
             segment_state.logprobs = data["logprobs"]
             # ``routed_experts`` is a per-node list for a MoE trace or ``None`` for a dense one; trace_store's
             # ``_resolve_routed_experts`` already enforces the all-or-nothing invariant (a trace mixing MoE turns with
@@ -413,20 +414,11 @@ class AgentInSandboxLoop(AgentLoop):
         if len(input_ids) < 2 or all(label == -100 for label in labels):
             raise ValueError("partial trace carries no trainable token")
 
-        # The chain must start with this sample's prompt; downstream offsets assume it.
-        prompt_ids = rollout_state.prompt_ids or []
-        if prompt_ids and input_ids[: len(prompt_ids)] != prompt_ids:
-            raise ValueError(
-                "partial trace does not start with this sample's prompt: "
-                f"trace_len={len(input_ids)} prompt_len={len(prompt_ids)}"
-            )
-
         rollout_state.input_ids = input_ids
         rollout_state.labels = labels
-        # Unified response_ids convention (same as the normal path): the contiguous suffix of
-        # input_ids after the prompt, so downstream mask offsets (len(labels) - len(response_ids))
-        # stay valid for multi-turn traces with masked tool-result segments in between.
-        rollout_state.response_ids = list(input_ids[len(prompt_ids) :])
+        # 与正常路径一致：response_ids 只保留监督 label 对应的 token，不依赖 prompt_ids 的
+        # 渲染边界——trace 的 prompt 是 agent 请求渲染（含 system/tools），与 dataset 侧不同。
+        rollout_state.response_ids = [token_id for token_id, label in zip(input_ids[1:], labels[1:]) if label != -100]
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
         rollout_state.response = (

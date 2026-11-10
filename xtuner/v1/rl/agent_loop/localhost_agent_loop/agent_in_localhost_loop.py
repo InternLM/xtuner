@@ -274,11 +274,11 @@ class AgentInLocalhostLoop(AgentLoop):
 
         rollout_state.input_ids = data["input_ids"]
         rollout_state.labels = data["labels"]
-        # Unified response_ids convention: the contiguous suffix of input_ids after the prompt
-        # (env-injected tokens included), aligned with response_model_steps for per-token
-        # staleness; also the token count used by rollout throughput logging.
-        prompt_len = len(rollout_state.prompt_ids or [])
-        rollout_state.response_ids = list(data["input_ids"][prompt_len:])
+        # response_ids 只用于日志/吞吐等可观测性：按监督 label 过滤，避免依赖 dataset 侧
+        # prompt_ids 与 trace prompt 的渲染一致（agent 请求带 system/tools，二者并不相同）。
+        rollout_state.response_ids = [
+            token_id for token_id, label in zip(data["input_ids"][1:], data["labels"][1:]) if label != -100
+        ]
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
         content = response_message.get("content")

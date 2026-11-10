@@ -13,8 +13,9 @@ TestTimeoutTraining —— 超时样本的生成与保留训练行为
     导出链缺少 tool_call_count 时 agent_tool_turns 保持 None,不从 artifacts 估算。
 - test_timeout_falls_back_without_trainable_trace:
     单 token 或 labels 全 -100 的部分轨迹没有可训练 token 时回退 FAILED。
-- test_timeout_prompt_mismatch_falls_back_to_failed:
-    导出链起始 prompt 与本样本 prompt_ids 不一致时回退 FAILED。
+- test_timeout_response_ids_do_not_depend_on_prompt_ids:
+    response_ids 按监督 label 过滤,与 dataset prompt_ids 的渲染边界无关;
+    两者不一致时样本仍可保留。
 - test_timeout_decode_failure_keeps_state_failed:
     保留流程中任何一步失败时样本保持 FAILED,不会被标成 COMPLETED 或写入固定 reward。
 - test_non_timeout_failure_keeps_failed:
@@ -164,7 +165,7 @@ class TestTimeoutTraining(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kept.reward, {"score": -1.0})
         self.assertEqual(kept.input_ids, [1, 2, 3])
         self.assertEqual(kept.labels, [-100, 5, 6])
-        # response_ids 是 prompt 之后的连续后缀,与正常路径一致(而非按 label 过滤)。
+        # response_ids 按监督 label 过滤(与正常路径一致),不依赖 prompt_ids 的渲染边界。
         self.assertEqual(kept.response_ids, [2, 3])
         self.assertEqual(kept.logprobs, [0.0, 0.1, 0.2])
         self.assertIsNone(kept.routed_experts)
@@ -191,11 +192,12 @@ class TestTimeoutTraining(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(kept_list[0].extra_fields["agent_tool_turns"])
 
-    async def test_timeout_prompt_mismatch_falls_back_to_failed(self):
-        # 行为:导出链的起始 prompt 与本样本 prompt_ids 不一致时视为串会话,回退 FAILED
+    async def test_timeout_response_ids_do_not_depend_on_prompt_ids(self):
+        # 行为:response_ids 按监督 label 过滤,与 dataset prompt_ids 的渲染边界无关;
+        # 两者不一致时样本仍可保留(agent 请求渲染含 system/tools,与 dataset 渲染不同)
         loop = _make_loop(train_on_timeout=True)
         state = _make_state(_timeout_item())
-        state.prompt_ids = [99]  # 与 partial_trace 的 [1, 2, 3] 首 token 不符
+        state.prompt_ids = [99]  # 与 partial_trace 的 [1, 2, 3] 不一致
         partial_trace = {
             "input_ids": [1, 2, 3],
             "labels": [-100, 5, 6],
@@ -204,12 +206,12 @@ class TestTimeoutTraining(unittest.IsolatedAsyncioTestCase):
         }
 
         with patch(f"{LOOP_MODULE}.get_store", return_value=_fake_store(partial_trace)):
-            failed_list = await loop.generate_sample(state)
+            kept_list = await loop.generate_sample(state)
 
-        self.assertEqual(len(failed_list), 1)
-        self.assertEqual(failed_list[0].status, Status.FAILED)
-        self.assertIsNone(failed_list[0].input_ids)
-        self.assertNotIn("timeout_trained", failed_list[0].extra_fields)
+        self.assertEqual(len(kept_list), 1)
+        kept = kept_list[0]
+        self.assertEqual(kept.status, Status.COMPLETED)
+        self.assertEqual(kept.response_ids, [2, 3])
 
     async def test_timeout_decode_failure_keeps_state_failed(self):
         # 行为:落盘前任何一步失败(这里让 decode 抛错)都不能留下 COMPLETED 状态和固定 reward
