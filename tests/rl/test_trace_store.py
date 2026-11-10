@@ -10,6 +10,8 @@ TestExportPartialTrainingTrace —— export_partial_training_trace 的部分导
     (同一时钟内并列时退回 token 数最多的分支),而不是拒绝或选拼接/最旧链。
 - test_tool_call_count_summed_on_export / ..._legacy_node_reports_unknown:
     tool_call_count 随 assistant 段写入、沿导出链求和;旧节点缺字段时返回 None。
+- test_response_ids_are_contiguous_suffix_after_session_prompt:
+    response_ids 从会话首个 prompt 段之后连续切出,tool-result 段保留(不按 label 过滤)。
 - test_empty_session_returns_empty_trace:
     不存在的 session 返回空 trace 而不是报错。
 """
@@ -157,8 +159,7 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
                 store.insert.remote(
                     "s",
                     "hello ",
-                    TokenizedSegment(text="hello ", token_ids=[1, 2], labels=[-100, 5], logprobs=[0.0, 0.1],
-                                     tool_call_count=2),
+                    TokenizedSegment(text="hello ", token_ids=[1, 2], labels=[-100, -100], logprobs=[0.0, 0.1]),
                 )
             )
             ray.get(
@@ -166,17 +167,19 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
                     "s",
                     "hello world",
                     TokenizedSegment(text="world", token_ids=[3, 4], labels=[6, 7], logprobs=[0.2, 0.3],
-                                     tool_call_count=0),
+                                     tool_call_count=2),
                 )
             )
 
             trace = ray.get(store.export_partial_training_trace.remote("s"))
 
             self.assertEqual(trace["input_ids"], [1, 2, 3, 4])
-            self.assertEqual(trace["labels"], [-100, 5, 6, 7])
+            self.assertEqual(trace["labels"], [-100, -100, 6, 7])
             self.assertEqual(trace["logprobs"], [0.0, 0.1, 0.2, 0.3])
             self.assertIsNone(trace["routed_experts"])
             self.assertEqual(trace["tool_call_count"], 2)
+            # 首个节点是会话 prompt 段,其余是连续响应后缀
+            self.assertEqual(trace["response_ids"], [3, 4])
         finally:
             ray.kill(store)
 
@@ -190,7 +193,7 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
                 store.insert.remote(
                     "s",
                     "hello ",
-                    TokenizedSegment(text="hello ", token_ids=[1, 2], labels=[-100, 5], logprobs=[0.0, 0.1]),
+                    TokenizedSegment(text="hello ", token_ids=[1, 2], labels=[-100, -100], logprobs=[0.0, 0.1]),
                 )
             )
             # 第一次尝试:长分支,先写入。
@@ -219,8 +222,9 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
 
             # 最新链是 "hello " + "world",而不是更长的 "there friend" 分支。
             self.assertEqual(trace["input_ids"], [1, 2, 3, 4])
-            self.assertEqual(trace["labels"], [-100, 5, 6, 7])
+            self.assertEqual(trace["labels"], [-100, -100, 6, 7])
             self.assertIsNone(trace["routed_experts"])
+            self.assertEqual(trace["response_ids"], [3, 4])
         finally:
             ray.kill(store)
 
@@ -248,6 +252,7 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
             trace = ray.get(store.export_partial_training_trace.remote("s"))
 
             self.assertEqual(trace["tool_call_count"], 3)
+            self.assertEqual(trace["response_ids"], [3, 4])
         finally:
             ray.kill(store)
 
@@ -260,7 +265,7 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
                 store.insert.remote(
                     "s",
                     "hello ",
-                    TokenizedSegment(text="hello ", token_ids=[1, 2], labels=[-100, 5], logprobs=[0.0, 0.1]),
+                    TokenizedSegment(text="hello ", token_ids=[1, 2], labels=[-100, -100], logprobs=[0.0, 0.1]),
                 )
             )
             ray.get(
@@ -274,6 +279,7 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
             trace = ray.get(store.export_partial_training_trace.remote("s"))
 
             self.assertIsNone(trace["tool_call_count"])
+            self.assertEqual(trace["response_ids"], [3, 4])
         finally:
             ray.kill(store)
 
@@ -285,7 +291,53 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
 
             self.assertEqual(trace["input_ids"], [])
             self.assertEqual(trace["labels"], [])
+            self.assertEqual(trace["response_ids"], [])
             self.assertIsNone(trace["routed_experts"])
             self.assertEqual(ray.get(store.list_sessions.remote()), [])
+        finally:
+            ray.kill(store)
+
+    def test_response_ids_are_contiguous_suffix_after_session_prompt(self):
+        # 回归:response_ids 必须是会话初始 prompt 段之后的连续后缀,tool-result 段
+        # (labels 全 -100)也要保留。按监督 label 过滤会得到带洞子序列,使下游
+        # token-staleness mask 的 len(labels)-len(response_ids) offset 错位。
+        store = RolloutTraceStore.remote()
+        try:
+            ray.get(
+                store.insert.remote(
+                    "s",
+                    "hi ",
+                    TokenizedSegment(text="hi ", token_ids=[1, 2], labels=[-100, -100], logprobs=[0.0, 0.0]),
+                )
+            )
+            ray.get(
+                store.insert.remote(
+                    "s",
+                    "hi a1",
+                    TokenizedSegment(text="a1", token_ids=[3], labels=[3], logprobs=[0.1], tool_call_count=1),
+                )
+            )
+            ray.get(
+                store.insert.remote(
+                    "s",
+                    "hi a1 tool ",
+                    TokenizedSegment(text=" tool ", token_ids=[4, 5], labels=[-100, -100], logprobs=[0.0, 0.0]),
+                )
+            )
+            ray.get(
+                store.insert.remote(
+                    "s",
+                    "hi a1 tool a2",
+                    TokenizedSegment(text="a2", token_ids=[6], labels=[6], logprobs=[0.2], tool_call_count=0),
+                )
+            )
+
+            trace = ray.get(store.export_partial_training_trace.remote("s"))
+
+            self.assertEqual(trace["input_ids"], [1, 2, 3, 4, 5, 6])
+            self.assertEqual(trace["labels"], [-100, -100, 3, -100, -100, 6])
+            # prompt 段 [1, 2] 被排除;tool-result 段 [4, 5] 保留在连续后缀中。
+            self.assertEqual(trace["response_ids"], [3, 4, 5, 6])
+            self.assertEqual(trace["tool_call_count"], 1)
         finally:
             ray.kill(store)

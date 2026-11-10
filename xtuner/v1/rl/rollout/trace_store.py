@@ -105,10 +105,13 @@ def _assemble_trace(nodes: List["TreeNode"], session_id: str) -> dict:
 
     Returns:
         dict: The trace dictionary containing `input_ids`, `labels`,
-        `logprobs`, `routed_experts`, and `tool_call_count`. The latter is
-        the summed per-turn tool-call count of the assistant turns on the
-        chain, or ``None`` when any assistant turn predates the
-        ``tool_call_count`` field (legacy node).
+        `logprobs`, `routed_experts`, `tool_call_count`, and `response_ids`.
+        ``tool_call_count`` is the summed per-turn tool-call count of the
+        assistant turns on the chain, or ``None`` when any assistant turn
+        predates the ``tool_call_count`` field (legacy node). ``response_ids``
+        is the contiguous suffix of ``input_ids`` after the session's initial
+        prompt segment (tool-result tokens included), derived from the trace
+        itself rather than dataset-side prompt ids.
     """
     trace: dict[str, Any] = {"input_ids": [], "labels": [], "logprobs": []}
     expert_keys: List[Any] = []
@@ -130,6 +133,23 @@ def _assemble_trace(nodes: List["TreeNode"], session_id: str) -> dict:
             tool_call_counts.append(None)
     trace["routed_experts"] = _resolve_routed_experts(expert_keys, session_id)
     trace["tool_call_count"] = None if None in tool_call_counts else sum(tool_call_counts)
+    # The first node holds the session's initial prompt segment (the only segment written
+    # before any assistant turn), so everything after it is the contiguous response suffix
+    # the training stack relies on (env/tool tokens included). A non-prompt head means the
+    # chain does not start at the session prompt and offsets would silently drift.
+    if nodes:
+        head = nodes[0].value
+        if not isinstance(head, TokenizedSegment):
+            raise TypeError(f"Unexpected trace head value type: {type(head)!r}")
+        assert head.labels is not None
+        if any(label != -100 for label in head.labels):
+            raise ValueError(
+                f"Trace head of session {session_id!r} is not a prompt segment: cannot derive response_ids."
+            )
+        prompt_token_count = len(head.token_ids)
+    else:
+        prompt_token_count = 0
+    trace["response_ids"] = list(trace["input_ids"][prompt_token_count:])
     return trace
 
 
@@ -455,9 +475,10 @@ class RolloutTraceStore:
 
         Returns:
             dict: The trace dictionary containing `input_ids`, `labels`, `logprobs`,
-                and `routed_experts`. `routed_experts` is a per-node list of expert-id
-                refs for a MoE trace, or `None` when the trace carries no routed
-                experts at all (dense model).
+                `routed_experts`, `tool_call_count`, and `response_ids`. `routed_experts`
+                is a per-node list of expert-id refs for a MoE trace, or `None` when the
+                trace carries no routed experts at all (dense model). `response_ids` is the
+                contiguous suffix after the session's initial prompt segment.
 
         Raises:
             ValueError: If the prompt_text does not completely match the trace keys in the session.

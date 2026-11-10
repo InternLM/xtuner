@@ -274,11 +274,9 @@ class AgentInLocalhostLoop(AgentLoop):
 
         rollout_state.input_ids = data["input_ids"]
         rollout_state.labels = data["labels"]
-        # response_ids 只用于日志/吞吐等可观测性：按监督 label 过滤，避免依赖 dataset 侧
-        # prompt_ids 与 trace prompt 的渲染一致（agent 请求带 system/tools，二者并不相同）。
-        rollout_state.response_ids = [
-            token_id for token_id, label in zip(data["input_ids"][1:], data["labels"][1:]) if label != -100
-        ]
+        # response_ids 由 trace store 从会话初始 prompt 段之后切出（连续后缀，含 tool-result 段），
+        # 不依赖 dataset 侧 prompt_ids（agent 请求渲染带 system/tools，二者并不相同）。
+        rollout_state.response_ids = list(data["response_ids"])
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
         content = response_message.get("content")

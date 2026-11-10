@@ -70,6 +70,10 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
     def _make_loop(mode: str = "train") -> AgentInSandboxLoop:
         loop = AgentInSandboxLoop.__new__(AgentInSandboxLoop)
         loop.mode = mode
+        # __new__ bypasses __init__; provide the attributes _build_rollout_states touches.
+        loop.train_on_timeout = False
+        loop.timeout_reward = -1.0
+        loop.logger = MagicMock()
         loop.tokenizer = MagicMock()
         loop.tokenizer.apply_chat_template.side_effect = lambda messages, **_: f"rendered-{messages[-1]['content']}\n"
         loop.tokenizer.decode.side_effect = lambda token_ids: f"decoded-{token_ids[-1]}"
@@ -83,6 +87,8 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
                 "labels": [-100, 10 + index, 20 + index],
                 "logprobs": [0.0, -0.1, -0.2],
                 "routed_experts": None,
+                # Trace store slices everything after the session's initial prompt (token [1]).
+                "response_ids": [10 + index, 20 + index],
             }
             for index in range(segment_count)
         ]

@@ -14,8 +14,8 @@ TestTimeoutTraining —— 超时样本的生成与保留训练行为
 - test_timeout_falls_back_without_trainable_trace:
     单 token 或 labels 全 -100 的部分轨迹没有可训练 token 时回退 FAILED。
 - test_timeout_response_ids_do_not_depend_on_prompt_ids:
-    response_ids 按监督 label 过滤,与 dataset prompt_ids 的渲染边界无关;
-    两者不一致时样本仍可保留。
+    response_ids 由 trace store 从头节点(会话初始 prompt 段)切出,与 dataset
+    prompt_ids 的渲染边界无关;两者不一致时样本仍可保留。
 - test_timeout_decode_failure_keeps_state_failed:
     保留流程中任何一步失败时样本保持 FAILED,不会被标成 COMPLETED 或写入固定 reward。
 - test_non_timeout_failure_keeps_failed:
@@ -30,6 +30,15 @@ TestTeacherScoring —— teacher scoring 对超时样本的处理
     非 defer 模式下逐样本 teacher scoring 也收到超时样本。
 - test_stale_timeout_marker_is_cleared_on_retry:
     上一次 attempt 残留的 timeout_trained 标记会被清理。
+
+TestTimeoutTrainingConfigValidation —— train_on_timeout 与 expired rerollout 的配置期互斥
+- test_timeout_training_rejects_expired_rerollout:
+    train_on_timeout=True 时 tail_batch_trigger_size=0/1 使 TaskSpecConfig/DisaggTaskSpecConfig
+    构造抛 ValueError。
+- test_timeout_training_allows_disabled_rerollout:
+    tail_batch_trigger_size=-1 时允许打开 train_on_timeout。
+- test_rerollout_without_timeout_training_is_allowed:
+    未打开 train_on_timeout 时 tail_batch_trigger_size>=0 不受影响。
 """
 
 import unittest
@@ -37,8 +46,18 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import AgentInSandboxLoop
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import (
+    AgentInSandboxLoop,
+    AgentInSandboxLoopConfig,
+)
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import AgentRolloutItem, RolloutError, RolloutStatus
+from xtuner.v1.rl.agent_loop_manager import (
+    AsyncProduceStrategyConfig,
+    DisaggAsyncProduceStrategyConfig,
+    DisaggTaskSpecConfig,
+    SamplerConfig,
+    TaskSpecConfig,
+)
 
 LOOP_MODULE = "xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop"
 
@@ -127,14 +146,16 @@ def _completed_item() -> AgentRolloutItem:
 
 
 def _fake_store(partial_trace: dict | None = None) -> SimpleNamespace:
+    partial = partial_trace or {"input_ids": [], "labels": [], "logprobs": [], "routed_experts": None}
+    # Fake traces start with a one-token session prompt, so the store-derived response_ids
+    # is the tail after it (the real store slices from its head node).
+    partial = {**partial, "response_ids": list(partial["input_ids"][1:])}
     return SimpleNamespace(
-        export_partial_training_trace=SimpleNamespace(
-            remote=AsyncMock(return_value=partial_trace or {"input_ids": [], "labels": [], "logprobs": [],
-                                                            "routed_experts": None})
-        ),
+        export_partial_training_trace=SimpleNamespace(remote=AsyncMock(return_value=partial)),
         export_training_trace=SimpleNamespace(
             remote=AsyncMock(return_value={"input_ids": [1, 2], "labels": [-100, 5],
-                                           "logprobs": [0.0, 0.1], "routed_experts": None})
+                                           "logprobs": [0.0, 0.1], "routed_experts": None,
+                                           "response_ids": [2]})
         ),
     )
 
@@ -165,7 +186,7 @@ class TestTimeoutTraining(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kept.reward, {"score": -1.0})
         self.assertEqual(kept.input_ids, [1, 2, 3])
         self.assertEqual(kept.labels, [-100, 5, 6])
-        # response_ids 按监督 label 过滤(与正常路径一致),不依赖 prompt_ids 的渲染边界。
+        # response_ids 由 trace store 从头节点切出的连续后缀(与正常路径一致)。
         self.assertEqual(kept.response_ids, [2, 3])
         self.assertEqual(kept.logprobs, [0.0, 0.1, 0.2])
         self.assertIsNone(kept.routed_experts)
@@ -193,7 +214,7 @@ class TestTimeoutTraining(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(kept_list[0].extra_fields["agent_tool_turns"])
 
     async def test_timeout_response_ids_do_not_depend_on_prompt_ids(self):
-        # 行为:response_ids 按监督 label 过滤,与 dataset prompt_ids 的渲染边界无关;
+        # 行为:response_ids 由 trace store 从头节点切出,与 dataset prompt_ids 的渲染边界无关;
         # 两者不一致时样本仍可保留(agent 请求渲染含 system/tools,与 dataset 渲染不同)
         loop = _make_loop(train_on_timeout=True)
         state = _make_state(_timeout_item())
@@ -357,6 +378,59 @@ class TestTeacherScoring(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(result), 1)
         self.assertNotIn("timeout_trained", result[0].extra_fields)
+
+
+class TestTimeoutTrainingConfigValidation(unittest.TestCase):
+    """train_on_timeout 与 expired rerollout 的配置期互斥校验。"""
+
+    @staticmethod
+    def _sampler_config() -> SamplerConfig:
+        # 只验证 validator 接线，不构造真实 dataloader。
+        return SamplerConfig.model_construct(dataloader_cfg=SimpleNamespace(), prompt_repeat_k=1)
+
+    @staticmethod
+    def _agent_loop_config(*, train_on_timeout: bool) -> AgentInSandboxLoopConfig:
+        return AgentInSandboxLoopConfig(hf_checkpoint="dummy", train_on_timeout=train_on_timeout)
+
+    def _task_spec(self, *, train_on_timeout: bool, tail_batch_trigger_size: int) -> TaskSpecConfig:
+        return TaskSpecConfig(
+            task_name="t",
+            agent_loop_config=self._agent_loop_config(train_on_timeout=train_on_timeout),
+            produce_strategy_config=AsyncProduceStrategyConfig(tail_batch_trigger_size=tail_batch_trigger_size),
+            sampler_config=self._sampler_config(),
+        )
+
+    def _disagg_task_spec(self, *, train_on_timeout: bool, tail_batch_trigger_size: int) -> DisaggTaskSpecConfig:
+        return DisaggTaskSpecConfig(
+            task_name="t",
+            agent_loop_config=self._agent_loop_config(train_on_timeout=train_on_timeout),
+            produce_strategy_config=DisaggAsyncProduceStrategyConfig(
+                tail_batch_trigger_size=tail_batch_trigger_size
+            ),
+            sampler_config=self._sampler_config(),
+        )
+
+    def test_timeout_training_rejects_expired_rerollout(self):
+        # 行为:train_on_timeout 打开时,任何启用 expired rerollout 的 tail_batch_trigger_size 都在配置期被拒绝
+        for spec_factory in (self._task_spec, self._disagg_task_spec):
+            for trigger_size in (0, 1):
+                with self.subTest(spec=spec_factory.__name__, tail_batch_trigger_size=trigger_size):
+                    with self.assertRaisesRegex(ValueError, "train_on_timeout"):
+                        spec_factory(train_on_timeout=True, tail_batch_trigger_size=trigger_size)
+
+    def test_timeout_training_allows_disabled_rerollout(self):
+        # 行为:tail_batch_trigger_size=-1(禁用 rerollout)时允许打开 train_on_timeout
+        for spec_factory in (self._task_spec, self._disagg_task_spec):
+            with self.subTest(spec=spec_factory.__name__):
+                spec = spec_factory(train_on_timeout=True, tail_batch_trigger_size=-1)
+                self.assertTrue(spec.agent_loop_config.train_on_timeout)
+
+    def test_rerollout_without_timeout_training_is_allowed(self):
+        # 行为:未打开 train_on_timeout 时,expired rerollout 配置不受影响
+        for spec_factory in (self._task_spec, self._disagg_task_spec):
+            with self.subTest(spec=spec_factory.__name__):
+                spec = spec_factory(train_on_timeout=False, tail_batch_trigger_size=0)
+                self.assertFalse(spec.agent_loop_config.train_on_timeout)
 
 
 if __name__ == "__main__":
