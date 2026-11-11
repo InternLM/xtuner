@@ -97,3 +97,7 @@ and the DCP source gate. CPU fixtures do not prove device transfer, distributed
 collective behavior, a usable exported model, optimizer correctness or online Agent
 continuation. Those require integration validation on the intended model and
 backend. The adapter does not change reward, advantage, masks, logprob or R3 semantics.
+
+## Alternative native route
+
+[XTuner #2292](https://github.com/InternLM/xtuner/pull/2292) keeps dedicated frozen MTP weights in the actor as an alternative. Do not enable both routes. `FrozenMTPConfig.validate_model` requires `actor.mtp_config=None` and rejects a native `MTPConfig`, including `frozen=True`; use exactly one parameter owner. This external adapter still requires its own receiver/GPU validation; the native route's GPU results do not substitute for that evidence.
