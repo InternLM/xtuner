@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -446,6 +447,29 @@ class RLColocateTrainerConfig(BaseRLTrainerConfig):
     agent_loop_manager_cfg: AgentLoopManagerConfig
     resources: AcceleratorResourcesConfig
 
+    @model_validator(mode="after")
+    def _validate_turn_keepalive(self):
+        if self.agent_loop_manager_cfg.turn_keepalive != (self.rollout_config.turn_resume_wait_timeout is not None):
+            raise ValueError("Colocate turn keepalive requires both request gates and the keepalive manager")
+        if self.agent_loop_manager_cfg.turn_keepalive:
+            if self.rollout_config.health_check_failure_threshold != 0:
+                raise ValueError("Colocate turn keepalive requires fixed topology: disable automatic worker recovery")
+            if self.enable_evaluate or self.enable_initial_evaluate or self.eval_agent_loop_manager_cfg is not None:
+                raise ValueError("Colocate turn keepalive requires all online evaluation disabled")
+            if self.rollout_config.turn_resume_wait_timeout is None:
+                raise ValueError("Colocate turn keepalive requires request gates")
+            self.rollout_config.turn_resume_initially_closed = True
+            if (self.debug_rollout or self.debug_train) and (
+                self.load_checkpoint_cfg.checkpoint_path is not None or self.auto_resume
+            ):
+                raise ValueError("Use full online run for colocate cold resume; debug modes start fresh")
+            if self.auto_resume and self.load_checkpoint_cfg.checkpoint_path is not None:
+                raise ValueError("Choose explicit checkpoint_path or auto_resume, not both")
+            if self.load_checkpoint_cfg.checkpoint_path is not None or self.auto_resume:
+                if not (self.load_checkpoint_cfg.load_optimizer_states and self.load_checkpoint_cfg.load_optimizer_args):
+                    raise ValueError("Full colocate resume requires optimizer states")
+        return self
+
     def build(self) -> "RLColocateTrainer":
         return RLColocateTrainer(self)
 
@@ -537,6 +561,29 @@ class RLDisaggregatedTrainerConfig(BaseRLTrainerConfig):
     agent_loop_manager_cfg: DisaggAgentLoopManagerConfig
     train_resources: AcceleratorResourcesConfig
     rollout_resources: AcceleratorResourcesConfig
+
+    @model_validator(mode="after")
+    def _validate_turn_resume(self):
+        enabled = self.rollout_config.turn_resume_wait_timeout is not None
+        manager_enabled = self.agent_loop_manager_cfg.turn_resume_drain_timeout is not None
+        if enabled != manager_enabled:
+            raise ValueError("turn-resume requires both request gates and Agent pause policy")
+        if enabled:
+            # A restored engine must never expose version-zero admission while
+            # actor/optimizer and manager state are still loading.
+            if self.load_checkpoint_cfg.checkpoint_path is not None or self.auto_resume:
+                self.rollout_config.turn_resume_initially_closed = True
+            if self.enable_evaluate or self.enable_initial_evaluate or self.eval_agent_loop_manager_cfg is not None:
+                raise ValueError("turn-resume first version rejects every online evaluation entrypoint")
+            if self.rollout_config.health_check_failure_threshold != 0:
+                raise ValueError("turn-resume requires fixed topology: disable automatic worker recovery")
+            tasks = self.agent_loop_manager_cfg.tasks
+            for task in tasks if isinstance(tasks, list) else [tasks]:
+                if not getattr(task.agent_loop_config, "require_turn_provenance", False):
+                    raise ValueError("Agent turn-resume requires complete request provenance and MoE routes")
+                if getattr(task.produce_strategy_config, "enable_partial_rollout", False):
+                    raise ValueError("Complete-turn pause cannot use token partial rollout")
+        return self
 
     def build(self) -> "RLDisaggregatedTrainer":
         return RLDisaggregatedTrainer(self)
@@ -771,12 +818,13 @@ class BaseRLTrainer:
         saved_model_step = await self.agent_loop_manager.resume(checkpoint_path)
         return saved_model_step
 
+    def _checkpoint_due(self, cur_step: int) -> bool:
+        interval = self._checkpoint_interval
+        return interval is not None and interval > 0 and cur_step % interval == 0
+
     async def _maybe_save_checkpoint(self, cur_step: int) -> None:
         """Save checkpoint if interval condition is met."""
-        ckp_interval = self._checkpoint_interval
-        if ckp_interval is None or ckp_interval == -1:
-            return
-        if cur_step % ckp_interval != 0:
+        if not self._checkpoint_due(cur_step):
             return
 
         checkpoint_path = self.exp_dir / self._CHECKPOINT_DIR / f"ckpt-step-{cur_step}"
@@ -1430,12 +1478,14 @@ class BaseRLTrainer:
 
 
 class RLColocateTrainer(BaseRLTrainer):
+    _turn_keepalive = False
     _META_PATH = ".xtuner_rl_colocate_trainer"
     agent_loop_manager: AgentLoopManager
     rl_health_manager: RLHealthManager | _NoOpRLHealthManager
 
     # 共卡保留资源切换和权重同步流程；通用保存、日志在 BaseRLTrainer。
     def __init__(self, cfg: RLColocateTrainerConfig):
+        self._turn_keepalive = cfg.agent_loop_manager_cfg.turn_keepalive
         self._init_common(cfg, meta_path=self._META_PATH, logger_tag="RLTrainer")
         self._num_workers = float(cfg.resources.num_workers)
         self._rollout_num_workers = float(cfg.resources.num_workers)
@@ -1458,6 +1508,8 @@ class RLColocateTrainer(BaseRLTrainer):
             self._build_agent_loop_components(cfg, replay_buffer)
             self._cpu_resource_manager.log_registered_summary()
             self.logger.warning("Debug rollout mode is enabled. Only rollout workers will be started.")
+            if self._turn_keepalive:
+                self._initialize_keepalive_rollout(None)
 
             return
 
@@ -1504,13 +1556,58 @@ class RLColocateTrainer(BaseRLTrainer):
 
         replay_buffer = cfg.replay_buffer_config.build()
         self._build_agent_loop_components(cfg, replay_buffer)
-        if checkpoint_path is not None:
+        if self._turn_keepalive:
+            self._initialize_keepalive_rollout(checkpoint_path)
+        elif checkpoint_path is not None:
             asyncio_run(self._resume_agent_loop_manager(checkpoint_path))
 
         self._cpu_resource_manager.log_registered_summary()
 
-        if self._rollout_config.skip_load_weights:
+        if not self._turn_keepalive and self._rollout_config.skip_load_weights:
             self._sync_weights_from_train_workers()
+
+    def _init_work_dir_and_meta(self, cfg, meta_path):
+        if self._turn_keepalive and cfg.auto_resume:
+            # Reuse native metadata and native selection, but write the resumed
+            # run into a new native exp_dir. Old HF/log/trajectory evidence must
+            # not be overwritten when replaying from an earlier saved step.
+            work_dir = Path(cfg.work_dir) if cfg.work_dir else Path.cwd() / "work_dirs"
+            previous_meta_path = work_dir / meta_path
+            if previous_meta_path.exists():
+                previous = XTunerMeta.model_validate_json(previous_meta_path.read_text())
+                # A prior resumed exp may have emitted HF but no new DCP.
+                # Consult only recorded metadata, newest experiment first;
+                # retain each ExpInfo.latest_checkpoint's native selection.
+                checkpoint_exp = next(
+                    (exp for exp in reversed(previous.exps) if exp.latest_checkpoint is not None), None
+                )
+                if checkpoint_exp is not None:
+                    selected_meta = previous.model_copy(update={"exps": [checkpoint_exp]})
+                    self._meta = selected_meta
+                    self._resolve_load_checkpoint_cfg(True, cfg.load_checkpoint_cfg)
+            super()._init_work_dir_and_meta(cfg.model_copy(update={"auto_resume": False}), meta_path)
+        else:
+            super()._init_work_dir_and_meta(cfg, meta_path)
+
+    def _initialize_keepalive_rollout(self, checkpoint_path):
+        # No new groups before restored sampler/replay and rollout publication.
+        # Gate construction already closed admission before external visibility.
+        try:
+            asyncio_run(self.agent_loop_manager.prepare_initial_sync())
+            restored_step = 0
+            if checkpoint_path is not None:
+                restored_step = asyncio_run(self._resume_agent_loop_manager(checkpoint_path))
+                if restored_step != self._cur_step:
+                    raise RuntimeError("Restored manager model_step disagrees with train state")
+            if checkpoint_path is not None or self._rollout_config.skip_load_weights:
+                self._sync_weights_from_train_workers()
+            asyncio_run(self.agent_loop_manager.publish_initial_version(restored_step))
+        except BaseException:
+            try:
+                asyncio_run(self.agent_loop_manager.close())
+            except Exception:
+                self.logger.exception("Keepalive startup cleanup failed")
+            raise
 
     def _sync_weights_from_train_workers(self) -> None:
         if self._rollout_config.weight_transport_type == "checkpoint_engine":
@@ -1538,9 +1635,20 @@ class RLColocateTrainer(BaseRLTrainer):
         try:
             self._fit()
         finally:
+            original_error = sys.exc_info()[0] is not None
+            cleanup_error = None
+            if self._turn_keepalive and not self._debug_train:
+                try:
+                    asyncio_run(self.agent_loop_manager.close())
+                except Exception as exc:
+                    cleanup_error = exc
+                    self._turn_keepalive_cleanup_error = repr(exc)
+                    self.logger.exception("Colocate keepalive cleanup failed")
             self.rl_health_manager.stop()
             self._exp_tracker.close()
             close_trace()
+            if cleanup_error is not None and not original_error:
+                raise cleanup_error
 
     def _fit(self):
         self.logger.info("Start RL training")
@@ -1582,6 +1690,8 @@ class RLColocateTrainer(BaseRLTrainer):
                                 self.train_batch_size,
                                 train_step=train_step,
                                 model_step=model_step,
+                                **({"quiesce": self._checkpoint_due(train_step) or train_step == self._total_train_steps}
+                                   if self._turn_keepalive else {}),
                             )
                         )
                 finally:
@@ -1793,6 +1903,12 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         saved_model_step = asyncio_run(self._resume_agent_loop_manager(checkpoint_path))
         assert self._cur_step == saved_model_step
 
+        # A fresh SessionServer starts at version zero. Seal requests before
+        # replacing weights so continue_produce publishes the restored version
+        # through the same barrier used by ordinary updates.
+        asyncio_run(self.agent_loop_manager.prepare_sync(False))
+        asyncio_run(self.agent_loop_manager.pause_produce())
+
         # Empty-init engines can retain GPU allocations while marked asleep.
         # Use the same offload/allocate/receive/warmup lifecycle as online sync;
         # NCCL transfer alone does not clear the engine's weights sleep tag.
@@ -1917,7 +2033,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                         or sync_model_step == self._total_train_steps
                     )
 
-                    if need_sync:
+                    if need_sync and not self._debug_rollout:
+                        await self.agent_loop_manager.prepare_sync(self._checkpoint_due(sync_model_step))
                         # 同步前暂停 producer，避免 pending rollout 继续写 buffer。
                         with timer("pause_produce", step_timer_dict):
                             await self.agent_loop_manager.pause_produce()
@@ -1943,7 +2060,11 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 train_step = self._cur_step + 1
         finally:
             self.agent_loop_manager.shutdown()
-            await producer_task
+            await asyncio.sleep(0)
+            if not producer_task.done():
+                producer_task.cancel()
+            await asyncio.gather(producer_task, return_exceptions=True)
+            await self.agent_loop_manager.close()
 
     async def _sync_weights_and_save(self, model_step: int, step_timer_dict: dict):
         # producer 已暂停；保持 save -> bind -> update 顺序。
