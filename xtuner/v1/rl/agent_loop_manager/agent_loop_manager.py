@@ -401,6 +401,8 @@ class AgentLoopManager:
         state_path = manager_state_path(checkpoint_path)
         with state_path.open("r") as f:
             manager_state = json.load(f)
+        if getattr(self, "_keepalive", None) is not None and not manager_state.get("replay_buffer_saved", True):
+            raise RuntimeError("Full colocate resume requires a persisted replay buffer")
         if manager_state.get("replay_buffer_saved", True):
             # replay buffer 恢复是 async I/O，不能在已有 event loop 中再次嵌套 asyncio_run。
             await self.replay_buffer.resume(checkpoint_path)
