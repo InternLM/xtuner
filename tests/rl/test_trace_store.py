@@ -8,10 +8,13 @@ TestExportPartialTrainingTrace —— export_partial_training_trace 的部分导
 - test_divergent_session_exports_latest_chain:
     session 出现分叉(过期重放复用同一 session id)时导出最新写入的分支链
     (同一时钟内并列时退回 token 数最多的分支),而不是拒绝或选拼接/最旧链。
+- test_overwritten_prefix_refreshes_chain_timestamp:
+    重试覆盖写同一 key 时刷新节点时间戳,导出本次 attempt 的链而不是更旧更长的旧分支。
 - test_tool_call_count_summed_on_export / ..._legacy_node_reports_unknown:
     tool_call_count 随 assistant 段写入、沿导出链求和;旧节点缺字段时返回 None。
 - test_response_ids_are_contiguous_suffix_after_session_prompt:
-    response_ids 从会话首个 prompt 段之后连续切出,tool-result 段保留(不按 label 过滤)。
+    response_ids 从会话首个 prompt 段之后连续切出,tool-result 段保留(不按 label 过滤);
+    同时返回首段 prompt_ids,满足 input_ids == prompt_ids + response_ids。
 - test_empty_session_returns_empty_trace:
     不存在的 session 返回空 trace 而不是报错。
 """
@@ -179,6 +182,7 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
             self.assertIsNone(trace["routed_experts"])
             self.assertEqual(trace["tool_call_count"], 2)
             # 首个节点是会话 prompt 段,其余是连续响应后缀
+            self.assertEqual(trace["prompt_ids"], [1, 2])
             self.assertEqual(trace["response_ids"], [3, 4])
         finally:
             ray.kill(store)
@@ -215,7 +219,7 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
                     TokenizedSegment(text="world", token_ids=[3, 4], labels=[6, 7], logprobs=[0.2, 0.3]),
                 )
             )
-            # 分开写入,保证两次尝试的 created_at 不落在同一时刻。
+            # 分开写入,保证两次尝试的 written_at 不落在同一时刻。
             time.sleep(0.01)
 
             trace = ray.get(store.export_partial_training_trace.remote("s"))
@@ -224,7 +228,64 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
             self.assertEqual(trace["input_ids"], [1, 2, 3, 4])
             self.assertEqual(trace["labels"], [-100, -100, 6, 7])
             self.assertIsNone(trace["routed_experts"])
+            self.assertEqual(trace["prompt_ids"], [1, 2])
             self.assertEqual(trace["response_ids"], [3, 4])
+        finally:
+            ray.kill(store)
+
+    def test_overwritten_prefix_refreshes_chain_timestamp(self):
+        # 回归:重试覆盖写同一 key 时必须刷新节点时间戳。否则“选最新链”会挑到
+        # 更旧但更长的旧分支,导出上一次 attempt 的 turn,而 reward/artifacts
+        # 描述的是本次 attempt。
+        store = RolloutTraceStore.remote()
+        try:
+            ray.get(
+                store.insert.remote(
+                    "s",
+                    "P",
+                    TokenizedSegment(text="P", token_ids=[1, 2], labels=[-100, -100], logprobs=[0.0, 0.0]),
+                )
+            )
+            # attempt 1:长链 P -> a1 -> a2 -> a3,先写入。
+            ray.get(
+                store.insert.remote(
+                    "s",
+                    "P a1",
+                    TokenizedSegment(text="a1", token_ids=[3], labels=[3], logprobs=[0.1], tool_call_count=1),
+                )
+            )
+            ray.get(
+                store.insert.remote(
+                    "s",
+                    "P a1 a2",
+                    TokenizedSegment(text="a2", token_ids=[4], labels=[4], logprobs=[0.2], tool_call_count=1),
+                )
+            )
+            ray.get(
+                store.insert.remote(
+                    "s",
+                    "P a1 a2 a3",
+                    TokenizedSegment(text="a3", token_ids=[5], labels=[5], logprobs=[0.3], tool_call_count=1),
+                )
+            )
+            time.sleep(0.01)
+            # attempt 2:与上次逐字相同的前缀覆盖写,随后超时(只写完 a1)。
+            ray.get(
+                store.insert.remote(
+                    "s",
+                    "P a1",
+                    TokenizedSegment(text="a1", token_ids=[3], labels=[3], logprobs=[0.1], tool_call_count=1),
+                )
+            )
+
+            trace = ray.get(store.export_partial_training_trace.remote("s"))
+
+            # 覆盖写刷新 written_at 后,P -> a1 才是“最后写入”;旧分支更长也不选。
+            self.assertEqual(trace["input_ids"], [1, 2, 3])
+            self.assertEqual(trace["labels"], [-100, -100, 3])
+            self.assertEqual(trace["prompt_ids"], [1, 2])
+            self.assertEqual(trace["response_ids"], [3])
+            self.assertEqual(trace["tool_call_count"], 1)
         finally:
             ray.kill(store)
 
@@ -252,6 +313,7 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
             trace = ray.get(store.export_partial_training_trace.remote("s"))
 
             self.assertEqual(trace["tool_call_count"], 3)
+            self.assertEqual(trace["prompt_ids"], [1, 2])
             self.assertEqual(trace["response_ids"], [3, 4])
         finally:
             ray.kill(store)
@@ -279,6 +341,7 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
             trace = ray.get(store.export_partial_training_trace.remote("s"))
 
             self.assertIsNone(trace["tool_call_count"])
+            self.assertEqual(trace["prompt_ids"], [1, 2])
             self.assertEqual(trace["response_ids"], [3, 4])
         finally:
             ray.kill(store)
@@ -291,6 +354,7 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
 
             self.assertEqual(trace["input_ids"], [])
             self.assertEqual(trace["labels"], [])
+            self.assertEqual(trace["prompt_ids"], [])
             self.assertEqual(trace["response_ids"], [])
             self.assertIsNone(trace["routed_experts"])
             self.assertEqual(ray.get(store.list_sessions.remote()), [])
@@ -337,7 +401,9 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
             self.assertEqual(trace["input_ids"], [1, 2, 3, 4, 5, 6])
             self.assertEqual(trace["labels"], [-100, -100, 3, -100, -100, 6])
             # prompt 段 [1, 2] 被排除;tool-result 段 [4, 5] 保留在连续后缀中。
+            self.assertEqual(trace["prompt_ids"], [1, 2])
             self.assertEqual(trace["response_ids"], [3, 4, 5, 6])
+            self.assertEqual(trace["input_ids"], trace["prompt_ids"] + trace["response_ids"])
             self.assertEqual(trace["tool_call_count"], 1)
         finally:
             ray.kill(store)

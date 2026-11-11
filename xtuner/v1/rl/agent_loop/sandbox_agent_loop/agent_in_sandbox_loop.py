@@ -23,7 +23,6 @@ from .schemas import AgentRolloutItem, RolloutStatus
 
 _MISSING = object()
 _TIMEOUT_ERROR_CATEGORIES = ["timeout"]
-_TIMEOUT_TRAINED_KEY = "timeout_trained"
 
 
 def _import_from_path(path: str) -> Any:
@@ -163,11 +162,13 @@ def _selected_agent(item: AgentRolloutItem) -> dict[str, Any] | None:
     return item.infer.agent.model_dump(mode="json")
 
 
-def _count_tool_turns(messages: list[dict[str, Any]]) -> int:
+def _count_tool_calls(messages: list[dict[str, Any]]) -> int:
+    """Number of tool calls across the assistant messages (parallel calls count
+    individually)."""
     return sum(
-        1
+        len(message["tool_calls"])
         for message in messages
-        if isinstance(message, dict) and isinstance(message.get("tool_calls"), list) and message["tool_calls"]
+        if isinstance(message, dict) and isinstance(message.get("tool_calls"), list)
     )
 
 
@@ -280,8 +281,6 @@ class AgentInSandboxLoop(AgentLoop):
     async def generate_sample(  # type: ignore[override]
         self, rollout_state: RolloutState, **kwargs
     ) -> list[RolloutState]:
-        # Reset the per-attempt marker so a retried sample only reflects this attempt.
-        rollout_state.extra_fields.pop(_TIMEOUT_TRAINED_KEY, None)
         try:
             rollout_item = rollout_state.extra_fields["rollout_item"].model_copy(deep=True)
             if rollout_state.session_id is None:
@@ -356,7 +355,7 @@ class AgentInSandboxLoop(AgentLoop):
             segment_state = rollout_state.model_copy(deep=True)
             segment_state.extra_fields["agent_messages"] = messages
             segment_state.extra_fields["agent_tools"] = tools
-            segment_state.extra_fields["agent_tool_turns"] = _count_tool_turns(messages)
+            segment_state.extra_fields["agent_tool_calls"] = _count_tool_calls(messages)
             segment_state.extra_fields["agent_trace_segment_index"] = segment_index
             segment_state.extra_fields["agent_trace_segment_count"] = len(segments)
             segment_state.extra_fields["agent_session_id"] = rollout_state.session_id
@@ -371,9 +370,11 @@ class AgentInSandboxLoop(AgentLoop):
             data = await trace_store.export_training_trace.remote(str(rollout_state.session_id), prompt_text)
             segment_state.input_ids = data["input_ids"]
             segment_state.labels = data["labels"]
-            # response_ids is the contiguous suffix after the session's initial prompt segment
-            # (tool-result tokens included), derived from the trace itself rather than dataset
-            # prompt_ids — agent requests render with system/tools, so the two need not match.
+            # prompt_ids/response_ids both come from the trace: the session's initial prompt
+            # segment and the contiguous suffix after it (tool-result tokens included), so
+            # input_ids == prompt_ids + response_ids holds. Dataset-side prompt_ids is not used
+            # because agent requests render with system/tools.
+            segment_state.prompt_ids = list(data["prompt_ids"])
             segment_state.response_ids = list(data["response_ids"])
             segment_state.logprobs = data["logprobs"]
             # ``routed_experts`` is a per-node list for a MoE trace or ``None`` for a dense one; trace_store's
@@ -415,19 +416,19 @@ class AgentInSandboxLoop(AgentLoop):
 
         rollout_state.input_ids = input_ids
         rollout_state.labels = labels
-        # 与正常路径一致：trace store 从会话初始 prompt 段之后切出的连续后缀（含 tool-result 段），
-        # 不依赖 dataset 侧 prompt_ids 的渲染边界。
+        # 与正常路径一致：prompt_ids/response_ids 都取自 trace（会话初始 prompt 段 + 其后的
+        # 连续后缀），恢复 input_ids == prompt_ids + response_ids，不依赖 dataset 侧渲染。
+        rollout_state.prompt_ids = list(data["prompt_ids"])
         rollout_state.response_ids = list(data["response_ids"])
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
         rollout_state.response = (
             self.tokenizer.decode(rollout_state.response_ids) if rollout_state.response_ids else ""
         )
-        rollout_state.extra_fields[_TIMEOUT_TRAINED_KEY] = True
         rollout_state.extra_fields["agent_session_id"] = rollout_state.session_id
         # Trace-side count is source-of-truth: it only counts the turns actually
         # exported (and trained). ``None`` means legacy nodes without the field.
-        rollout_state.extra_fields["agent_tool_turns"] = data.get("tool_call_count")
+        rollout_state.extra_fields["agent_tool_calls"] = data.get("tool_call_count")
         rollout_state.status = Status.COMPLETED
         rollout_state.finish_reason = "timeout"
         rollout_state.reward = {"score": self.timeout_reward}
@@ -486,4 +487,4 @@ class AgentInSandboxLoop(AgentLoop):
         if messages:
             rollout_state.extra_fields["agent_messages"] = messages
             rollout_state.extra_fields["agent_tools"] = tools
-            rollout_state.extra_fields["agent_tool_turns"] = _count_tool_turns(messages)
+            rollout_state.extra_fields["agent_tool_calls"] = _count_tool_calls(messages)

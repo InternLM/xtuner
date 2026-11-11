@@ -7,15 +7,14 @@ generate_sample / generate_group 代码路径)。
 TestTimeoutTraining —— 超时样本的生成与保留训练行为
 - test_timeout_sample_is_kept_trainable_with_fixed_reward:
     开关打开且错误为 entry timeout 时,已完成 turn 的部分轨迹被保留为 COMPLETED 样本,
-    finish_reason="timeout",reward 固定为 timeout_reward,训练字段全部填充并带
-    timeout_trained 标记。
-- test_timeout_tool_turns_is_none_without_store_count:
-    导出链缺少 tool_call_count 时 agent_tool_turns 保持 None,不从 artifacts 估算。
+    finish_reason="timeout",reward 固定为 timeout_reward,训练字段全部填充。
+- test_timeout_tool_calls_is_none_without_store_count:
+    导出链缺少 tool_call_count 时 agent_tool_calls 保持 None,不从 artifacts 估算。
 - test_timeout_falls_back_without_trainable_trace:
     单 token 或 labels 全 -100 的部分轨迹没有可训练 token 时回退 FAILED。
 - test_timeout_response_ids_do_not_depend_on_prompt_ids:
-    response_ids 由 trace store 从头节点(会话初始 prompt 段)切出,与 dataset
-    prompt_ids 的渲染边界无关;两者不一致时样本仍可保留。
+    prompt_ids/response_ids 都由 trace store 从头节点(会话初始 prompt 段)给出,
+    与 dataset prompt_ids 的渲染边界无关;两者不一致时样本仍可保留。
 - test_timeout_decode_failure_keeps_state_failed:
     保留流程中任何一步失败时样本保持 FAILED,不会被标成 COMPLETED 或写入固定 reward。
 - test_non_timeout_failure_keeps_failed:
@@ -28,8 +27,6 @@ TestTeacherScoring —— teacher scoring 对超时样本的处理
     group 级 teacher scoring(defer 模式)同时收到普通样本和超时样本。
 - test_sample_level_teacher_scoring_includes_timeout_samples:
     非 defer 模式下逐样本 teacher scoring 也收到超时样本。
-- test_stale_timeout_marker_is_cleared_on_retry:
-    上一次 attempt 残留的 timeout_trained 标记会被清理。
 
 TestTimeoutTrainingConfigValidation —— train_on_timeout 与 expired rerollout 的配置期互斥
 - test_timeout_training_rejects_expired_rerollout:
@@ -147,15 +144,19 @@ def _completed_item() -> AgentRolloutItem:
 
 def _fake_store(partial_trace: dict | None = None) -> SimpleNamespace:
     partial = partial_trace or {"input_ids": [], "labels": [], "logprobs": [], "routed_experts": None}
-    # Fake traces start with a one-token session prompt, so the store-derived response_ids
-    # is the tail after it (the real store slices from its head node).
-    partial = {**partial, "response_ids": list(partial["input_ids"][1:])}
+    # Fake traces start with a one-token session prompt, so the store-derived prompt_ids is
+    # the first token and response_ids the tail after it (the real store slices from its head node).
+    partial = {
+        **partial,
+        "prompt_ids": list(partial["input_ids"][:1]),
+        "response_ids": list(partial["input_ids"][1:]),
+    }
     return SimpleNamespace(
         export_partial_training_trace=SimpleNamespace(remote=AsyncMock(return_value=partial)),
         export_training_trace=SimpleNamespace(
             remote=AsyncMock(return_value={"input_ids": [1, 2], "labels": [-100, 5],
                                            "logprobs": [0.0, 0.1], "routed_experts": None,
-                                           "response_ids": [2]})
+                                           "prompt_ids": [1], "response_ids": [2]})
         ),
     )
 
@@ -186,17 +187,19 @@ class TestTimeoutTraining(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kept.reward, {"score": -1.0})
         self.assertEqual(kept.input_ids, [1, 2, 3])
         self.assertEqual(kept.labels, [-100, 5, 6])
-        # response_ids 由 trace store 从头节点切出的连续后缀(与正常路径一致)。
+        # prompt_ids/response_ids 都由 trace store 从头节点给出,满足
+        # input_ids == prompt_ids + response_ids。
+        self.assertEqual(kept.prompt_ids, [1])
         self.assertEqual(kept.response_ids, [2, 3])
+        self.assertEqual(kept.input_ids, kept.prompt_ids + kept.response_ids)
         self.assertEqual(kept.logprobs, [0.0, 0.1, 0.2])
         self.assertIsNone(kept.routed_experts)
-        self.assertTrue(kept.extra_fields["timeout_trained"])
         self.assertEqual(kept.extra_fields["agent_status"], "timeout")
         # 优先使用 trace store 沿导出链求和的计数(与训练 token 同源)。
-        self.assertEqual(kept.extra_fields["agent_tool_turns"], 2)
+        self.assertEqual(kept.extra_fields["agent_tool_calls"], 2)
 
-    async def test_timeout_tool_turns_is_none_without_store_count(self):
-        # 行为:导出的 tool_call_count 为 None(旧节点缺字段)时,agent_tool_turns 保持
+    async def test_timeout_tool_calls_is_none_without_store_count(self):
+        # 行为:导出的 tool_call_count 为 None(旧节点缺字段)时,agent_tool_calls 保持
         # None——trace store 没有记录就不虚构计数,不从 artifacts 估算
         loop = _make_loop(train_on_timeout=True)
         state = _make_state(_timeout_item_with_tool_calls())
@@ -211,14 +214,14 @@ class TestTimeoutTraining(unittest.IsolatedAsyncioTestCase):
         with patch(f"{LOOP_MODULE}.get_store", return_value=_fake_store(partial_trace)):
             kept_list = await loop.generate_sample(state)
 
-        self.assertIsNone(kept_list[0].extra_fields["agent_tool_turns"])
+        self.assertIsNone(kept_list[0].extra_fields["agent_tool_calls"])
 
     async def test_timeout_response_ids_do_not_depend_on_prompt_ids(self):
-        # 行为:response_ids 由 trace store 从头节点切出,与 dataset prompt_ids 的渲染边界无关;
-        # 两者不一致时样本仍可保留(agent 请求渲染含 system/tools,与 dataset 渲染不同)
+        # 行为:prompt_ids/response_ids 都取自 trace(首节点 + 其后的连续后缀),dataset
+        # prompt_ids 会被覆盖;两者不一致时样本仍可保留(agent 请求渲染含 system/tools)
         loop = _make_loop(train_on_timeout=True)
         state = _make_state(_timeout_item())
-        state.prompt_ids = [99]  # 与 partial_trace 的 [1, 2, 3] 不一致
+        state.prompt_ids = [99]  # 与 partial_trace 的 [1, 2, 3] 不一致,会被 trace 首段覆盖
         partial_trace = {
             "input_ids": [1, 2, 3],
             "labels": [-100, 5, 6],
@@ -232,7 +235,9 @@ class TestTimeoutTraining(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(kept_list), 1)
         kept = kept_list[0]
         self.assertEqual(kept.status, Status.COMPLETED)
+        self.assertEqual(kept.prompt_ids, [1])
         self.assertEqual(kept.response_ids, [2, 3])
+        self.assertEqual(kept.input_ids, kept.prompt_ids + kept.response_ids)
 
     async def test_timeout_decode_failure_keeps_state_failed(self):
         # 行为:落盘前任何一步失败(这里让 decode 抛错)都不能留下 COMPLETED 状态和固定 reward
@@ -252,8 +257,8 @@ class TestTimeoutTraining(unittest.IsolatedAsyncioTestCase):
         failed = failed_list[0]
         self.assertEqual(failed.status, Status.FAILED)
         self.assertEqual(failed.extra_fields["agent_status"], "failed")
+        self.assertEqual(failed.finish_reason, "error")
         self.assertIsNone(failed.reward)
-        self.assertNotIn("timeout_trained", failed.extra_fields)
 
     async def test_timeout_falls_back_without_trainable_trace(self):
         # 行为:单 token 或 labels 全 -100 的部分轨迹没有可训练 token,回退 FAILED
@@ -330,7 +335,7 @@ class TestTeacherScoring(unittest.IsolatedAsyncioTestCase):
             result = await loop.generate_group([normal_state, timeout_state])
 
         self.assertEqual(len(result), 2)
-        scored_flags = sorted(state.extra_fields.get("timeout_trained", False) for state in scored_states)
+        scored_flags = sorted(state.finish_reason == "timeout" for state in scored_states)
         self.assertEqual(scored_flags, [False, True])
 
     async def test_sample_level_teacher_scoring_includes_timeout_samples(self):
@@ -360,24 +365,7 @@ class TestTeacherScoring(unittest.IsolatedAsyncioTestCase):
             await loop.generate_group([normal_state, timeout_state])
 
         self.assertEqual(len(scored_states), 2)
-        self.assertEqual(sorted(s.extra_fields.get("timeout_trained", False) for s in scored_states), [False, True])
-
-    async def test_stale_timeout_marker_is_cleared_on_retry(self):
-        # 行为:上一次 attempt 残留的 timeout_trained 标记被清理
-        loop = _make_loop(train_on_timeout=True)
-        state = _make_state(_completed_item())
-        state.extra_fields["timeout_trained"] = True  # 上次超时尝试遗留的标记
-
-        loop._teacher_scorer = SimpleNamespace(
-            on_sample_ready=AsyncMock(side_effect=lambda state: state),
-            on_group_ready=AsyncMock(side_effect=lambda group: group),
-        )
-
-        with patch(f"{LOOP_MODULE}.get_store", return_value=_fake_store()):
-            result = await loop.generate_group([state])
-
-        self.assertEqual(len(result), 1)
-        self.assertNotIn("timeout_trained", result[0].extra_fields)
+        self.assertEqual(sorted(s.finish_reason == "timeout" for s in scored_states), [False, True])
 
 
 class TestTimeoutTrainingConfigValidation(unittest.TestCase):

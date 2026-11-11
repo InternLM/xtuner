@@ -2,8 +2,8 @@
 
 TestLocalhostTraceFields —— _fill_rollout_state 从 trace store 读取训练字段
 - test_response_ids_come_from_store_not_dataset_prompt:
-    response_ids 使用 store 导出的连续后缀(含 tool-result 段),与 dataset prompt_ids
-    的渲染边界无关;两者不一致时正常样本仍可产出训练字段。
+    prompt_ids/response_ids 都使用 store 导出的首段 + 连续后缀(含 tool-result 段),
+    满足 input_ids == prompt_ids + response_ids;与 dataset prompt_ids 的渲染边界无关。
 """
 
 import unittest
@@ -55,11 +55,11 @@ class TestLocalhostTraceFields(unittest.IsolatedAsyncioTestCase):
     """_fill_rollout_state 使用 store 导出的训练字段。"""
 
     async def test_response_ids_come_from_store_not_dataset_prompt(self):
-        # 行为:response_ids 直接取 store 导出结果,不按 dataset prompt_ids 切片
+        # 行为:prompt_ids/response_ids 都取 store 导出结果,不按 dataset prompt_ids 切片
         loop = _make_loop()
         state = RolloutState(
             message=[{"role": "user", "content": "hi"}],
-            prompt_ids=[99],  # 与 trace 的 [1, 2, 3] 不一致
+            prompt_ids=[99],  # 与 trace 的 [1, 2, 3] 不一致,会被 trace 首段覆盖
             session_id=123,
         )
         trace = {
@@ -67,6 +67,7 @@ class TestLocalhostTraceFields(unittest.IsolatedAsyncioTestCase):
             "labels": [-100, 5, 6],
             "logprobs": [0.0, 0.1, 0.2],
             "routed_experts": None,
+            "prompt_ids": [1],
             "response_ids": [2, 3],
         }
 
@@ -78,7 +79,9 @@ class TestLocalhostTraceFields(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.finish_reason, "stop")
         self.assertEqual(state.input_ids, [1, 2, 3])
         self.assertEqual(state.labels, [-100, 5, 6])
+        self.assertEqual(state.prompt_ids, [1])
         self.assertEqual(state.response_ids, [2, 3])
+        self.assertEqual(state.input_ids, state.prompt_ids + state.response_ids)
         self.assertEqual(state.logprobs, [0.0, 0.1, 0.2])
         self.assertIsNone(state.routed_experts)
         self.assertEqual(state.response, "answer")

@@ -105,13 +105,14 @@ def _assemble_trace(nodes: List["TreeNode"], session_id: str) -> dict:
 
     Returns:
         dict: The trace dictionary containing `input_ids`, `labels`,
-        `logprobs`, `routed_experts`, `tool_call_count`, and `response_ids`.
-        ``tool_call_count`` is the summed per-turn tool-call count of the
-        assistant turns on the chain, or ``None`` when any assistant turn
-        predates the ``tool_call_count`` field (legacy node). ``response_ids``
-        is the contiguous suffix of ``input_ids`` after the session's initial
-        prompt segment (tool-result tokens included), derived from the trace
-        itself rather than dataset-side prompt ids.
+        `logprobs`, `routed_experts`, `tool_call_count`, `prompt_ids`, and
+        `response_ids`. ``tool_call_count`` is the summed per-turn tool-call
+        count of the assistant turns on the chain, or ``None`` when any
+        assistant turn predates the ``tool_call_count`` field (legacy node).
+        ``prompt_ids`` is the session's initial prompt segment and
+        ``response_ids`` the contiguous suffix after it (tool-result tokens
+        included), so ``input_ids == prompt_ids + response_ids`` holds. Both
+        are derived from the trace itself rather than dataset-side prompt ids.
     """
     trace: dict[str, Any] = {"input_ids": [], "labels": [], "logprobs": []}
     expert_keys: List[Any] = []
@@ -147,10 +148,49 @@ def _assemble_trace(nodes: List["TreeNode"], session_id: str) -> dict:
                 f"Trace head of session {session_id!r} is not a prompt segment: cannot derive response_ids."
             )
         prompt_token_count = len(head.token_ids)
+        trace["prompt_ids"] = list(head.token_ids)
     else:
         prompt_token_count = 0
+        trace["prompt_ids"] = []
     trace["response_ids"] = list(trace["input_ids"][prompt_token_count:])
     return trace
+
+
+def _latest_chain(trie: "Trie") -> List["TreeNode"]:
+    """Return the committed chain ending at the most recently written node.
+
+    ``written_at`` is refreshed on every write (including overwrites), so the
+    anchor must be the node with the latest *own* write rather than the deepest
+    node of a chain: a replayed attempt may overwrite a shared prefix node and
+    stop earlier than the old branch below it. Ties fall back to the longer
+    chain (more tokens on the path).
+
+    Args:
+        trie (Trie): The session trie to search.
+
+    Returns:
+        List[TreeNode]: Valued nodes from the root to the anchor, in path order.
+    """
+    best_node: Any = None
+    best_key: tuple[float, int] = (float("-inf"), -1)
+    stack: list[tuple[Any, int]] = [(trie.root, 0)]
+    while stack:
+        node, token_count = stack.pop()
+        if node.value is not None:
+            key = (node.written_at, token_count)
+            if key > best_key:
+                best_key = key
+                best_node = node
+            token_count += len(node.value.token_ids)
+        for child in node.children.values():
+            stack.append((child, token_count))
+
+    chain: List["TreeNode"] = []
+    while best_node is not None:
+        if best_node.value is not None:
+            chain.append(best_node)
+        best_node = best_node.parent
+    return chain[::-1]
 
 
 class TokenizedSegment(BaseModel):
@@ -186,13 +226,13 @@ class TreeNode:
         value (Optional[Any]): The value stored in the node.
         parent (Optional["TreeNode"]): The parent node.
         children (dict[str, "TreeNode"]): The child nodes, mapping string tokens to TreeNodes.
-        created_at (float): The timestamp when the node was created.
+        written_at (float): Last-write timestamp; refreshed on create and on overwrite.
     """
 
     value: Optional[Any]
     parent: Optional["TreeNode"]
     children: dict[str, "TreeNode"] = field(default_factory=dict)
-    created_at: float = field(default_factory=time.time)
+    written_at: float = field(default_factory=time.time)
 
 
 class Trie:
@@ -236,6 +276,7 @@ class Trie:
                 node = node.children[key]
                 break
 
+        node.written_at = time.time()
         node.value = value
 
     def search(self, text: str, filter_none: bool = False) -> Tuple[str, List["TreeNode"]]:
@@ -432,10 +473,10 @@ class RolloutTraceStore:
 
         A session with divergent branches (e.g. an expired rollout reusing the
         same session id) exports the most recently written committed chain
-        (ties broken by most tokens, then most nodes) instead of being
-        rejected, so the export always matches the latest attempt — the same
-        semantics the prompt-matching ``export_training_trace`` gives the
-        normal path — while a single-attempt trajectory is still trainable.
+        (ties broken by the longer chain) instead of being rejected, so the
+        export always matches the latest attempt — the same semantics the
+        prompt-matching ``export_training_trace`` gives the normal path —
+        while a single-attempt trajectory is still trainable.
 
         Args:
             session_id (str): The session identifier.
@@ -447,24 +488,7 @@ class RolloutTraceStore:
         trie = self.sessions.get(session_id)
         if trie is None:
             return _assemble_trace([], session_id)
-        # newest first, then token count, then node count — all single-clock
-        # comparisons inside this actor, so `created_at` is comparable across
-        # branches. A chain's newest node is its deepest one (shared prefix
-        # nodes are always older than the branches below them).
-        best: tuple[float, int, int, List[TreeNode]] = (-1.0, 0, 0, [])
-        stack: list[tuple[TreeNode, float, int, int, List[TreeNode]]] = [(trie.root, -1.0, 0, 0, [])]
-        while stack:
-            node, newest, tokens, node_count, chain = stack.pop()
-            if node.value is not None:
-                chain = chain + [node]
-                tokens += len(node.value.token_ids)
-                node_count += 1
-                newest = max(newest, node.created_at)
-                if (newest, tokens, node_count) > (best[0], best[1], best[2]):
-                    best = (newest, tokens, node_count, chain)
-            for child in reversed(list(node.children.values())):
-                stack.append((child, newest, tokens, node_count, chain))
-        return _assemble_trace(best[3], session_id)
+        return _assemble_trace(_latest_chain(trie), session_id)
 
     def export_training_trace(self, session_id: str, prompt_text: str) -> dict:
         """Export the stored training trace given a complete prompt text.
@@ -475,10 +499,11 @@ class RolloutTraceStore:
 
         Returns:
             dict: The trace dictionary containing `input_ids`, `labels`, `logprobs`,
-                `routed_experts`, `tool_call_count`, and `response_ids`. `routed_experts`
-                is a per-node list of expert-id refs for a MoE trace, or `None` when the
-                trace carries no routed experts at all (dense model). `response_ids` is the
-                contiguous suffix after the session's initial prompt segment.
+                `routed_experts`, `tool_call_count`, `prompt_ids`, and `response_ids`.
+                `routed_experts` is a per-node list of expert-id refs for a MoE trace, or
+                `None` when the trace carries no routed experts at all (dense model).
+                `prompt_ids`/`response_ids` are the session's initial prompt segment and the
+                contiguous suffix after it, so `input_ids == prompt_ids + response_ids`.
 
         Raises:
             ValueError: If the prompt_text does not completely match the trace keys in the session.
