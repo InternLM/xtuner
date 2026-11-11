@@ -122,7 +122,8 @@ class KPoolIndexer(nn.Module):
         q = self.wq_b(q_resid).view(bsz, seq_len, self.index_n_heads, self.index_head_dim)
         projected_k = self.wk(hidden_states)
         if self._uses_lmdeploy_kpool and (
-            _lmdeploy_kpool_is_available(q.device) or _lmdeploy_kpool_is_available(q.device, bf16=True)
+            _lmdeploy_kpool_is_available(q.device)
+            or (q.dtype == torch.bfloat16 and _lmdeploy_kpool_is_available(q.device, bf16=True))
         ):
             norm_weight = materialize_full(self.k_norm.weight, name="indexer.k_norm.weight")
             norm_bias = materialize_full(self.k_norm.bias, name="indexer.k_norm.bias")

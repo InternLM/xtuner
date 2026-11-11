@@ -28,6 +28,30 @@ from xtuner.v1.ops.sparse_mla.lmdeploy_kpool import (
 
 class TestKPoolCompression:
     @pytest.mark.gpu
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+    def test_bf16_override_preserves_other_pool_dtypes(
+        self, monkeypatch: pytest.MonkeyPatch, dtype: torch.dtype
+    ) -> None:
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA required")
+        monkeypatch.setenv("XTUNER_GLM53_KPOOL_BF16", "1")
+        implementation = importlib.import_module("xtuner.v1.ops.sparse_mla.kpool")
+        monkeypatch.setattr(
+            implementation,
+            "_lmdeploy_kpool_is_available",
+            lambda *args, **kwargs: pytest.fail("Non-BF16 pools must retain the original arithmetic"),
+        )
+        torch.manual_seed(87)
+        keys = torch.randn(8, 128, device="cuda", dtype=dtype)
+        scores = torch.randn_like(keys)
+        ape = torch.randn(4, 128, device="cuda")
+        ctx = SequenceContext.from_input_ids((torch.zeros(1, 8, dtype=torch.long),), device="cuda")
+        actual, _, _ = build_pools(keys, scores, ape, ctx, index_kpool=4)
+        probabilities = (scores.view(2, 4, 128).float() + ape).softmax(1).to(dtype)
+        expected = (probabilities * keys.view(2, 4, 128)).sum(1)
+        assert actual.dtype == dtype and torch.equal(actual, expected)
+
+    @pytest.mark.gpu
     @pytest.mark.parametrize("lengths", [(4096,), (5, 11), (1, 2, 3)])
     def test_bf16_pooling_matches_lmdeploy(self, monkeypatch: pytest.MonkeyPatch, lengths: tuple[int, ...]) -> None:
         if not torch.cuda.is_available():

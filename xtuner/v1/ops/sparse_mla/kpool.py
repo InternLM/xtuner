@@ -191,7 +191,12 @@ def build_pools(
     grouped_k = k[safe]
     grouped_gate = gate_scores[safe]
 
-    if index_kpool == 4 and k.shape[-1] == 128 and _lmdeploy_kpool_is_available(device, bf16=True):
+    if (
+        k.dtype == torch.bfloat16
+        and index_kpool == 4
+        and k.shape[-1] == 128
+        and _lmdeploy_kpool_is_available(device, bf16=True)
+    ):
         from .lmdeploy_kpool import _compress_storage
 
         # Keep softmax, products and accumulation in FP32 until the BF16 store.
