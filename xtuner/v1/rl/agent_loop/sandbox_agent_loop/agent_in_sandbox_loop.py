@@ -9,6 +9,7 @@ import uuid
 from typing import Any, Literal
 
 from lagent.utils import create_object
+from pydantic import Field
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
@@ -48,11 +49,37 @@ def _resolve_runner(pipeline: Any, session_id: str) -> Any:
     return pipeline
 
 
-def _drop_failed_train_samples(samples: list[RolloutState], mode: Literal["train", "eval"]) -> list[RolloutState]:
+def _drop_failed_train_samples(
+    samples: list[RolloutState], mode: Literal["train", "eval"], min_valid_attempts: int | None = None
+) -> list[RolloutState]:
+    """Drop failed training attempts; optionally require independent survivors.
+
+    - mixed group: failed attempts dropped; remaining valid attempts train.
+    - fewer than min_valid_attempts valid independent attempts (distinct
+      agent_session_id): whole group marked FILTERED with a recorded reason,
+      so it never reaches replay/advantage/policy loss.
+    - all attempts failed: statuses kept as FAILED so the group is counted
+      and discarded as failed, not silently re-labelled.
+    """
     if mode != "train":
         return samples
     filtered = [sample for sample in samples if sample.status != Status.FAILED]
-    return filtered or samples
+    if len(filtered) == len(samples):
+        return samples
+    if not filtered:
+        return samples
+    if min_valid_attempts is None:
+        return filtered
+    valid_attempts = {sample.extra_fields.get("agent_session_id") for sample in filtered}
+    if len(valid_attempts) < min_valid_attempts:
+        for sample in samples:
+            sample.status = Status.FILTERED
+            sample.extra_fields["filter_reason"] = (
+                f"valid_independent_attempts<{min_valid_attempts} "
+                f"(valid={len(valid_attempts)}, dropped_failed={len(samples) - len(filtered)})"
+            )
+        return samples
+    return filtered
 
 
 def _validate_trace_segment(
@@ -197,6 +224,8 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
     requires_rollout_proxy: bool = True
     require_turn_provenance: bool = False
     retire_route_on_completion: bool = False
+    # Optional recipe policy; ordinary sandbox filtering keeps upstream semantics.
+    min_valid_attempts: int | None = Field(default=None, ge=1)
 
     def build_local(
         self, rollout_controller: RolloutController | None = None, judger: Judger | None = None, logger=None
@@ -211,6 +240,7 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
             mode=self.mode,
             require_turn_provenance=self.require_turn_provenance,
             retire_route_on_completion=self.retire_route_on_completion,
+            min_valid_attempts=self.min_valid_attempts,
         )
 
 
@@ -226,6 +256,7 @@ class AgentInSandboxLoop(AgentLoop):
         mode: Literal["train", "eval"] = "train",
         require_turn_provenance: bool = False,
         retire_route_on_completion: bool = False,
+        min_valid_attempts: int | None = None,
     ):
         if hf_checkpoint is None:
             raise ValueError("hf_checkpoint must be provided for AgentInSandboxLoop.")
@@ -235,6 +266,9 @@ class AgentInSandboxLoop(AgentLoop):
         self.mode = mode
         self.require_turn_provenance = require_turn_provenance
         self.retire_route_on_completion = retire_route_on_completion
+        if min_valid_attempts is not None and min_valid_attempts < 1:
+            raise ValueError("min_valid_attempts must be positive")
+        self.min_valid_attempts = min_valid_attempts
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         async def generate_one(state: RolloutState) -> list[RolloutState]:
@@ -254,7 +288,7 @@ class AgentInSandboxLoop(AgentLoop):
         generated_samples = asyncio.gather(*pending_tasks)
         sample_groups = await generated_samples
         samples = [sample for sample_group in sample_groups for sample in sample_group]
-        samples = _drop_failed_train_samples(samples, self.mode)
+        samples = _drop_failed_train_samples(samples, self.mode, self.min_valid_attempts)
         samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
         samples = await self._teacher_scorer.on_group_ready(samples)
         return self.canonicalize_train_fields(samples)
@@ -323,6 +357,7 @@ class AgentInSandboxLoop(AgentLoop):
         rollout_state.reward = _extract_reward_payload(item)
         rollout_state.extra_fields["origin_data_source"] = item.data_source
         rollout_state.extra_fields["agent_status"] = item.status.value
+        rollout_state.extra_fields["agent_sandbox_env_id"] = item.infer.sandbox_env_id
         selected_agent = _selected_agent(item)
         if selected_agent is not None:
             rollout_state.extra_fields["agent_name"] = selected_agent.get("name")
