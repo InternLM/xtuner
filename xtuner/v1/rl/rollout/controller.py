@@ -1,4 +1,6 @@
 import asyncio
+import math
+from time import monotonic
 from typing import Any, TypeAlias
 from uuid import uuid4
 
@@ -46,6 +48,8 @@ class RolloutController:
             placement_group (PlacementGroup): The placement group for the
                 RolloutWorker actors.
         """
+        self._request_barrier = None
+        self._request_epoch = 0
         self.config = infer_config
         self.num_gpus_per_engine = self.config.num_gpus_per_engine
         self.logger = get_logger(log_dir=infer_config.worker_log_dir, tag="RolloutController")
@@ -174,6 +178,70 @@ class RolloutController:
             ]
         )
 
+    def assert_request_gates_healthy(self):
+        workers = self.registry.active_entrypoints()
+        servers = ray.get([w.actor.get_session_server.remote() for w in workers], timeout=ROLLOUT_RAY_GET_TIMEOUT)
+        if not servers or any(server is None for server in servers):
+            raise RuntimeError("A fixed Agent request entrypoint is missing")
+        states = ray.get([s.request_status.remote() for s in servers], timeout=ROLLOUT_RAY_GET_TIMEOUT)
+        failures = [state for state in states if state["failures"]]
+        if failures:
+            raise RuntimeError(f"Unsettled Agent requests stop this run: {failures}")
+
+    def prepare_pause(self, *, freeze_timeout: float, drain_timeout: float):
+        """Freeze topology, seal every entrypoint, then drain with one deadline."""
+        if self._request_barrier is not None:
+            raise RuntimeError("A request barrier already exists")
+        self.health_manager.pause()
+        if not self.health_manager.wait_recovery_done(timeout=freeze_timeout):
+            raise TimeoutError("Could not freeze rollout lifecycle")
+        workers = self.registry.active_entrypoints()
+        servers = ray.get([w.actor.get_session_server.remote() for w in workers], timeout=freeze_timeout)
+        if not servers or any(server is None for server in servers):
+            raise RuntimeError("Every fixed rollout entrypoint must own a SessionServer")
+        self._request_epoch += 1
+        barrier = dict(epoch=self._request_epoch, endpoints=tuple(w.session_url for w in workers))
+        self._request_barrier = (barrier, servers)
+        # Send all seals before waiting for any drain.
+        ray.get([s.seal_requests.remote(barrier["epoch"]) for s in servers], timeout=freeze_timeout)
+        ray.get([s.drain_requests.remote(drain_timeout) for s in servers], timeout=drain_timeout + freeze_timeout)
+        return barrier
+
+    def resume_requests(self, barrier: dict, model_step: int, *, timeout: float = 60):
+        """Publish an updated model under the existing admission barrier.
+
+        The topology control budget covers version installation, clearing backend
+        abort flags, and reopening. It does not bound training or weight transfer.
+        A failed install or backend resume cannot open a gate. Reopening multiple
+        entrypoints is not atomic; an RPC failure may leave some valid gates open.
+        """
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("Request publication timeout must be finite and positive")
+        if self._request_barrier is None or barrier != self._request_barrier[0]:
+            raise RuntimeError("Unknown request barrier")
+        _, servers = self._request_barrier
+        endpoints = tuple(w.session_url for w in self.registry.active_entrypoints())
+        if endpoints != barrier["endpoints"]:
+            raise RuntimeError("Fixed rollout topology changed under barrier")
+        deadline = monotonic() + timeout
+
+        def wait_all(actors, method, *args):
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"Request publication timed out before {method}")
+            refs = [getattr(actor, method).remote(*args) for actor in actors]
+            return ray.get(refs, timeout=remaining)
+
+        # Install while sealed, then clear every backend abort flag before opening.
+        wait_all(servers, "install_request_version", barrier["epoch"], model_step)
+        workers = self.registry.get_target_state_workers(WorkerLifecycleState.ACTIVE)
+        results = wait_all([w.actor for w in workers], "continue_generation")
+        if any(result is False for result in results):
+            raise RuntimeError("Backend resume failed under request barrier")
+        wait_all(servers, "reopen_requests", barrier["epoch"])
+        self._request_barrier = None
+        self.health_manager.resume()
+
     def pause_generation(self):
         self.health_manager.pause()
         # Wait for the health manager to finish recovery before pausing generation.
@@ -195,6 +263,8 @@ class RolloutController:
         failed_worker_urls = [worker.url for worker, result in zip(active_workers, results) if result is False]
         if succeeded_worker_urls:
             self.logger.info(f"Abort request sent successfully: count={len(succeeded_worker_urls)}")
+        if failed_worker_urls and self._request_barrier is not None:
+            raise RuntimeError(f"Backend pause failed: {failed_worker_urls}")
         if failed_worker_urls:
             self.logger.warning(f"Abort request failed: worker_urls={failed_worker_urls}")
 
@@ -240,7 +310,8 @@ class RolloutController:
 
     def continue_generation(self):
         self._broadcast_to_workers("continue_generation", WorkerLifecycleState.ACTIVE)
-        self.health_manager.resume()
+        if self._request_barrier is None:
+            self.health_manager.resume()
 
     def offload(self):
         self._broadcast_to_workers("offload", WorkerLifecycleState.ACTIVE)
