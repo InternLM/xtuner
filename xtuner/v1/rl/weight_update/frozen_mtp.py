@@ -236,7 +236,8 @@ class FrozenMTPSource:
         temporary.replace(target)
         data["weight_map"].update({key: _SHARD for key in self._tensors})
         meta = data.setdefault("metadata", {})
-        meta["total_size"] = meta.get("total_size", 0) + sum(spec["nbytes"] for spec in self.specs.values())
+        if "total_size" in meta:
+            meta["total_size"] += sum(spec["nbytes"] for spec in self.specs.values())
         _atomic_json(index, data)
         self.save_binding(directory)
         # No marker is written if shard/index/binding completion raises.

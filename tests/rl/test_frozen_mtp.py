@@ -417,3 +417,27 @@ def test_actual_lmdeploy_config_consumes_prefixed_speculation_fields(monkeypatch
         assert resolved.speculative_config.num_speculative_tokens == 3
     else:
         assert resolved.speculative_config is None
+
+
+@pytest.mark.parametrize("metadata", [None, {}, {"total_size": 256}])
+def test_hf_export_does_not_invent_partial_total_size(source, tmp_path, metadata):
+    directory = tmp_path / "target"
+    actor_export(directory)
+    index = directory / "model.safetensors.index.json"
+    data = json.loads(index.read_text())
+    if metadata is None:
+        data.pop("metadata")
+    else:
+        data["metadata"] = metadata
+    index.write_text(json.dumps(data))
+    frozen = FrozenMTPSource(source)
+    frozen.complete_hf(directory)
+    exported = json.loads(index.read_text())
+    if metadata is not None and "total_size" in metadata:
+        assert exported["metadata"]["total_size"] == 256 + sum(spec["nbytes"] for spec in frozen.specs.values())
+    else:
+        assert "total_size" not in exported["metadata"]
+    assert (directory / frozen_mtp.READY).is_file()
+    assert set(exported["weight_map"]) == {
+        "model.language_model.embed_tokens.weight", "lm_head.weight", *frozen.specs
+    }
