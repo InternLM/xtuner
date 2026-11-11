@@ -1013,17 +1013,19 @@ class BaseRLTrainer:
 
         # fit内部再做worker的onload，ppo onload critic, 其他的onload actor
         with timer("training", step_timer_dict):
-            workers_log_item, data_info = self.train_controller.fit(
-                train_batch,
-                pack_max_length=self._train_worker_cfg.pack_max_length,
-                rollout_idx=train_step,
-                raw_rewards_sum=raw_rewards_sum,
-                raw_rewards_count=raw_rewards_count,
-            )
+            try:
+                workers_log_item, data_info = self.train_controller.fit(
+                    train_batch,
+                    pack_max_length=self._train_worker_cfg.pack_max_length,
+                    rollout_idx=train_step,
+                    raw_rewards_sum=raw_rewards_sum,
+                    raw_rewards_count=raw_rewards_count,
+                )
+            finally:
+                self._release_train_batch_resources(train_batch)
 
         data_info["invalid_train_groups"] = dropped_groups
         data_info["invalid_train_samples"] = dropped_samples
-        self._release_train_batch_resources(train_batch)
 
         return {
             "data_info": data_info,
