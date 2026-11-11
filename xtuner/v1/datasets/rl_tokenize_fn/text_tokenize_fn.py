@@ -106,11 +106,14 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState]):
     def hash(self) -> str:
         """Cache key that tracks tokenizer identity and tokenize source.
 
-        The previous constant key silently reused cached ids after the model
-        directory swapped in a different tokenizer (e.g. a custom Glm5Tokenizer
-        that encodes control-token literals differently), so both the
-        tokenizer fingerprint and the ``__call__`` source hash are part of
-        the key.
+        The RL dataset cache stores only token counts (``num_tokens`` /
+        ``proxy_attn_flops``), not token ids — runtime tokenization always
+        runs fresh. With the previous constant key, swapping in a different
+        tokenizer (e.g. a custom Glm5Tokenizer that encodes control-token
+        literals differently) silently loaded stale counts, causing wrong
+        max-length filtering and packing decisions that surface as a runtime
+        assertion when the real count diverges. Both the tokenizer
+        fingerprint and the ``__call__`` source hash are part of the key.
         """
         if self._hash is None:
             tokenizer_hash = tokenizer_xxhash(self.tokenizer)[:16]
