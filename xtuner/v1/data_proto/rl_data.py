@@ -250,7 +250,7 @@ class RolloutState(BaseModel):
             None
         """
         routed_experts = self.routed_experts
-        if routed_experts is not None:
+        if routed_experts is not None and not self.extra_fields.get("request_ids"):
             from ray import ObjectRef
 
             from xtuner.v1.rl.utils.ray_utils import free_object_refs
@@ -342,6 +342,10 @@ def free_rollout_state_refs(rollout_state: RolloutState) -> None:
 
     from xtuner.v1.rl.utils.ray_utils import free_object_refs
 
+    # Request-aware trace routes are shared with sibling segments and workers.
+    # Keep the ordinary rollout's explicit free contract when provenance is off.
+    if rollout_state.extra_fields.get("request_ids"):
+        rollout_state.routed_experts = None
     refs: list[ObjectRef] = []
 
     def clear_object_refs(value: Any) -> Any:

@@ -140,6 +140,7 @@ class BaseProduceContext:
         for item in rollout_state:
             item.extra_fields["producer_future_step"] = self.train_step
 
+        inherited_tokens = sum(len(item.response_ids or []) for item in rollout_state)
         start = time.perf_counter()
         if isinstance(self.agent_loop, ray.actor.ActorHandle):
             result = await self.agent_loop.generate_group.remote(
@@ -152,15 +153,24 @@ class BaseProduceContext:
                 enable_partial_rollout=enable_partial_rollout,
             )
         elapsed = time.perf_counter() - start
-        if isinstance(result, list):
-            for item in result:
-                if isinstance(item, RolloutState):
-                    item.extra_fields[GROUP_GENERATE_TIME_KEY] = elapsed
+        new_tokens = max(0, sum(len(item.response_ids or []) for item in result) - inherited_tokens)
+        for index, item in enumerate(result):
+            extra_fields = getattr(item, "extra_fields", None)
+            if extra_fields is None:
+                extra_fields = {}
+                setattr(item, "extra_fields", extra_fields)
+            extra_fields[GROUP_GENERATE_TIME_KEY] = elapsed
+            # Provenance may already cover every new token. Count generation
+            # separately, once per group, without mutating token versions.
+            extra_fields["new_response_tokens"] = new_tokens if index == 0 else 0
         return result
 
     async def put_generated_group(self, group: list[RolloutState]) -> bool:
         produced_tokens = sum(
-            max(0, len(item.response_ids or []) - len(item.response_model_steps or [])) for item in group
+            item.extra_fields.get(
+                "new_response_tokens", max(0, len(item.response_ids or []) - len(item.response_model_steps or []))
+            )
+            for item in group
         )
         initial_status = get_group_status(group)
 
