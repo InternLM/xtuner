@@ -1129,6 +1129,33 @@ class BaseRLTrainer:
         torch.save(serializable_batch, save_path)
         self.logger.info(f"Debug rollout batch for step {train_step} saved to {save_path}")
 
+    async def _fit_debug_train(self) -> None:
+        self._benchmark_start_time_s = time.perf_counter()
+        self._benchmark_training_samples = 0
+        self._benchmark_training_tokens = 0
+
+        init_train_step = self._cur_step + 1
+        for train_step in range(init_train_step, self._total_train_steps + 1):
+            self.logger.info(f"Debug train step {train_step}/{self._total_train_steps} start")
+            step_timer_dict: dict[str, float] = {}
+            with timer("step", step_timer_dict):
+                with timer("load_debug_rollout", step_timer_dict):
+                    train_batch = await await_owned_operation(
+                        asyncio.to_thread(self._load_debug_rollout_batch, train_step)
+                    )
+                train_log_info = await self._train_one_batch(
+                    train_batch,
+                    train_step,
+                    step_timer_dict,
+                    offload_rollout_before_train=False,
+                    resume_train_nccl_before_train=False,
+                )
+                eval_log_info: dict[str, float] = {}
+                produce_result = ProduceBatchResult(rollout_states=train_batch)
+
+            self._log_step(train_step, step_timer_dict, produce_result, train_log_info, eval_log_info)
+            self._cur_step = train_step
+
     def _list_debug_rollout_files(self, debug_rollout_dir: Path) -> dict[int, Path]:
         debug_files = {
             _parse_debug_rollout_step(path): path
@@ -1728,33 +1755,6 @@ class RLColocateTrainer(BaseRLTrainer):
             if cleanup_error is not None and not original_error:
                 raise cleanup_error
 
-    async def _fit_debug_train(self) -> None:
-        self._benchmark_start_time_s = time.perf_counter()
-        self._benchmark_training_samples = 0
-        self._benchmark_training_tokens = 0
-
-        init_train_step = self._cur_step + 1
-        for train_step in range(init_train_step, self._total_train_steps + 1):
-            self.logger.info(f"Debug train step {train_step}/{self._total_train_steps} start")
-            step_timer_dict: dict[str, float] = {}
-            with timer("step", step_timer_dict):
-                with timer("load_debug_rollout", step_timer_dict):
-                    train_batch = await await_owned_operation(
-                        asyncio.to_thread(self._load_debug_rollout_batch, train_step)
-                    )
-                train_log_info = await self._train_one_batch(
-                    train_batch,
-                    train_step,
-                    step_timer_dict,
-                    offload_rollout_before_train=False,
-                    resume_train_nccl_before_train=False,
-                )
-                eval_log_info: dict[str, float] = {}
-                produce_result = ProduceBatchResult(rollout_states=train_batch)
-
-            self._log_step(train_step, step_timer_dict, produce_result, train_log_info, eval_log_info)
-            self._cur_step = train_step
-
     def _get_colocate_rollout_model_step(self, train_step: int) -> int:
         previous_step = train_step - 1
         return previous_step - (previous_step % self._sync_weights_interval)
@@ -1857,14 +1857,24 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             train_resources=cfg.train_resources,
             rollout_resources=cfg.rollout_resources,
         )
-        self._cpu_resource_manager = CPUResourceManager([self._train_pg, self._rollout_pg])
+        self._cpu_resource_manager = CPUResourceManager(
+            [pg for pg in (self._train_pg, self._rollout_pg) if pg is not None]
+        )
         self._cpu_resource_manager.log_initial_snapshot()
         set_cpu_resource_manager(self._cpu_resource_manager)
-        self.train_controller = self._train_worker_cfg.build(
-            self._train_pg,
-            advantage_estimator=self._advantage_estimator,
-            distillation=self._distillation,
-        )
+        if not self._debug_rollout:
+            self.train_controller = self._train_worker_cfg.build(
+                self._train_pg, advantage_estimator=self._advantage_estimator, distillation=self._distillation
+            )
+        if self._debug_train:
+            assert self._debug_rollout_dir is not None
+            self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_path, trust_remote_code=True)
+            self._debug_train_files = self._list_debug_rollout_files(self._debug_rollout_dir)
+            if cfg.total_train_steps is None:
+                self._total_train_steps = max(self._debug_train_files)
+            return
+        if self._debug_rollout:
+            self._rollout_config.skip_load_weights = False
         self.rollout_controller = self._rollout_config.build(self._rollout_pg)
 
         if self._rollout_config.weight_transport_type != "nccl":
@@ -1881,6 +1891,9 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                     "In disaggregated mode, should_continue_fn must be default, "
                     "because it does not allow early stopping in production."
                 )
+
+        if self._debug_rollout:
+            return
 
         bind_train_rollout(
             train_controller=self.train_controller,
@@ -1901,9 +1914,17 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         train_pg_name = f"{pg_name_prefix}_train"
         rollout_pg_name = f"{pg_name_prefix}_rollout"
 
-        train_pg = AutoAcceleratorWorkers.build_placement_group(train_resources, name=train_pg_name)
-        rollout_pg = AutoAcceleratorWorkers.build_placement_group(rollout_resources, name=rollout_pg_name)
-        if train_pg.id == rollout_pg.id:
+        train_pg = (
+            None
+            if self._debug_rollout
+            else AutoAcceleratorWorkers.build_placement_group(train_resources, name=train_pg_name)
+        )
+        rollout_pg = (
+            None
+            if self._debug_train
+            else AutoAcceleratorWorkers.build_placement_group(rollout_resources, name=rollout_pg_name)
+        )
+        if train_pg is not None and rollout_pg is not None and train_pg.id == rollout_pg.id:
             raise RuntimeError(
                 "RLDisaggregatedTrainer requires distinct placement groups for train and rollout, "
                 f"but both resolved to the same placement group id={train_pg.id}. "
@@ -1912,8 +1933,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
         self.logger.info(
             "Created disaggregated placement groups: "
-            f"train={train_pg_name}(id={train_pg.id}), "
-            f"rollout={rollout_pg_name}(id={rollout_pg.id})"
+            f"train={train_pg_name}(id={getattr(train_pg, 'id', None)}), "
+            f"rollout={rollout_pg_name}(id={getattr(rollout_pg, 'id', None)})"
         )
         return train_pg, rollout_pg
 
@@ -1977,6 +1998,13 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
     async def _fit(self):
         self.logger.info("Start RL disaggregated training")
+        if self._debug_train:
+            await self._fit_debug_train()
+            # Diagnostic actor/optimizer checkpoint; full manager/replay checkpoint uses the online save path.
+            await await_owned_operation(
+                asyncio.to_thread(self.train_controller.save, str(self.exp_dir / "debug-train-dcp"), False)
+            )
+            return
         manager: DisaggAgentLoopManager | None = None
         producer_task: asyncio.Task | None = None
         try:
@@ -2037,14 +2065,21 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                             "RLDisaggregatedTrainer expects get_batch() to return non-empty rollout_states "
                             "unless status is empty EXPIRED_BATCH."
                         )
-                        train_log_info = await self._train_one_batch(
-                            train_batch,
-                            train_step,
-                            step_timer_dict,
-                            raw_rewards_sum=produce_result.raw_rewards_sum,
-                            raw_rewards_count=produce_result.raw_rewards_count,
-                            produce_result=produce_result,
-                        )
+                        if self._debug_rollout:
+                            await await_owned_operation(
+                                asyncio.to_thread(self._save_debug_rollout_batch, train_batch, train_step)
+                            )
+                            self._release_train_batch_resources(train_batch)
+                            train_log_info = {}
+                        else:
+                            train_log_info = await self._train_one_batch(
+                                train_batch,
+                                train_step,
+                                step_timer_dict,
+                                raw_rewards_sum=produce_result.raw_rewards_sum,
+                                raw_rewards_count=produce_result.raw_rewards_count,
+                                produce_result=produce_result,
+                            )
                         sync_model_step = train_step
 
                     # 保存、同步、评测、恢复 producer 都以已完成 model_step 为口径。
