@@ -196,6 +196,7 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
     mode: Literal["train", "eval"] = "train"
     requires_rollout_proxy: bool = True
     require_turn_provenance: bool = False
+    retire_route_on_completion: bool = False
 
     def build_local(
         self, rollout_controller: RolloutController | None = None, judger: Judger | None = None, logger=None
@@ -209,6 +210,7 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
             max_concurrent_samples=self.max_concurrent_samples,
             mode=self.mode,
             require_turn_provenance=self.require_turn_provenance,
+            retire_route_on_completion=self.retire_route_on_completion,
         )
 
 
@@ -223,6 +225,7 @@ class AgentInSandboxLoop(AgentLoop):
         max_concurrent_samples: int | None = None,
         mode: Literal["train", "eval"] = "train",
         require_turn_provenance: bool = False,
+        retire_route_on_completion: bool = False,
     ):
         if hf_checkpoint is None:
             raise ValueError("hf_checkpoint must be provided for AgentInSandboxLoop.")
@@ -231,6 +234,7 @@ class AgentInSandboxLoop(AgentLoop):
         self._sample_semaphore = asyncio.Semaphore(max_concurrent_samples) if max_concurrent_samples else None
         self.mode = mode
         self.require_turn_provenance = require_turn_provenance
+        self.retire_route_on_completion = retire_route_on_completion
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         async def generate_one(state: RolloutState) -> list[RolloutState]:
@@ -287,6 +291,12 @@ class AgentInSandboxLoop(AgentLoop):
             rollout_state.error_msg = f"{type(exc).__name__}: {exc}"
             self.logger.error(f"[AgentInSandboxLoop] failed: {exc}\n{traceback.format_exc()}")
             return [rollout_state]
+        finally:
+            # This loop returns terminal Agent executions, never partial continuations.
+            # Retire HTTP ownership after runner completion/cancellation, independently
+            # of later filtering or replay consumption; keep trace ownership unchanged.
+            if self.retire_route_on_completion and self.rollout_ctl is not None and rollout_state.session_id is not None:
+                await self.rollout_ctl.retire_route_sessions.remote([str(rollout_state.session_id)])
 
     async def _run_item(self, item: AgentRolloutItem) -> AgentRolloutItem:
         runner = _resolve_runner(item.pipeline, str(item.uid))

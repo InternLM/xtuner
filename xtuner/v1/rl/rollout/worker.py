@@ -434,6 +434,10 @@ class RolloutConfig(BaseModel):
             help="Number of consecutive health check failures required before marking a worker inactive.",
         ),
     ] = 3
+    session_affinity: bool = Field(
+        default=False,
+        description="Pin external HTTP sessions to one concrete DP SessionServer.",
+    )
     enable_proxy: Annotated[
         bool,
         Parameter(

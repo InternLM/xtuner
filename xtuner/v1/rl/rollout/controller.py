@@ -326,14 +326,22 @@ class RolloutController:
     def onload_kvcache(self, target_state: WorkerLifecycleState = WorkerLifecycleState.ACTIVE):
         self._broadcast_to_workers("onload_kvcache", target_state)
 
+    def retire_route_sessions(self, session_ids: list[str]) -> None:
+        if self.proxy_manager is not None:
+            self.proxy_manager.retire_sessions(session_ids)
+
     def shutdown(self):
         """Shut down all rollout workers tracked by the controller."""
         self.health_manager.stop()
-        actors = self.registry.all_actors()
-        ray.get(
-            [actor.shutdown.remote(stop_session_server=True) for actor in actors],  # type: ignore[attr-defined]
-            timeout=ROLLOUT_RAY_GET_TIMEOUT,
-        )
+        try:
+            actors = self.registry.all_actors()
+            ray.get(
+                [actor.shutdown.remote(stop_session_server=True) for actor in actors],  # type: ignore[attr-defined]
+                timeout=ROLLOUT_RAY_GET_TIMEOUT,
+            )
+        finally:
+            if self.proxy_manager is not None:
+                self.proxy_manager.close()
 
     def _broadcast_to_workers(self, method_name: str, target_state: WorkerLifecycleState, **kwargs):
         workers = self.registry.get_target_state_workers(target_state)
