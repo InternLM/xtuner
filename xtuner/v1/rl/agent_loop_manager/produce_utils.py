@@ -785,6 +785,14 @@ async def request_agent_loop_pause(ctx: BaseProduceContext, *, pending_count: in
         )
 
 
+async def retain_pending_tasks(*, pending_tasks, ctx, put_claimed_task) -> float:
+    """Claim completed groups once; live Agent tasks keep their original owner."""
+    start = time.perf_counter()
+    for task in await pending_tasks.claim_ready():
+        await put_claimed_task(task)
+    return time.perf_counter() - start
+
+
 async def pause_pending_tasks(
     *,
     pending_tasks: set[asyncio.Task] | _PendingTasks,

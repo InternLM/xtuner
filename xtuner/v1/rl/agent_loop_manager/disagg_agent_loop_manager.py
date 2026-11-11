@@ -17,6 +17,7 @@ from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.utils import get_logger
 
+from .agent_turn_pause_policy import AgentTurnPausePolicy, DrainPendingPausePolicy
 from .disagg_producer import (
     DisaggAsyncProduceStrategyConfig,
     DisaggProduceContext,
@@ -67,6 +68,9 @@ class DisaggAgentLoopManagerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     tasks: list[DisaggTaskSpecConfig] | DisaggTaskSpecConfig
+    turn_resume_drain_timeout: float | None = Field(default=None, gt=0)
+    turn_resume_freeze_timeout: float = Field(default=60, gt=0)
+    turn_resume_quiesce_timeout: float = Field(default=1800, gt=0)
 
     def build(
         self,
@@ -112,6 +116,15 @@ class DisaggAgentLoopManagerConfig(BaseModel):
             )
 
         return DisaggAgentLoopManager(
+            pause_policy=(
+                AgentTurnPausePolicy(
+                    quiesce_timeout=self.turn_resume_quiesce_timeout,
+                    freeze_timeout=self.turn_resume_freeze_timeout,
+                    drain_timeout=self.turn_resume_drain_timeout,
+                )
+                if self.turn_resume_drain_timeout is not None
+                else DrainPendingPausePolicy()
+            ),
             task_runners=task_runners,
             replay_buffer=replay_buffer,
             rollout_controller=rollout_controller,
@@ -174,12 +187,17 @@ class DisaggAgentLoopManager:
         replay_buffer: ReplayBuffer,
         rollout_controller: RolloutController,
         logger=None,
+        pause_policy=None,
     ):
         if not task_runners:
             raise ValueError("DisaggAgentLoopManager requires at least one task runner.")
         if sum(task.weight for task in task_runners) <= 0:
             raise ValueError("At least one task weight must be positive for DisaggAgentLoopManager.")
 
+        self._pause_policy = pause_policy or DrainPendingPausePolicy()
+        if isinstance(self._pause_policy, AgentTurnPausePolicy):
+            for task in task_runners:
+                task.produce_strategy.configure_turn_resume(self._pause_policy.pending_cleanup)
         self.task_runners = task_runners
         self.replay_buffer = replay_buffer
         self._rollout_controller = rollout_controller
@@ -195,6 +213,10 @@ class DisaggAgentLoopManager:
         # consumer 同步权重前置位；producer / strategy 直接观察 event。
         self._update_event = asyncio.Event()
         self._finish_event = asyncio.Event()
+        self._group_admission = asyncio.Event()
+        self._group_admission.set()
+        self._producer_idle = asyncio.Event()
+        self._producer_idle.set()
 
         # rollout 侧当前模型版本；pause 清空 pending 后才能更新。
         self._model_step = 0
@@ -260,29 +282,57 @@ class DisaggAgentLoopManager:
         progress.add_produce_time(time.perf_counter() - produce_start)
         return produce_status
 
+    def _pending_context(self, task):
+        return DisaggProduceContext(
+            agent_loop=task.agent_loop,
+            sampler=task.sampler,
+            replay_buffer=self.replay_buffer,
+            task_batch_size=0,
+            task_name=task.task_name,
+            train_step=self._produce_progress.producer_future_step,
+            model_step=self._model_step,
+            progress=self._produce_progress,
+            update_event=self._update_event,
+            stale_threshold=task.stale_threshold,
+            token_stale_threshold=task.token_stale_threshold,
+            expired_groups_retryable=task.expired_groups_retryable,
+        )
+
+    async def prepare_sync(self, checkpoint_due: bool):
+        await self._pause_policy.before_sync(self, checkpoint_due)
+
+    async def quiesce(self, timeout: float):
+        """Stop new groups, join producer claims, finish episodes with gates open."""
+        self._group_admission.clear()
+        for task in self.task_runners:
+            task.produce_strategy.scheduling_paused = True
+        async with asyncio.timeout(timeout):
+            await self._producer_idle.wait()
+            await asyncio.gather(
+                *[task.produce_strategy.quiesce(self._pending_context(task)) for task in self.task_runners]
+            )
+        if get_pending_task_counts(self.task_runners):
+            raise RuntimeError("Quiesce left pending tasks")
+
+    async def close(self):
+        self.shutdown()
+        results = await asyncio.gather(
+            *[task.produce_strategy.close() for task in self.task_runners], return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+
     async def pause_produce(self) -> float:
         # 非共卡显式刹车；共卡没有 public pause。
         self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
         self._update_event.set()
-        await self._rollout_controller.pause_generation.remote()  # type: ignore[attr-defined]
+        await self._pause_policy.pause(self._rollout_controller)
 
         pause_time_s = 0.0
         for task in self.task_runners:
             produce_strategy = cast(DisaggProduceStrategy, task.produce_strategy)
-            ctx = DisaggProduceContext(
-                agent_loop=task.agent_loop,
-                sampler=task.sampler,
-                replay_buffer=self.replay_buffer,
-                task_batch_size=0,
-                task_name=task.task_name,
-                train_step=self._produce_progress.producer_future_step,
-                model_step=self._model_step,
-                progress=self._produce_progress,
-                update_event=self._update_event,
-                stale_threshold=task.stale_threshold,
-                token_stale_threshold=task.token_stale_threshold,
-                expired_groups_retryable=task.expired_groups_retryable,
-            )
+            ctx = self._pending_context(task)
             pause_time_s += await produce_strategy.pause_produce(ctx)
         self._pause_time_s = pause_time_s
         return pause_time_s
@@ -290,14 +340,18 @@ class DisaggAgentLoopManager:
     async def continue_produce(self, model_step: int) -> None:
         # 与 pause_produce 成对：同步/评测完成后，用新 model_step 恢复后台 producer。
         self._model_step = model_step
-        await self._rollout_controller.continue_generation.remote()  # type: ignore[attr-defined]
+        await self._pause_policy.resume(self._rollout_controller, model_step)
         self._status = AgentLoopManagerStatus.NORMAL
         self._update_event.clear()
+        for task in self.task_runners:
+            task.produce_strategy.scheduling_paused = False
+        self._group_admission.set()
 
     def shutdown(self) -> None:
         self._status = AgentLoopManagerStatus.FINISH
         self._update_event.set()
         self._finish_event.set()
+        self._group_admission.set()
 
     async def _wait_for_status_exit(self, blocked_status: AgentLoopManagerStatus) -> None:
         while not self._finish_event.is_set() and self._status == blocked_status:
@@ -306,6 +360,7 @@ class DisaggAgentLoopManager:
     async def produce_loop(self, batch_size: int) -> None:
         # 后台持续生产；前台通过 get_batch 消费。
         while not self._finish_event.is_set():
+            await self._group_admission.wait()
             if self._status == AgentLoopManagerStatus.FINISH:
                 break
             if self._status in (AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT, AgentLoopManagerStatus.EXPIRED_BATCH):
@@ -322,12 +377,16 @@ class DisaggAgentLoopManager:
                     future_step,
                 ),
             )
-            produce_status = await self._produce_batch_to_buffer(task_batch_sizes, self._produce_progress)
+            self._producer_idle.clear()
+            try:
+                produce_status = await self._produce_batch_to_buffer(task_batch_sizes, self._produce_progress)
+            finally:
+                self._producer_idle.set()
 
             if produce_status == ProduceBatchStatus.EXPIRED_BATCH:
                 # EXPIRED_BATCH 是 producer 自己检测出来的“立即停下”信号。
                 self._status = AgentLoopManagerStatus.EXPIRED_BATCH
-            elif produce_status == ProduceBatchStatus.NORMAL:
+            elif produce_status == ProduceBatchStatus.NORMAL and self._group_admission.is_set():
                 # 只有正常完成一轮生产时，producer 自己维护的 train_step 才前进一步。
                 self._produce_progress.advance_future_step()
 
@@ -350,6 +409,7 @@ class DisaggAgentLoopManager:
         current_model_step = train_step - 1
 
         while not self._finish_event.is_set():
+            await self._pause_policy.check_requests(self._rollout_controller)
             if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
                 if current_model_step > self._model_step:
                     pause_time_s = self._consume_pause_time()

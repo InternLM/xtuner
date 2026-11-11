@@ -127,6 +127,10 @@ class AgentLoopManagerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     tasks: list[TaskSpecConfig] | TaskSpecConfig
+    turn_keepalive: bool = False
+    turn_keepalive_freeze_timeout: float = Field(default=30, gt=0)
+    turn_keepalive_drain_timeout: float = Field(default=450, gt=0)
+    turn_keepalive_quiesce_timeout: float = Field(default=3600, gt=0)
 
     def build(
         self,
@@ -137,6 +141,15 @@ class AgentLoopManagerConfig(BaseModel):
         sync_weights_interval: int = 1,
         rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
     ) -> AgentLoopManager:
+        if self.turn_keepalive:
+            from .colocate_keepalive import build_keepalive_manager
+
+            return build_keepalive_manager(
+                self, rollout_controller=rollout_controller, tokenizer=tokenizer,
+                replay_buffer=replay_buffer, logger=logger,
+                sync_weights_interval=sync_weights_interval,
+                rollout_teacher_scorer_config=rollout_teacher_scorer_config,
+            )
         tasks = self.tasks if isinstance(self.tasks, list) else [self.tasks]
         if not tasks:
             raise ValueError("AgentLoopManagerConfig requires at least one task config.")
@@ -221,6 +234,7 @@ class AgentLoopManager:
         train_step: int,
         *,
         model_step: int,
+        quiesce: bool = False,
     ) -> ProduceBatchResult:
         # 共卡同步入口：生产入 buffer -> pause/drain 本轮 pending -> 取非空训练 batch。
         if batch_size <= 0:
@@ -233,7 +247,12 @@ class AgentLoopManager:
         active_tasks = [task for task in self.task_runners if current_sizes[task.task_name] > 0]
         assert active_tasks, "No active tasks found"
 
-        await self._rollout_controller.continue_generation.remote()  # type: ignore[attr-defined]
+        keepalive = getattr(self, "_keepalive", None)
+        if keepalive is None:
+            await self._rollout_controller.continue_generation.remote()
+        else:
+            await keepalive.resume(self._rollout_controller, model_step)
+            await keepalive.check_requests(self._rollout_controller)
         local_progress = ProduceProgress.build(
             task_names=self.task_names,
             target_samples=current_sizes,
@@ -271,12 +290,37 @@ class AgentLoopManager:
         await asyncio.gather(*produce_futures)
         local_progress.add_produce_time(time.perf_counter() - produce_start)
 
-        # pause 只收尾本轮本地 pending。
-        await self._rollout_controller.pause_generation.remote()  # type: ignore[attr-defined]
+        # Checkpoint/final quiesce happens while gates are open. Never wait for
+        # an entire episode behind a sealed request gate.
+        if keepalive is not None:
+            if quiesce:
+                async def finish_live_tasks():
+                    for task in self.task_runners:
+                        ctx = ProduceContext(
+                            agent_loop=task.agent_loop, sampler=task.sampler,
+                            replay_buffer=self.replay_buffer, task_batch_size=0,
+                            task_name=task.task_name, train_step=train_step,
+                            model_step=model_step, progress=local_progress,
+                            stale_threshold=task.stale_threshold,
+                            token_stale_threshold=task.token_stale_threshold,
+                            expired_groups_retryable=task.expired_groups_retryable,
+                        )
+                        owner = task.produce_strategy._pending_tasks
+                        while owner.count():
+                            for ready in await owner.wait_and_claim(timeout_s=1):
+                                await ctx.put_generated_group(ready.result())
+                await asyncio.wait_for(finish_live_tasks(), keepalive.quiesce_timeout)
+            await keepalive.pause(self._rollout_controller)
+        else:
+            await self._rollout_controller.pause_generation.remote()
 
         pause_time_s = 0.0
         for task in active_tasks:
             produce_strategy = cast(ProduceStrategy, task.produce_strategy)
+            if keepalive is not None:
+                # Live futures stay in the strategy's existing _PendingTasks.
+                # Done futures are harvested on the next window (or quiesce).
+                continue
             pause_time_s += await produce_strategy.pause_produce(
                 ProduceContext(
                     agent_loop=task.agent_loop,
