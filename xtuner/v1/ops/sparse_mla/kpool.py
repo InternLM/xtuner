@@ -7,7 +7,9 @@ individual tokens, then expands the selected pools back into raw token ids and a
 current (still-incomplete) trailing pool as a "tail".
 
 The ``tilelang`` entry point uses LMDeploy FP8 operators for supported GLM-5.3 geometry
-when the CUDA device and optional dependencies are compatible. Its original TileLang
+when the CUDA device and optional dependencies are compatible. With
+``XTUNER_GLM53_KPOOL_BF16=1``, supported BF16 pools use LMDeploy compression
+with FP32 intermediates and the existing TileLang scorer. Its original TileLang
 implementation remains the fallback and has three segments:
 
   A. :func:`build_pools`    -- ``O(S * Di)`` pool construction, pure PyTorch.
@@ -41,6 +43,7 @@ token id in this module is global. Concretely that splits the work in two:
 import math
 import os
 from functools import lru_cache
+from inspect import signature
 from typing import Literal
 
 import torch
@@ -187,6 +190,21 @@ def build_pools(
     safe = pool_index.clamp(min=0)
     grouped_k = k[safe]
     grouped_gate = gate_scores[safe]
+
+    if index_kpool == 4 and k.shape[-1] == 128 and _lmdeploy_kpool_is_available(device, bf16=True):
+        from .lmdeploy_kpool import _compress_storage
+
+        # Keep softmax, products and accumulation in FP32 until the BF16 store.
+        pool_key, _ = _compress_storage(
+            torch.where(valid.unsqueeze(-1), grouped_k, 0),
+            grouped_gate.masked_fill(~valid.unsqueeze(-1), float("-inf")),
+            kpool_ape,
+            "decode",
+            True,
+            out_dtype=torch.bfloat16,
+        )
+        pool_key = torch.where(valid.any(dim=1, keepdim=True), pool_key, 0)
+        return pool_key, pool_index.to(torch.int32), valid.all(dim=-1)
 
     logits = grouped_gate.float() + kpool_ape.float().unsqueeze(0)
     logits = logits.masked_fill(~valid.unsqueeze(-1), float("-inf"))
@@ -491,17 +509,21 @@ def _supports_lmdeploy_kpool(head_dim: int, heads: int, pool_size: int, topk: in
 
 
 @lru_cache(maxsize=None)
-def _lmdeploy_kpool_is_available(device: torch.device) -> bool:
-    """Check whether the optional FP8 path is enabled and supported on this
-    device."""
-    # Set before startup: force the original BF16 preparation and TileLang selector.
-    if os.environ.get("XTUNER_GLM53_KPOOL_BF16", "0").lower() in {"1", "true", "yes", "on"}:
+def _lmdeploy_kpool_is_available(device: torch.device, *, bf16: bool = False) -> bool:
+    """Check the selected precision and optional serving operators at startup."""
+    use_bf16 = os.environ.get("XTUNER_GLM53_KPOOL_BF16", "0").lower() in {"1", "true", "yes", "on"}
+    if use_bf16 != bf16:
         return False
     # Resolve at forward time: model construction can happen on CPU/meta before
     # the process selects its CUDA device. Keep XTuner usable without LMDeploy.
     if device.type != "cuda" or torch.cuda.get_device_capability(device)[0] < 9:
         return False
     try:
+        if bf16:
+            from lmdeploy.pytorch.backends.cuda.kpool import kpool_compress_quantize_cuda
+
+            # Older LMDeploy versions only expose FP8 compression.
+            return "out_dtype" in signature(kpool_compress_quantize_cuda).parameters
         from lmdeploy.pytorch.backends.cuda.kpool import (
             _get_deep_gemm,
             kpool_compress_quantize_cuda,

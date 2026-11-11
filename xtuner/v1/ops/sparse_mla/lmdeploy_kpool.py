@@ -142,21 +142,36 @@ def _kpool_topk_indices(
 
 
 def _compress_storage(
-    keys: Tensor, scores: Tensor, ape: Tensor, mode: str, round_scale: bool
+    keys: Tensor,
+    scores: Tensor,
+    ape: Tensor,
+    mode: str,
+    round_scale: bool,
+    *,
+    out_dtype: torch.dtype = torch.float8_e4m3fn,
 ) -> tuple[Tensor, Tensor]:
     _validate_compression(keys, scores, ape, mode)
+    if out_dtype not in (torch.float8_e4m3fn, torch.bfloat16):
+        raise ValueError("KPool storage must be FP8 or BF16")
     if keys.shape[0] == 0:
         return (
-            torch.empty((0, keys.shape[-1]), device=keys.device, dtype=torch.float8_e4m3fn),
+            torch.empty((0, keys.shape[-1]), device=keys.device, dtype=out_dtype),
             torch.empty((0, 1), device=keys.device, dtype=torch.float32),
         )
     if keys.is_cuda:
         # This adapter includes LMDeploy's SM90+ fused/reference dispatch.
         from lmdeploy.pytorch.backends.cuda.kpool import kpool_compress_quantize_cuda
 
+        if out_dtype == torch.bfloat16:
+            return kpool_compress_quantize_cuda(
+                keys, scores, ape, mode=mode, round_scale=round_scale, out_dtype=out_dtype
+            )
         return kpool_compress_quantize_cuda(keys, scores, ape, mode=mode, round_scale=round_scale)
     from lmdeploy.pytorch.nn.kpool import kpool_compress, kpool_quantize_fp8
 
+    if out_dtype == torch.bfloat16:
+        pooled = kpool_compress(keys, scores, ape, mode=mode, rotate=False)
+        return pooled.to(out_dtype), torch.ones_like(pooled[:, :1], dtype=torch.float32)
     pooled = kpool_compress(keys, scores, ape, mode=mode)
     return kpool_quantize_fp8(pooled, block_size=keys.shape[-1], round_scale=round_scale)
 

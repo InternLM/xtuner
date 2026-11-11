@@ -19,7 +19,9 @@ def _sp_worker(rank: int, init_path: str) -> None:
     device = torch.device("cuda", rank)
     dist.init_process_group("nccl", rank=rank, world_size=2, init_method=f"file://{init_path}")
     try:
-        assert _lmdeploy_kpool_is_available(device), "Requires LMDeploy KPool and DeepGEMM on SM90+"
+        assert _lmdeploy_kpool_is_available(device) or _lmdeploy_kpool_is_available(device, bf16=True), (
+            "Requires compatible LMDeploy KPool on SM90+"
+        )
         mesh = init_device_mesh("cuda", (2,))
         # First case: pool [4, 5, 6, 7] straddles the shard seam at token 6.
         # Other cases place a document boundary at/before the seam and exercise
@@ -68,10 +70,15 @@ def _sp_worker(rank: int, init_path: str) -> None:
 
 class TestLMDeployKPoolSequenceParallel:
     @pytest.mark.gpu
-    def test_two_gpu_gathering_and_packed_ownership(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("bf16", ["0", "1"])
+    def test_two_gpu_gathering_and_packed_ownership(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bf16: str
+    ) -> None:
+        monkeypatch.setenv("XTUNER_GLM53_KPOOL_BF16", bf16)
+        _lmdeploy_kpool_is_available.cache_clear()
         if torch.cuda.device_count() < 2 or not dist.is_nccl_available():
             pytest.skip("Two CUDA GPUs and NCCL required")
         pytest.importorskip("lmdeploy.pytorch.backends.cuda.kpool")
-        if not _lmdeploy_kpool_is_available(torch.device("cuda", 0)):
+        if not _lmdeploy_kpool_is_available(torch.device("cuda", 0), bf16=bf16 == "1"):
             pytest.skip("Requires compatible LMDeploy/DeepGEMM and SM90+")
         mp.spawn(_sp_worker, args=(str(tmp_path / "nccl_init"),), nprocs=2, join=True)
