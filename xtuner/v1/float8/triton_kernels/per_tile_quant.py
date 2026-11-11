@@ -76,6 +76,7 @@ def per_tile_quant_kernel(
     M,
     K,
     BLOCK_M: tl.constexpr,
+    USE_RECIPROCAL: tl.constexpr,
 ):
     group_id = tl.program_id(1)
     m_id = tl.program_id(0)
@@ -91,9 +92,16 @@ def per_tile_quant_kernel(
     s_ptr = scale_ptr + m_offs * stride_sm + group_id * stride_sg
     rfp8_max = 1 / fp8_max
     a = tl.load(a_ptrs, mask=mk_mask, other=0.0).to(tl.float32)
-    scale = tl.max(tl.abs(a), 1) * rfp8_max
-    scale = tl.clamp(scale, 1e-12, 3e38)
-    out = a / scale[:, None]
+    if USE_RECIPROCAL:
+        # Match serving quantization at FP8 midpoints: multiply by fp8_max/amax
+        # rather than dividing by the rounded storage scale.
+        amax = tl.maximum(tl.max(tl.abs(a), 1), 1e-6)
+        scale = amax * rfp8_max
+        out = a * (fp8_max / amax[:, None])
+    else:
+        scale = tl.max(tl.abs(a), 1) * rfp8_max
+        scale = tl.clamp(scale, 1e-12, 3e38)
+        out = a / scale[:, None]
     out = tl.clamp(out, fp8_min, fp8_max)
     out = out.to(out_ptr.dtype.element_ty)
     tl.store(o_ptrs, out, mask=mk_mask)
@@ -102,7 +110,7 @@ def per_tile_quant_kernel(
 
 @torch.library.custom_op("float8::per_tile_quant", mutates_args=())
 def per_tile_quant(
-    A: Tensor, group_size: int = 128, dtype: torch.dtype = torch.float8_e4m3fn
+    A: Tensor, group_size: int = 128, dtype: torch.dtype = torch.float8_e4m3fn, use_reciprocal: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     assert A.dim() == 2
     M, K = A.shape
@@ -128,12 +136,15 @@ def per_tile_quant(
         GROUP_SIZE=group_size,
         M=M,
         K=K,
+        USE_RECIPROCAL=use_reciprocal,
     )
     return out, scales
 
 
 @per_tile_quant.register_fake
-def _(A: Tensor, group_size: int = 128, dtype: torch.dtype = torch.float8_e4m3fn) -> Tuple[torch.Tensor, torch.Tensor]:
+def _(
+    A: Tensor, group_size: int = 128, dtype: torch.dtype = torch.float8_e4m3fn, use_reciprocal: bool = False
+) -> Tuple[torch.Tensor, torch.Tensor]:
     M, K = A.shape
     num_groups = triton.cdiv(K, group_size)
     out = torch.empty_like(A, dtype=dtype)
