@@ -195,6 +195,8 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
     max_concurrent_samples: int | None = None
     mode: Literal["train", "eval"] = "train"
     requires_rollout_proxy: bool = True
+    require_turn_provenance: bool = False
+    retire_route_on_completion: bool = False
 
     def build_local(
         self, rollout_controller: RolloutController | None = None, judger: Judger | None = None, logger=None
@@ -207,6 +209,8 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
             logger=logger,
             max_concurrent_samples=self.max_concurrent_samples,
             mode=self.mode,
+            require_turn_provenance=self.require_turn_provenance,
+            retire_route_on_completion=self.retire_route_on_completion,
         )
 
 
@@ -220,6 +224,8 @@ class AgentInSandboxLoop(AgentLoop):
         logger=None,
         max_concurrent_samples: int | None = None,
         mode: Literal["train", "eval"] = "train",
+        require_turn_provenance: bool = False,
+        retire_route_on_completion: bool = False,
     ):
         if hf_checkpoint is None:
             raise ValueError("hf_checkpoint must be provided for AgentInSandboxLoop.")
@@ -227,6 +233,8 @@ class AgentInSandboxLoop(AgentLoop):
         self.max_concurrent_samples = max_concurrent_samples
         self._sample_semaphore = asyncio.Semaphore(max_concurrent_samples) if max_concurrent_samples else None
         self.mode = mode
+        self.require_turn_provenance = require_turn_provenance
+        self.retire_route_on_completion = retire_route_on_completion
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         async def generate_one(state: RolloutState) -> list[RolloutState]:
@@ -283,6 +291,12 @@ class AgentInSandboxLoop(AgentLoop):
             rollout_state.error_msg = f"{type(exc).__name__}: {exc}"
             self.logger.error(f"[AgentInSandboxLoop] failed: {exc}\n{traceback.format_exc()}")
             return [rollout_state]
+        finally:
+            # This loop returns terminal Agent executions, never partial continuations.
+            # Retire HTTP ownership after runner completion/cancellation, independently
+            # of later filtering or replay consumption; keep trace ownership unchanged.
+            if self.retire_route_on_completion and self.rollout_ctl is not None and rollout_state.session_id is not None:
+                await self.rollout_ctl.retire_route_sessions.remote([str(rollout_state.session_id)])
 
     async def _run_item(self, item: AgentRolloutItem) -> AgentRolloutItem:
         runner = _resolve_runner(item.pipeline, str(item.uid))
@@ -365,6 +379,31 @@ class AgentInSandboxLoop(AgentLoop):
             # indistinguishable from a dense trace; catching that would need the MoE-vs-dense signal the loop lacks
             # (session_server gates on ``enable_return_routed_experts``).
             segment_state.routed_experts = data["routed_experts"]
+            if self.require_turn_provenance:
+                # main's response_ids is the full suffix, including tool/history
+                # positions. Versions must follow the same positions, not only
+                # the supervised labels. Preserve each original request's lease.
+                versions = data.get("token_model_steps", [])[prompt_len:]
+                if len(versions) != len(segment_state.response_ids) or any(v is None for v in versions):
+                    raise ValueError("Missing request-time response model versions")
+                if not data["routed_experts"]:
+                    raise ValueError("turn-resume MoE training requires routed experts on every node")
+                records = _load_messages_artifact(item.artifacts)
+                matching = [
+                    record for record in records if record.get("messages") == messages and record.get("tools") == tools
+                ]
+                recorded_ids = matching[0].get("request_ids", []) if len(matching) == 1 else []
+                path_ids = data.get("request_ids", [])
+                if (
+                    not recorded_ids
+                    or not path_ids
+                    or recorded_ids[-1] != path_ids[-1]
+                    or not set(path_ids).issubset(recorded_ids)
+                    or not await trace_store.contains_request_ids.remote(str(rollout_state.session_id), recorded_ids)
+                ):
+                    raise ValueError("Agent transcript request IDs do not match committed trace")
+                segment_state.response_model_steps = versions
+                segment_state.extra_fields["request_ids"] = data["request_ids"]
             if segment_state.response_ids:
                 segment_state.response = self.tokenizer.decode(segment_state.response_ids)
             else:

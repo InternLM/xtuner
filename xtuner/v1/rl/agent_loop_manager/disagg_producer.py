@@ -321,11 +321,21 @@ class DisaggProduceStrategy(ABC):
     async def pause_produce(self, ctx: DisaggProduceContext) -> float:
         return 0.0
 
+    async def close(self):
+        return
+
     def is_model_expired(self, train_step: int, model_step: int) -> bool:
         return False
 
     def pending_task_count(self) -> int:
         return 0
+
+    def configure_turn_resume(self, pending_cleanup) -> None:
+        """Opt in only when the strategy owns and can quiesce retained tasks."""
+        raise ValueError(f"{type(self).__name__} does not support complete-turn resume")
+
+    async def quiesce(self, ctx: DisaggProduceContext) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not support quiesce")
 
 
 class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
@@ -361,20 +371,33 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         )
         self.tail_batch_trigger_size = tail_batch_trigger_size
         self._pending_tasks = _PendingTasks()
+        self.pending_cleanup = pause_pending_tasks
+        self.scheduling_paused = False
 
     def is_model_expired(self, train_step: int, model_step: int) -> bool:
         staleness = calculate_seq_staleness(model_step, train_step)
         return staleness >= self.stale_threshold
 
+    def configure_turn_resume(self, pending_cleanup) -> None:
+        self.pending_cleanup = pending_cleanup
+
     def pending_task_count(self) -> int:
         return self._pending_tasks.count()
 
     async def pause_produce(self, ctx: DisaggProduceContext) -> float:
-        return await pause_pending_tasks(
+        return await self.pending_cleanup(
             pending_tasks=self._pending_tasks,
             ctx=ctx,
             put_claimed_task=lambda task: ctx.put_generated_group(task.result()),
         )
+
+    async def quiesce(self, ctx: DisaggProduceContext):
+        while self._pending_tasks.count():
+            claimed = await self._pending_tasks.wait_and_claim(timeout_s=1)
+            await _put_claimed_tasks(claimed, ctx)
+
+    async def close(self):
+        await self._pending_tasks.cancel_all()
 
     async def produce_batch(self, ctx: DisaggProduceContext) -> ProduceBatchStatus:
         if ctx.task_name not in ctx.progress.consumed_samples:
@@ -439,6 +462,8 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         )
         produce_status = ProduceBatchStatus.NORMAL
         while True:
+            if self.scheduling_paused:
+                break
             if ctx.should_abort():
                 produce_status = ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
                 break
@@ -456,7 +481,7 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
             if available + pending_count < scheduled_target:
                 while await self._pending_tasks.schedule_one(
                     max_pending=desired_pending,
-                    should_abort=ctx.should_abort,
+                    should_abort=lambda: self.scheduling_paused or ctx.should_abort(),
                     spawn_one=spawn_one,
                 ):
                     pass
