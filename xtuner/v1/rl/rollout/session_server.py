@@ -458,6 +458,7 @@ class SessionServer:
         ).rstrip()
         # Templates such as GLM's do not append tokenizer.eos_token to assistant turns.
         # Rendered text defines cache boundaries; raw output IDs define the training trace.
+        # TODO: 增加每个模型的 stop_word 列表，并用列表匹配endswith xxx
         if not new_prompt.startswith(old_prompt):
             raise RuntimeError("SessionServer response template does not preserve the generation prompt prefix.")
 
