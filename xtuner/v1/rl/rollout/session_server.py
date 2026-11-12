@@ -877,6 +877,18 @@ class SessionServer:
                     "backend_ended=True request_headers_sent=False"
                 )
             raise
+        except TimeoutError as exc:
+            # Only HTTP forwarding timeouts qualify. Trace-hook errors, unknown
+            # exceptions and caller cancellation must not be relabelled safe.
+            if lease is not None and lease.settlement is None:
+                if not hasattr(self, "_forward_timeouts"):
+                    self._forward_timeouts = {}
+                self._forward_timeouts[lease.request_id] = dict(
+                    session_id=lease.session_id, epoch=lease.epoch,
+                    headers_sent=headers_may_have_been_sent,
+                    error_type=type(exc).__name__, forwarding_exited=True,
+                )
+            raise
 
         forward_s = time.perf_counter() - forward_start
         # Apply abstract on_response processing
@@ -1329,13 +1341,65 @@ class SessionServerActor:
         return self.server.request_gate
 
     async def request_status(self):
-        return self._gate().snapshot()
+        state = self._gate().snapshot()
+        state["known_forward_timeouts"] = sorted(getattr(self.server, "_forward_timeouts", {}))
+        return state
 
     async def seal_requests(self, epoch: int):
         await self._gate().seal(epoch)
 
     async def drain_requests(self, timeout: float):
         return await self._gate().drain(timeout)
+
+    async def settle_after_backend_sleep(self, epoch: int, receipt: dict):
+        import asyncio
+        from .trace_store import get_existing_store
+        if (self.server is None or receipt.get("epoch") != epoch
+                or receipt.get("backend_url") != self.worker_base_url
+                or receipt.get("level") != 2
+                or receipt.get("native_sleep_returned") is not True
+                or receipt.get("is_sleeping") is not True):
+            raise RuntimeError("Missing or mismatched native backend sleep receipt")
+        gate = self._gate()
+        # Native sleep aborts running requests and fences queued old work by
+        # backend epoch. Wait for their local forwarding coroutines to exit too.
+        deadline = asyncio.get_running_loop().time() + 30
+        while True:
+            state = gate.snapshot()
+            if state["open"] or state["epoch"] != epoch:
+                raise RuntimeError("Recovery entrypoint was not sealed")
+            if set(state["active"]) == set(state["failures"]):
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError("Local HTTP forwarding did not finish after backend sleep")
+            await asyncio.sleep(0.05)
+        ids = set(state["failures"])
+        if not ids:
+            return dict(recovered=[], gate=state)
+        known = getattr(self.server, "_forward_timeouts", {})
+        if not ids.issubset(known) or any(not known[i]["forwarding_exited"] for i in ids):
+            raise RuntimeError("Unknown non-timeout failures remain unsafe")
+        # Whole failed Agent executions are excluded by the existing recipe.
+        # Never retain a failed turn as a successful training trace/reward.
+        sessions = list({known[i]["session_id"] for i in ids})
+        store = get_existing_store()
+        if store is None:
+            raise RuntimeError("Cannot certify trace cleanup without the existing store")
+        await store.release_sessions.remote(sessions)
+        for session_id in sessions:
+            if await store.keys.remote(session_id):
+                raise RuntimeError("Failed Agent trace resources remain live")
+        terminals = getattr(self.server, "_recovery_terminals", {})
+        for request_id in ids:
+            terminals[request_id] = dict(outcome="failed_after_backend_sleep",
+                                        session_id=known[request_id]["session_id"],
+                                        barrier_epoch=epoch, reward_valid=False)
+        self.server._recovery_terminals = terminals
+        result = await gate.settle_after_backend_sleep(epoch, ids)
+        for request_id in ids:
+            del known[request_id]
+        get_logger().warning(f"backend_timeout_recovered epoch={epoch} requests={sorted(ids)}")
+        return dict(recovered=sorted(ids), gate=result, failed_terminals=terminals)
 
     async def install_request_version(self, epoch: int, model_step: int):
         await self._gate().install_version(epoch, model_step)

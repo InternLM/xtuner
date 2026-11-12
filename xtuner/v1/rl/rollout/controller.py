@@ -204,7 +204,32 @@ class RolloutController:
         self._request_barrier = (barrier, servers)
         # Send all seals before waiting for any drain.
         ray.get([s.seal_requests.remote(barrier["epoch"]) for s in servers], timeout=freeze_timeout)
-        ray.get([s.drain_requests.remote(drain_timeout) for s in servers], timeout=drain_timeout + freeze_timeout)
+        try:
+            ray.get([s.drain_requests.remote(drain_timeout) for s in servers], timeout=drain_timeout + freeze_timeout)
+        except Exception:
+            states = ray.get([s.request_status.remote() for s in servers], timeout=freeze_timeout)
+            if not any(state["failures"] for state in states):
+                raise
+            if any(not set(state["failures"]).issubset(state.get("known_forward_timeouts", []))
+                   for state in states):
+                raise  # Never abort unrelated work to recover an unknown failure.
+            # No reopen or version publication occurs here. Every fixed
+            # backend must finish native sleep before any lease is reconciled.
+            receipts = ray.get(
+                [w.actor.sleep_for_timeout_recovery.remote(barrier["epoch"]) for w in workers],
+                timeout=600 + freeze_timeout,
+            )
+            if tuple(w.session_url for w in self.registry.active_entrypoints()) != barrier["endpoints"]:
+                raise RuntimeError("Topology changed during timeout recovery")
+            for worker, receipt in zip(workers, receipts):
+                if receipt.get("backend_url") != worker.url or receipt.get("epoch") != barrier["epoch"]:
+                    raise RuntimeError("Backend sleep receipt identity mismatch")
+            recovered = ray.get(
+                [server.settle_after_backend_sleep.remote(barrier["epoch"], receipt)
+                 for server, receipt in zip(servers, receipts)], timeout=60 + freeze_timeout,
+            )
+            self.logger.warning(f"backend_timeout_recovery epoch={barrier['epoch']} receipts={receipts} recovered={recovered}")
+            ray.get([s.drain_requests.remote(drain_timeout) for s in servers], timeout=drain_timeout + freeze_timeout)
         return barrier
 
     def resume_requests(self, barrier: dict, model_step: int, *, timeout: float = 60):
