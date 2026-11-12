@@ -430,6 +430,16 @@ class RolloutTraceStore:
                 request_ids.append(node_val.request_id)
         trace["routed_experts"] = _resolve_routed_experts(expert_keys, session_id)
         trace["token_model_steps"] = token_model_steps
+        # Use the actual session prompt, rather than the dataset's rendered prompt.
+        # Tool-result deltas remain in the contiguous response suffix.
+        if nodes:
+            head = nodes[0].value
+            if any(label != -100 for label in head.labels):
+                raise ValueError(f"Trace head of session {session_id!r} is not a prompt segment")
+            trace["prompt_ids"] = list(head.token_ids)
+        else:
+            trace["prompt_ids"] = []
+        trace["response_ids"] = list(trace["input_ids"][len(trace["prompt_ids"]):])
         if request_ids:
             trace["response_model_steps"] = response_model_steps
             trace["request_ids"] = request_ids

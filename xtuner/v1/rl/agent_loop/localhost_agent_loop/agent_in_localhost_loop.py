@@ -277,8 +277,9 @@ class AgentInLocalhostLoop(AgentLoop):
         # Unified response_ids convention: the contiguous suffix of input_ids after the prompt
         # (env-injected tokens included), aligned with response_model_steps for per-token
         # staleness; also the token count used by rollout throughput logging.
-        prompt_len = len(rollout_state.prompt_ids or [])
-        rollout_state.response_ids = list(data["input_ids"][prompt_len:])
+        rollout_state.prompt_ids = list(data["prompt_ids"])
+        prompt_len = len(rollout_state.prompt_ids)
+        rollout_state.response_ids = list(data["response_ids"])
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
         content = response_message.get("content")

@@ -404,8 +404,9 @@ class AgentInSandboxLoop(AgentLoop):
             # Unified response_ids convention: the contiguous suffix of input_ids after the prompt
             # (env-injected tokens included), aligned with response_model_steps for per-token
             # staleness; also the token count used by rollout throughput logging.
-            prompt_len = len(segment_state.prompt_ids or [])
-            segment_state.response_ids = list(data["input_ids"][prompt_len:])
+            segment_state.prompt_ids = list(data["prompt_ids"])
+            prompt_len = len(segment_state.prompt_ids)
+            segment_state.response_ids = list(data["response_ids"])
             segment_state.logprobs = data["logprobs"]
             # ``routed_experts`` is a per-node list for a MoE trace or ``None`` for a dense one; trace_store's
             # ``_resolve_routed_experts`` already enforces the all-or-nothing invariant (a trace mixing MoE turns with
