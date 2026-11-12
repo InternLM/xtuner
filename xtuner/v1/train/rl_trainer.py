@@ -801,6 +801,8 @@ class BaseRLTrainer:
 
     def _resume_train_controller_and_state(self, checkpoint_path: Path | str) -> Path:
         # 权重同步恢复由共卡/非共卡子类分别处理。
+        # Reject exports before loading model/optimizer or touching sampler.
+        AgentLoopManager.assert_resumable_checkpoint(checkpoint_path)
         self.logger.info(f"Resume train controller and state from {checkpoint_path}")
         checkpoint_path = Path(checkpoint_path)
         self.train_controller.resume(self._load_checkpoint_cfg)
@@ -851,6 +853,9 @@ class BaseRLTrainer:
 
         # 4. Update meta
         current_exp = self._meta.latest_exp
+        if not getattr(self.agent_loop_manager, "checkpoint_resumable", True):
+            self.logger.info("Model export saved; excluded from automatic full-resume selection")
+            return
         current_exp.checkpoint_list.append(str(checkpoint_path))
 
         # 5. Prune old checkpoints
@@ -1715,7 +1720,8 @@ class RLColocateTrainer(BaseRLTrainer):
                                 self.train_batch_size,
                                 train_step=train_step,
                                 model_step=model_step,
-                                **({"quiesce": self._checkpoint_due(train_step) or train_step == self._total_train_steps}
+                                **({"quiesce": self._checkpoint_due(train_step) or train_step == self._total_train_steps,
+                                    "final": train_step == self._total_train_steps}
                                    if self._turn_keepalive else {}),
                             )
                         )

@@ -38,7 +38,8 @@ class OwnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(state["same_loop"])
         self.assertEqual(state["pending"].count(), 1)
         inner = SimpleNamespace(
-            task_runners=[SimpleNamespace(produce_strategy=SimpleNamespace(_pending_tasks=state["pending"]))]
+            release_final_leftovers=AsyncMock(),
+            task_runners=[SimpleNamespace(task_name="fixture",produce_strategy=SimpleNamespace(_pending_tasks=state["pending"]))]
         )
         proxy = ColocateKeepaliveManager(inner, owner)
         await proxy.close()
@@ -56,7 +57,7 @@ class OwnerTests(unittest.IsolatedAsyncioTestCase):
             loops.append(asyncio.get_running_loop())
             return 7
 
-        inner = SimpleNamespace(task_runners=[], produce_batch=operation, save=operation, resume=operation)
+        inner = SimpleNamespace(task_runners=[], release_final_leftovers=AsyncMock(), produce_batch=operation, save=operation, resume=operation)
         proxy = ColocateKeepaliveManager(inner, owner)
         try:
             self.assertEqual(await proxy.produce_batch(), 7)
@@ -301,6 +302,7 @@ class StartupTests(unittest.TestCase):
             _rollout_controller=ctl,
             _keepalive=AgentTurnPausePolicy(freeze_timeout=1, drain_timeout=1),
             task_runners=[],
+            release_final_leftovers=AsyncMock(),
             resume=restore,
         )
         manager = ColocateKeepaliveManager(inner, owner)

@@ -409,12 +409,14 @@ class AsyncProduceStrategy(ProduceStrategy):
 
         async def spawn_one() -> asyncio.Task:
             rollout_state = await ctx.sample_group(from_expired_pool=sample_expired)
-            return create_task(
+            task = create_task(
                 ctx.generate_group(
                     rollout_state,
                     enable_partial_rollout=self.enable_partial_rollout,
                 )
             )
+            self._pending_tasks.track_group(task, rollout_state)
+            return task
 
         initial_available = await ctx.completed_count()
         progress_displayer = _ProgressDisplayer.create(

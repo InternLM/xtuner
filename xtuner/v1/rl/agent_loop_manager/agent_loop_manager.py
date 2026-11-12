@@ -4,9 +4,9 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import Status
@@ -128,9 +128,18 @@ class AgentLoopManagerConfig(BaseModel):
 
     tasks: list[TaskSpecConfig] | TaskSpecConfig
     turn_keepalive: bool = False
+    turn_keepalive_update_policy: Literal["quiescent", "batch_ready"] = "quiescent"
+    turn_keepalive_checkpoint_mode: Literal["full", "model_export"] = "full"
     turn_keepalive_freeze_timeout: float = Field(default=30, gt=0)
     turn_keepalive_drain_timeout: float = Field(default=450, gt=0)
     turn_keepalive_quiesce_timeout: float = Field(default=3600, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_batch_ready_policy(self):
+        if self.turn_keepalive_update_policy == "batch_ready":
+            if not self.turn_keepalive or self.turn_keepalive_checkpoint_mode != "model_export":
+                raise ValueError("batch_ready requires turn_keepalive and explicit model_export")
+        return self
 
     def build(
         self,
@@ -235,7 +244,10 @@ class AgentLoopManager:
         *,
         model_step: int,
         quiesce: bool = False,
+        final: bool = False,
     ) -> ProduceBatchResult:
+        if getattr(self, "_final_window", False):
+            raise RuntimeError("Cannot produce after final batch selection")
         # 共卡同步入口：生产入 buffer -> pause/drain 本轮 pending -> 取非空训练 batch。
         if batch_size <= 0:
             raise ValueError(f"produce_batch expects batch_size > 0, got {batch_size}")
@@ -293,7 +305,9 @@ class AgentLoopManager:
         # Checkpoint/final quiesce happens while gates are open. Never wait for
         # an entire episode behind a sealed request gate.
         if keepalive is not None:
-            if quiesce:
+            if quiesce and getattr(self, "_update_policy", "quiescent") != "batch_ready":
+                self.logger.info(f"checkpoint_quiesce_begin step={train_step} pending="
+                                 f"{sum(t.produce_strategy._pending_tasks.count() for t in self.task_runners)}")
                 async def finish_live_tasks():
                     for task in self.task_runners:
                         ctx = ProduceContext(
@@ -351,11 +365,56 @@ class AgentLoopManager:
             "Use get_batch() for disaggregated empty/expired reads."
         )
 
+        if getattr(self, "_update_policy", "quiescent") == "batch_ready":
+            if len(result.rollout_states) != sum(current_sizes.values()):
+                raise RuntimeError("Batch-ready update requires the full valid batch")
+            if final:
+                # pause() already sealed admission and certified GPU/trace drain.
+                # Claim before cancelling: late completions cannot reenter replay.
+                # Cleanup may continue during training, owned until close().
+                self._finalizing_tasks = getattr(self, "_finalizing_tasks", set())
+                for task in self.task_runners:
+                    tails, groups = await task.produce_strategy._pending_tasks.cancel_detached()
+                    self._finalizing_tasks.update(tails)
+                    self._finalizing_groups = getattr(self, "_finalizing_groups", []) + groups
+                self._final_window = True
+                self.logger.info(f"final_tail_cancelled count={len(self._finalizing_tasks)}")
+
         self.logger.info(
             f"[AgentLoopManager][{self.name}] produce_batch done "
             f"elapsed={time.perf_counter() - start:.3f}, completed_groups={len(result.rollout_states)}"
         )
         return result
+
+    async def release_final_leftovers(self) -> None:
+        if not getattr(self, "_final_window", False):
+            return
+        from xtuner.v1.rl.rollout.trace_store import release_and_discard_rollout_groups
+        groups = list(getattr(self, "_finalizing_groups", []))
+        # Result segments may be new objects. Include completed, unclaimed tails.
+        for future in getattr(self, "_finalizing_tasks", set()):
+            if not future.cancelled() and future.exception() is None:
+                groups.append(future.result())
+        for task in self.task_runners:
+            for status in Status:
+                count = await self.replay_buffer.count(task.task_name, status)
+                if count:
+                    groups.extend(await self.replay_buffer.get(count, task.task_name, status))
+        self._finalizing_groups = groups
+        sessions = sorted({str(item.session_id) for group in groups for item in group if item.session_id is not None})
+        self.logger.info(f"final_trace_cleanup sessions={sessions}")
+        await release_and_discard_rollout_groups([g for g in groups if g])
+        self._finalizing_groups = []
+
+    @property
+    def checkpoint_resumable(self) -> bool:
+        return getattr(self, "_checkpoint_mode", "full") == "full"
+
+    @staticmethod
+    def assert_resumable_checkpoint(checkpoint_path: Path | str) -> None:
+        state_path = manager_state_path(Path(checkpoint_path))
+        if state_path.exists() and json.loads(state_path.read_text()).get("resumable") is False:
+            raise RuntimeError("Model export cannot restore sampler/replay/live Agents; load weights explicitly")
 
     async def save(
         self,
@@ -367,6 +426,18 @@ class AgentLoopManager:
         """Save all task sampler states and the shared replay buffer."""
         checkpoint_path = Path(checkpoint_path)
         checkpoint_path.mkdir(parents=True, exist_ok=True)
+        if getattr(self, "_checkpoint_mode", "full") == "model_export":
+            # A model export is intentionally NOT an Agent/sampler checkpoint.
+            # Never serialize a mutable replay snapshot or advertise cold resume.
+            state = {
+                "model_step": model_step, "checkpoint_mode": "model_export",
+                "resumable": False, "live_agents_restored": False,
+                "sampler_saved": False, "replay_buffer_saved": False,
+                "pending_task_counts": get_pending_task_counts(self.task_runners),
+            }
+            manager_state_path(checkpoint_path).write_text(json.dumps(state))
+            self.logger.info("Saving model export only; live Agents retained in memory, cold resume unavailable")
+            return
         pending_task_counts = get_pending_task_counts(self.task_runners)
         if pending_task_counts:
             raise RuntimeError(
@@ -395,6 +466,7 @@ class AgentLoopManager:
     async def resume(self, checkpoint_path: Path | str) -> int:
         """Resume all task sampler states and the shared replay buffer."""
         checkpoint_path = Path(checkpoint_path)
+        self.assert_resumable_checkpoint(checkpoint_path)
         for task in self.task_runners:
             task.sampler.resume(task_checkpoint_path(checkpoint_path, task.task_name))
 

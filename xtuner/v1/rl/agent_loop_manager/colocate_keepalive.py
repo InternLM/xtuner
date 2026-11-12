@@ -67,31 +67,48 @@ class ColocateKeepaliveManager:
     async def close(self):
         if self._closed:
             return
-        self._closed = True
 
         async def cleanup():
-            cancellations = [
-                asyncio.create_task(task.produce_strategy._pending_tasks.cancel_all())
-                for task in self._inner.task_runners
-            ]
-            if cancellations:
-                _, pending = await asyncio.wait(cancellations, timeout=120)
-                if pending:
-                    raise TimeoutError("Pending Agent cleanup exceeded 120 seconds")
-            # Local AgentInSandboxLoop cancellation reaches original Runner
-            # finally/pool cleanup. No duplicate sandbox owner is introduced.
+            errors = []
+            for task in self._inner.task_runners:
+                task.produce_strategy._pending_tasks.close_admission()
+            finalizing = getattr(self._inner, "_finalizing_tasks", set())
+            cancellations = getattr(self, "_cleanup_waiters", None)
+            if cancellations is None:
+                cancellations = [asyncio.create_task(task.produce_strategy._pending_tasks.cancel_all(),
+                                                    name=f"cleanup:{task.task_name}")
+                                 for task in self._inner.task_runners]
+                self._cleanup_waiters = cancellations
+            owned = set(finalizing) | set(cancellations)
+            pending = set()
+            if owned:
+                done, pending = await asyncio.wait(owned, timeout=120)
+                errors.extend(f"{t.get_name()}: {t.exception()!r}" for t in done
+                              if not t.cancelled() and t.exception() is not None)
+            if pending:
+                # Do not stop this loop or cancel an already-running finally a
+                # second time: platform cleanup must keep its original owner.
+                return errors, [t.get_name() for t in pending]
+            try:
+                await self._inner.release_final_leftovers()
+            except Exception as exc:
+                errors.append(f"final trace cleanup: {exc!r}")
             remaining = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
             for task in remaining:
                 task.cancel()
             if remaining:
-                _, pending = await asyncio.wait(remaining, timeout=30)
-                if pending:
-                    raise TimeoutError("Agent client teardown exceeded 30 seconds")
+                done, pending = await asyncio.wait(remaining, timeout=30)
+                errors.extend(f"{t.get_name()}: {t.exception()!r}" for t in done
+                              if not t.cancelled() and t.exception() is not None)
+            return errors, [t.get_name() for t in pending]
 
-        try:
-            await self._owner.call(cleanup())
-        finally:
-            self._owner.stop()
+        errors, pending = await self._owner.call(cleanup())
+        if pending:
+            raise RuntimeError(f"Agent cleanup still owned by live loop: pending={pending} errors={errors}")
+        self._owner.stop()
+        self._closed = True
+        if errors:
+            raise RuntimeError(f"Agent cleanup failed: {errors}")
 
 
 def build_keepalive_manager(config, **kwargs):
@@ -110,6 +127,10 @@ def build_keepalive_manager(config, **kwargs):
     async def build():
         # Build clients, locks, sampler and tasks on the one persistent loop.
         inner = config.model_copy(update={"turn_keepalive": False}).build(**kwargs)
+        inner._update_policy = config.turn_keepalive_update_policy
+        inner._checkpoint_mode = config.turn_keepalive_checkpoint_mode
+        if inner._update_policy == "batch_ready" and inner._checkpoint_mode != "model_export":
+            raise ValueError("Batch-ready keepalive requires explicit model_export checkpoint mode")
         inner._keepalive = AgentTurnPausePolicy(
             freeze_timeout=config.turn_keepalive_freeze_timeout,
             drain_timeout=config.turn_keepalive_drain_timeout,

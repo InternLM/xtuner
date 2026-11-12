@@ -683,7 +683,22 @@ class _PendingTasks:
 
     def __init__(self) -> None:
         self._tasks: set[asyncio.Task] = set()
+        self._groups: dict[asyncio.Task, list[RolloutState]] = {}
         self._lock = asyncio.Lock()
+        self._admission_closed = False
+
+    def close_admission(self) -> None:
+        """Permanently stop new groups on this owner's loop during shutdown.
+
+        Set before cancelling tasks: a still-running producer may observe the
+        emptied pending set while cancellation/trace cleanup yields control.
+        Normal keepalive windows never call this terminal operation.
+        """
+        self._admission_closed = True
+
+    def track_group(self, task: asyncio.Task, group: list[RolloutState]) -> None:
+        # Called by spawn_one under the scheduling lock, before task publication.
+        self._groups[task] = group
 
     def count(self) -> int:
         return len(self._tasks)
@@ -692,6 +707,8 @@ class _PendingTasks:
         async with self._lock:
             ready = {task for task in self._tasks if task.done()}
             self._tasks.difference_update(ready)
+            for task in ready:
+                self._groups.pop(task, None)
             return ready
 
     async def wait_and_claim(self, *, timeout_s: float) -> set[asyncio.Task]:
@@ -704,6 +721,8 @@ class _PendingTasks:
         async with self._lock:
             claimed = done & self._tasks
             self._tasks.difference_update(claimed)
+            for task in claimed:
+                self._groups.pop(task, None)
             return claimed
 
     async def schedule_one(
@@ -714,16 +733,36 @@ class _PendingTasks:
         spawn_one: Callable[[], Awaitable[asyncio.Task]],
     ) -> bool:
         async with self._lock:
-            if should_abort() or len(self._tasks) >= max_pending:
+            if self._admission_closed or should_abort() or len(self._tasks) >= max_pending:
                 return False
-            self._tasks.add(await spawn_one())
+            task = await spawn_one()
+            self._tasks.add(task)
+            if self._admission_closed:
+                # close may have run while the sampler yielded. The newly
+                # created task has not run yet; cancel it before first dispatch
+                # and keep it owned so cancel_all can drain it exactly once.
+                task.cancel()
+                return False
             return True
 
     async def _claim_all(self) -> set[asyncio.Task]:
         async with self._lock:
             claimed = set(self._tasks)
             self._tasks.clear()
+            for task in claimed:
+                self._groups.pop(task, None)
             return claimed
+
+    async def cancel_detached(self) -> tuple[set[asyncio.Task], list[list[RolloutState]]]:
+        """Transfer unselected tasks and their trace owners after certified pause."""
+        async with self._lock:
+            tasks = set(self._tasks)
+            self._tasks.clear()
+            groups = [self._groups.pop(task, []) for task in tasks]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        return tasks, groups
 
     async def cancel_all(self) -> int:
         tasks = await self._claim_all()
