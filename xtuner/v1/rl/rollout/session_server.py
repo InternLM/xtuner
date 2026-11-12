@@ -9,7 +9,7 @@ from typing import Any, List, Optional
 
 import numpy as np
 import ray
-from aiohttp import ClientConnectionResetError, ClientSession, ClientTimeout, web
+from aiohttp import ClientConnectionResetError, ClientSession, ClientTimeout, ConnectionTimeoutError, TraceConfig, web
 
 from transformers import AutoTokenizer
 from xtuner.v1.utils import get_logger
@@ -761,95 +761,122 @@ class SessionServer:
         )
 
         forward_start = time.perf_counter()
-        timeout = ClientTimeout(total=self.request_timeout, sock_connect=30)
-        async with ClientSession(read_bufsize=self.read_bufsize, timeout=timeout) as client:
-            async with client.request(
-                method=request.method, url=target_url, headers=forward_headers, data=request_body
-            ) as resp:
-                upstream_status = resp.status
-                is_success_response = HTTPStatus.OK <= upstream_status < HTTPStatus.MULTIPLE_CHOICES
-                trace_response = trace_active and is_success_response
-                if is_stream:
-                    response_chunks: list[bytes] = []
-                    response = web.StreamResponse(
-                        status=resp.status,
-                        headers={
-                            k: v
-                            for k, v in resp.headers.items()
-                            if k.lower() not in ("transfer-encoding", "content-length", "content-encoding")
-                        },
-                    )
-                    # If the downstream client closes the socket mid-stream
-                    # (e.g. AsyncAPIClient bails out on a finish_reason=='error'
-                    # chunk after the prompt overflowed the session window),
-                    # keep draining the upstream so the trace is still recorded
-                    # in full but stop attempting to write to the closed socket.
-                    try:
-                        await response.prepare(request)
-                    except (ConnectionError, ClientConnectionResetError):
-                        client_alive = False
-                    else:
-                        client_alive = True
-                    skip_blank_after_done = False
-                    async for line in resp.content:
-                        # Only retain chunks when we'll actually need to parse
-                        # them for tracing; evaluate-mode requests skip this
-                        # so memory does not grow with stream length.
-                        if trace_response:
-                            response_chunks.append(line)
+        # ConnectionTimeoutError is raised by aiohttp while acquiring a connection,
+        # before sending this attempt. Keep a monotonic send latch as redirects or
+        # future transport changes may have already sent an earlier attempt.
+        headers_may_have_been_sent = False
+        trace_configs = []
+        if lease is not None:
+            trace = TraceConfig()
 
-                        if (
-                            is_success_response
-                            and clean_data is not None
-                            and request_data is not None
-                            and line.startswith(b"data: ")
-                            and line.strip() != b"data: [DONE]"
-                        ):
+            async def mark_headers_sent(session, context, params):
+                nonlocal headers_may_have_been_sent
+                headers_may_have_been_sent = True
+
+            trace.on_request_headers_sent.append(mark_headers_sent)
+            trace_configs.append(trace)
+        try:
+            timeout = ClientTimeout(total=self.request_timeout, sock_connect=30)
+            async with ClientSession(read_bufsize=self.read_bufsize, timeout=timeout, trace_configs=trace_configs) as client:
+                async with client.request(
+                    method=request.method, url=target_url, headers=forward_headers, data=request_body
+                ) as resp:
+                    upstream_status = resp.status
+                    is_success_response = HTTPStatus.OK <= upstream_status < HTTPStatus.MULTIPLE_CHOICES
+                    trace_response = trace_active and is_success_response
+                    if is_stream:
+                        response_chunks: list[bytes] = []
+                        response = web.StreamResponse(
+                            status=resp.status,
+                            headers={
+                                k: v
+                                for k, v in resp.headers.items()
+                                if k.lower() not in ("transfer-encoding", "content-length", "content-encoding")
+                            },
+                        )
+                        # If the downstream client closes the socket mid-stream
+                        # (e.g. AsyncAPIClient bails out on a finish_reason=='error'
+                        # chunk after the prompt overflowed the session window),
+                        # keep draining the upstream so the trace is still recorded
+                        # in full but stop attempting to write to the closed socket.
+                        try:
+                            await response.prepare(request)
+                        except (ConnectionError, ClientConnectionResetError):
+                            client_alive = False
+                        else:
+                            client_alive = True
+                        skip_blank_after_done = False
+                        async for line in resp.content:
+                            # Only retain chunks when we'll actually need to parse
+                            # them for tracing; evaluate-mode requests skip this
+                            # so memory does not grow with stream length.
+                            if trace_response:
+                                response_chunks.append(line)
+
+                            if (
+                                is_success_response
+                                and clean_data is not None
+                                and request_data is not None
+                                and line.startswith(b"data: ")
+                                and line.strip() != b"data: [DONE]"
+                            ):
+                                try:
+                                    text = line.decode("utf-8")
+                                    data = json.loads(text[6:])
+                                    if isinstance(data, dict) and not _is_error_payload(data) and clean_data(data):
+                                        line = ("data: " + json.dumps(data) + "\n").encode("utf-8")
+                                except Exception:
+                                    pass
+
+                            # Delay [DONE] only while a training trace still needs to be exported.
+                            if trace_response and skip_blank_after_done:
+                                if not line.strip():
+                                    continue
+                                skip_blank_after_done = False
+                            if line.strip() == b"data: [DONE]":
+                                if trace_response:
+                                    skip_blank_after_done = True
+                                    continue
+                            if client_alive:
+                                try:
+                                    await response.write(line)
+                                except (ConnectionError, ClientConnectionResetError):
+                                    client_alive = False
+
+                        raw_response = b"".join(response_chunks) if trace_response else b""
+                    else:
+                        raw_response = await resp.read()
+                        final_raw_response = raw_response
+
+                        if is_success_response and clean_data is not None and request_data is not None:
                             try:
-                                text = line.decode("utf-8")
-                                data = json.loads(text[6:])
-                                if isinstance(data, dict) and not _is_error_payload(data) and clean_data(data):
-                                    line = ("data: " + json.dumps(data) + "\n").encode("utf-8")
+                                parsed = json.loads(raw_response)
+                                if isinstance(parsed, dict) and not _is_error_payload(parsed) and clean_data(parsed):
+                                    final_raw_response = json.dumps(parsed).encode("utf-8")
                             except Exception:
                                 pass
 
-                        # Delay [DONE] only while a training trace still needs to be exported.
-                        if trace_response and skip_blank_after_done:
-                            if not line.strip():
-                                continue
-                            skip_blank_after_done = False
-                        if line.strip() == b"data: [DONE]":
-                            if trace_response:
-                                skip_blank_after_done = True
-                                continue
-                        if client_alive:
-                            try:
-                                await response.write(line)
-                            except (ConnectionError, ClientConnectionResetError):
-                                client_alive = False
+                        response = web.Response(
+                            status=resp.status,
+                            headers={
+                                k: v
+                                for k, v in resp.headers.items()
+                                if k.lower() not in ("transfer-encoding", "content-length", "content-encoding")
+                            },
+                            body=final_raw_response,
+                        )
 
-                    raw_response = b"".join(response_chunks) if trace_response else b""
-                else:
-                    raw_response = await resp.read()
-                    final_raw_response = raw_response
-
-                    if is_success_response and clean_data is not None and request_data is not None:
-                        try:
-                            parsed = json.loads(raw_response)
-                            if isinstance(parsed, dict) and not _is_error_payload(parsed) and clean_data(parsed):
-                                final_raw_response = json.dumps(parsed).encode("utf-8")
-                        except Exception:
-                            pass
-
-                    response = web.Response(
-                        status=resp.status,
-                        headers={
-                            k: v
-                            for k, v in resp.headers.items()
-                            if k.lower() not in ("transfer-encoding", "content-length", "content-encoding")
-                        },
-                        body=final_raw_response,
-                    )
+        except ConnectionTimeoutError:
+            if lease is not None and not headers_may_have_been_sent:
+                # A failed, never-sent attempt has no backend generation to drain.
+                # Do not retry or fabricate a successful trace/reward. Preserve
+                # the exception for the caller; release only its unsafe gate lease.
+                lease.settlement = SettlementReceipt(True, True, "not_started_connect_timeout")
+                get_logger().warning(
+                    f"request_terminal id={lease.request_id} outcome=not_started_connect_timeout "
+                    "backend_ended=True request_headers_sent=False"
+                )
+            raise
 
         forward_s = time.perf_counter() - forward_start
         # Apply abstract on_response processing
