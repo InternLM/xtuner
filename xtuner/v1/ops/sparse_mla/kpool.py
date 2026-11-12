@@ -4,8 +4,13 @@ F5.a).
 
 GLM-5.3-Flash's indexer scores *pools* of ``index_kpool`` (4) consecutive tokens instead of
 individual tokens, then expands the selected pools back into raw token ids and appends the
-current (still-incomplete) trailing pool as a "tail". The production path below has three
-segments:
+current (still-incomplete) trailing pool as a "tail".
+
+The ``tilelang`` entry point uses LMDeploy FP8 operators for supported GLM-5.3 geometry
+when the CUDA device and optional dependencies are compatible. With
+``XTUNER_GLM53_KPOOL_BF16=1``, supported BF16 pools use LMDeploy compression
+with FP32 intermediates and the existing TileLang scorer. Its original TileLang
+implementation remains the fallback and has three segments:
 
   A. :func:`build_pools`    -- ``O(S * Di)`` pool construction, pure PyTorch.
   B. the per-query top-k over pools -- reuses
@@ -36,6 +41,9 @@ token id in this module is global. Concretely that splits the work in two:
 """
 
 import math
+import os
+from functools import lru_cache
+from inspect import signature
 from typing import Literal
 
 import torch
@@ -183,6 +191,26 @@ def build_pools(
     grouped_k = k[safe]
     grouped_gate = gate_scores[safe]
 
+    if (
+        k.dtype == torch.bfloat16
+        and index_kpool == 4
+        and k.shape[-1] == 128
+        and _lmdeploy_kpool_is_available(device, bf16=True)
+    ):
+        from .lmdeploy_kpool import _compress_storage
+
+        # Keep softmax, products and accumulation in FP32 until the BF16 store.
+        pool_key, _ = _compress_storage(
+            torch.where(valid.unsqueeze(-1), grouped_k, 0),
+            grouped_gate.masked_fill(~valid.unsqueeze(-1), float("-inf")),
+            kpool_ape,
+            "decode",
+            True,
+            out_dtype=torch.bfloat16,
+        )
+        pool_key = torch.where(valid.any(dim=1, keepdim=True), pool_key, 0)
+        return pool_key, pool_index.to(torch.int32), valid.all(dim=-1)
+
     logits = grouped_gate.float() + kpool_ape.float().unsqueeze(0)
     logits = logits.masked_fill(~valid.unsqueeze(-1), float("-inf"))
     # Trailing padding pools have only -inf logits; map their NaN softmax to zero keys.
@@ -321,8 +349,22 @@ def kpool_topk_indices(
 ) -> Tensor:
     """Build pools (A), score/select pools (B), expand to token ids + tail (C).
 
-    ``scorer="original"`` uses TileLang scoring with the selected TopK kernel;
-    ``"cooperative"`` uses its fused scoring and selection path.
+    The ``tilelang`` entry point uses LMDeploy FP8 operators for head dimension
+    128, 32/64/128 heads, pool size 4 and Top-K 2048/8192 on compatible SM90+
+    devices. Missing optional LMDeploy/DeepGEMM APIs, other geometries,
+    alternative selectors/scorers and SP query balancing use the original
+    TileLang implementation. The backend name and output contract are unchanged.
+
+    Set ``XTUNER_GLM53_KPOOL_BF16=1`` before process startup to retain the
+    original BF16 key normalization, head projection, pooling and selection
+    even when LMDeploy is available. The default is ``0`` (FP8 when supported).
+    This controls XTuner only; rollout precision is configured separately.
+
+    LMDeploy compression uses decode's two-pass order for all closed pools;
+    serving prompt prefill uses online extend order. Packed document boundaries
+    do not encode that serving schedule, so full prefill/decode parity is not
+    guaranteed. Selection returns integer IDs under ``torch.no_grad()`` and
+    does not provide a differentiable indexer training path.
 
     Args:
         q (Tensor): Index query, shape ``[1, S, index_n_heads, index_head_dim]``, bf16.
@@ -336,8 +378,12 @@ def kpool_topk_indices(
         seq_ctx (SequenceContext): Packed-sequence and SP metadata.
         index_head_dim (int): Indexer head dimension (scaling only; kernel infers dims from q/k).
         index_topk (int): Semantic token budget (e.g. 2048); must be divisible by ``index_kpool``.
+        index_kpool (int): Number of consecutive tokens per pool.
         always_select_tail (bool): Whether to append the incomplete trailing pool.
         alignment (int): Output width alignment (FlashMLA: 512; TileLang: 64).
+        query_chunk_size (int | None): Query row cap. The LMDeploy path also
+            limits logits storage with ``LMDEPLOY_DSA_INDEXER_MAX_LOGITS_MB``.
+        scorer (Literal["original", "cooperative"]): Original or cooperative pool scorer.
         selector (Literal["torch", "deep_select"]): TopK kernel for original TileLang scoring.
         balance_sp (bool): Redistribute query scoring work with neighbor P2P, then
             restore attention ownership before token expansion and tail selection.
@@ -352,6 +398,31 @@ def kpool_topk_indices(
         raise ValueError("selector is only supported with the original KPool scorer")
     if not math.isfinite(sp_full_pool_work_ratio) or sp_full_pool_work_ratio < 0:
         raise ValueError("sp_full_pool_work_ratio must be finite and nonnegative")
+    if (
+        scorer == "original"
+        and selector == "torch"
+        and not balance_sp
+        and _supports_lmdeploy_kpool(index_head_dim, q.shape[2], index_kpool, index_topk)
+        and _lmdeploy_kpool_is_available(q.device)
+    ):
+        from .lmdeploy_kpool import _kpool_topk_indices
+
+        return _kpool_topk_indices(
+            q,
+            k,
+            gate_scores,
+            weights,
+            kpool_ape,
+            seq_ctx,
+            index_head_dim=index_head_dim,
+            index_topk=index_topk,
+            index_kpool=index_kpool,
+            always_select_tail=always_select_tail,
+            alignment=alignment,
+            query_chunk_size=query_chunk_size,
+            balance_sp=balance_sp,
+            sp_full_pool_work_ratio=sp_full_pool_work_ratio,
+        )
     # SP: queries stay sharded; the key side gathers *before* pooling, because a pool can
     # straddle the shard seam (see build_pools). This costs 2 x [S, index_head_dim] per layer
     # instead of the [P, index_head_dim] a post-pooling gather would move -- the price of
@@ -436,6 +507,53 @@ def kpool_topk_indices(
         always_select_tail=always_select_tail,
         alignment=alignment,
     )
+
+
+def _supports_lmdeploy_kpool(head_dim: int, heads: int, pool_size: int, topk: int) -> bool:
+    return head_dim == 128 and heads in (32, 64, 128) and pool_size == 4 and topk in (2048, 8192)
+
+
+@lru_cache(maxsize=None)
+def _lmdeploy_kpool_is_available(device: torch.device, *, bf16: bool = False) -> bool:
+    """Check the selected precision and optional serving operators at
+    startup."""
+    use_bf16 = os.environ.get("XTUNER_GLM53_KPOOL_BF16", "0").lower() in {"1", "true", "yes", "on"}
+    if use_bf16 != bf16:
+        return False
+    # Resolve at forward time: model construction can happen on CPU/meta before
+    # the process selects its CUDA device. Keep XTuner usable without LMDeploy.
+    if device.type != "cuda" or torch.cuda.get_device_capability(device)[0] < 9:
+        return False
+    try:
+        if bf16:
+            from lmdeploy.pytorch.backends.cuda.kpool import kpool_compress_quantize_cuda
+
+            # Older LMDeploy versions only expose FP8 compression.
+            return "out_dtype" in signature(kpool_compress_quantize_cuda).parameters
+        from lmdeploy.pytorch.backends.cuda.kpool import (
+            _get_deep_gemm,
+            kpool_compress_quantize_cuda,
+            kpool_expand_groups_cuda,
+            kpool_select_groups_cuda,
+        )
+        from lmdeploy.pytorch.kernels.cuda.kpool import rotate_kpool_query
+        from lmdeploy.pytorch.nn.kpool import kpool_quantize_fp8
+
+        _get_deep_gemm()
+        return all(
+            callable(operator)
+            for operator in (
+                kpool_compress_quantize_cuda,
+                kpool_expand_groups_cuda,
+                kpool_select_groups_cuda,
+                rotate_kpool_query,
+                kpool_quantize_fp8,
+            )
+        )
+    except (ImportError, OSError, AttributeError, RuntimeError):
+        # Optional imports and unavailable DeepGEMM APIs select the original
+        # implementation. Actual operator errors are never caught here.
+        return False
 
 
 @torch.no_grad()
