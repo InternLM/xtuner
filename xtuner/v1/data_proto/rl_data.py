@@ -136,7 +136,8 @@ class RolloutState(BaseModel):
     # Samples generated from the same prompt share one group_id.
     group_id: int | None = None
     message: list[dict[str, Any]]  # dataset输出，需要在AgentLoop中转换成input_ids
-    prompt_ids: list[int] | None = None  # 原始 prompt的token ids
+    # 原始 prompt 的 token ids；agentic trace 样本为 trace 首个 prompt 段（会话初始 prompt）。
+    prompt_ids: list[int] | None = None
     num_tokens: int | None = None
     proxy_attn_flops: float | None = None
     data_source: dict[str, Any] | str | None = None

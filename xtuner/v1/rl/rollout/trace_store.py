@@ -95,6 +95,104 @@ def _resolve_routed_experts(expert_keys: List[Any], session_id: str) -> List[Any
     )
 
 
+def _assemble_trace(nodes: List["TreeNode"], session_id: str) -> dict:
+    """Assemble an exportable trace dict from trie nodes in path order.
+
+    Args:
+        nodes (List["TreeNode"]): Trace nodes whose values are
+            ``TokenizedSegment`` instances, in chronological order.
+        session_id (str): The session identifier, used for error messages.
+
+    Returns:
+        dict: The trace dictionary containing `input_ids`, `labels`,
+        `logprobs`, `routed_experts`, `tool_call_count`, `prompt_ids`, and
+        `response_ids`. ``tool_call_count`` is the summed per-turn tool-call
+        count of the assistant turns on the chain, or ``None`` when any
+        assistant turn predates the ``tool_call_count`` field (legacy node).
+        ``prompt_ids`` is the session's initial prompt segment and
+        ``response_ids`` the contiguous suffix after it (tool-result tokens
+        included), so ``input_ids == prompt_ids + response_ids`` holds. Both
+        are derived from the trace itself rather than dataset-side prompt ids.
+    """
+    trace: dict[str, Any] = {"input_ids": [], "labels": [], "logprobs": []}
+    expert_keys: List[Any] = []
+    tool_call_counts: List[int | None] = []
+    for node in nodes:
+        node_val = node.value
+        if not isinstance(node_val, TokenizedSegment):
+            raise TypeError(f"Unexpected trace node value type: {type(node_val)!r}")
+        assert node_val.labels is not None
+        assert node_val.logprobs is not None
+        trace["input_ids"].extend(node_val.token_ids)
+        trace["labels"].extend(node_val.labels)
+        trace["logprobs"].extend(node_val.logprobs)
+        expert_keys.append(node_val.expert_key)
+        if node_val.tool_call_count is not None:
+            tool_call_counts.append(node_val.tool_call_count)
+        elif any(label != -100 for label in node_val.labels):
+            # Assistant turn written before the field existed: count unknown.
+            tool_call_counts.append(None)
+    trace["routed_experts"] = _resolve_routed_experts(expert_keys, session_id)
+    trace["tool_call_count"] = None if None in tool_call_counts else sum(tool_call_counts)
+    # The first node holds the session's initial prompt segment (the only segment written
+    # before any assistant turn), so everything after it is the contiguous response suffix
+    # the training stack relies on (env/tool tokens included). A non-prompt head means the
+    # chain does not start at the session prompt and offsets would silently drift.
+    if nodes:
+        head = nodes[0].value
+        if not isinstance(head, TokenizedSegment):
+            raise TypeError(f"Unexpected trace head value type: {type(head)!r}")
+        assert head.labels is not None
+        if any(label != -100 for label in head.labels):
+            raise ValueError(
+                f"Trace head of session {session_id!r} is not a prompt segment: cannot derive response_ids."
+            )
+        prompt_token_count = len(head.token_ids)
+        trace["prompt_ids"] = list(head.token_ids)
+    else:
+        prompt_token_count = 0
+        trace["prompt_ids"] = []
+    trace["response_ids"] = list(trace["input_ids"][prompt_token_count:])
+    return trace
+
+
+def _latest_chain(trie: "Trie") -> List["TreeNode"]:
+    """Return the committed chain ending at the most recently written node.
+
+    ``written_at`` is refreshed on every write (including overwrites), so the
+    anchor must be the node with the latest *own* write rather than the deepest
+    node of a chain: a replayed attempt may overwrite a shared prefix node and
+    stop earlier than the old branch below it. Ties fall back to the longer
+    chain (more tokens on the path).
+
+    Args:
+        trie (Trie): The session trie to search.
+
+    Returns:
+        List[TreeNode]: Valued nodes from the root to the anchor, in path order.
+    """
+    best_node: Any = None
+    best_key: tuple[float, int] = (float("-inf"), -1)
+    stack: list[tuple[Any, int]] = [(trie.root, 0)]
+    while stack:
+        node, token_count = stack.pop()
+        if node.value is not None:
+            key = (node.written_at, token_count)
+            if key > best_key:
+                best_key = key
+                best_node = node
+            token_count += len(node.value.token_ids)
+        for child in node.children.values():
+            stack.append((child, token_count))
+
+    chain: List["TreeNode"] = []
+    while best_node is not None:
+        if best_node.value is not None:
+            chain.append(best_node)
+        best_node = best_node.parent
+    return chain[::-1]
+
+
 class TokenizedSegment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -103,6 +201,11 @@ class TokenizedSegment(BaseModel):
     labels: List[int] | None = Field(default=None, repr=False)
     logprobs: List[float] | None = Field(default=None, repr=False)
     expert_key: Any = Field(default=None, repr=False)
+    # Assistant turns only: number of tool calls in that turn (0 = plain reply).
+    # ``None`` on prompt-delta segments and on assistant turns written before
+    # the field existed; export reports ``None`` when any assistant turn is
+    # unknown instead of silently undercounting.
+    tool_call_count: int | None = Field(default=None, repr=False)
     length: int | None = None
 
     def model_post_init(self, _):
@@ -123,13 +226,13 @@ class TreeNode:
         value (Optional[Any]): The value stored in the node.
         parent (Optional["TreeNode"]): The parent node.
         children (dict[str, "TreeNode"]): The child nodes, mapping string tokens to TreeNodes.
-        created_at (float): The timestamp when the node was created.
+        written_at (float): Last-write timestamp; refreshed on create and on overwrite.
     """
 
     value: Optional[Any]
     parent: Optional["TreeNode"]
     children: dict[str, "TreeNode"] = field(default_factory=dict)
-    created_at: float = field(default_factory=time.time)
+    written_at: float = field(default_factory=time.time)
 
 
 class Trie:
@@ -173,6 +276,7 @@ class Trie:
                 node = node.children[key]
                 break
 
+        node.written_at = time.time()
         node.value = value
 
     def search(self, text: str, filter_none: bool = False) -> Tuple[str, List["TreeNode"]]:
@@ -359,6 +463,33 @@ class RolloutTraceStore:
         self.objects.clear()
         self.updated_at.clear()
 
+    def export_partial_training_trace(self, session_id: str) -> dict:
+        """Export the whole session trace without requiring a prompt text.
+
+        Only fully finished turns are stored, so the export ends exactly at
+        the last finished turn; an in-progress turn is never included. Use for
+        trajectories that cannot render a full prompt text (e.g. timed-out
+        rollouts). Returns empty lists when nothing was stored.
+
+        A session with divergent branches (e.g. an expired rollout reusing the
+        same session id) exports the most recently written committed chain
+        (ties broken by the longer chain) instead of being rejected, so the
+        export always matches the latest attempt — the same semantics the
+        prompt-matching ``export_training_trace`` gives the normal path —
+        while a single-attempt trajectory is still trainable.
+
+        Args:
+            session_id (str): The session identifier.
+
+        Returns:
+            dict: The trace dictionary with the same contract as
+            ``export_training_trace``.
+        """
+        trie = self.sessions.get(session_id)
+        if trie is None:
+            return _assemble_trace([], session_id)
+        return _assemble_trace(_latest_chain(trie), session_id)
+
     def export_training_trace(self, session_id: str, prompt_text: str) -> dict:
         """Export the stored training trace given a complete prompt text.
 
@@ -368,9 +499,11 @@ class RolloutTraceStore:
 
         Returns:
             dict: The trace dictionary containing `input_ids`, `labels`, `logprobs`,
-                and `routed_experts`. `routed_experts` is a per-node list of expert-id
-                refs for a MoE trace, or `None` when the trace carries no routed
-                experts at all (dense model).
+                `routed_experts`, `tool_call_count`, `prompt_ids`, and `response_ids`.
+                `routed_experts` is a per-node list of expert-id refs for a MoE trace, or
+                `None` when the trace carries no routed experts at all (dense model).
+                `prompt_ids`/`response_ids` are the session's initial prompt segment and the
+                contiguous suffix after it, so `input_ids == prompt_ids + response_ids`.
 
         Raises:
             ValueError: If the prompt_text does not completely match the trace keys in the session.
@@ -400,20 +533,7 @@ class RolloutTraceStore:
                 f"prompt_len={len(prompt_text)} matched_len={len(key)} key_count={len(session_keys)}. "
                 "See the logged '[TraceStore] prompt mismatch' report for the full diff."
             )
-        trace: dict[str, Any] = {"input_ids": [], "labels": [], "logprobs": []}
-        expert_keys: list[Any] = []
-        for node in nodes:
-            node_val = node.value
-            if not isinstance(node_val, TokenizedSegment):
-                raise TypeError(f"Unexpected trace node value type: {type(node_val)!r}")
-            assert node_val.labels is not None
-            assert node_val.logprobs is not None
-            trace["input_ids"].extend(node_val.token_ids)
-            trace["labels"].extend(node_val.labels)
-            trace["logprobs"].extend(node_val.logprobs)
-            expert_keys.append(node_val.expert_key)
-        trace["routed_experts"] = _resolve_routed_experts(expert_keys, session_id)
-        return trace
+        return _assemble_trace(nodes, session_id)
 
     def get_objects(self, keys: list[str]) -> list[ray.ObjectRef]:
         """Fetch ray.ObjectRef elements by their keys.

@@ -225,7 +225,7 @@ class TrainingController:
         advantages_list: list[float] = []
         prompt_len_list: list[float] = []
         response_len_list: list[float] = []
-        tool_turns_list: list[int] = []
+        tool_calls_list: list[int] = []
         training_tokens = 0
         if advantages is not None and len(advantages) != len(prepared["rollout_items"]):
             raise ValueError(
@@ -237,9 +237,9 @@ class TrainingController:
             assert meta is not None
             prompt_len_list.append(int(meta.prompt_length))
             response_len_list.append(int(meta.supervised_tokens))
-            turns = state.extra_fields.get("agent_tool_turns")
-            if isinstance(turns, int):
-                tool_turns_list.append(turns)
+            calls = state.extra_fields.get("agent_tool_calls")
+            if isinstance(calls, int):
+                tool_calls_list.append(calls)
             assert state.num_tokens is not None
             training_tokens += state.num_tokens
             if token_stats is None:
@@ -296,11 +296,11 @@ class TrainingController:
             "prompt_len/max": prompt_len_t.max().item(),
         }
         info_dict.update(self.distillation.reward_scalars(prepared["distillation_reward_observations"]))
-        if tool_turns_list:
-            tool_turns_t = torch.tensor(tool_turns_list, dtype=torch.float32)
-            info_dict["tool_turns/mean"] = tool_turns_t.mean().item()
-            info_dict["tool_turns/min"] = float(tool_turns_t.min().item())
-            info_dict["tool_turns/max"] = float(tool_turns_t.max().item())
+        if tool_calls_list:
+            tool_calls_t = torch.tensor(tool_calls_list, dtype=torch.float32)
+            info_dict["tool_calls/mean"] = tool_calls_t.mean().item()
+            info_dict["tool_calls/min"] = float(tool_calls_t.min().item())
+            info_dict["tool_calls/max"] = float(tool_calls_t.max().item())
         info_dict.update(pack_plan.metrics)
         # WorkerLogItem is a TypedDict; dynamic-key reads below need a plain dict view.
         worker_logs = cast(list[dict[str, Any]], log_infos)

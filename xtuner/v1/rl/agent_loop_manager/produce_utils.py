@@ -96,6 +96,27 @@ def calculate_stale_threshold(max_staleness: int, sync_weights_interval: int) ->
     return (max_staleness + 1) * sync_weights_interval
 
 
+def check_timeout_training_rerollout(agent_loop_config: Any, produce_strategy_config: Any) -> None:
+    """Reject timeout training when expired rerollout is enabled.
+
+    ``train_on_timeout`` rebuilds a sample from its session's trace-store chain.
+    Expired rerollout reuses that ``session_id``, so the exported chain may
+    still contain turns from a previous attempt.
+
+    Args:
+        agent_loop_config (Any): One task's agent loop configuration.
+        produce_strategy_config (Any): The same task's produce strategy configuration.
+    """
+    tail_batch_trigger_size = getattr(produce_strategy_config, "tail_batch_trigger_size", -1)
+    if getattr(agent_loop_config, "train_on_timeout", False) and tail_batch_trigger_size >= 0:
+        raise ValueError(
+            "train_on_timeout=True cannot be combined with tail_batch_trigger_size >= 0: expired "
+            "rerollout reuses the sample's session_id, so a timed-out sample's exported trace may "
+            "contain turns from a previous attempt. Keep tail_batch_trigger_size=-1 or disable "
+            "train_on_timeout."
+        )
+
+
 @runtime_checkable
 class ShouldContinueFn(Protocol):
     def __call__(self, completed_count: int, batch_size: int, **kwargs) -> bool: ...
