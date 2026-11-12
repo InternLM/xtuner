@@ -515,7 +515,8 @@ def _supports_lmdeploy_kpool(head_dim: int, heads: int, pool_size: int, topk: in
 
 @lru_cache(maxsize=None)
 def _lmdeploy_kpool_is_available(device: torch.device, *, bf16: bool = False) -> bool:
-    """Check the selected precision and optional serving operators at startup."""
+    """Check the selected precision and optional serving operators at
+    startup."""
     use_bf16 = os.environ.get("XTUNER_GLM53_KPOOL_BF16", "0").lower() in {"1", "true", "yes", "on"}
     if use_bf16 != bf16:
         return False
