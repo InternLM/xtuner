@@ -1,8 +1,12 @@
+import os
 from functools import partial
 from typing import Callable
 
 import torch
 from torch.nn import functional as F
+
+
+_LMDEPLOY_SWIGLU = os.getenv("XTUNER_GLM53_LMDEPLOY_SWIGLU", "0") == "1"
 
 
 def native_swiglu(fused_x: torch.Tensor, split_dim=-1) -> torch.Tensor:
@@ -32,7 +36,15 @@ def native_clamped_swiglu(fused_x: torch.Tensor, split_dim=-1, limit=10.0) -> to
     Distinct from :func:`native_clipped_swiglu` (GPT-OSS's ``(up+1) * gate * sigmoid(alpha*gate)``)
     -- same activation family, different formula, so this is a separate function rather than a
     parameterization of the existing one.
+
+    Set ``XTUNER_GLM53_LMDEPLOY_SWIGLU=1`` before importing this module in each
+    worker to reuse LMDeploy's CUDA forward kernel with a mathematical backward.
+    This requires LMDeploy with ``silu_and_mul(..., precise_mul=True)`` support.
     """
+    if _LMDEPLOY_SWIGLU and fused_x.is_cuda:
+        from xtuner.v1.ops.lmdeploy_swiglu import clamped_swiglu
+
+        return clamped_swiglu(fused_x, split_dim=split_dim, limit=limit)
     gate, up = torch.chunk(fused_x, 2, dim=split_dim)
     gate = gate.clamp(max=limit)
     up = up.clamp(min=-limit, max=limit)
@@ -60,6 +72,8 @@ def get_gated_act_fn(hidden_act: str, swiglu_limit: float | None = None) -> Call
     act_fn = get_act_fn(hidden_act)
     if swiglu_limit is None:
         return lambda gate, up: act_fn(gate) * up
+    if _LMDEPLOY_SWIGLU and hidden_act == "silu":
+        return lambda gate, up: native_clamped_swiglu(torch.cat((gate, up), dim=-1), limit=swiglu_limit)
     return lambda gate, up: act_fn(gate.clamp(max=swiglu_limit)) * up.clamp(min=-swiglu_limit, max=swiglu_limit)
 
 
