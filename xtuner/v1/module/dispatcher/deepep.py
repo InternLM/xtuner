@@ -1,3 +1,4 @@
+import os
 from typing import Literal, TypeAlias, cast
 
 import torch
@@ -31,6 +32,8 @@ from .base import (
 if get_device() == "npu":
     from torch_npu.contrib import transfer_to_npu  # noqa
 
+
+_COMBINE_FP32 = os.getenv("XTUNER_GLM53_MOE_COMBINE_FP32", "0") == "1"
 
 DEVICE = get_device()
 logger = get_logger()
@@ -516,11 +519,16 @@ class DeepEPDispatcher(
         async_op: bool = False,
         decoding: bool = False,
     ) -> DeepEPPreCombineResult:
+        input_dtype = hidden_states.dtype
+        if _COMBINE_FP32:
+            # Reduce weighted expert outputs in FP32, then restore the dtype
+            # expected by DeepEP communication.
+            hidden_states = hidden_states.float()
         hidden_states = unpermute(
             hidden_states,
             post_dispatched["row_ids_map"],
             probs=dispatched["topk_weights"],
-        )
+        ).to(input_dtype)
 
         if async_op:
             backward_previous_event = EventOverlap(None)
