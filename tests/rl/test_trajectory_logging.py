@@ -1,6 +1,5 @@
 import copy
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,20 +7,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop import agent_in_sandbox_loop as sandbox_impl
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import AgentInSandboxLoop
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import AgentRolloutItem, RolloutStatus
 from xtuner.v1.train.rl_trainer import BaseRLTrainer
-
-
-with patch.dict(
-    sys.modules,
-    {
-        "lagent": MagicMock(),
-        "lagent.utils": MagicMock(),
-        "lagent.utils.rate_limiter": MagicMock(),
-    },
-):
-    from xtuner.v1.rl.agent_loop.sandbox_agent_loop import agent_in_sandbox_loop as sandbox_impl
-    from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import AgentInSandboxLoop
-    from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import AgentRolloutItem, RolloutStatus
 
 
 class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
@@ -70,6 +59,10 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
     def _make_loop(mode: str = "train") -> AgentInSandboxLoop:
         loop = AgentInSandboxLoop.__new__(AgentInSandboxLoop)
         loop.mode = mode
+        # __new__ bypasses __init__; provide the attributes _build_rollout_states touches.
+        loop.train_on_timeout = False
+        loop.timeout_reward = -1.0
+        loop.logger = MagicMock()
         loop.tokenizer = MagicMock()
         loop.tokenizer.apply_chat_template.side_effect = lambda messages, **_: f"rendered-{messages[-1]['content']}\n"
         loop.tokenizer.decode.side_effect = lambda token_ids: f"decoded-{token_ids[-1]}"
@@ -83,6 +76,9 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
                 "labels": [-100, 10 + index, 20 + index],
                 "logprobs": [0.0, -0.1, -0.2],
                 "routed_experts": None,
+                # Trace store reports the initial prompt (token [1]) and the contiguous suffix.
+                "prompt_ids": [1],
+                "response_ids": [10 + index, 20 + index],
             }
             for index in range(segment_count)
         ]
@@ -115,8 +111,32 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
             [segment.extra_fields["agent_tools"][0]["function"]["name"] for segment in segments],
             ["tool-0", "tool-1"],
         )
+        self.assertEqual([segment.prompt_ids for segment in segments], [[1], [1]])
         self.assertEqual([segment.response_ids for segment in segments], [[10, 20], [11, 21]])
         self.assertEqual(item.artifacts, original_artifacts)
+
+    async def test_parallel_tool_calls_counted_individually(self):
+        # 行为:一个 assistant turn 并行发起 2 个 tool call 时,agent_tool_calls 记 2(调用个数口径)
+        loop = self._make_loop()
+        state = self._make_state()
+        item = self._make_item(RolloutStatus.COMPLETED, segment_count=1)
+        item.artifacts["messages"][0]["messages"] = [
+            {"role": "user", "content": "test"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "c1", "function": {"name": "f1", "arguments": "{}"}},
+                    {"id": "c2", "function": {"name": "f2", "arguments": "{}"}},
+                ],
+            },
+        ]
+
+        with patch.object(sandbox_impl, "get_store", return_value=self._trace_store(segment_count=1)):
+            segments = await loop._build_rollout_states(state, item)
+
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(segments[0].extra_fields["agent_tool_calls"], 2)
 
     async def test_single_segment_keeps_artifacts(self):
         loop = self._make_loop()
@@ -182,7 +202,7 @@ class TestTrajectoryLogging(unittest.TestCase):
         extra_fields = {
             "agent_name": "test-agent",
             "agent_status": "completed",
-            "agent_tool_turns": 1,
+            "agent_tool_calls": 1,
             "agent_messages": messages,
             "agent_tools": tools,
         }
@@ -248,6 +268,7 @@ class TestTrajectoryLogging(unittest.TestCase):
         self.assertIsNone(rows[1]["agent"]["artifacts"])
         self.assertEqual(trajectory_path.read_text(encoding="utf-8").count('"large_blob"'), 1)
         self.assertEqual([row["agent"]["segment_index"] for row in rows], [0, 1])
+        self.assertEqual([row["agent"]["tool_calls"] for row in rows], [1, 1])
         self.assertTrue(all(row["agent"]["segment_count"] == 2 for row in rows))
         self.assertTrue(all(row["agent"]["session_id"] == "12345678901234567890" for row in rows))
         self.assertEqual(rows[0]["agent"]["messages"][0]["content"], "segment-0")

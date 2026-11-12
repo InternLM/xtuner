@@ -22,6 +22,7 @@ from .schemas import AgentRolloutItem, RolloutStatus
 
 
 _MISSING = object()
+_TIMEOUT_ERROR_CATEGORIES = ["timeout"]
 
 
 def _import_from_path(path: str) -> Any:
@@ -161,11 +162,13 @@ def _selected_agent(item: AgentRolloutItem) -> dict[str, Any] | None:
     return item.infer.agent.model_dump(mode="json")
 
 
-def _count_tool_turns(messages: list[dict[str, Any]]) -> int:
+def _count_tool_calls(messages: list[dict[str, Any]]) -> int:
+    """Number of tool calls across the assistant messages (parallel calls count
+    individually)."""
     return sum(
-        1
+        len(message["tool_calls"])
         for message in messages
-        if isinstance(message, dict) and isinstance(message.get("tool_calls"), list) and message["tool_calls"]
+        if isinstance(message, dict) and isinstance(message.get("tool_calls"), list)
     )
 
 
@@ -190,9 +193,17 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
     item's sandbox pipeline, then converts the resulting task reward and agent
     transcript back into the standard ``RolloutState`` fields consumed by the
     replay buffer/trainer.
+
+    ``train_on_timeout`` keeps rollouts that failed with an entry timeout as
+    ``COMPLETED`` samples built from their finished turns, using
+    ``timeout_reward`` as the fixed reward. The training benefit depends on the
+    group still having at least two reward-bearing samples; otherwise the
+    group-relative advantage is zero for the kept sample.
     """
 
     max_concurrent_samples: int | None = None
+    train_on_timeout: bool = False
+    timeout_reward: float = -1.0
     mode: Literal["train", "eval"] = "train"
     requires_rollout_proxy: bool = True
 
@@ -206,6 +217,8 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
             judger=judger,
             logger=logger,
             max_concurrent_samples=self.max_concurrent_samples,
+            train_on_timeout=self.train_on_timeout,
+            timeout_reward=self.timeout_reward,
             mode=self.mode,
         )
 
@@ -219,12 +232,16 @@ class AgentInSandboxLoop(AgentLoop):
         judger: Judger | None = None,
         logger=None,
         max_concurrent_samples: int | None = None,
+        train_on_timeout: bool = False,
+        timeout_reward: float = -1.0,
         mode: Literal["train", "eval"] = "train",
     ):
         if hf_checkpoint is None:
             raise ValueError("hf_checkpoint must be provided for AgentInSandboxLoop.")
         super().__init__(rollout_ctl, sample_params, hf_checkpoint, judger, logger)
         self.max_concurrent_samples = max_concurrent_samples
+        self.train_on_timeout = train_on_timeout
+        self.timeout_reward = timeout_reward
         self._sample_semaphore = asyncio.Semaphore(max_concurrent_samples) if max_concurrent_samples else None
         self.mode = mode
 
@@ -235,8 +252,7 @@ class AgentInSandboxLoop(AgentLoop):
             else:
                 async with self._sample_semaphore:
                     samples = await self.generate_sample(state)
-            samples = [await self._teacher_scorer.on_sample_ready(sample) for sample in samples]
-            return samples
+            return [await self._teacher_scorer.on_sample_ready(sample) for sample in samples]
 
         pending_tasks = []
         for state in rollout_state:
@@ -295,8 +311,9 @@ class AgentInSandboxLoop(AgentLoop):
             self._fill_eval_rollout_state(rollout_state, item)
             return [rollout_state]
 
-        # prompt_ids 切片只对纯文本 trace 成立；train_prompt_ids（VLM 扩充版 prompt）一旦存在，
-        # trace input_ids 与 prompt_ids 的长度约定即失效，宁可快速失败也不静默产出错位训练字段。
+        # agentic trace 只保存模型实际消费的纯文本 token；train_prompt_ids（VLM 扩充版
+        # prompt）一旦存在，trace input_ids 无法与多模态 prompt 对齐，宁可快速失败也不
+        # 静默产出错位训练字段。
         assert "train_prompt_ids" not in rollout_state.extra_fields, (
             f"Agentic trace rollout does not support multimodal samples, rollout_id={rollout_state.rollout_id}"
         )
@@ -323,7 +340,8 @@ class AgentInSandboxLoop(AgentLoop):
             rollout_state.error_msg = f"{item.error.stage}/{item.error.category}: {item.error.message}"
         if item.status != RolloutStatus.COMPLETED:
             rollout_state.extra_fields["agent_artifacts"] = _to_json_safe(item.artifacts)
-            return [rollout_state]
+            timeout_state = await self._try_keep_timeout_sample(rollout_state, item)
+            return [timeout_state or rollout_state]
 
         segments = _load_train_trace_segments(item.artifacts)
         if not segments:
@@ -337,7 +355,7 @@ class AgentInSandboxLoop(AgentLoop):
             segment_state = rollout_state.model_copy(deep=True)
             segment_state.extra_fields["agent_messages"] = messages
             segment_state.extra_fields["agent_tools"] = tools
-            segment_state.extra_fields["agent_tool_turns"] = _count_tool_turns(messages)
+            segment_state.extra_fields["agent_tool_calls"] = _count_tool_calls(messages)
             segment_state.extra_fields["agent_trace_segment_index"] = segment_index
             segment_state.extra_fields["agent_trace_segment_count"] = len(segments)
             segment_state.extra_fields["agent_session_id"] = rollout_state.session_id
@@ -352,11 +370,12 @@ class AgentInSandboxLoop(AgentLoop):
             data = await trace_store.export_training_trace.remote(str(rollout_state.session_id), prompt_text)
             segment_state.input_ids = data["input_ids"]
             segment_state.labels = data["labels"]
-            # Unified response_ids convention: the contiguous suffix of input_ids after the prompt
-            # (env-injected tokens included), aligned with response_model_steps for per-token
-            # staleness; also the token count used by rollout throughput logging.
-            prompt_len = len(segment_state.prompt_ids or [])
-            segment_state.response_ids = list(data["input_ids"][prompt_len:])
+            # prompt_ids/response_ids both come from the trace: the session's initial prompt
+            # segment and the contiguous suffix after it (tool-result tokens included), so
+            # input_ids == prompt_ids + response_ids holds. Dataset-side prompt_ids is not used
+            # because agent requests render with system/tools.
+            segment_state.prompt_ids = list(data["prompt_ids"])
+            segment_state.response_ids = list(data["response_ids"])
             segment_state.logprobs = data["logprobs"]
             # ``routed_experts`` is a per-node list for a MoE trace or ``None`` for a dense one; trace_store's
             # ``_resolve_routed_experts`` already enforces the all-or-nothing invariant (a trace mixing MoE turns with
@@ -373,6 +392,64 @@ class AgentInSandboxLoop(AgentLoop):
 
         rollout_states[0].extra_fields["agent_artifacts"] = _to_json_safe(item.artifacts)
         return rollout_states
+
+    async def _fill_timeout_rollout_state(self, rollout_state: RolloutState) -> RolloutState:
+        """Mark a timed-out sample trainable using its finished turns.
+
+        Marks the sample ``COMPLETED`` with ``finish_reason`` ``"timeout"`` and
+        a fixed reward. The caller falls back to the regular FAILED handling
+        when no trainable turn exists.
+
+        Args:
+            rollout_state (RolloutState): The timed-out rollout state.
+
+        Returns:
+            RolloutState: The rollout state filled with the partial trace.
+        """
+        if rollout_state.session_id is None:
+            raise ValueError("session_id is missing on the timed-out sample")
+        data = await get_store().export_partial_training_trace.remote(str(rollout_state.session_id))
+        input_ids = data["input_ids"]
+        labels = data["labels"]
+        if len(input_ids) < 2 or all(label == -100 for label in labels):
+            raise ValueError("partial trace carries no trainable token")
+
+        rollout_state.input_ids = input_ids
+        rollout_state.labels = labels
+        # 与正常路径一致：prompt_ids/response_ids 都取自 trace（会话初始 prompt 段 + 其后的
+        # 连续后缀），恢复 input_ids == prompt_ids + response_ids，不依赖 dataset 侧渲染。
+        rollout_state.prompt_ids = list(data["prompt_ids"])
+        rollout_state.response_ids = list(data["response_ids"])
+        rollout_state.logprobs = data["logprobs"]
+        rollout_state.routed_experts = data["routed_experts"]
+        rollout_state.response = (
+            self.tokenizer.decode(rollout_state.response_ids) if rollout_state.response_ids else ""
+        )
+        rollout_state.extra_fields["agent_session_id"] = rollout_state.session_id
+        # Trace-side count is source-of-truth: it only counts the turns actually
+        # exported (and trained). ``None`` means legacy nodes without the field.
+        rollout_state.extra_fields["agent_tool_calls"] = data.get("tool_call_count")
+        rollout_state.status = Status.COMPLETED
+        rollout_state.finish_reason = "timeout"
+        rollout_state.reward = {"score": self.timeout_reward}
+        return rollout_state
+
+    async def _try_keep_timeout_sample(
+        self, rollout_state: RolloutState, item: AgentRolloutItem
+    ) -> RolloutState | None:
+        if not (self.train_on_timeout and item.error is not None and item.error.category in _TIMEOUT_ERROR_CATEGORIES):
+            return None
+        try:
+            timeout_state = await self._fill_timeout_rollout_state(rollout_state)
+        except Exception as exc:
+            self.logger.warning(
+                f"[AgentInSandboxLoop] failed to keep timed-out sample trainable "
+                f"(rollout_id={rollout_state.rollout_id}): {exc}",
+                exc_info=True,
+            )
+            return None
+        timeout_state.extra_fields["agent_status"] = "timeout"
+        return timeout_state
 
     def _fill_eval_rollout_state(self, rollout_state: RolloutState, item: AgentRolloutItem) -> None:
         is_success = item.status == RolloutStatus.COMPLETED
@@ -410,4 +487,4 @@ class AgentInSandboxLoop(AgentLoop):
         if messages:
             rollout_state.extra_fields["agent_messages"] = messages
             rollout_state.extra_fields["agent_tools"] = tools
-            rollout_state.extra_fields["agent_tool_turns"] = _count_tool_turns(messages)
+            rollout_state.extra_fields["agent_tool_calls"] = _count_tool_calls(messages)

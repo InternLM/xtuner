@@ -297,8 +297,9 @@ class SessionServer:
         fields.
 
         When ``trace_enabled`` is False (evaluate mode), forward the request
-        as-is with parameter-name hygiene only — no token-in-token-out
-        rewrite — so the upstream worker handles tokenization on its own.
+        without token-in-token-out rewriting, so the upstream worker handles
+        tokenization. Parameter names are normalized, and routed experts are
+        forced off when the engine was started without routed-expert support.
 
         Args:
             req_body (dict): The original client request body.
@@ -324,7 +325,11 @@ class SessionServer:
                 worker_req.pop("top_logprobs", None)
                 worker_req["return_logprob"] = False
             worker_req["return_token_ids"] = False
-            worker_req.setdefault("return_routed_experts", True)
+            if self.enable_return_routed_experts:
+                worker_req.setdefault("return_routed_experts", True)
+            else:
+                # Engines started without routed experts reject the flag with HTTP 400.
+                worker_req["return_routed_experts"] = False
             return worker_req
 
         session_id = req_body["session_id"]
@@ -376,7 +381,7 @@ class SessionServer:
         }
         worker_req["input_ids"] = input_ids
         worker_req["return_token_ids"] = True
-        worker_req["return_routed_experts"] = True
+        worker_req["return_routed_experts"] = self.enable_return_routed_experts
         worker_req["return_logprob"] = True
         worker_req["include_stop_str_in_output"] = True
 
@@ -509,6 +514,7 @@ class SessionServer:
                 logprobs=output_logprobs,
                 labels=output_token_ids,
                 expert_key=response_expert,
+                tool_call_count=len(assistant_msg.get("tool_calls") or []),
                 length=len(output_token_ids),
             ),
         )

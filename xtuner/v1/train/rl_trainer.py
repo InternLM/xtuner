@@ -1306,7 +1306,7 @@ class BaseRLTrainer:
                             "status": data.extra_fields.get("agent_status", None),
                             "judgers": data.extra_fields.get("agent_judgers", None),
                             "finish_info": data.extra_fields.get("agent_finish_info", None),
-                            "tool_turns": data.extra_fields.get("agent_tool_turns", None),
+                            "tool_calls": data.extra_fields.get("agent_tool_calls", None),
                             "session_id": str(data.session_id) if data.session_id is not None else None,
                             "segment_index": (
                                 data.train_meta.segment_index
@@ -1383,7 +1383,7 @@ class BaseRLTrainer:
                             "status": data.extra_fields.get("agent_status", None),
                             "judgers": data.extra_fields.get("agent_judgers", None),
                             "finish_info": data.extra_fields.get("agent_finish_info", None),
-                            "tool_turns": data.extra_fields.get("agent_tool_turns", None),
+                            "tool_calls": data.extra_fields.get("agent_tool_calls", None),
                             "session_id": str(data.session_id) if data.session_id is not None else None,
                             "segment_index": (
                                 data.train_meta.segment_index
