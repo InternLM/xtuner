@@ -416,6 +416,15 @@ class LMDeployWorker(RolloutWorker):
         if backend == "pytorch" and self.config.enable_prefix_caching:
             extra_engine_config["enable_prefix_caching"] = True
 
+        if backend == "pytorch":
+            extra_engine_config.update(
+                prefill_save_alignment=self.config.prefill_save_alignment,
+                prefix_cache_state_budget=self.config.prefix_cache_state_budget,
+                prefix_cache_decode_save_first=self.config.prefix_cache_decode_save_first,
+                prefix_cache_decode_state_interval=self.config.prefix_cache_decode_state_interval,
+                prefill_save_last_only=self.config.prefill_save_last_only,
+            )
+
         assert self.server_launch_spec is not None
         dp_rank = 0
         if backend == "pytorch":
