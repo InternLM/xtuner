@@ -1,6 +1,8 @@
 import os
 from argparse import Namespace
+from copy import deepcopy
 from typing import Any, Dict, List, Mapping
+from uuid import uuid4
 
 import numpy as np
 import ray
@@ -353,7 +355,7 @@ class LMDeployWorker(RolloutWorker):
         Returns:
             Namespace: A namespace object containing the server configuration.
         """
-        from lmdeploy.messages import PytorchEngineConfig, SpeculativeConfig, TurbomindEngineConfig
+        from lmdeploy.messages import KVTransferConfig, PytorchEngineConfig, SpeculativeConfig, TurbomindEngineConfig
 
         accelerator_to_device_type = {
             "GPU": "cuda",
@@ -390,6 +392,36 @@ class LMDeployWorker(RolloutWorker):
             )
 
         extra_engine_config: Dict[str, Any] = {}
+        for option in (
+            "num_gpu_blocks",
+            "prefix_cache_state_budget",
+            "prefill_save_alignment",
+            "prefill_save_last_only",
+            "prefix_cache_decode_state_interval",
+            "prefix_cache_decode_save_first",
+        ):
+            if option in lmdeploy_config_kwargs:
+                if backend != "pytorch":
+                    raise ValueError(f"{option} requires the LMDeploy PyTorch backend")
+                extra_engine_config[option] = lmdeploy_config_kwargs.pop(option)
+        transfer = lmdeploy_config_kwargs.pop("kv_transfer_config", None)
+        if transfer is not None:
+            if backend != "pytorch":
+                raise ValueError("RL KV connectors require the LMDeploy PyTorch backend")
+            transfer = KVTransferConfig(**deepcopy(transfer)) if isinstance(transfer, dict) else deepcopy(transfer)
+            if not isinstance(transfer, KVTransferConfig) or transfer.kv_connector != "MooncakeStoreConnector":
+                raise ValueError("RL currently supports MooncakeStoreConnector only")
+            if transfer.kv_role != "kv_both":
+                raise ValueError("RL Mooncake Store requires kv_role=kv_both")
+            if transfer.kv_connector_extra_config.get(
+                "rl_share_across_engines", False
+            ) and self.config.weight_transport_type not in (None, "ipc"):
+                raise ValueError("Shared RL Store currently requires full colocated IPC weight updates")
+            transfer.kv_connector_extra_config["store_routed_experts"] = self.config.enable_return_routed_experts
+            # A fresh bootstrap identity prevents cross-run/restart stale hits.
+            # Successful weight commits replace it collectively in LMDeploy.
+            transfer.kv_connector_extra_config.update(rl_weight_versioning=True, weight_version=uuid4().hex)
+            extra_engine_config["kv_transfer_config"] = transfer
         if backend == "pytorch" and self.config.enable_return_routed_experts:
             extra_engine_config["enable_return_routed_experts"] = True
         if backend == "pytorch" and self.config.router_n_groups:

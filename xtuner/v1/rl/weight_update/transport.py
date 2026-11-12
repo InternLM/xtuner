@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Generic, Protocol, Sequence, TypeVar, cast
+from uuid import uuid4
 
 import requests
 import torch
@@ -464,6 +465,46 @@ class IPCWeightTransport(WeightTransport[IPCBackendAdapter]):
         self.cpu_group = self.cpu_mesh.get_group()
         self.head_rank = int(self.cpu_mesh.mesh[0].item())
 
+        transfer = (self.rollout_info.rollout_config.extra_rollout_config or {}).get("lmdeploy_kv_transfer_config")
+        extra = (
+            transfer.get("kv_connector_extra_config", {})
+            if isinstance(transfer, dict)
+            else getattr(transfer, "kv_connector_extra_config", {})
+        )
+        self._shared_store_group: dist.ProcessGroup | None = None
+        self._shared_store_epoch: str | None = None
+        if extra.get("rl_share_across_engines", False):
+            if self.backend != "pytorch" or not extra.get("rl_weight_versioning", True):
+                raise ValueError("Shared RL Store requires the LMDeploy PyTorch IPC weight path")
+            updated = sorted(
+                rank for target in self.rollout_info.weight_update_targets for rank in target.update_ranks
+            )
+            if updated != list(range(dist.get_world_size())):
+                raise ValueError("Shared RL Store requires a full colocated refresh; partial recovery is unsupported")
+            self._shared_store_group = dist.new_group(backend="gloo")
+
+    def update(self, weight_iterator: Any, **kwargs: Any) -> None:
+        """Publish one shared Store epoch with the final IPC bucket.
+
+        Args:
+            weight_iterator (Any): Full-model update stream for every rollout replica.
+            **kwargs (Any): Arguments forwarded to the weight transport.
+        """
+        if self._shared_store_group is not None:
+            epoch = [uuid4().hex if dist.get_rank() == 0 else None]
+            dist.broadcast_object_list(epoch, src=0, group=self._shared_store_group)
+            self._shared_store_epoch = epoch[0]
+        try:
+            super().update(weight_iterator, **kwargs)
+        finally:
+            self._shared_store_epoch = None
+
+    def teardown(self) -> None:
+        """Release only this transport's optional shared-epoch process group."""
+        if self._shared_store_group is not None:
+            dist.destroy_process_group(self._shared_store_group)
+            self._shared_store_group = None
+
     def _build_adapter(self) -> IPCBackendAdapter:
         if self.backend == "vllm":
             return VLLMIPCBackendAdapter(rollout_tp=self.rollout_info.tp)
@@ -500,6 +541,8 @@ class IPCWeightTransport(WeightTransport[IPCBackendAdapter]):
             )
             if dist.get_rank() == self.head_rank:
                 request = self._adapter.build_request(batch, serialized_data)
+                if batch.finished and self._shared_store_epoch is not None:
+                    request.body["weight_version"] = self._shared_store_epoch
                 self.post_json(
                     rollout_url,
                     request.endpoint,
