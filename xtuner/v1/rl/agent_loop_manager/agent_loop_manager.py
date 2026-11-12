@@ -16,6 +16,12 @@ from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.utils import get_logger
 
+from .domain_scheduler import (
+    AdaptiveDomainSchedulerConfig,
+    DomainAdmissionWindow,
+    DomainSchedulingState,
+    FixedDomainSchedulerConfig,
+)
 from .produce_utils import (
     _MANAGER_STATE_PATH,
     _STATUS_POLL_INTERVAL_S,
@@ -24,6 +30,7 @@ from .produce_utils import (
     _TaskRunner,
     _TaskSamplerView,
     allocate_task_batch_sizes,
+    default_should_continue_fn,
     get_pending_task_counts,
     manager_state_path,
     refresh_for_all_tasks,
@@ -31,6 +38,7 @@ from .produce_utils import (
     task_checkpoint_path,
 )
 from .producer import (
+    AsyncProduceStrategy,
     ProduceContext,
     ProduceProgress,
     ProduceStrategy,
@@ -127,6 +135,10 @@ class AgentLoopManagerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     tasks: list[TaskSpecConfig] | TaskSpecConfig
+    domain_scheduler: FixedDomainSchedulerConfig | AdaptiveDomainSchedulerConfig = Field(
+        default_factory=FixedDomainSchedulerConfig,
+        discriminator="kind",
+    )
     turn_keepalive: bool = False
     turn_keepalive_freeze_timeout: float = Field(default=30, gt=0)
     turn_keepalive_drain_timeout: float = Field(default=450, gt=0)
@@ -189,6 +201,8 @@ class AgentLoopManagerConfig(BaseModel):
             replay_buffer=replay_buffer,
             rollout_controller=rollout_controller,
             logger=logger,
+            domain_scheduler=self.domain_scheduler,
+            filter_enabled={task.task_name: task.is_valid_sample_fn is not None for task in tasks},
         )
 
 
@@ -210,6 +224,8 @@ class AgentLoopManager:
         replay_buffer: ReplayBuffer,
         rollout_controller: RolloutController,
         logger=None,
+        domain_scheduler: FixedDomainSchedulerConfig | AdaptiveDomainSchedulerConfig | None = None,
+        filter_enabled: dict[str, bool] | None = None,
     ):
         if not task_runners:
             raise ValueError("AgentLoopManager requires at least one task runner.")
@@ -227,6 +243,29 @@ class AgentLoopManager:
         self.name = task_runners[0].task_name if len(task_runners) == 1 else "multi_task"
         self.logger = get_logger() if logger is None else logger
         self.task_names = [task.task_name for task in task_runners]
+        self._domain_scheduler: DomainSchedulingState | None = None
+        self._admission: DomainAdmissionWindow | None = None
+        self._filter_enabled = filter_enabled or {}
+        if isinstance(domain_scheduler, AdaptiveDomainSchedulerConfig):
+            if filter_enabled is None:
+                self._filter_enabled = {
+                    task.task_name: getattr(task.agent_loop, "is_valid_sample_fn", None) is not None
+                    for task in task_runners
+                }
+            if set(domain_scheduler.target_groups) != set(self.task_names):
+                raise ValueError("Adaptive target_groups must cover exactly the manager's task names.")
+            if any(not isinstance(task.produce_strategy, AsyncProduceStrategy) for task in task_runners):
+                raise ValueError("Adaptive admission requires the original AsyncProduceStrategy for every task.")
+            if any(
+                task.produce_strategy.should_continue_fn is not default_should_continue_fn
+                for task in task_runners
+            ):
+                raise ValueError("Adaptive FIFO admission requires the default batch-completion predicate.")
+            if domain_scheduler.max_concurrent_samples is not None and any(
+                task.sampler.prompt_repeat_k > domain_scheduler.max_concurrent_samples for task in task_runners
+            ):
+                raise ValueError("max_concurrent_samples must fit at least one whole group from every task.")
+            self._domain_scheduler = DomainSchedulingState(domain_scheduler)
 
     async def produce_batch(
         self,
@@ -243,7 +282,20 @@ class AgentLoopManager:
         self.logger.info(
             f"[AgentLoopManager][{self.name}] Start produce_batch: train_step={train_step} model_step={model_step} batch_size={batch_size}"
         )
-        current_sizes = allocate_task_batch_sizes(self.task_runners, batch_size, train_step)
+        scheduler = self._domain_scheduler
+        if scheduler is None:
+            current_sizes = allocate_task_batch_sizes(self.task_runners, batch_size, train_step)
+        else:
+            if batch_size != scheduler.config.batch_size:
+                raise ValueError("Adaptive target_groups must sum to the requested training batch size.")
+            current_sizes = dict(scheduler.config.target_groups)
+            self._admission = DomainAdmissionWindow(
+                scheduler,
+                self.replay_buffer,
+                siblings={task.task_name: task.sampler.prompt_repeat_k for task in self.task_runners},
+                filter_enabled=self._filter_enabled,
+                next_start=self._admission.next_start if self._admission is not None else 0,
+            )
         active_tasks = [task for task in self.task_runners if current_sizes[task.task_name] > 0]
         assert active_tasks, "No active tasks found"
 
@@ -284,6 +336,7 @@ class AgentLoopManager:
                         stale_threshold=task.stale_threshold,
                         token_stale_threshold=task.token_stale_threshold,
                         expired_groups_retryable=task.expired_groups_retryable,
+                        admission=self._admission,
                     )
                 )
             )
@@ -345,6 +398,7 @@ class AgentLoopManager:
             progress=local_progress,
             current_train_step=train_step,
             pause_time_s=pause_time_s,
+            shared_fifo=scheduler is not None,
         )
         assert result.rollout_states, (
             "AgentLoopManager.produce_batch() must return non-empty rollout_states for colocated training. "
@@ -355,6 +409,8 @@ class AgentLoopManager:
             f"[AgentLoopManager][{self.name}] produce_batch done "
             f"elapsed={time.perf_counter() - start:.3f}, completed_groups={len(result.rollout_states)}"
         )
+        if scheduler is not None:
+            self.logger.info(f"[DomainScheduler] {scheduler.metrics()}")
         return result
 
     async def save(
@@ -383,14 +439,14 @@ class AgentLoopManager:
         else:
             await self.replay_buffer.save(checkpoint_path)
         state_path = manager_state_path(checkpoint_path)
+        manager_state: dict[str, Any] = {
+            "model_step": model_step,
+            "replay_buffer_saved": not no_save_replay_buffer,
+        }
+        if self._domain_scheduler is not None:
+            manager_state["domain_scheduler_rng"] = self._domain_scheduler.rng.getstate()
         with state_path.open("w") as f:
-            json.dump(
-                {
-                    "model_step": model_step,
-                    "replay_buffer_saved": not no_save_replay_buffer,
-                },
-                f,
-            )
+            json.dump(manager_state, f)
 
     async def resume(self, checkpoint_path: Path | str) -> int:
         """Resume all task sampler states and the shared replay buffer."""
@@ -410,4 +466,7 @@ class AgentLoopManager:
             raise RuntimeError("Cannot resume without replay buffer checkpoint into a non-empty buffer")
         else:
             self.logger.info(f"Skip replay buffer resume for checkpoint without replay buffer: {checkpoint_path}")
+        if self._domain_scheduler is not None and "domain_scheduler_rng" in manager_state:
+            version, internal_state, gauss = manager_state["domain_scheduler_rng"]
+            self._domain_scheduler.rng.setstate((version, tuple(internal_state), gauss))
         return manager_state["model_step"]

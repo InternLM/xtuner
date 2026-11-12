@@ -610,10 +610,19 @@ async def take_train_batch(
     progress: ProduceProgress | DisaggProduceProgress,
     current_train_step: int,
     pause_time_s: float = 0.0,
+    shared_fifo: bool = False,
 ) -> ProduceBatchResult:
     """Take rollout results and apply the existing per-task token-staleness
     masks."""
-    batch_by_task, consumed_counts = await replay_buffer.take_batch(task_batch_sizes)
+    fifo_groups = None
+    if shared_fifo:
+        batch_by_task, consumed_counts, fifo_groups = await replay_buffer.take_fifo_batch(
+            sum(task_batch_sizes.values()),
+            list(task_batch_sizes),
+        )
+        task_batch_sizes = consumed_counts
+    else:
+        batch_by_task, consumed_counts = await replay_buffer.take_batch(task_batch_sizes)
     # Use the existing task field to retain attribution through sorting/debug saves.
     for task_name, groups in batch_by_task.items():
         for group in groups:
@@ -645,7 +654,7 @@ async def take_train_batch(
         batch_by_task=batch_by_task,
         leftover_counts=leftover_counts,
     )
-    return build_produce_batch_result(
+    result = build_produce_batch_result(
         task_runners=task_runners,
         task_batch_sizes=task_batch_sizes,
         batch_by_task=batch_by_task,
@@ -653,6 +662,9 @@ async def take_train_batch(
         progress=progress,
         pause_time_s=pause_time_s,
     )
+    if fifo_groups is not None:
+        result.rollout_states = fifo_groups
+    return result
 
 
 def task_checkpoint_path(checkpoint_path: Path | str, task_name: str) -> Path:

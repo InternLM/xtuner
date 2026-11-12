@@ -27,6 +27,8 @@ from .produce_utils import (
 if TYPE_CHECKING:
     from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 
+    from .domain_scheduler import DomainAdmissionWindow
+
 
 logger = get_logger()
 
@@ -112,11 +114,15 @@ class ProduceProgress:
 class ProduceContext(BaseProduceContext):
     """共卡本地生产窗口；不暴露非共卡状态机字段。"""
 
+    admission: "DomainAdmissionWindow | None" = None
+
     @property
     def batch_target(self) -> int:
         return self.progress.target_samples[self.task_name]
 
     async def completed_count(self) -> int:
+        if self.admission is not None:
+            return await self.admission.completed_count()
         return await self.replay_buffer.count(task_name=self.task_name, group_status=Status.COMPLETED)
 
 
@@ -416,11 +422,21 @@ class AsyncProduceStrategy(ProduceStrategy):
                 )
             )
 
+        if ctx.admission is not None:
+            await ctx.admission.register(
+                ctx.task_name,
+                pending=self._pending_tasks,
+                spawn=spawn_one,
+                max_pending=self.max_pending_tasks,
+                oversample_budget=oversample_budget,
+            )
+            batch_target = ctx.admission.state.config.batch_size
+
         initial_available = await ctx.completed_count()
         progress_displayer = _ProgressDisplayer.create(
             strategy_name=self.__class__.__name__,
             task_name=ctx.task_name,
-            total=ctx.batch_target,
+            total=batch_target,
             initial=initial_available,
         )
         while True:
@@ -433,13 +449,21 @@ class AsyncProduceStrategy(ProduceStrategy):
             desired_pending = max(0, scheduled_target - available)
             if self.max_pending_tasks is not None:
                 desired_pending = min(desired_pending, self.max_pending_tasks)
-            if pending_count < desired_pending:
+            if ctx.admission is not None:
+                while await ctx.admission.schedule_one():
+                    pass
+            elif pending_count < desired_pending:
                 while await self._pending_tasks.schedule_one(
                     max_pending=desired_pending, should_abort=lambda: False, spawn_one=spawn_one
                 ):
                     pass
 
             if not self._pending_tasks.count():
+                if ctx.admission is not None:
+                    # Another domain may own all live work, or pacing may delay
+                    # admission. Keep collecting instead of ending this producer.
+                    await asyncio.sleep(0.01)
+                    continue
                 logger.warning("All tasks are done but not enough samples collected.")
                 break
 

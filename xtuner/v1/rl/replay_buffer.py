@@ -568,6 +568,37 @@ class ReplayBuffer:
         async with self._lock:
             return await self._policy.count(query_dsl, self._storage)
 
+    async def _completed_fifo(self, task_names: list[str]) -> list[StorageItem]:
+        # Caller holds _lock. Use the existing storage timestamps, including on
+        # resume, rather than introducing a second queue or trajectory owner.
+        records = await self._storage.get(
+            {"$and": [{"task_name": {"$in": task_names}}, {"status": Status.COMPLETED}]}
+        )
+        return sorted(records, key=lambda record: record.timestamp_id)
+
+    async def fifo_counts(self, task_names: list[str], *, limit: int | None = None) -> dict[str, int]:
+        """Count the leading accepted FIFO window for adaptive admission."""
+        async with self._lock:
+            records = (await self._completed_fifo(task_names))[:limit]
+            counts = dict.fromkeys(task_names, 0)
+            for record in records:
+                counts[record.task_name] += 1
+            return counts
+
+    async def take_fifo_batch(
+        self,
+        batch_size: int,
+        task_names: list[str],
+    ) -> tuple[dict[str, list[list[RolloutState]]], dict[str, int], list[list[RolloutState]]]:
+        """Atomically consume a shared FIFO; per-domain targets are soft."""
+        async with self._lock:
+            selected = (await self._completed_fifo(task_names))[:max(batch_size, 0)]
+            await self._storage.delete([record.uid for record in selected])
+            by_task: dict[str, list[list[RolloutState]]] = {name: [] for name in task_names}
+            for record in selected:
+                by_task[record.task_name].append(record.item)
+            return by_task, {name: len(groups) for name, groups in by_task.items()}, [r.item for r in selected]
+
     async def refresh_staleness(
         self,
         *,
