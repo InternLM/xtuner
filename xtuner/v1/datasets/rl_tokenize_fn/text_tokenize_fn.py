@@ -1,4 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import hashlib
+import inspect
+
 from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer
@@ -6,7 +9,7 @@ from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.utils import get_logger
 
 from ..data_item import CacheItem
-from ..utils import CachableTokenizeFunction
+from ..utils import CachableTokenizeFunction, tokenizer_xxhash
 
 
 logger = get_logger()
@@ -26,6 +29,7 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState]):
         self.tools_schema = tools_schema if tools_schema is not None else []
         self.data_judger_mapping = data_judger_mapping
         self.system_prompt = system_prompt
+        self._hash: str | None = None
 
     def __call__(self, item: dict, **kwargs) -> RolloutState | CacheItem:
         """example:
@@ -100,7 +104,22 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState]):
             )
 
     def hash(self) -> str:
-        return "RLTextTokenizeFn"
+        """Cache key that tracks tokenizer identity and tokenize source.
+
+        The RL dataset cache stores only token counts (``num_tokens`` /
+        ``proxy_attn_flops``), not token ids — runtime tokenization always
+        runs fresh. With the previous constant key, swapping in a different
+        tokenizer (e.g. a custom Glm5Tokenizer that encodes control-token
+        literals differently) silently loaded stale counts, causing wrong
+        max-length filtering and packing decisions that surface as a runtime
+        assertion when the real count diverges. Both the tokenizer
+        fingerprint and the ``__call__`` source hash are part of the key.
+        """
+        if self._hash is None:
+            tokenizer_hash = tokenizer_xxhash(self.tokenizer)[:16]
+            source_hash = hashlib.sha256(inspect.getsource(self.__class__.__call__).encode()).hexdigest()[:16]
+            self._hash = f"RLTextTokenizeFn_{tokenizer_hash}_{source_hash}"
+        return self._hash
 
 
 class RLTextTokenizeFnConfig(BaseModel):
