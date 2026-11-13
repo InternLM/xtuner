@@ -273,6 +273,8 @@ class MoE(BaseModel):
         self.rotary_emb = self.build_rotary_embedding(config)
         self.embed_tokens = self.build_embeddings(config)
         self.mtp_block = self.build_mtp_block(config) if config.mtp_config is not None else None
+        if self.mtp_block is not None and not self._mtp_training_enabled:
+            self.mtp_block.requires_grad_(False)
         self._configure_model_specific_layers()
         # Per-dispatch grouped-GEMM row counts of the current train step; None outside one.
         self._ep_recv_tokens: list[int] | None = None
@@ -305,6 +307,10 @@ class MoE(BaseModel):
 
     def _configure_model_specific_layers(self) -> None:
         return
+
+    @property
+    def _mtp_training_enabled(self) -> bool:
+        return self.mtp_block is not None and self.config.mtp_config is not None and not self.config.mtp_config.frozen
 
     def _saved_tensors_offload_ctx(
         self,
@@ -413,7 +419,8 @@ class MoE(BaseModel):
             )
             stats_idx += 1
 
-        if self.mtp_block is not None and self.config.mtp_config is not None:
+        if self._mtp_training_enabled:
+            assert self.mtp_block is not None and self.config.mtp_config is not None
             mtp_config = self.config.mtp_config
             if mtp_config.share_weights:
                 end = stats_idx + mtp_config.num_layers
@@ -484,9 +491,10 @@ class MoE(BaseModel):
         self._add_auxiliary_loss("balancing", self.config.balancing_loss_cfg, _data_batch, res)
         self._add_auxiliary_loss("z_loss", self.config.z_loss_cfg, _data_batch, res)
 
-        # Add MTP loss contexts if MTP is enabled.
-        if self.config.mtp_config is not None:
+        # Add MTP loss contexts if MTP training is enabled.
+        if self._mtp_training_enabled:
             mtp_config = self.config.mtp_config
+            assert mtp_config is not None
             if mtp_config.loss_type == "e2e_tv":
                 tv_loss_cfg = MTPE2ETVLossConfig(
                     ignore_idx=self.config.lm_loss_cfg.ignore_idx,
@@ -494,7 +502,7 @@ class MoE(BaseModel):
                     chunk_size=mtp_config.tv_loss_chunk_size,
                     loss_reduction=self.config.lm_loss_cfg.loss_reduction,
                     num_steps=mtp_config.num_layers,
-                    detach_mtp_lm_head_weight=self.config.mtp_config.detach_mtp_lm_head_weight,
+                    detach_mtp_lm_head_weight=mtp_config.detach_mtp_lm_head_weight,
                 )
                 tv_loss_ctx_list = self._build_loss_ctx(tv_loss_cfg, _data_batch, sp_mesh)
                 if tv_loss_ctx_list is not None:
@@ -739,8 +747,8 @@ class MoE(BaseModel):
 
         assert hidden_states_list, "XTuner Internal Error, found empty hidden states for domino EP"
 
-        if self.mtp_block is not None:
-            assert self.config.mtp_config is not None
+        if self._mtp_training_enabled:
+            assert self.mtp_block is not None and self.config.mtp_config is not None
 
             # Build a per-microbatch SequenceContext clone for MTP. We always run the MTP
             # block on every micro-batch so domino EP can overlap dispatch/combine across
@@ -1025,10 +1033,11 @@ class MoE(BaseModel):
         mtp_loss_ctx_list = loss_ctx.get("mtp") if loss_ctx is not None else None
         mtp_tv_loss_ctx = loss_ctx.get("mtp_e2e_tv") if loss_ctx is not None else None
         if (
-            self.mtp_block is not None
+            self._mtp_training_enabled
             and loss_ctx is not None
             and (mtp_loss_ctx_list is not None or mtp_tv_loss_ctx is not None)
         ):
+            assert self.mtp_block is not None
             mtp_seq_ctx = seq_ctx.copy(
                 input_ids=input_ids.clone() if input_ids is not None else None,
                 position_ids=position_ids.clone(),
