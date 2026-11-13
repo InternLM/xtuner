@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from shutil import rmtree
@@ -589,6 +590,10 @@ class BaseRLTrainer:
         self._exp_tracker = get_writer(writer_type=cfg.exp_tracker, log_dir=log_dir / self._EXP_TRACKING_PATH)
         self._display_all_workers_log = False
 
+        # 轨迹落盘线程池：单 worker 保证相邻步不重叠；_train_one_batch 在训练前 join，
+        # 保留 fail-before-fit 语义。
+        self._trajectory_save_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rl-traj-save")
+
     def _init_work_dir_and_meta(self, cfg: BaseRLTrainerConfig, meta_path: str) -> None:
         work_dir = Path(cfg.work_dir) if cfg.work_dir else Path.cwd() / "work_dirs"
         if get_rank() == 0:
@@ -996,15 +1001,28 @@ class BaseRLTrainer:
         train_sample_count = sum(len(group) for group in train_batch)
         self.logger.info(f"generate {train_sample_count} samples for training")
 
+        # 轨迹落盘只读 train_batch（后续 prepare/offload 均不改动状态），转入后台线程与
+        # 打包并行；训练前 join，失败仍在消耗 NPU 前抛出。
         train_trajectory_dir = self.exp_dir / "train_rollout"
         train_trajectory_dir.mkdir(parents=True, exist_ok=True)
         train_trajectory_path = train_trajectory_dir / f"train_rollout_{train_step}.jsonl"
-        self._save_trajectories(train_batch, train_trajectory_path)
-        self.logger.info(f"Train step {train_step} train trajectories saved to {train_trajectory_path}")
+        trajectory_save = self._trajectory_save_executor.submit(
+            self._save_trajectories, train_batch, train_trajectory_path
+        )
 
-        # 共卡训练前切换资源：检查 rollout -> offload rollout
-        if offload_rollout_before_train:
-            ray.get(self.rollout_controller.offload.remote(), timeout=RL_TRAINER_RAY_GET_TIMEOUT)
+        # 共卡训练前切换资源：rollout offload 非阻塞先发，与训练侧 CPU 打包（奖励聚类、
+        # pack plan、object store 装载）并行；NPU 阶段在 join 之后才开始。
+        offload_ref = self.rollout_controller.offload.remote() if offload_rollout_before_train else None
+        fit_session = self.train_controller.prepare_fit(
+            train_batch,
+            pack_max_length=self._train_worker_cfg.pack_max_length,
+            rollout_idx=train_step,
+        )
+
+        trajectory_save.result()
+        self.logger.info(f"Train step {train_step} train trajectories saved to {train_trajectory_path}")
+        if offload_ref is not None:
+            ray.get(offload_ref, timeout=RL_TRAINER_RAY_GET_TIMEOUT)
         if resume_train_nccl_before_train:
             if getattr(self, "_train_nccl_suspended", False):
                 with timer("resume_train_nccl", step_timer_dict):
@@ -1013,10 +1031,7 @@ class BaseRLTrainer:
 
         # fit内部再做worker的onload，ppo onload critic, 其他的onload actor
         with timer("training", step_timer_dict):
-            workers_log_item, data_info = self.train_controller.fit(
-                train_batch,
-                pack_max_length=self._train_worker_cfg.pack_max_length,
-                rollout_idx=train_step,
+            workers_log_item, data_info = fit_session.fit(
                 raw_rewards_sum=raw_rewards_sum,
                 raw_rewards_count=raw_rewards_count,
             )

@@ -26,6 +26,7 @@ import json
 import tempfile
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -157,17 +158,20 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._maybe_save_checkpoint = AsyncMock()
         trainer._maybe_save_hf = MagicMock()
         trainer._checkpoint_no_save_replay_buffer = False
+        train_fit = MagicMock(
+            return_value=(
+                [{"train_metrics": [], "sft_train_metrics": {}}],
+                {"batch_size": 1, "rewards/mean": 1.0},
+            )
+        )
         trainer.train_controller = SimpleNamespace(
-            fit=MagicMock(
-                return_value=(
-                    [{"train_metrics": [], "sft_train_metrics": {}}],
-                    {"batch_size": 1, "rewards/mean": 1.0},
-                )
-            ),
+            fit=train_fit,
+            prepare_fit=MagicMock(return_value=SimpleNamespace(fit=train_fit)),
             onload=MagicMock(return_value="onload"),
             offload=MagicMock(return_value="offload"),
             weight_update=MagicMock(return_value="update"),
         )
+        trainer._trajectory_save_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-traj-save")
         trainer.rollout_controller = SimpleNamespace(
             shutdown_inactive_workers=SimpleNamespace(
                 remote=MagicMock(return_value="rollout_inactive_workers_shutdown")
