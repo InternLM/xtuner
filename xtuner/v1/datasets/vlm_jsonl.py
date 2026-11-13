@@ -44,6 +44,9 @@ class VLMJsonlDataset(JsonlDataset):
             else:
                 data = raw_data
         except Exception as e:
+            if not getattr(self.tokenize_fn, "allow_fake_data_fallback", True):
+                logger.error(f"[{self.path}] sample index={item}: tokenization failed; fake-data fallback disabled.")
+                raise
             logger.warning(f"[{os.path.basename(self.path)}]: {e}. Dumping a fake data.")
             data = self.tokenize_fn(self.fake_data)
             assert isinstance(data, dict), f"Expected dict, got {type(data)}"

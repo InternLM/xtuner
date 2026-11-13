@@ -484,7 +484,7 @@ def get_train_seq_ctx(
             the VLM MRoPE layout; a prompt-only position segment is extended to cover
             the whole input.
         multimodal_train_info (dict | None): Optional multimodal payload with
-            ``pixel_values``, ``image_grid_thw`` and ``num_img_tokens``.
+            ``pixel_values``, ``image_grid_thw``, ``mm_token_type_ids`` and ``num_img_tokens``.
 
     Returns:
         SequenceContext: The CPU sequence context of the sample.
@@ -510,6 +510,15 @@ def get_train_seq_ctx(
     if multimodal_train_info:
         seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
         seq_ctx.image_grid_thw = _to_cpu_tensor(multimodal_train_info.get("image_grid_thw"), dtype=torch.long)
+        mm_token_type_ids = _to_cpu_tensor(multimodal_train_info.get("mm_token_type_ids"), dtype=torch.long)
+        if mm_token_type_ids is not None:
+            # Tokenizer metadata covers the prompt; generated response tokens
+            # are text. Keep the full input shape before packing and SP splitting.
+            mm_token_type_ids = mm_token_type_ids.reshape(1, -1)
+            if mm_token_type_ids.size(-1) > input_ids.size(-1):
+                raise ValueError("mm_token_type_ids cannot be longer than the training input")
+            seq_ctx.mm_token_type_ids = torch.zeros_like(input_ids)
+            seq_ctx.mm_token_type_ids[:, : mm_token_type_ids.size(-1)] = mm_token_type_ids
         num_img_tokens = multimodal_train_info.get("num_img_tokens")
         if num_img_tokens is not None:
             seq_ctx.num_img_tokens = [num_img_tokens]
