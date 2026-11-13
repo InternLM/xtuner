@@ -481,8 +481,16 @@ class TrainingWorker(SingleAcceleratorWorker):
         """Save every configured role in Hugging Face format under
         ``hf_dir``."""
         hf_path = Path(hf_dir)
-        for name, role in self._roles().items():
-            role.save_hf(hf_path / name, save_dtype)
+        model_role = self._resident_model_role()
+        optimizer_role = self._resident_optimizer_role()
+        try:
+            for name, role in self._roles().items():
+                # Export needs only one model, not optimizer state. Offload the
+                # previous role before loading the next full model.
+                self.set_residency(name, None)
+                role.save_hf(hf_path / name, save_dtype)
+        finally:
+            self.set_residency(model_role, optimizer_role)
 
     @ray_method
     def suspend_train_nccl_process_groups(self) -> dict[str, object]:
