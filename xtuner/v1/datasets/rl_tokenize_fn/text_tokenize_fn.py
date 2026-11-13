@@ -16,6 +16,8 @@ logger = get_logger()
 
 
 class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState]):
+    supports_fake_data_fallback = False
+
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,

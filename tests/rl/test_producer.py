@@ -22,6 +22,8 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import ray
+
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, discard_rollout_state
 from xtuner.v1.rl.agent_loop import maybe_filter_invalid_sample
 from xtuner.v1.rl.agent_loop_manager import (
@@ -405,6 +407,79 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         result = await ctx.generate_group([state])
         self.assertFalse(await ctx.put_generated_group(result))
         self.assertEqual(len(self.replay_buffer), 0)
+
+    async def test_failed_input_group_bypasses_local_and_ray_agent_loops(self):
+        # 公共 producer 入口先短路，连自定义 generate_group / Ray RPC 都不会进入。
+        for remote in (False, True):
+            with self.subTest(remote=remote):
+                agent_loop = MagicMock(spec=ray.actor.ActorHandle) if remote else MagicMock()
+                generate = AsyncMock(side_effect=AssertionError("Failed inputs must not enter the agent loop"))
+                if remote:
+                    agent_loop.generate_group = MagicMock(remote=generate)
+                else:
+                    agent_loop.generate_group = generate
+                ctx = self._build_context(
+                    SyncProduceStrategyConfig().build(),
+                    "failed_input",
+                    agent_loop,
+                    self._build_sampler(),
+                    batch_size=1,
+                )
+                group = [
+                    make_rollout_state(1, status=Status.INIT),
+                    make_rollout_state(2, status=Status.FAILED),
+                ]
+                group[1].extra_fields["failure_reason"] = "invalid input"
+                self.assertIs(await ctx.generate_group(group), group)
+                generate.assert_not_awaited()
+                self.assertEqual(group[1].extra_fields["failure_reason"], "invalid input")
+                self.assertFalse(await ctx.put_generated_group(group))
+                self.assertEqual(len(self.replay_buffer), 0)
+                self.assertEqual(ctx.progress.failed_samples["failed_input"], 2)
+
+    async def test_nonfailed_inputs_still_dispatch_to_local_and_ray_agent_loops(self):
+        for remote in (False, True):
+            for status in (Status.INIT, Status.ABORTED):
+                with self.subTest(remote=remote, status=status):
+                    agent_loop = MagicMock(spec=ray.actor.ActorHandle) if remote else MagicMock()
+                    group = [make_rollout_state(1, status=status)]
+                    result = [make_rollout_state(1)]
+                    generate = AsyncMock(return_value=result)
+                    if remote:
+                        agent_loop.generate_group = MagicMock(remote=generate)
+                    else:
+                        agent_loop.generate_group = generate
+                    ctx = self._build_context(
+                        SyncProduceStrategyConfig().build(),
+                        "valid_input",
+                        agent_loop,
+                        self._build_sampler(),
+                        batch_size=1,
+                    )
+                    self.assertIs(await ctx.generate_group(group, enable_partial_rollout=True), result)
+                    generate.assert_awaited_once_with(group, enable_partial_rollout=True)
+
+    async def test_failed_input_group_is_replaced_without_oversampling(self):
+        for config in (SyncProduceStrategyConfig(), AsyncProduceStrategyConfig()):
+            with self.subTest(strategy=type(config).__name__):
+                task_name = type(config).__name__
+                self.mock_dataloader.__iter__.return_value = iter(
+                    [[make_rollout_state(i, status=Status.FAILED if i == 0 else Status.INIT)] for i in range(3)]
+                )
+                sampler_cfg = SamplerConfig.model_construct(dataloader_cfg=self.mock_dataloader_cfg, prompt_repeat_k=2)
+                sampler = sampler_cfg.build(self.mock_tokenizer, self.replay_buffer)
+                agent_loop = self._build_agent_loop()
+                generate = AsyncMock(wraps=agent_loop.generate_group)
+                agent_loop.generate_group = generate
+                strategy = config.build()
+                ctx = self._build_context(strategy, task_name, agent_loop, sampler, batch_size=2)
+                await asyncio.wait_for(strategy.produce_batch(ctx), timeout=5)
+                groups = await self.replay_buffer.get(2, task_name=task_name, group_status=Status.COMPLETED)
+                self.assertEqual(len(groups), 2)
+                self.assertEqual({group[0].group_id for group in groups}, {1, 2})
+                self.assertTrue(all(len(group) == 2 for group in groups))
+                self.assertEqual(generate.await_count, 2)
+                self.assertEqual(ctx.progress.failed_samples[task_name], 2)
 
     async def test_put_generated_group_releases_non_retryable_trace_sessions(self):
         # FAILED / FILTERED 不进入 replay buffer，必须在丢弃 RolloutState 前释放对应 trace session。

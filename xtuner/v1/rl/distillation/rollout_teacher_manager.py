@@ -11,6 +11,7 @@ import httpx
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, TeacherTargets, get_group_status
 from xtuner.v1.rl.utils import create_task
+from xtuner.v1.rl.utils.misc import validate_image_only_rollout
 from xtuner.v1.utils import get_logger
 
 from .config import RolloutTeacherConfig, RolloutTeacherScorerConfig, TeacherTargetConfig
@@ -67,6 +68,7 @@ class RolloutTeacherClient:
     async def compute_logprobs(self, state: RolloutState) -> RolloutState:
         start = time.perf_counter()
         try:
+            validate_image_only_rollout(state)
             scoring_input = self._prepare_scoring_input(state)
             if scoring_input is None:
                 return state
@@ -92,6 +94,7 @@ class RolloutTeacherClient:
                 response_ids,
                 logprob_start_len=logprob_start_len,
                 image_data=image_data,
+                image_processor_kwargs=state.extra_fields.get("image_processor_kwargs"),
             )
 
             attempt_idx = 0
@@ -190,6 +193,7 @@ class RolloutTeacherClient:
         *,
         logprob_start_len: int,
         image_data: Any | None = None,
+        image_processor_kwargs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if self.backend == "sglang":
             payload = self._construct_sglang_payload(
@@ -207,6 +211,8 @@ class RolloutTeacherClient:
             raise RuntimeError(f"Unsupported teacher backend: {self.backend}")
         if image_data:
             payload["image_data"] = image_data
+        if image_processor_kwargs is not None and self.backend == "lmdeploy":
+            payload["mm_processor_kwargs"] = {"image": image_processor_kwargs}
         if self.target_config.uses_topk_targets:
             payload["top_logprobs_num"] = cast(int, self.target_config.top_k)
         return payload

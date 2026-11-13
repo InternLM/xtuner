@@ -299,6 +299,10 @@ class LMDeployWorker(RolloutWorker):
             if sample_params.min_tokens > 0:
                 lmdeploy_sample_params["min_new_tokens"] = sample_params.min_tokens
             payload.update(lmdeploy_sample_params)
+        # 两种请求（token IDs / messages）共用，预算只读并交给 HTTP 客户端序列化。
+        image_options = rollout_state.extra_fields.get("image_processor_kwargs")
+        if image_options is not None:
+            payload["mm_processor_kwargs"] = {"image": image_options}
         return payload
 
     def _sleep(self, level: int = 1):
