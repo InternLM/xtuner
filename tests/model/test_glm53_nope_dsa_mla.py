@@ -241,7 +241,9 @@ class TestNoPEDSAMLAConfigIndexerChunking:
             captured.update(kwargs)
             return torch.full((4, 1, 8), -1, dtype=torch.int32)
 
-        indexer._topk_indices_fn = selector
+        from dataclasses import replace
+
+        indexer._plan = replace(indexer._plan, topk_indices=selector)
         ctx = SequenceContext.from_input_ids((torch.zeros(1, 4, dtype=torch.long),), device="cpu")
         indexer(torch.randn(1, 4, HIDDEN), torch.randn(1, 4, Q_LORA_RANK), ctx)
         assert captured["balance_sp"] is True
@@ -302,6 +304,88 @@ class TestNoPEDSAMLAConfigGuards:
         NoPEDSAMLAConfig(**{**self._BASE_KWARGS, "sparse_mla_backend": "torch"})
 
 
+class TestExplicitKPoolConfig:
+    def _config(self, backend, **overrides):
+        kwargs = {
+            **TestNoPEDSAMLAConfigGuards._BASE_KWARGS,
+            "indexer_backend": backend,
+            "index_head_dim": 128,
+            "index_n_heads": 32,
+            "index_kpool": 4,
+            "index_topk": 2048,
+        }
+        return NoPEDSAMLAConfig(**{**kwargs, **overrides})
+
+    @pytest.mark.parametrize("backend", ["torch", "tilelang", "lmdeploy_fp8", "lmdeploy_bf16"])
+    def test_serialized_config_records_effective_precision(self, monkeypatch, backend):
+        checked = []
+        monkeypatch.setattr(
+            "xtuner.v1.model.moe.glm53.nope_dsa_mla.ensure_lmdeploy_kpool_runtime_available", checked.append
+        )
+        config = self._config(backend)
+        serving = backend.startswith("lmdeploy_")
+        assert config.indexer_kpool_fp32_prep is serving
+        serialized = config.model_dump_json()
+        restored = NoPEDSAMLAConfig.model_validate_json(serialized)
+        assert restored.indexer_backend == backend and restored.indexer_kpool_fp32_prep is serving
+        indexer = restored.build(hidden_size=HIDDEN).indexer
+        assert indexer.indexer_backend == backend
+        assert checked == ([backend.removeprefix("lmdeploy_")] if serving else [])
+
+    @pytest.mark.parametrize("backend", ["lmdeploy_fp8", "lmdeploy_bf16"])
+    def test_rejects_explicitly_disabled_fp32_prep(self, backend):
+        config = self._config(backend, indexer_kpool_fp32_prep=False)
+        with pytest.raises(ValueError, match="requires indexer_kpool_fp32_prep=True"):
+            config.build(hidden_size=HIDDEN)
+
+    @pytest.mark.parametrize("backend", ["lmdeploy_fp8", "lmdeploy_bf16"])
+    @pytest.mark.parametrize(
+        "bad_config",
+        [
+            {"index_head_dim": 64},
+            {"index_n_heads": 16},
+            {"index_kpool": 2},
+            {"index_topk": 1024},
+            {"indexer_balance_sp": True},
+        ],
+    )
+    def test_rejects_unsupported_geometry_before_optional_imports(self, monkeypatch, backend, bad_config):
+        monkeypatch.setattr(
+            "xtuner.v1.model.moe.glm53.nope_dsa_mla.ensure_lmdeploy_kpool_runtime_available",
+            lambda *args: pytest.fail("geometry must be checked first"),
+        )
+        with pytest.raises(ValueError, match="LMDeploy KPool"):
+            self._config(backend, **bad_config).build(hidden_size=HIDDEN)
+
+    @pytest.mark.parametrize("backend", ["lmdeploy_fp8", "lmdeploy_bf16"])
+    def test_dependency_error_surfaces_during_build(self, monkeypatch, backend):
+        def unavailable(precision):
+            raise RuntimeError(f"missing {precision} runtime")
+
+        monkeypatch.setattr(
+            "xtuner.v1.model.moe.glm53.nope_dsa_mla.ensure_lmdeploy_kpool_runtime_available", unavailable
+        )
+        with pytest.raises(RuntimeError, match="missing.*runtime"):
+            self._config(backend).build(hidden_size=HIDDEN)
+
+    @pytest.mark.parametrize("backend", ["torch", "tilelang"])
+    def test_native_backends_accept_explicit_fp32_preparation(self, backend):
+        config = self._config(backend, indexer_kpool_fp32_prep=True)
+        assert config.indexer_kpool_fp32_prep
+        assert config.build(hidden_size=HIDDEN).indexer.indexer_backend == backend
+
+    def test_backend_assignment_updates_only_implicit_precision_default(self):
+        config = self._config("tilelang")
+        assert not config.indexer_kpool_fp32_prep
+        config.indexer_backend = "lmdeploy_fp8"
+        assert config.indexer_kpool_fp32_prep
+        config.indexer_backend = "torch"
+        assert not config.indexer_kpool_fp32_prep
+        config.indexer_kpool_fp32_prep = True
+        config.indexer_backend = "tilelang"
+        assert config.indexer_kpool_fp32_prep
+
+
 class TestNoPEDSAMLAConfigRMSNormEps:
     """q/kv a-layernorm 的 eps 必须能从 config 传入（回归：曾固定在 RMSNorm 默认 1e-6）。
 
@@ -345,7 +429,6 @@ class TestNoPEDSAMLAConfigRMSNormEps:
         # 语义来源交叉验证：HF 对这两个 norm 用 config.rms_norm_eps。注意现有 HF 对拍
         # 用例（_hf_module）把 rms_norm_eps 硬编码为 1e-6，恰好等于旧默认值，因此对拍
         # 从未覆盖该 eps 分歧 —— 真实 checkpoint 为 1e-5。
-        from transformers.models.glm5_next.configuration_glm5_next import Glm5NextTextConfig
         from transformers.models.glm5_next.modeling_glm5_next import Glm5NextTextAttention
 
         _, config = _hf_module()
