@@ -238,12 +238,17 @@ class CriticLossContext(BaseLossContext):
         valid_mask = shifted_labels != self.loss_cfg.ignore_idx
         rank_grad_tokens = valid_mask.sum()
         extra_info: dict[str, Any] = {}
-        if old_values is None:
-            if rank_grad_tokens == 0:
-                loss = values.sum() * 0
-            else:
-                per_token = 0.5 * (v - returns) ** 2
-                loss = (per_token * loss_weight).sum()
+        if rank_grad_tokens == 0:
+            loss = values.sum() * 0
+            if old_values is not None:
+                # Keep metric reductions rank-symmetric without evaluating ignored targets.
+                extra_info = {
+                    "reduced_critic_value_clip_count": values.new_zeros(()),
+                    "reduced_critic_value_valid_count": values.new_zeros(()),
+                }
+        elif old_values is None:
+            per_token = 0.5 * (v - returns) ** 2
+            loss = (per_token * loss_weight).sum()
         else:
             cliprange = self.loss_cfg.cliprange_value
             v_clip = old_values + (v - old_values).clamp(-cliprange, cliprange)

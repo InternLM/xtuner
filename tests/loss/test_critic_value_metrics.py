@@ -3,12 +3,12 @@
 Good Tests:
 - 用手工张量精确控制 old_values 与 values 的偏差，断言 clip/valid 计数的逐 token 结果。
 - 覆盖 cliprange 边界（严格大于才算 clipped）与 ignore_idx 掩码。
-- 空 rank（全 ignore）在 old_values 存在时仍发零计数：finalize 的 all-reduce 必须保持 rank 对称。
+- 空 rank（全 ignore）保持可反传零损失，并在 old_values 存在时发零计数，保持归约 rank 对称。
 - finalize 无 dist 环境下的派生与 config 委托。
 - ModelForwardExtraLogInfo 白名单 round-trip：新计数 key 能被求和保留。
 
 Bad Tests:
-- 不构造模型/engine，不测 loss 数值本身（GPU 侧 test_critic_sft.py 已覆盖）。
+- 不构造模型/engine；除全掩码零损失回归外，不重复 GPU 侧 test_critic_sft.py 的数值覆盖。
 """
 
 import unittest
@@ -70,7 +70,24 @@ class TestCriticValueClipCounts(unittest.TestCase):
         # 回归：全 ignore 的空 rank（old_values 存在）也必须发出计数 key（值为 0）。
         # 若缺失，finalize 的 all-reduce 会按 rank 条件跳过，有 token 的 rank 在
         # NCCL 上永久等待直至 watchdog 击杀 worker（smoke 两连挂的根因）。
-        extra_info = _loss_fn_with_values(values=[0.5], old_values=[0.0], labels=[-100])
+        loss_ctx = CriticLossConfig().build(
+            {
+                "shifted_labels": torch.tensor([[-100]]),
+                # Finite targets whose squared error overflows must not affect an ignored pack.
+                "returns": torch.tensor([[1e20]]),
+                "old_values": torch.tensor([[0.0]]),
+            },
+            device="cpu",
+        )
+        assert loss_ctx is not None
+        CriticLossContext.build_batches([loss_ctx])
+        hidden_states = torch.tensor([[[0.5]]], requires_grad=True)
+        head_weight = torch.ones(1, 1, requires_grad=True)
+        loss, (_, extra_info) = loss_ctx.forward(hidden_states, head_weight)
+        self.assertEqual(loss.item(), 0.0)
+        loss.backward()
+        torch.testing.assert_close(hidden_states.grad, torch.zeros_like(hidden_states))
+        torch.testing.assert_close(head_weight.grad, torch.zeros_like(head_weight))
         self.assertEqual(extra_info["reduced_critic_value_clip_count"].item(), 0.0)
         self.assertEqual(extra_info["reduced_critic_value_valid_count"].item(), 0.0)
 
