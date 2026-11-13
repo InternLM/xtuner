@@ -11,7 +11,7 @@ import torch
 from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.rl.advantage.base import AdvantageEstimator, TokenAdvantageEstimator
 from xtuner.v1.rl.advantage.gae import session_token_targets
-from xtuner.v1.rl.advantage.stats import TokenStats
+from xtuner.v1.rl.advantage.stats import TokenStats, critic_value_stats
 from xtuner.v1.rl.distillation import DistillationTrainerAdapter
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import get_logger
@@ -149,21 +149,39 @@ class TrainingController:
 
     @staticmethod
     def _critic_log_scalars(critic_logs: list[WorkerLogItem] | None) -> dict[str, float]:
-        """Average rank-0 critic step metrics into ``data_info`` keys."""
+        """Average losses and sum global clip counters across critic updates.
+
+        Read rank zero only: each rank already carries world-reduced counters.
+        Derive the fraction from their sums, not the mean of step fractions.
+        """
         if not critic_logs:
             return {}
         steps = critic_logs[0].get("train_metrics") or []
+        mean_rename = {"reduced_llm_loss": "critic/value_loss", "grad_norm": "critic/grad_norm"}
+        sum_rename = {
+            "reduced_critic_value_clip_count": "critic/value_clip_count",
+            "reduced_critic_value_valid_count": "critic/value_valid_count",
+        }
         sums: dict[str, float] = {}
         counts: dict[str, int] = {}
-        rename = {"reduced_llm_loss": "critic/value_loss", "grad_norm": "critic/grad_norm"}
         for step in steps:
             for key, value in step.items():
-                target = rename.get(key)
-                if target is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
                     continue
-                sums[target] = sums.get(target, 0.0) + float(value)
-                counts[target] = counts.get(target, 0) + 1
-        return {key: sums[key] / counts[key] for key in sums}
+                target = mean_rename.get(key)
+                if target is not None:
+                    sums[target] = sums.get(target, 0.0) + float(value)
+                    counts[target] = counts.get(target, 0) + 1
+                    continue
+                target = sum_rename.get(key)
+                if target is not None:
+                    sums[target] = sums.get(target, 0.0) + float(value)
+        scalars = {key: total / counts[key] if key in counts else total for key, total in sums.items()}
+        clip_count = scalars.get("critic/value_clip_count")
+        valid_count = scalars.get("critic/value_valid_count")
+        if clip_count is not None and valid_count is not None:
+            scalars["critic/value_clip_frac"] = clip_count / valid_count if valid_count > 0 else 0.0
+        return scalars
 
     def _prepare_group_targets(self, prepared: _PreparedBatch, pack_plan: PackPlan) -> list[float]:
         """Estimate group-scalar advantages and install them per DP rank.
@@ -423,7 +441,7 @@ class TrainingController:
         pack_plan: PackPlan,
         data_replicate_size: int,
         timers: dict[str, float],
-    ) -> TokenStats:
+    ) -> tuple[TokenStats, dict[str, float]]:
         """Collect critic values and install complete PPO targets on every
         worker.
 
@@ -439,7 +457,8 @@ class TrainingController:
             timers (dict[str, float]): Step timing accumulator.
 
         Returns:
-            TokenStats: Normalized effective-action-token statistics.
+            tuple[TokenStats, dict[str, float]]: Normalized action-token statistics
+            and session critic health metrics (empty for segment GAE).
         """
         estimator = cast(TokenAdvantageEstimator, self.advantage_estimator)
         session = estimator.reward_scope == "session"
@@ -464,7 +483,7 @@ class TrainingController:
                 ],
                 timeout=TRAIN_RAY_GET_TIMEOUT,
             )
-            return TokenStats.merge(cast(list[TokenStats], stats))
+            return TokenStats.merge(cast(list[TokenStats], stats)), {}
 
         rows_by_dp = [
             value_results[worker_index] for worker_index in range(len(self.workers)) if is_representative[worker_index]
@@ -487,12 +506,11 @@ class TrainingController:
             ],
             timeout=TRAIN_RAY_GET_TIMEOUT,
         )
-        return TokenStats.merge(
-            [
-                TokenStats.from_masked(advantage, torch.tensor(state.labels or [])[1:].ne(-100))
-                for state, advantage in zip(prepared["rollout_items"], advantages)
-            ]
+        masks = [torch.tensor(state.labels or [])[1:].ne(-100) for state in prepared["rollout_items"]]
+        token_stats = TokenStats.merge(
+            [TokenStats.from_masked(advantage, mask) for advantage, mask in zip(advantages, masks)]
         )
+        return token_stats, critic_value_stats(values, returns, masks)
 
     @contextmanager
     def _loaded_batch(
@@ -570,6 +588,7 @@ class TrainingController:
 
         sample_advantages: list[float] | None = None
         token_stats: TokenStats | None = None
+        value_stats: dict[str, float] = {}
         critic_log_infos: list[WorkerLogItem] | None = None
         with self._loaded_batch(rollout_items, pack_plan, prepared["batch_attr"], data_replicate_size):
             if self._has_critic:
@@ -577,7 +596,7 @@ class TrainingController:
                     [worker.set_residency.remote("critic", "critic") for worker in self.workers],  # type: ignore[attr-defined]
                     timeout=TRAIN_RAY_GET_TIMEOUT,
                 )
-                token_stats = self._prepare_ppo_targets(prepared, pack_plan, data_replicate_size, timers)
+                token_stats, value_stats = self._prepare_ppo_targets(prepared, pack_plan, data_replicate_size, timers)
                 with timer("critic_fit", timers):
                     critic_log_infos = ray.get(
                         [worker.critic_fit.remote() for worker in self.workers],  # type: ignore[attr-defined]
@@ -607,6 +626,7 @@ class TrainingController:
             raw_rewards_count=raw_rewards_count,
         )
         data_info.update(self._critic_log_scalars(critic_log_infos))
+        data_info.update(value_stats)
         data_info.update({f"time/{name}": value for name, value in timers.items()})
         return log_infos, data_info
 
