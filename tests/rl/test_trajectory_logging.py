@@ -58,6 +58,8 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _make_loop(mode: str = "train") -> AgentInSandboxLoop:
         loop = AgentInSandboxLoop.__new__(AgentInSandboxLoop)
+        loop._closing = False
+        loop._active_runs = set()
         loop.mode = mode
         # __new__ bypasses __init__; provide the attributes _build_rollout_states touches.
         loop.train_on_timeout = False

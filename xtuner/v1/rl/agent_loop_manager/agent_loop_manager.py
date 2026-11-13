@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.rl.agent_loop import AgentLoopConfig, IsValidSampleFn
+from xtuner.v1.rl.agent_loop.agent_loop import call_agent_loop_hook, close_agent_loops
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
@@ -221,6 +222,9 @@ class AgentLoopManager:
         self.logger = get_logger() if logger is None else logger
         self.task_names = [task.task_name for task in task_runners]
 
+    async def close(self) -> None:
+        await close_agent_loops([task.agent_loop for task in self.task_runners])
+
     async def produce_batch(
         self,
         batch_size: int,
@@ -240,6 +244,7 @@ class AgentLoopManager:
         assert active_tasks, "No active tasks found"
 
         await self._rollout_controller.continue_generation.remote()  # type: ignore[attr-defined]
+        await asyncio.gather(*(call_agent_loop_hook(task.agent_loop, "resume") for task in active_tasks))
         local_progress = ProduceProgress.build(
             task_names=self.task_names,
             target_samples=current_sizes,
@@ -277,13 +282,14 @@ class AgentLoopManager:
         await asyncio.gather(*produce_futures)
         local_progress.add_produce_time(time.perf_counter() - produce_start)
 
+        pause_start = time.perf_counter()
+        await asyncio.gather(*(call_agent_loop_hook(task.agent_loop, "prepare_pause") for task in active_tasks))
         # pause 只收尾本轮本地 pending。
         await self._rollout_controller.pause_generation.remote()  # type: ignore[attr-defined]
 
-        pause_time_s = 0.0
         for task in active_tasks:
             produce_strategy = cast(ProduceStrategy, task.produce_strategy)
-            pause_time_s += await produce_strategy.pause_produce(
+            await produce_strategy.pause_produce(
                 ProduceContext(
                     agent_loop=task.agent_loop,
                     sampler=task.sampler,
@@ -298,6 +304,7 @@ class AgentLoopManager:
                     expired_groups_retryable=task.expired_groups_retryable,
                 )
             )
+        pause_time_s = time.perf_counter() - pause_start
         result = await take_train_batch(
             task_runners=self.task_runners,
             replay_buffer=self.replay_buffer,

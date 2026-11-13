@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, TypeAlias, cast, overload
+from collections.abc import Awaitable, Callable
+from threading import Lock
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, cast, overload
 
 import ray
 import torch
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
 
 AGENT_LOOP_CONCURRENCY_GROUP_GENERATE = "generate"
 IsValidSampleFn: TypeAlias = Callable[[list[RolloutState]], bool]
+_AgentLoopResult = TypeVar("_AgentLoopResult")
 
 
 def maybe_filter_invalid_sample(
@@ -384,6 +386,23 @@ class AgentLoop(ABC):
         finally:
             await cancel_and_drain([pause_task])
 
+    async def close(self) -> None:
+        """Release loop-owned resources during framework shutdown.
+
+        Resource-owning loops should stop admission, drain active work and close their clients here. Implementations
+        must tolerate repeated calls and bound external I/O. Loops without persistent resources need no override.
+        """
+
+    async def prepare_pause(self) -> None:
+        """Drain external model requests before the manager aborts inference.
+
+        Loops whose model calls come from an external harness should stop admitting new calls here so the abort that
+        follows does not cut a request the harness still waits on. Loops without external clients need no override.
+        """
+
+    async def resume(self) -> None:
+        """Reopen external request admission after inference resumes."""
+
     async def pause(self) -> None:
         self._judger_pause_event.set()
         try:
@@ -433,6 +452,15 @@ class RouterAgentLoop:
     def get_worker_status(self) -> dict[str, int]:
         return {str(worker): load for worker, load in self._worker_loads.items()}
 
+    async def close(self) -> None:
+        await close_agent_loops(list(self.workers))
+
+    async def prepare_pause(self) -> None:
+        await asyncio.gather(*(worker.prepare_pause.remote() for worker in self.workers))
+
+    async def resume(self) -> None:
+        await asyncio.gather(*(worker.resume.remote() for worker in self.workers))
+
     async def pause(self) -> None:
         await asyncio.gather(
             *(worker.pause.remote() for worker in self.workers),
@@ -463,35 +491,84 @@ class AgentLoopActor:
     ):
         from xtuner.v1.rl.distillation import RolloutTeacherScorer
 
-        self.agent_loop = agent_loop_config.build_local(
-            rollout_controller=rollout_controller,
-            judger=judger,
-            logger=logger,
-        )
-        self.agent_loop.is_valid_sample_fn = is_valid_sample_fn
-        self.agent_loop._set_teacher_scorer(
-            rollout_teacher_scorer_config.build(
-                defers_to_filter=is_valid_sample_fn is not None,
+        def build_loop() -> AgentLoop:
+            agent_loop = agent_loop_config.build_local(
+                rollout_controller=rollout_controller,
+                judger=judger,
+                logger=logger,
             )
-            if rollout_teacher_scorer_config is not None
-            else RolloutTeacherScorer.disabled(),
-        )
+            agent_loop.is_valid_sample_fn = is_valid_sample_fn
+            agent_loop._set_teacher_scorer(
+                rollout_teacher_scorer_config.build(
+                    defers_to_filter=is_valid_sample_fn is not None,
+                )
+                if rollout_teacher_scorer_config is not None
+                else RolloutTeacherScorer.disabled(),
+            )
+            return agent_loop
+
+        # Ray concurrency groups run different event loops. Construct loop-bound
+        # resources on the first RPC's loop, and route every operation back there.
+        self._build_loop = build_loop
+        self.agent_loop: AgentLoop | None = None
+        self._init_error: Exception | None = None
+        self._owner_loop: asyncio.AbstractEventLoop | None = None
+        self._owner_lock = Lock()
 
     @ray_method(concurrency_group=AGENT_LOOP_CONCURRENCY_GROUP_GENERATE)
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
-        return await self.agent_loop.generate_sample(rollout_state, **kwargs)
+        return await self._call_on_owner(lambda loop: loop.generate_sample(rollout_state, **kwargs))
 
     @ray_method(concurrency_group=AGENT_LOOP_CONCURRENCY_GROUP_GENERATE)
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
-        return await self.agent_loop.generate_group(rollout_state, **kwargs)
+        return await self._call_on_owner(lambda loop: loop.generate_group(rollout_state, **kwargs))
 
     @ray_method
-    async def get_rollout_ctl(self):
-        return self.agent_loop.rollout_ctl
+    async def get_rollout_ctl(self) -> RolloutController | None:
+        async def get_controller(loop: AgentLoop) -> RolloutController | None:
+            return loop.rollout_ctl
+
+        return await self._call_on_owner(get_controller)
+
+    @ray_method
+    async def close(self) -> None:
+        await self._call_on_owner(lambda loop: loop.close())
+
+    @ray_method
+    async def prepare_pause(self) -> None:
+        await self._call_on_owner(lambda loop: loop.prepare_pause())
+
+    @ray_method
+    async def resume(self) -> None:
+        await self._call_on_owner(lambda loop: loop.resume())
 
     @ray_method
     async def pause(self) -> None:
-        return await self.agent_loop.pause()
+        await self._call_on_owner(lambda loop: loop.pause())
+
+    async def _call_on_owner(self, call: Callable[[AgentLoop], Awaitable[_AgentLoopResult]]) -> _AgentLoopResult:
+        current_loop = asyncio.get_running_loop()
+        with self._owner_lock:
+            if self._owner_loop is None:
+                self._owner_loop = current_loop
+            owner_loop = self._owner_loop
+        if owner_loop is current_loop:
+            return await self._invoke(call)
+        # Bypass Ray's generate queue so control can drain a saturated group.
+        future = asyncio.run_coroutine_threadsafe(self._invoke(call), owner_loop)
+        return await asyncio.wrap_future(future)
+
+    async def _invoke(self, call: Callable[[AgentLoop], Awaitable[_AgentLoopResult]]) -> _AgentLoopResult:
+        if self.agent_loop is None:
+            if self._init_error is not None:
+                raise self._init_error
+            try:
+                # Synchronous construction cannot interleave on the owner loop.
+                self.agent_loop = self._build_loop()
+            except Exception as exc:
+                self._init_error = exc
+                raise
+        return await call(self.agent_loop)
 
 
 RayAgentLoop = cast(
@@ -504,3 +581,20 @@ RayAgentLoop = cast(
 )
 RayAgentLoopProxy: TypeAlias = ActorProxy[AgentLoopActor]
 AgentLoopSpec: TypeAlias = AgentLoop | RayAgentLoopProxy | RouterAgentLoop
+
+
+async def call_agent_loop_hook(agent_loop: AgentLoopSpec, name: str) -> None:
+    """Invoke a lifecycle hook locally or on its owning Ray actor."""
+    method = getattr(agent_loop, name)
+    if isinstance(agent_loop, ray.actor.ActorHandle):
+        await method.remote()
+    else:
+        await method()
+
+
+async def close_agent_loops(loops: list[AgentLoopSpec]) -> None:
+    """Close every loop, then raise the first failure."""
+    results = await asyncio.gather(*(call_agent_loop_hook(loop, "close") for loop in loops), return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result

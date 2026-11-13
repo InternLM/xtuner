@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -763,6 +764,19 @@ class BaseRLTrainer:
             train_state = json.load(f)
         self._cur_step = train_state["cur_step"]
         return checkpoint_path
+
+    async def _close_agent_loop_managers(self, *, training_failed: bool = False) -> None:
+        managers = [self.agent_loop_manager]
+        if self._enable_evaluate:
+            managers.append(self.eval_agent_loop_manager)
+        results = await asyncio.gather(*(manager.close() for manager in managers), return_exceptions=True)
+        failures = [result for result in results if isinstance(result, BaseException)]
+        for failure in failures:
+            self.logger.opt(exception=failure).error("Failed to close agent loop manager")
+        # Preserve an existing training error/cancellation, but never report a
+        # successful run when its external resources could not be released.
+        if failures and not training_failed:
+            raise failures[0]
 
     async def _resume_agent_loop_manager(self, checkpoint_path: Path | str) -> int:
         self.logger.info(f"Resume agent_loop_manager from {checkpoint_path}")
@@ -1533,12 +1547,17 @@ class RLColocateTrainer(BaseRLTrainer):
 
     def fit(self):
         self.rl_health_manager.start()
+        training_succeeded = False
         try:
             self._fit()
+            training_succeeded = True
         finally:
-            self.rl_health_manager.stop()
-            self._exp_tracker.close()
-            close_trace()
+            try:
+                asyncio_run(self._close_agent_loop_managers(training_failed=not training_succeeded))
+            finally:
+                self.rl_health_manager.stop()
+                self._exp_tracker.close()
+                close_trace()
 
     def _fit(self):
         self.logger.info("Start RL training")
@@ -1803,11 +1822,17 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
     def fit(self):
         # 对外同步 fit；内部用 async loop 组织 producer/consumer。
+        training_succeeded = False
         try:
-            return asyncio_run(self._fit())
+            result = asyncio_run(self._fit())
+            training_succeeded = True
+            return result
         finally:
-            self._exp_tracker.close()
-            close_trace()
+            try:
+                asyncio_run(self._close_agent_loop_managers(training_failed=not training_succeeded))
+            finally:
+                self._exp_tracker.close()
+                close_trace()
 
     async def _get_batch_or_raise_producer_failure(
         self,
@@ -1941,7 +1966,11 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 train_step = self._cur_step + 1
         finally:
             self.agent_loop_manager.shutdown()
-            await producer_task
+            # Let an idle producer observe shutdown; cancel one blocked on generation.
+            await asyncio.sleep(0)
+            producer_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await producer_task
 
     async def _sync_weights_and_save(self, model_step: int, step_timer_dict: dict):
         # producer 已暂停；保持 save -> bind -> update 顺序。

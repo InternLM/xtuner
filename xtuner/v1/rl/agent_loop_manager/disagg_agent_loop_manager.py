@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.rl.agent_loop import AgentLoopConfig, IsValidSampleFn
+from xtuner.v1.rl.agent_loop.agent_loop import call_agent_loop_hook, close_agent_loops
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
@@ -270,9 +271,10 @@ class DisaggAgentLoopManager:
         # 非共卡显式刹车；共卡没有 public pause。
         self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
         self._update_event.set()
+        pause_start = time.perf_counter()
+        await asyncio.gather(*(call_agent_loop_hook(task.agent_loop, "prepare_pause") for task in self.task_runners))
         await self._rollout_controller.pause_generation.remote()  # type: ignore[attr-defined]
 
-        pause_time_s = 0.0
         for task in self.task_runners:
             produce_strategy = cast(DisaggProduceStrategy, task.produce_strategy)
             ctx = DisaggProduceContext(
@@ -289,7 +291,8 @@ class DisaggAgentLoopManager:
                 token_stale_threshold=task.token_stale_threshold,
                 expired_groups_retryable=task.expired_groups_retryable,
             )
-            pause_time_s += await produce_strategy.pause_produce(ctx)
+            await produce_strategy.pause_produce(ctx)
+        pause_time_s = time.perf_counter() - pause_start
         self._pause_time_s = pause_time_s
         return pause_time_s
 
@@ -297,8 +300,12 @@ class DisaggAgentLoopManager:
         # 与 pause_produce 成对：同步/评测完成后，用新 model_step 恢复后台 producer。
         self._model_step = model_step
         await self._rollout_controller.continue_generation.remote()  # type: ignore[attr-defined]
+        await asyncio.gather(*(call_agent_loop_hook(task.agent_loop, "resume") for task in self.task_runners))
         self._status = AgentLoopManagerStatus.NORMAL
         self._update_event.clear()
+
+    async def close(self) -> None:
+        await close_agent_loops([task.agent_loop for task in self.task_runners])
 
     def shutdown(self) -> None:
         self._status = AgentLoopManagerStatus.FINISH

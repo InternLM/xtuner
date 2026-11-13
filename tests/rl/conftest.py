@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict
 
 _RL_TEST_DIR = Path(__file__).resolve().parent
 _LIGHTWEIGHT_TEST_FILES = {
+    "test_agent_loop_shutdown.py",
     "test_cpu_pg.py",
     "test_multi_task_agent_loop_manager.py",
     "test_pending_tasks.py",
@@ -27,8 +28,10 @@ _LIGHTWEIGHT_TEST_FILES = {
     "test_rl_disaggregated_trainer.py",
     "test_rollout_config_dist_port_base_patch.py",
     "test_rollout_logic.py",
+    "test_sandbox_pool.py",
     "test_single_turn_agent_loop.py",
     "test_staleness_policy.py",
+    "test_trajectory_logging.py",
     "test_utils.py",
 }
 
