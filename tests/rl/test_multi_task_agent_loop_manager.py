@@ -13,7 +13,7 @@ import asyncio
 import unittest
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import (
@@ -521,7 +521,17 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             rollout_controller=_fake_rollout_controller(),
         )
 
-        result = await manager.produce_batch(batch_size=2, train_step=7, model_step=6)
+        clock = MagicMock()
+        clock.perf_counter.return_value = 0.0
+        pause_produce = strategy.pause_produce
+
+        async def timed_pause(ctx: Any) -> float:
+            clock.perf_counter.return_value += 1.25
+            return await pause_produce(ctx)
+
+        strategy.pause_produce = timed_pause
+        with patch("xtuner.v1.rl.agent_loop_manager.agent_loop_manager.time", clock):
+            result = await manager.produce_batch(batch_size=2, train_step=7, model_step=6)
 
         self.assertEqual(result.group_gen_count, 2)
         self.assertAlmostEqual(result.group_gen_mean_s, 0.75)
@@ -675,8 +685,15 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 class TestEnvironmentLifecycleOrder(unittest.IsolatedAsyncioTestCase):
     async def test_disagg_drains_requests_before_abort_and_resumes_after_controller(self):
         events = []
+        clock = MagicMock()
+        clock.perf_counter.return_value = 0.0
+
+        def drain() -> None:
+            events.append("drain")
+            clock.perf_counter.return_value += 3.0
+
         loop = _fake_agent_loop()
-        loop.prepare_pause.side_effect = lambda: events.append("drain")
+        loop.prepare_pause.side_effect = drain
         loop.resume.side_effect = lambda: events.append("resume")
         ctl = _fake_rollout_controller()
         ctl.pause_generation.remote.side_effect = lambda: events.append("abort")
@@ -696,7 +713,11 @@ class TestEnvironmentLifecycleOrder(unittest.IsolatedAsyncioTestCase):
             _FakeReplayBuffer({}, {}),
             ctl,
         )
-        await manager.pause_produce()
+        with patch("xtuner.v1.rl.agent_loop_manager.disagg_agent_loop_manager.time", clock):
+            pause_time = await manager.pause_produce()
+        assert pause_time == 3.0
+        assert manager._consume_pause_time() == 3.0
+        assert manager._consume_pause_time() == 0.0
         assert events == ["drain", "abort"]
         await manager.continue_produce(model_step=2)
         assert events == ["drain", "abort", "continue", "resume"]
@@ -704,8 +725,15 @@ class TestEnvironmentLifecycleOrder(unittest.IsolatedAsyncioTestCase):
 
     async def test_colocated_drains_requests_before_abort(self):
         events = []
+        clock = MagicMock()
+        clock.perf_counter.return_value = 0.0
+
+        def drain() -> None:
+            events.append("drain")
+            clock.perf_counter.return_value += 3.0
+
         loop = _fake_agent_loop()
-        loop.prepare_pause.side_effect = lambda: events.append("drain")
+        loop.prepare_pause.side_effect = drain
         loop.resume.side_effect = lambda: events.append("resume")
         ctl = _fake_rollout_controller()
         ctl.pause_generation.remote.side_effect = lambda: events.append("abort")
@@ -741,7 +769,9 @@ class TestEnvironmentLifecycleOrder(unittest.IsolatedAsyncioTestCase):
             ),
             ctl,
         )
-        await manager.produce_batch(batch_size=1, train_step=1, model_step=0)
+        with patch("xtuner.v1.rl.agent_loop_manager.agent_loop_manager.time", clock):
+            result = await manager.produce_batch(batch_size=1, train_step=1, model_step=0)
+        assert result.group_gen_pause_time_s == 3.0
         assert events == ["continue", "resume", "drain", "abort"]
 
     async def test_failed_drain_prevents_global_abort(self):

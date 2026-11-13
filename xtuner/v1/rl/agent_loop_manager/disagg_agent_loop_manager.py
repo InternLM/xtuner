@@ -265,10 +265,10 @@ class DisaggAgentLoopManager:
         # 非共卡显式刹车；共卡没有 public pause。
         self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
         self._update_event.set()
+        pause_start = time.perf_counter()
         await asyncio.gather(*(call_agent_loop_hook(task.agent_loop, "prepare_pause") for task in self.task_runners))
         await self._rollout_controller.pause_generation.remote()  # type: ignore[attr-defined]
 
-        pause_time_s = 0.0
         for task in self.task_runners:
             produce_strategy = cast(DisaggProduceStrategy, task.produce_strategy)
             ctx = DisaggProduceContext(
@@ -285,7 +285,8 @@ class DisaggAgentLoopManager:
                 token_stale_threshold=task.token_stale_threshold,
                 expired_groups_retryable=task.expired_groups_retryable,
             )
-            pause_time_s += await produce_strategy.pause_produce(ctx)
+            await produce_strategy.pause_produce(ctx)
+        pause_time_s = time.perf_counter() - pause_start
         self._pause_time_s = pause_time_s
         return pause_time_s
 

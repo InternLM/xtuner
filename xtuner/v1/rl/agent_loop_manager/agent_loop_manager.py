@@ -276,14 +276,14 @@ class AgentLoopManager:
         await asyncio.gather(*produce_futures)
         local_progress.add_produce_time(time.perf_counter() - produce_start)
 
+        pause_start = time.perf_counter()
         await asyncio.gather(*(call_agent_loop_hook(task.agent_loop, "prepare_pause") for task in active_tasks))
         # pause 只收尾本轮本地 pending。
         await self._rollout_controller.pause_generation.remote()  # type: ignore[attr-defined]
 
-        pause_time_s = 0.0
         for task in active_tasks:
             produce_strategy = cast(ProduceStrategy, task.produce_strategy)
-            pause_time_s += await produce_strategy.pause_produce(
+            await produce_strategy.pause_produce(
                 ProduceContext(
                     agent_loop=task.agent_loop,
                     sampler=task.sampler,
@@ -298,6 +298,7 @@ class AgentLoopManager:
                     expired_groups_retryable=task.expired_groups_retryable,
                 )
             )
+        pause_time_s = time.perf_counter() - pause_start
         result = await take_train_batch(
             task_runners=self.task_runners,
             replay_buffer=self.replay_buffer,
