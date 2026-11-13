@@ -311,11 +311,16 @@ class TrainingWorker(SingleAcceleratorWorker):
         roles = self._roles()
         if model_role not in (*roles, None) or optimizer_role not in (*roles, None):
             raise ValueError("Requested role is not configured")
+        offloaded = False
         for name, role in roles.items():
             if name != optimizer_role and role.optimizer_on_device:
-                role.offload_optimizer()
+                offloaded = role.offload_optimizer() or offloaded
             if name != model_role and role.model_on_device:
-                role.offload_model()
+                offloaded = role.offload_model() or offloaded
+        if offloaded:
+            # The next role may initialize NCCL resources outside the tensor allocator.
+            # Release the previous role's unused cache before loading the next one.
+            DEVICE_MODULE.empty_cache()
         if model_role is not None:
             roles[model_role].onload_model()
         if optimizer_role is not None:
