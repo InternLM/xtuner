@@ -44,6 +44,9 @@ def main(
 ):
     if not ray.is_initialized():
         ray.init(address="auto")
+    # ray.init() installs its own SIGTERM handler. Restore XTuner's bounded
+    # cleanup handler without registering a second atexit callback.
+    register_cleanup()
 
     if os.getenv("XTUNER_RL_MEM_DIR"):
         interval = int(os.getenv("XTUNER_RL_MEM_INTERVAL", "60"))

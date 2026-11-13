@@ -604,6 +604,14 @@ class BaseRLTrainer:
     _distillation_config: DistillationConfig | None
 
     def _init_common(self, cfg: BaseRLTrainerConfig, *, meta_path: str, logger_tag: str) -> None:
+        # Custom recipe entrypoints also receive signal/exit recovery. Register
+        # after ray.init(), which replaces SIGTERM handlers.
+        from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import start_cleanup_supervisor
+        from xtuner.v1.rl.utils import register_cleanup
+
+        start_cleanup_supervisor()
+        register_cleanup()
+
         distillation_config = cfg.distillation_config
         if distillation_config is not None and distillation_config.rollout_teachers:
             endpoint_map = json.loads(os.environ.get("XTUNER_OPD_TEACHER_ENDPOINTS_JSON", "{}"))
@@ -1656,6 +1664,18 @@ class RLColocateTrainer(BaseRLTrainer):
             self.logger.info("Rollout workers updated weights from train workers.")
 
     def fit(self):
+        try:
+            return self._fit_with_cleanup()
+        finally:
+            from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import cleanup_from_environment
+
+            try:
+                if not cleanup_from_environment():
+                    self.logger.error("Sandbox recovery pending; supervisor will retry abandoned journals")
+            except Exception:
+                self.logger.exception("Sandbox recovery failed; retain cleanup journals")
+
+    def _fit_with_cleanup(self) -> None:
         self.rl_health_manager.start()
         try:
             self._fit()
@@ -1940,6 +1960,18 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         asyncio_run(self.agent_loop_manager.continue_produce(model_step=saved_model_step))
 
     def fit(self):
+        try:
+            return self._fit_with_cleanup()
+        finally:
+            from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import cleanup_from_environment
+
+            try:
+                if not cleanup_from_environment():
+                    self.logger.error("Sandbox recovery pending; supervisor will retry abandoned journals")
+            except Exception:
+                self.logger.exception("Sandbox recovery failed; retain cleanup journals")
+
+    def _fit_with_cleanup(self) -> None:
         # 对外同步 fit；内部用 async loop 组织 producer/consumer。
         try:
             return asyncio_run(self._fit())

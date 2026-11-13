@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeAlias, cast, overload
@@ -147,6 +148,13 @@ class AgentLoopConfig(ABC, BaseModel):
         rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
     ) -> RayAgentLoopProxy:
         ray_agent_loop = ray.remote(
+            runtime_env={
+                "env_vars": {
+                    key: os.environ[key]
+                    for key in ("XTUNER_SANDBOX_CLEANUP_DIR", "XTUNER_SANDBOX_PROVIDER_KEY")
+                    if key in os.environ
+                }
+            },
             concurrency_groups={
                 AGENT_LOOP_CONCURRENCY_GROUP_GENERATE: concurrency,
             },
@@ -181,6 +189,13 @@ class AgentLoopConfig(ABC, BaseModel):
         rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
     ) -> list[RayAgentLoopProxy]:
         ray_agent_loop = ray.remote(
+            runtime_env={
+                "env_vars": {
+                    key: os.environ[key]
+                    for key in ("XTUNER_SANDBOX_CLEANUP_DIR", "XTUNER_SANDBOX_PROVIDER_KEY")
+                    if key in os.environ
+                }
+            },
             concurrency_groups={
                 AGENT_LOOP_CONCURRENCY_GROUP_GENERATE: concurrency,
             },

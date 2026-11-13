@@ -1,7 +1,9 @@
 import atexit
+import os
 import signal
 import subprocess
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from types import FrameType
 from typing import TYPE_CHECKING, Optional, cast
 
 import ray
@@ -17,6 +19,7 @@ if TYPE_CHECKING:
 
 
 logger = get_logger()
+_cleanup_registration: tuple[int, Callable[[int, FrameType | None], None]] | None = None
 
 
 @ray.remote
@@ -114,7 +117,7 @@ def free_object_refs(refs: ObjectRef | Iterable[ObjectRef]) -> None:
         ray.internal.free(valid_refs, local_only=False)
 
 
-def close_ray():
+def close_ray(*, stop_local_cluster: bool = False) -> None:
     """Clean up the ray resource."""
     # 1. Shutdown ray if initialized
     try:
@@ -123,6 +126,11 @@ def close_ray():
             logger.info("Ray shutdown successfully")
     except Exception as e:
         logger.warning(f"Error during ray.shutdown(): {e}")
+
+    # Stopping a shared cluster can kill unrelated jobs. Only an explicit
+    # owner of a local cluster may request the CLI-wide stop.
+    if not stop_local_cluster:
+        return
 
     # 2. Stop ray launched by CLI
     try:
@@ -133,17 +141,49 @@ def close_ray():
         logger.warning(f"Error stopping ray cluster: {e}")
 
 
-def register_cleanup():
-    """Register cleanup handlers for Ray on exit and signals."""
+def register_cleanup() -> None:
+    """Register once, and reinstall signal handlers after ``ray.init()``.
+
+    Ray replaces SIGTERM during initialization. Repeated registration restores
+    our handler while retaining a single cleanup/atexit owner for this process.
+    """
+    global _cleanup_registration
+    if _cleanup_registration is not None and _cleanup_registration[0] == os.getpid():
+        handler = _cleanup_registration[1]
+        signal.signal(signal.SIGINT, handler)
+        signal.signal(signal.SIGTERM, handler)
+        return
     _cleaned = False
 
-    def cleanup_once():
+    def cleanup_once() -> None:
         nonlocal _cleaned
         if not _cleaned:
             _cleaned = True
-            close_ray()
+            # Also protect the atexit path if a later library replaced our
+            # handlers: repeated TERM must not interrupt Ray shutdown/reaping.
+            signal.signal(signal.SIGINT, signal_handler)
+            signal.signal(signal.SIGTERM, signal_handler)
+            try:
+                close_ray()
+            finally:
+                # Ray workers may die before their Trial finally completes.
+                # Recover only journaled IDs whose owner locks are now free.
+                try:
+                    if os.environ.get("XTUNER_SANDBOX_CLEANUP_FACTORY") or os.environ.get(
+                        "XTUNER_SANDBOX_CLEANUP_DIR"
+                    ):
+                        from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import cleanup_from_environment
 
-    def signal_handler(signum, frame):
+                        if not cleanup_from_environment():
+                            logger.error("Sandbox cleanup incomplete; inspect the run's cleanup-report.json")
+                except Exception as exc:
+                    logger.error(f"Sandbox cleanup failed ({type(exc).__name__}); retain the run journal")
+
+    def signal_handler(signum: int, frame: FrameType | None) -> None:
+        if _cleaned:
+            # A repeated TERM/INT must not interrupt the bounded recovery child.
+            logger.info(f"Deferring signal {signum} while shutdown cleanup runs")
+            return
         logger.info(f"Received signal {signum}, cleaning up...")
         cleanup_once()
         import sys
@@ -152,6 +192,7 @@ def register_cleanup():
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+    _cleanup_registration = (os.getpid(), signal_handler)
 
     atexit.register(cleanup_once)
 

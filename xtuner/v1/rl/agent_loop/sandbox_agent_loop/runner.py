@@ -12,6 +12,7 @@ lagent-style runner config (``dict(type=Runner, ...)``), plus
 
 from __future__ import annotations
 
+import asyncio
 import time
 import traceback
 from copy import deepcopy
@@ -19,6 +20,7 @@ from typing import Any
 
 from lagent.utils import create_object
 
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.finalization import CleanupError
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.judger import Judger
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox import SandboxPool, SandboxStage
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
@@ -50,6 +52,18 @@ class Runner:
         self.validate = create_object(validate)
 
     async def run(self, item: AgentRolloutItem) -> AgentRolloutItem:
+        """Run a sample and preserve cancellation after bounded cleanup.
+
+        Returns:
+            AgentRolloutItem: The input item with result fields filled.
+        """
+        try:
+            return await self._run(item)
+        except asyncio.CancelledError:
+            self._fail(item, RolloutError(stage="runner", category="rollout_cancelled", message="Rollout cancelled"))
+            raise
+
+    async def _run(self, item: AgentRolloutItem) -> AgentRolloutItem:
         """Run one rollout sample and return the same item with result fields
         filled.
 
@@ -69,6 +83,7 @@ class Runner:
             if override:
                 _deep_merge(pool_cfg, override)
             pool = create_object(pool_cfg)
+        pool.set_cleanup_context(str(item.uid) if item.uid is not None else item.id)
         infer_sandbox = _stage_sandbox_name(self.infer, pool)
         infer_spec = pool.spec(infer_sandbox)
 
@@ -139,8 +154,15 @@ class Runner:
             get_logger().error(f"[{tid}] traceback:\n{traceback.format_exc()}")
             return self._fail(item, promoted)
         finally:
-            self._log_final(tid, item, t_acquire, t_infer, t_validate)
-            await pool.release_all()
+            try:
+                await pool.aclose()
+            except CleanupError as exc:
+                # A cleanup failure must not make a sample eligible for training.
+                # _fail retains an existing business error for diagnosis.
+                self._fail(item, RolloutError(stage="cleanup", category=exc.kind, message=str(exc)))
+            finally:
+                item.artifacts["sandbox_cleanup"] = pool.cleanup
+                self._log_final(tid, item, t_acquire, t_infer, t_validate)
 
     def _log_final(
         self,

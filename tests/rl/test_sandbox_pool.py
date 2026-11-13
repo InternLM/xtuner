@@ -213,12 +213,14 @@ async def test_create_failure_rolls_back_only_returned_members(fail_image: str) 
     sandbox_pool = pool(
         provider,
         spec(dependencies={"db": SandboxSpec(image="database"), "target": SandboxSpec(image="target")}),
-        max_attempts=1,
+        max_attempts=3,
     )
 
-    with pytest.raises(RuntimeError, match="could not acquire sandbox group"):
+    with pytest.raises(RuntimeError, match=f"create failed: {fail_image}") as error:
         await sandbox_pool.get("main")
 
+    assert error.value.allocation_state == "unknown"
+    assert events.count(f"create:{fail_image}") == 1
     created_ids = [event.removeprefix("health:") for event in events if event.startswith("health:")]
     assert [event.removeprefix("delete:") for event in events if event.startswith("delete:")] == list(
         reversed(created_ids)

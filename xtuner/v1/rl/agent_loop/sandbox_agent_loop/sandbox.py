@@ -21,14 +21,17 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import math
 import os
 import random
 import re
 import shlex
+import sys
 import tarfile
 import time
 import traceback
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -37,6 +40,8 @@ import httpx
 from lagent.utils import create_object
 from lagent.utils.rate_limiter import get_shared_async_token_bucket
 
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import CleanupJournal, defer_cleanup, delete_confirmed
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.finalization import CleanupError, finalize_bounded
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     AgentRolloutItem,
     EntryOutcome,
@@ -866,6 +871,18 @@ class SandboxPool:
       - the primary ``client`` / ``env_id`` / ``url`` triplet per public name
       - sandbox-name validation against the configured spec map
 
+    ``release_all`` releases a phase's resources while retaining the provider;
+    ``aclose`` ends the Trial and transfers unresolved IDs to a fresh provider
+    when a reconstructible provider configuration is available. Cleanup is
+    bounded by ``cleanup_timeout_sec`` (default 120 seconds), plus
+    a cancellation grace of at most one second. Deletes and retries precede
+    connection closure; results are available in ``cleanup``. ``close_provider``
+    defaults to true for dict configurations and false for shared instances.
+    Set it explicitly only for a provider dedicated to this pool. By default,
+    ``verify_deletion`` is enabled for providers exposing ``get``. Persistent
+    cleanup requires verification and an explicit ``cleanup_provider_key``;
+    credentials/configuration are never written to the journal.
+
     Providers create and delete exactly one physical sandbox per call. They
     must not manage dependency groups or close returned clients.  An optional
     spec provisioner runs only after every member is healthy and must restrict
@@ -886,8 +903,52 @@ class SandboxPool:
         creates_per_sec: float | None = 3.0,
         creates_burst: int = 1,
         create_rate_limit_key: str = "xtuner.sandbox_agent_loop.sandbox_acquire",
-    ):
+        cleanup_timeout_sec: float = 120.0,
+        close_provider: bool | None = None,
+        verify_deletion: bool | None = None,
+        cleanup_dir: str | None = None,
+        cleanup_provider_key: str | None = None,
+        cleanup_provider: dict[str, Any] | None = None,
+        cleanup_retry_timeout_sec: float = 60.0,
+    ) -> None:
+        if not math.isfinite(cleanup_timeout_sec) or cleanup_timeout_sec <= 0:
+            raise ValueError("cleanup_timeout_sec must be finite and positive")
+        self._cleanup_timeout_sec = cleanup_timeout_sec
+        # A passed instance may serve other pools. Only a dedicated provider
+        # may donate orphaned creates or be closed by this pool.
+        self._close_provider = isinstance(provider, dict) if close_provider is None else close_provider
+        if not math.isfinite(cleanup_retry_timeout_sec) or cleanup_retry_timeout_sec <= 0:
+            raise ValueError("cleanup retry timeout must be finite and positive")
+        self._cleanup_retry_timeout_sec = cleanup_retry_timeout_sec
+        if cleanup_provider is not None and not isinstance(cleanup_provider, dict):
+            raise TypeError("cleanup_provider must be a reconstructible provider config")
+        recovery_config = cleanup_provider if cleanup_provider is not None else provider
+        self._recovery_config = deepcopy(recovery_config) if isinstance(recovery_config, dict) else None
+        self._journal_dir = cleanup_dir or os.environ.get("XTUNER_SANDBOX_CLEANUP_DIR")
+        self._provider_key = cleanup_provider_key or os.environ.get("XTUNER_SANDBOX_PROVIDER_KEY")
+        if self._journal_dir and not self._provider_key:
+            raise ValueError("cleanup_dir requires cleanup_provider_key for exact backend recovery")
+        self._journal: CleanupJournal | None = None
+        self._cleanup_trial_id: str | None = None
+        self._known_ids: dict[str, None] = {}
+        self._unclaimed_creates: dict[str, Any] = {}
+        self._release_lock = asyncio.Lock()
+        self._close_lock = asyncio.Lock()
+        self._closed = False
+        self._closing = False
+        self._deferred_cleanup: asyncio.Task | None = None
+        self.cleanup: dict[str, Any] = {"ok": False, "error_kind": None}
+        self._cleanup_clients: list[Any] = []
+        self._pending_delete_ids: set[str] = set()
+        self._pending_verification_ids: set[str] = set()
+        self._releasing = False
         self._provider = create_object(provider)
+        query_supported = callable(getattr(self._provider, "get", None))
+        self._verify_deletion = query_supported if verify_deletion is None else verify_deletion
+        if self._verify_deletion and not query_supported:
+            raise ValueError("verify_deletion requires provider.get")
+        if self._journal_dir and not self._verify_deletion:
+            raise ValueError("persistent cleanup requires deletion verification")
         self._specs: dict[str, SandboxSpec] = {name: create_object(spec) for name, spec in specs.items()}
         self._provisioners = {
             name: create_object(spec.provisioner) if spec.provisioner is not None else None
@@ -907,6 +968,17 @@ class SandboxPool:
         self._groups: dict[str, list[_SandboxLease]] = {}
 
     async def get(self, name: str, *, record: StageRecord | None = None) -> Any:
+        if self._closed or self._closing:
+            raise RuntimeError("SandboxPool is closed")
+        if self._releasing or self._pending_delete_ids or self._pending_verification_ids:
+            # Never expand a group while previous resources are unaccounted for.
+            raise RuntimeError("Previous sandbox cleanup is still pending")
+        if self._journal is None and self._journal_dir:
+            assert self._provider_key is not None
+            self._journal = CleanupJournal(self._journal_dir, self._provider_key)
+            self.cleanup["journal"] = str(self._journal.path)
+            if self._cleanup_trial_id is not None:
+                await self._journal.write("identify", self._cleanup_trial_id)
         if name in self._clients:
             return self._clients[name]
         self.validate_name(name)
@@ -941,6 +1013,12 @@ class SandboxPool:
         if name not in self._specs:
             raise KeyError(f"unknown sandbox {name!r}; known: {sorted(self._specs)}")
 
+    def set_cleanup_context(self, trial_id: str) -> None:
+        """Associate the journal with a rollout UID; never serialize task content."""
+        if self._journal is not None:
+            raise RuntimeError("Cleanup context must be set before acquisition")
+        self._cleanup_trial_id = trial_id
+
     def env_id(self, name: str) -> str | None:
         return self._env_ids.get(name)
 
@@ -951,15 +1029,175 @@ class SandboxPool:
         return self._specs[name]
 
     async def release_all(self) -> None:
-        for name in list(reversed(self._clients)):
-            client = self._clients.pop(name)
-            env_id = self._env_ids.pop(name, None)
-            self._urls.pop(name, None)
-            group = self._groups.pop(name, None)
-            if group is None and env_id is not None:
-                group = [_SandboxLease(name="primary", client=client, env_id=env_id)]
-            if group:
-                await self._release_group(name, group)
+        """Release current resources without closing the provider between phases."""
+        if self._closed and (self._journal is not None or self._deferred_cleanup is not None):
+            raise RuntimeError("Cleanup ownership has been transferred; use the run reconciler")
+        primary_exception = sys.exc_info()[1]
+
+        async def serialized() -> None:
+            async with self._release_lock:
+                await self._release_all(primary_exception)
+
+        try:
+            await finalize_bounded(
+                serialized(),
+                timeout_seconds=self._cleanup_timeout_sec * 1.1,
+                diagnostic=self.cleanup.setdefault("release_wait", {}),
+            )
+        except CleanupError:
+            if primary_exception is None:
+                raise
+
+    async def _release_all(self, primary_exception: BaseException | None) -> None:
+        if (
+            self.cleanup.get("ok")
+            and not self._clients
+            and not self._pending_delete_ids
+            and not self._pending_verification_ids
+            and not self._owned_orphan_ids()
+            and not self._unclaimed_creates
+            and not self._cleanup_clients
+        ):
+            return
+        self._releasing = True
+        self.cleanup.update(ok=False, error_kind=None, resources_deleted=False, clients_closed=False)
+        seconds = self._cleanup_timeout_sec
+        started = time.monotonic()
+        # First deletion pass, retry pass and final observation share the outer
+        # deadline, leaving a final slice for closing HTTP connections.
+        self._release_delete_deadline = started + seconds * 0.4
+
+        async def release() -> None:
+            for env_id, client in self._unclaimed_creates.items():
+                self._pending_delete_ids.add(env_id)
+                self._cleanup_clients.append(client)
+            self._unclaimed_creates.clear()
+            owned_ids = self._owned_orphan_ids()
+            owned_ids.update(self._pending_delete_ids)
+            owned_ids.update(self._pending_verification_ids)
+            owned_ids.update(lease.env_id for group in self._groups.values() for lease in group)
+            for env_id in owned_ids:
+                await self._remember_created(env_id)
+            if self._verify_deletion:
+                # Deletion acceptance and confirmed termination are separate.
+                # Register before any await so failed/cancelled passes cannot
+                # lose IDs when leases or provider ownership are released.
+                self._pending_verification_ids.update(owned_ids)
+            try:
+                self.cleanup["phase"] = "delete_sandboxes"
+                await self._release_groups()
+                retry_ids = self._pending_delete_ids | self._pending_verification_ids | self._owned_orphan_ids()
+                self.cleanup["phase"] = "retry_deletions"
+                await self._delete_pass(sorted(retry_ids), started + seconds * 0.8)
+                if self._pending_delete_ids or self._pending_verification_ids:
+                    raise RuntimeError("Sandbox deletion not confirmed")
+                self.cleanup["resources_deleted"] = True
+            except Exception:
+                self.cleanup["failure_phase"] = self.cleanup["phase"]
+                raise
+            finally:
+                self.cleanup["phase"] = "close_clients"
+                clients = list(self._cleanup_clients)
+
+                async def close_client(client: Any) -> None:
+                    await client.aclose()
+                    self._cleanup_clients.remove(client)
+                    self.cleanup["closed_client_count"] = self.cleanup.get("closed_client_count", 0) + 1
+
+                operations = [close_client(client) for client in clients]
+                self.cleanup["provider_closed"] = False
+                outcomes = await asyncio.gather(*operations, return_exceptions=True)
+                self.cleanup["clients_closed"] = not any(isinstance(value, BaseException) for value in outcomes)
+                if not self.cleanup["clients_closed"]:
+                    raise RuntimeError("Sandbox HTTP client closure not confirmed")
+
+        try:
+            await finalize_bounded(release(), timeout_seconds=seconds, diagnostic=self.cleanup)
+        except CleanupError:
+            if primary_exception is None:
+                raise
+        finally:
+            self.cleanup["unverified_env_ids"] = sorted(self._pending_verification_ids)
+            self.cleanup["pending_env_ids"] = sorted(self._pending_delete_ids)
+            self._releasing = False
+
+    async def _remember_created(self, env_id: str) -> None:
+        # Memory ownership precedes disk I/O so a failed write still rolls back.
+        self._known_ids[env_id] = None
+        if self._journal is not None and env_id not in self._journal.data["resources"]:
+            await self._journal.write("created", env_id)
+
+    async def aclose(self) -> None:
+        """Final release, durable handoff, then close the original management client."""
+        primary_exception = sys.exc_info()[1]
+        self._closing = True
+
+        async def finish() -> None:
+            async with self._close_lock:
+                if self._closed and (
+                    self._journal is not None
+                    or self._deferred_cleanup is not None
+                    or self.cleanup.get("provider_closed")
+                ):
+                    return
+                try:
+                    # Keep subclass release checks (e.g. VerifiedSandboxPool).
+                    await self.release_all()
+                finally:
+                    pending = self._pending_delete_ids | self._pending_verification_ids | self._owned_orphan_ids()
+                    for env_id in pending:
+                        await self._remember_created(env_id)
+                    self._closed = True
+                    if self._journal is not None:
+                        await self._journal.write("detach")
+                    if pending and self._recovery_config is not None:
+                        config = deepcopy(self._recovery_config)
+
+                        def fresh_provider() -> Any:
+                            provider = create_object(deepcopy(config))
+                            if provider is self._provider:
+                                raise RuntimeError("Cleanup factory must return a fresh provider")
+                            return provider
+
+                        self._deferred_cleanup = defer_cleanup(
+                            [key for key in self._known_ids if key in pending],
+                            fresh_provider,
+                            journal=self._journal,
+                            timeout=self._cleanup_retry_timeout_sec,
+                        )
+                        self.cleanup["deferred"] = True
+
+                        def record_result(task: asyncio.Task[Any]) -> None:
+                            if task.cancelled():
+                                self.cleanup["deferred_result"] = {"ok": False, "error_kind": "cancelled"}
+                            elif task.exception() is not None:
+                                self.cleanup["deferred_result"] = {"ok": False, "error_kind": "recovery_failed"}
+                            else:
+                                self.cleanup["deferred_result"] = task.result()
+
+                        self._deferred_cleanup.add_done_callback(record_result)
+                    # Without a fresh factory, retain the transport for explicit
+                    # retries. A journal still permits recovery in a new process.
+                    if self._close_provider and (not pending or self._recovery_config is not None):
+                        close = getattr(self._provider, "aclose", None)
+                        if close is not None:
+                            await finalize_bounded(close(), timeout_seconds=5, diagnostic={})
+                        self.cleanup["provider_closed"] = True
+                    if self._journal is not None and (
+                        self._journal.data["creating"] or self._journal.data["ambiguous_creates"]
+                    ):
+                        raise CleanupError("cleanup_ambiguous_create", "create")
+
+        try:
+            await finalize_bounded(
+                finish(),
+                timeout_seconds=self._cleanup_timeout_sec * 1.2 + 6,
+                diagnostic=self.cleanup.setdefault("finalize", {}),
+            )
+        except CleanupError:
+            self.cleanup["ok"] = False
+            if primary_exception is None:
+                raise
 
     @staticmethod
     def _url_of(client: Any) -> str | None:
@@ -988,9 +1226,10 @@ class SandboxPool:
                     t_ready = time.monotonic()
                 members = [*spec.dependencies.items(), ("primary", spec)]
                 for member_name, member_spec in members:
-                    client, env_id = await self._create(member_spec, record=record)
+                    client, env_id = await self._create_tracked(member_spec, record=record)
                     lease = _SandboxLease(name=member_name, client=client, env_id=env_id)
                     group.append(lease)
+                    self._unclaimed_creates.pop(env_id, None)
                     if not await self._wait_healthy(client):
                         raise RuntimeError(f"sandbox group {name!r} member {member_name!r} ({env_id}) unhealthy")
 
@@ -1002,15 +1241,15 @@ class SandboxPool:
                     record.metadata["sandbox_create_to_ready_time_s"] = time.monotonic() - t_ready
                 return group
             except asyncio.CancelledError:
-                cleanup = asyncio.create_task(self._release_group(name, group))
-                try:
-                    await asyncio.shield(cleanup)
-                except asyncio.CancelledError:
-                    await cleanup
+                await self._rollback_group(name, group)
                 raise
             except Exception as exc:
                 last_err = exc
-                await self._release_group(name, group)
+                await self._rollback_group(name, group)
+                # Structured allocation errors must never enter the generic
+                # whole-group retry (including already exhausted 429 retries).
+                if getattr(exc, "allocation_state", None) is not None:
+                    raise
                 if attempt < self._max_attempts:
                     await asyncio.sleep(min(2**attempt, 8))
 
@@ -1045,28 +1284,164 @@ class SandboxPool:
                 record.metadata["sandbox_acquire_rate_limit_wait_s"] = (
                     record.metadata.get("sandbox_acquire_rate_limit_wait_s", 0.0) + time.monotonic() - t_limit
                 )
-        return await self._provider.create(
-            image_tag=spec.image,
-            ttl_seconds=spec.ttl_seconds,
-            **create_kwargs,
-        )
+        try:
+            return await self._provider.create(
+                image_tag=spec.image,
+                ttl_seconds=spec.ttl_seconds,
+                **create_kwargs,
+            )
+        except Exception as exc:
+            # An unclassified create failure can hide an allocation even when
+            # persistence is disabled. Never replay that POST as a group retry.
+            if not hasattr(exc, "allocation_state"):
+                setattr(exc, "allocation_state", "unknown")
+            raise
+
+    async def _create_tracked(self, spec: SandboxSpec, *, record: StageRecord | None = None) -> tuple[Any, str]:
+        # Keep the creation policy separate: admission/rate-limit changes can
+        # evolve independently of ownership and cleanup.
+        before = self._owned_orphan_ids()
+        started = False
+        allocated_id = None
+        try:
+            if self._journal is not None:
+                await self._journal.write("begin_create")
+            started = True
+            client, env_id = await self._create(spec, record=record)
+            allocated_id = env_id
+            self._unclaimed_creates[env_id] = client
+            await self._remember_created(env_id)
+        except BaseException as exc:
+            known = self._owned_orphan_ids() - before
+            if allocated_id is not None:
+                known.add(allocated_id)
+            for env_id in known:
+                await self._remember_created(env_id)
+            if self._journal is not None:
+                ambiguous = started and not known and getattr(exc, "allocation_state", None) != "not_allocated"
+                await self._journal.write("end_create", ambiguous=ambiguous)
+                if ambiguous and isinstance(exc, Exception):
+                    setattr(exc, "allocation_state", "unknown")
+            raise
+        else:
+            if self._journal is not None:
+                await self._journal.write("end_create", ambiguous=False)
+            return client, env_id
+
+    async def _rollback_group(self, name: str, group: list[_SandboxLease]) -> None:
+        diagnostic: dict[str, Any] = {"name": name, "phase": "acquire_rollback"}
+        self.cleanup.setdefault("acquire_rollbacks", []).append(diagnostic)
+        try:
+            await finalize_bounded(
+                self._release_group(name, group), timeout_seconds=self._cleanup_timeout_sec, diagnostic=diagnostic
+            )
+        except CleanupError:
+            # Preserve the acquisition failure; release_all retries retained
+            # leases and sockets. Repeated cancellation cannot skip this pass.
+            pass
+
+    async def _release_groups(self) -> None:
+        for name in list(reversed(self._clients)):
+            client = self._clients.pop(name)
+            env_id = self._env_ids.pop(name, None)
+            self._urls.pop(name, None)
+            group = self._groups.pop(name, None)
+            if group is None and env_id is not None:
+                group = [_SandboxLease(name="primary", client=client, env_id=env_id)]
+            if group:
+                await self._release_group(name, group)
+
+    async def _delete_pass(self, env_ids: list[str], deadline: float) -> None:
+        env_ids = list(dict.fromkeys(env_ids))
+        for index, env_id in enumerate(env_ids):
+            self._pending_delete_ids.add(env_id)
+            remaining = deadline - time.monotonic()
+            diagnostic = {"env_id": env_id, "phase": "delete_sandbox"}
+            self.cleanup.setdefault("delete_attempts", []).append(diagnostic)
+            if remaining <= 0:
+                diagnostic.update(ok=False, error_kind="delete_budget_exhausted")
+                continue
+            # Include finalize_bounded's cancellation grace in this member's
+            # share. A stalled primary must leave time to delete dependencies.
+            share = remaining / (len(env_ids) - index)
+            try:
+                await finalize_bounded(
+                    delete_confirmed(self._provider, env_id)
+                    if self._verify_deletion
+                    else self._provider.delete(env_id),
+                    timeout_seconds=share / 1.1,
+                    diagnostic=diagnostic,
+                )
+            except CleanupError:
+                continue
+            self._pending_delete_ids.discard(env_id)
+            self._pending_verification_ids.discard(env_id)
+            if self._verify_deletion:
+                self.cleanup.setdefault("final_states", []).append({"env_id": env_id, "status": "deleted"})
+                if self._journal is not None:
+                    await self._journal.write("confirmed", env_id)
 
     async def _release_group(self, name: str, group: list[_SandboxLease]) -> None:
-        for lease in reversed(group):
-            try:
-                await self._provider.delete(lease.env_id)
-            except Exception as exc:
-                get_logger().warning(
-                    f"gateway delete failed for sandbox {name} member={lease.name} env_id={lease.env_id}:\n"
-                    f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
+        # A stalled HTTP close must not prevent deleting the next dependency.
+        # Preserve reverse dependency deletion, then close clients independently.
+        leases = list(reversed(group))
+        self._cleanup_clients.extend(lease.client for lease in leases)
+        diagnostic = {"name": name, "phase": "delete_sandboxes"}
+        self.cleanup.setdefault("group_releases", []).append(diagnostic)
+        seconds = self._cleanup_timeout_sec
+        deadline = getattr(self, "_release_delete_deadline", time.monotonic() + seconds * 0.4)
+        env_ids = [lease.env_id for lease in leases]
+        self._pending_delete_ids.update(env_ids)
+        try:
+            # Also called by upstream while unwinding a partial acquisition,
+            # before Runner reaches release_all(). Never replace its primary
+            # cancellation/error; owned IDs are retried by the final pool pass.
+            await finalize_bounded(
+                self._delete_pass(env_ids, deadline),
+                timeout_seconds=max(0.001, deadline - time.monotonic()) * 1.1,
+                diagnostic=diagnostic,
+            )
+        except CleanupError:
+            pass
+        if self._pending_delete_ids.intersection(env_ids):
+            diagnostic.update(
+                ok=False,
+                error_kind="cleanup_timeout"
+                if any(
+                    row.get("error_kind") == "cleanup_timeout" and row["env_id"] in env_ids
+                    for row in self.cleanup.get("delete_attempts", [])
                 )
+                else "delete_failed",
+            )
+
+        if not self._releasing:
+            retry_ids = self._pending_delete_ids.intersection(env_ids)
+            await self._delete_pass(sorted(retry_ids), time.monotonic() + seconds * 0.4)
+            # Acquisition rollback must release sockets even when callers use
+            # Pool.get directly and never reach Runner's final release.
+            clients = [lease.client for lease in leases]
+
+            async def close_rollback() -> None:
+                outcomes = await asyncio.gather(*(client.aclose() for client in clients), return_exceptions=True)
+                for client, outcome in zip(clients, outcomes):
+                    if not isinstance(outcome, BaseException):
+                        self._cleanup_clients.remove(client)
+                if any(isinstance(value, BaseException) for value in outcomes):
+                    raise RuntimeError("Sandbox rollback client closure failed")
+
             try:
-                await lease.client.aclose()
-            except Exception as exc:
-                get_logger().warning(
-                    f"client aclose failed for sandbox {name} member={lease.name} env_id={lease.env_id}:\n"
-                    f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()}"
+                await finalize_bounded(
+                    close_rollback(),
+                    timeout_seconds=seconds * 0.2,
+                    diagnostic=diagnostic.setdefault("close", {}),
                 )
+            except CleanupError:
+                # Keep failed clients for the final release, preserving the
+                # acquisition exception that caused rollback.
+                pass
+
+    def _owned_orphan_ids(self) -> set[str]:
+        return set(getattr(self._provider, "owned_env_ids", ())) if self._close_provider else set()
 
     async def _wait_healthy(self, client: Any) -> bool:
         deadline = time.monotonic() + self._health_max_wait_sec
