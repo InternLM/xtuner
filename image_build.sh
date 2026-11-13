@@ -8,6 +8,7 @@ export ADAPTIVE_GEMM_URL=https://github.com/InternLM/AdaptiveGEMM@10411e08b182e8
 export GROUPED_GEMM_URL=https://github.com/InternLM/GroupedGEMM@aa5ffb21cb626d6cd61d99fc42958127b0b99be7
 export DEEP_EP_URL=https://github.com/deepseek-ai/DeepEP@9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee # v1.2.1
 export DEEP_GEMM_URL=https://github.com/deepseek-ai/DeepGEMM@88965b078186ee7510ab9fc4f1d5ebc19adfa8d1 # v2.6.1 88965b0
+export NCCL_RDMA_SHARP_PLUGIN_URL=https://github.com/Mellanox/nccl-rdma-sharp-plugins@0b5eeb9dc9bc146d315476a1c68ebe526ef2cfec # reset socket handshake after invalid magic
 export CAUSAL_CONV1D_URL=https://github.com/Dao-AILab/causal-conv1d@c51519fb10d92ffa257c1982e1831d3243454b2f # v1.6.1
 export FLA_URL="${FLA_URL-https://github.com/fla-org/flash-linear-attention@v0.5.2}"
 
@@ -43,6 +44,7 @@ docker build . \
   --build-arg FLA_URL="$FLA_URL" \
   --build-arg DEEP_EP_URL=$DEEP_EP_URL \
   --build-arg DEEP_GEMM_URL=$DEEP_GEMM_URL \
+  --build-arg NCCL_RDMA_SHARP_PLUGIN_URL=$NCCL_RDMA_SHARP_PLUGIN_URL \
   --build-arg XTUNER_URL=$XTUNER_URL \
   --build-arg XTUNER_COMMIT=$XTUNER_COMMIT \
   --build-arg LMDEPLOY_VERSION="$LMDEPLOY_VERSION" \
@@ -58,6 +60,7 @@ docker build . \
   --label "FLA_URL=${FLA_URL/@/\/tree\/}" \
   --label "DEEP_EP_URL=${DEEP_EP_URL/@/\/tree\/}" \
   --label "DEEP_GEMM_URL=${DEEP_GEMM_URL/@/\/tree\/}" \
+  --label "NCCL_RDMA_SHARP_PLUGIN_URL=${NCCL_RDMA_SHARP_PLUGIN_URL/@/\/tree\/}" \
   --label "LMDEPLOY_VERSION=${LMDEPLOY_VERSION}" \
   --label "LMDEPLOY_URL=${LMDEPLOY_URL/@/\/tree\/}"
 
