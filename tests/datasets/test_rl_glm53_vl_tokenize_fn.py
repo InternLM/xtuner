@@ -3,21 +3,26 @@
 import copy
 import os
 from pathlib import Path
-from unittest.mock import Mock, patch
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
+import ray
 from PIL import Image
 
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.datasets.rl_tokenize_fn import RLGlm53VLTokenizeFnConfig
 from xtuner.v1.model.compose.glm53 import Glm53BaseConfig
+from xtuner.v1.rl.agent_loop.agent_loop import AgentLoop
+from xtuner.v1.rl.agent_loop_manager.sampler import put_to_ray
 from xtuner.v1.rl.distillation import DistillationConfig, DistillationTrainerAdapter, TrainTeacherConfig
 from xtuner.v1.rl.distillation.train_teacher_manager import TrainTeacherManager
 from xtuner.v1.rl.loss import DistillationLossConfig
 from xtuner.v1.rl.trainer.controller import TrainingController
-from xtuner.v1.train.rl_trainer import BaseRLTrainer
+from xtuner.v1.rl.trainer.pack import RankPlan
+from xtuner.v1.rl.trainer.train_batch import TrainBatch, resolve_mm_inputs
 
 
 @pytest.fixture(scope="module")
@@ -30,7 +35,7 @@ def tokenizer():
 
 class TestRLGlm53VLTokenize:
     @pytest.mark.parametrize("media", ["text", "image", "video"])
-    def test_real_producer_to_teacher(self, media: str, tokenizer, tmp_path: Path) -> None:
+    def test_real_producer_to_teacher(self, media: str, tokenizer, tmp_path: Path, monkeypatch) -> None:
         image_path = tmp_path / "image.png"
         Image.new("RGB", (112, 112), (20, 50, 80)).save(image_path)
         content = [{"type": "text", "text": "Describe this."}]
@@ -70,10 +75,13 @@ class TestRLGlm53VLTokenize:
         state.response_ids = [10, 11, 12]
         state.logprobs = [-0.1] * 3
         state.reward = {"score": 1.0}
-        trainer = BaseRLTrainer.__new__(BaseRLTrainer)
-        trainer.logger = Mock()
-        trainer.tokenizer = tokenizer
-        trainer._distillation = DistillationTrainerAdapter(
+        loop = SimpleNamespace(logger=Mock(), tokenizer=tokenizer)
+        assert AgentLoop.canonicalize_train_fields(loop, [state]) == [state]
+        assert state.status == Status.COMPLETED
+        assert state.train_meta.prompt_length == len(prompt)
+        assert state.num_tokens == len(prompt) + 2
+        state.extra_fields["origin_data_source"] = "vl"
+        adapter = DistillationTrainerAdapter(
             DistillationConfig(
                 loss_config=DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"}),
                 teachers=[
@@ -86,11 +94,39 @@ class TestRLGlm53VLTokenize:
                 data_source_teacher_map={"vl": "teacher"},
             )
         )
-        with patch("xtuner.v1.train.rl_trainer.XTUNER_DETERMINISTIC", True):
-            batches, _ = trainer._prepare_train_data([[state]], pack_max_length=len(prompt) + 5)
-        assert batches[0]["seq_ctx"].input_ids.tolist() == [prompt + [10, 11]]
-        packed_batch = TrainingController([])._packing(batches, len(prompt) + 5, language_cfg=None)[0]
+        # Real ObjectRefs with an in-memory store exercise the current worker materialization path.
+        store = {}
+
+        def put(value):
+            ref = ray.ObjectRef.from_random()
+            store[ref] = value
+            return ref
+
+        monkeypatch.setattr(ray, "put", put)
+        monkeypatch.setattr(ray, "get", lambda refs: [store[ref] for ref in refs])
+        put_to_ray(state)
+        prepared = TrainingController([], distillation=adapter)._prepare_rollout_items([[state]], rollout_idx=0)
+        batch = TrainBatch(
+            prepared["rollout_items"],
+            RankPlan(global_indices=(0,), steps=(((0,),),)),
+            prepared["batch_attr"],
+            adapter,
+            pack_max_length=len(prompt) + 5,
+            model_cfg=SimpleNamespace(),
+            teacher_loss_keys=["teacher_indices"],
+            distillation_config=None,
+        )
+        packed_batch = batch.materialize((0,)).full_data
         packed = packed_batch["seq_ctx"]
+        assert packed.input_ids.tolist() == [prompt + [10, 11, 0, 0, 0]]
+        resolve_mm_inputs(packed)
+        # Each worker stage must be able to re-materialize the same pristine source refs.
+        repeated = batch.materialize((0,)).full_data["seq_ctx"]
+        resolve_mm_inputs(repeated)
+        for field in ("pixel_values", "pixel_values_videos"):
+            values = getattr(packed, field)
+            if values is not None:
+                np.testing.assert_array_equal(getattr(repeated, field).numpy(), values.numpy())
         assert packed_batch["teacher_indices"][0, -3:].tolist() == [-1] * 3
         teacher = TrainTeacherManager.construct_teacher_seq_ctx(packed, is_composed=True)
         assert teacher.mm_token_type_ids.shape == teacher.input_ids.shape

@@ -407,6 +407,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         result = await ctx.generate_group([state])
         self.assertFalse(await ctx.put_generated_group(result))
         self.assertEqual(len(self.replay_buffer), 0)
+
     async def test_failed_input_group_bypasses_local_and_ray_agent_loops(self):
         # 公共 producer 入口先短路，连自定义 generate_group / Ray RPC 都不会进入。
         for remote in (False, True):
@@ -465,9 +466,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
                 self.mock_dataloader.__iter__.return_value = iter(
                     [[make_rollout_state(i, status=Status.FAILED if i == 0 else Status.INIT)] for i in range(3)]
                 )
-                sampler_cfg = SamplerConfig.model_construct(
-                    dataloader_cfg=self.mock_dataloader_cfg, prompt_repeat_k=2
-                )
+                sampler_cfg = SamplerConfig.model_construct(dataloader_cfg=self.mock_dataloader_cfg, prompt_repeat_k=2)
                 sampler = sampler_cfg.build(self.mock_tokenizer, self.replay_buffer)
                 agent_loop = self._build_agent_loop()
                 generate = AsyncMock(wraps=agent_loop.generate_group)

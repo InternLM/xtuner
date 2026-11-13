@@ -342,12 +342,13 @@ class TestBatchLifecycle(unittest.TestCase):
         trace_ref = ray.ObjectRef(b"a" * 28)
         plain_ref = ray.ObjectRef(b"b" * 28)
         pixel_ref = ray.ObjectRef(b"c" * 28)
+        video_ref = ray.ObjectRef(b"d" * 28)
         traced = canonical_state(1)
         traced.session_id = 7
         traced.routed_experts = trace_ref
         plain = canonical_state(2)
         plain.routed_experts = [plain_ref]
-        plain.mm_info = {"pixel_values": pixel_ref}
+        plain.mm_info = {"pixel_values": pixel_ref, "pixel_values_videos": video_ref}
 
         with (
             mock_patch.object(BaseRLTrainer, "_release_trace_sessions", return_value={"7"}),
@@ -358,6 +359,7 @@ class TestBatchLifecycle(unittest.TestCase):
         freed = free_refs.call_args.args[0]
         self.assertIn(plain_ref, freed)
         self.assertIn(pixel_ref, freed)
+        self.assertIn(video_ref, freed)
         self.assertNotIn(trace_ref, freed)
 
 
