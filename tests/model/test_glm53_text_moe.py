@@ -176,11 +176,11 @@ class TestGlm53TextMoEInitWeights:
 
 class TestGlm53CompileCfg:
     def test_mhc_primitives_are_compiled_with_and_without_ep(self):
-        """`hc_pre` materializes fp32 rms-norm intermediates over `[B, S, hc_mult * hidden]` and
-        `_hc_post_eager` a broadcast-multiply that only inductor's fusion keeps off HBM. They
-        used to ride along inside `Glm53MoEDecoderLayer._pre/_post_moe_forward`'s boundary,
-        which the EP config drops (all2all does not trace), leaving 42 of 45 layers running
-        them eagerly under the production topology. They need their own entries."""
+        """Keep independent compile entries when EP drops the enclosing MoE-layer boundary.
+
+        Compilation fuses hc_pre's FP32 rms-norm intermediates and the elementwise operations
+        in _hc_post_eager's stream loop; the latter no longer creates an H-by-H-by-D tensor.
+        """
         # EP 表会 pop 掉 MoE 层边界，mHC 原语必须各自登记才不会退回 eager。
         from xtuner.v1.model.moe.glm53.glm53 import GLM53_MOE_EP_COMPILE_CFG, GLM53_MOE_NON_EP_COMPILE_CFG
 

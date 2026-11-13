@@ -58,11 +58,10 @@ from xtuner.v1.module.attention.kda import KDAConfig
 # everything around the one break instead of falling back to eager for the whole method
 # (design doc F6's compile row).
 #
-# hc_pre/hc_post must stay INSIDE a compiled region -- hc_pre's fp32 rms-norm intermediates and
-# _hc_post_eager's broadcast-multiply are only affordable once inductor fuses them. They are
-# registered on their own rather than riding along inside the enclosing method's boundary,
-# because the EP table below drops _pre_moe_forward/_post_moe_forward and would otherwise leave
-# 42 of 45 layers running them eagerly under the production topology.
+# Compile hc_pre to fuse its FP32 rms-norm intermediates. _hc_post_eager's stream loop no longer
+# materializes an H-by-H-by-D tensor, but compilation still fuses its elementwise operations.
+# Register both independently because the EP table drops _pre_moe_forward/_post_moe_forward
+# and would otherwise leave 42 of 45 layers running these primitives eagerly.
 GLM53_MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
     "xtuner.v1.module.decoder_layer.mhc.hc_pre": TorchCompileOption(fullgraph=True),
     "xtuner.v1.module.decoder_layer.mhc._hc_post_eager": TorchCompileOption(fullgraph=True),
