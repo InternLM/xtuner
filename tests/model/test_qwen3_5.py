@@ -11,7 +11,8 @@ from transformers import AutoTokenizer
 import torch.distributed as dist
 from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
 from xtuner.v1.loss.ce_loss import CELossConfig
-from xtuner.v1.model.moe.moe import SequenceContext, MTPConfig
+from xtuner.v1.model.moe.moe import SequenceContext
+from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.utils.test_utils import init_data_mesh
 from xtuner.v1.datasets import Qwen3VLTokenizeFnConfig
 from xtuner.v1.config import FSDPConfig
