@@ -12,7 +12,7 @@ from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.rl.advantage.base import AdvantageEstimator, TokenAdvantageEstimator
 from xtuner.v1.rl.advantage.gae import session_token_targets
 from xtuner.v1.rl.advantage.stats import TokenStats
-from xtuner.v1.rl.distillation import DistillationTrainerAdapter
+from xtuner.v1.rl.distillation import ROLLOUT_TRAINING_EXTRA_FIELDS, DistillationTrainerAdapter
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.profile import timer
@@ -518,11 +518,15 @@ class TrainingController:
         """
         refs_by_dp: list[list[ray.ObjectRef]] = []
         try:
+            # Ship payload-slimmed copies: the training workers never read the
+            # conversation text, engine inputs or judger payloads, and the
+            # trainer keeps the originals for trajectory dumping and reward
+            # bookkeeping (see ``RolloutState.training_copy``).
+            extra_field_keys = ROLLOUT_TRAINING_EXTRA_FIELDS if self.distillation.needs_rollout_extra_fields else ()
+            lean_items = [item.training_copy(extra_field_keys=extra_field_keys) for item in rollout_items]
             # Nested in a list so Ray does not dereference it before the worker
             # fetches it; replicas of one DP rank share the ref.
-            refs_by_dp = [
-                [ray.put([rollout_items[index] for index in rank.global_indices])] for rank in pack_plan.ranks
-            ]
+            refs_by_dp = [[ray.put([lean_items[index] for index in rank.global_indices])] for rank in pack_plan.ranks]
             load_handles = []
             for worker_idx, worker in enumerate(self.workers):
                 dp_rank = worker_idx // data_replicate_size
