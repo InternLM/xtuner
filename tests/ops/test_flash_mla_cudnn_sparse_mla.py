@@ -13,6 +13,8 @@ TestDeterministicSparseMLABackward
     test_deterministic_rejects_multi_head_tile            多 head-tile 形状被拒绝而非静默失确定性
     test_deterministic_rejects_launch_with_more_ctas_than_slices 单 launch CTA 数超分片数被拒绝
     test_deterministic_workspace_oom_gives_clear_error    分片工作区放不下时清晰报错而非静默 OOM
+    test_deterministic_workspace_uses_cached_memory       显存判断计入可复用的分配器缓存
+    test_deterministic_multilaunch_uses_four_aligned_splits 最小 4 分片保证 topk_length 自然对齐
 """
 
 import importlib.util
@@ -246,6 +248,8 @@ class TestDeterministicSparseMLABackward:
         from xtuner.v1.ops.sparse_mla import cudnn_dsa_det
 
         monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (1024, 1024))
+        monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 0)
+        monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 0)
 
         seq_len, num_head, head_dim, topk = 64, 64, 512, 64
         q = torch.randn(seq_len, num_head, head_dim, device="cuda", dtype=torch.bfloat16)
@@ -255,15 +259,34 @@ class TestDeterministicSparseMLABackward:
         lse = torch.randn(seq_len, num_head, device="cuda", dtype=torch.float32)
         topk_idxs = torch.arange(seq_len, device="cuda", dtype=torch.int32)[:, None].expand(seq_len, topk).contiguous()
 
-        with pytest.raises(RuntimeError, match="per-CTA"):
+        with pytest.raises(RuntimeError, match="minimum of 4 per-CTA slices"):
             cudnn_dsa_det.flash_attn_bwd_sm90_multilaunch(q, kv, out, dout, lse, topk_idxs)
 
     @pytest.mark.skipif(not _flash_mla_cudnn_available(), reason="requires FlashMLA + cuDNN DSA runtimes")
+    def test_deterministic_workspace_uses_cached_memory(self, monkeypatch):
+        # 物理空闲显存不足时，分配器已预留但未使用的缓存仍可直接满足分配，不能误报 OOM。
+        from xtuner.v1.ops.sparse_mla import cudnn_dsa_det
+
+        seq_len, num_head, head_dim, topk = 64, 64, 512, 64
+        q = torch.randn(seq_len, num_head, head_dim, device="cuda", dtype=torch.bfloat16)
+        kv = torch.randn(seq_len, head_dim, device="cuda", dtype=torch.bfloat16)
+        out = torch.randn(seq_len, num_head, head_dim, device="cuda", dtype=torch.bfloat16)
+        dout = torch.randn(seq_len, num_head, head_dim, device="cuda", dtype=torch.bfloat16)
+        lse = torch.randn(seq_len, num_head, device="cuda", dtype=torch.float32)
+        topk_idxs = torch.arange(seq_len, device="cuda", dtype=torch.int32)[:, None].expand(seq_len, topk).contiguous()
+
+        workspace_bytes = 4 * seq_len * head_dim * 4  # 最低 4 个分片
+        monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (1024, 1024))
+        monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: workspace_bytes)
+        monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 0)
+
+        cudnn_dsa_det.flash_attn_bwd_sm90_multilaunch(q, kv, out, dout, lse, topk_idxs)
+
+    @pytest.mark.skipif(not _flash_mla_cudnn_available(), reason="requires FlashMLA + cuDNN DSA runtimes")
     def test_deterministic_multilaunch_shrinks_chunk_to_fit_workspace(self, monkeypatch):
-        # 空闲显存只够 2 个分片时，driver 必须把每次 launch 的 query 数自动收缩到
-        # 2（分片数同步减半、launch 次数等比增多）而不是直接报错；收缩后两次运行
-        # 仍须逐位一致，且 dq 与正常分片数逐位相同、dkv 数值一致（仅归约分组不同，
-        # 容差对齐参考测试）。
+        # 空闲显存只够 4 个分片时，driver 必须把每次 launch 的 query 数自动收缩到
+        # 4（launch 次数等比增多）而不是直接报错；收缩后两次运行仍须逐位一致，
+        # 且 dq 与正常分片数逐位相同、dkv 数值一致（仅归约分组不同，容差对齐参考测试）。
         from xtuner.v1.ops.sparse_mla import cudnn_dsa_det
 
         seq_len, num_head, head_dim, topk = 256, 64, 512, 64
@@ -276,10 +299,12 @@ class TestDeterministicSparseMLABackward:
 
         dq_ref, dkv_ref = cudnn_dsa_det.flash_attn_bwd_sm90_multilaunch(q, kv, out, dout, lse, topk_idxs)
 
-        # 每片 4*256(round64(seq_len))*512 = 0.5 MiB；2 MiB 空闲的 80% 预算只够 2 片，
-        # 默认 n_splits=128 会被逐级减半收缩到 2（2 个 launch 变成 128 个）。
-        free_bytes = 2 * 1024**2
+        # 每片 4*256(round64(seq_len))*512 = 0.5 MiB；2.5 MiB 空闲的 80% 预算只够 4 片，
+        # 默认 n_splits=128 会按 4 的倍数收缩到 4（2 个 launch 变成 64 个）。
+        free_bytes = 5 * 1024**2 // 2
         monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (free_bytes, free_bytes))
+        monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 0)
+        monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 0)
 
         dq1, dkv1 = cudnn_dsa_det.flash_attn_bwd_sm90_multilaunch(q, kv, out, dout, lse, topk_idxs)
         dq2, dkv2 = cudnn_dsa_det.flash_attn_bwd_sm90_multilaunch(q, kv, out, dout, lse, topk_idxs)
@@ -288,6 +313,35 @@ class TestDeterministicSparseMLABackward:
         assert torch.equal(dkv1, dkv2)
         assert torch.equal(dq1, dq_ref)  # dq 路径与分片几何无关
         assert torch.allclose(dkv1, dkv_ref, rtol=1e-2, atol=1e-2)
+
+    @pytest.mark.skipif(not _flash_mla_cudnn_available(), reason="requires FlashMLA + cuDNN DSA runtimes")
+    def test_deterministic_multilaunch_uses_four_aligned_splits(self, monkeypatch):
+        # 最小 4 分片的第二个 launch 从 query 4 开始，topk_length 偏移 16 字节，无需 clone 即可对齐。
+        from xtuner.v1.ops.sparse_mla import cudnn_dsa_det
+
+        seq_len, num_head, head_dim, topk = 8, 64, 512, 64
+        q = torch.randn(seq_len, num_head, head_dim, device="cuda", dtype=torch.bfloat16)
+        kv = torch.randn(seq_len, head_dim, device="cuda", dtype=torch.bfloat16)
+        out = torch.randn(seq_len, num_head, head_dim, device="cuda", dtype=torch.bfloat16)
+        dout = torch.randn(seq_len, num_head, head_dim, device="cuda", dtype=torch.bfloat16)
+        lse = torch.randn(seq_len, num_head, device="cuda", dtype=torch.float32)
+        topk_idxs = torch.arange(seq_len, device="cuda", dtype=torch.int32)[:, None].expand(seq_len, topk).contiguous()
+        topk_length = torch.full((seq_len,), topk, device="cuda", dtype=torch.int32)
+
+        free_bytes = 4 * 64 * head_dim * 5
+        monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (free_bytes, free_bytes))
+        monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 0)
+        monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 0)
+
+        dq1, dkv1 = cudnn_dsa_det.flash_attn_bwd_sm90_multilaunch(
+            q, kv, out, dout, lse, topk_idxs, topk_length, chunk=6
+        )
+        dq2, dkv2 = cudnn_dsa_det.flash_attn_bwd_sm90_multilaunch(
+            q, kv, out, dout, lse, topk_idxs, topk_length, chunk=6
+        )
+
+        assert torch.equal(dq1, dq2)
+        assert torch.equal(dkv1, dkv2)
 
     @pytest.mark.skipif(not _flash_mla_cudnn_available(), reason="requires FlashMLA + cuDNN DSA runtimes")
     def test_deterministic_backward_matches_torch_reference(self, deterministic_mode):

@@ -1,11 +1,15 @@
+import copy
 import os
 from typing import Any, cast
+
+from PIL import UnidentifiedImageError
 
 from xtuner.v1.data_proto.rl_data import RolloutState
 
 from ...data_proto.rl_data import MultimodalInfo
 from ..data_item import CacheItem
 from ..mllm_tokenize_fn.qwen3_vl_tokenize_fn import Qwen3VLTokenizeFnConfig, Qwen3VLTokenizeFunction, QwenVL3DataItem
+from .failed_image import failed_image_rollout
 
 
 def _tensor_to_numpy(value):
@@ -61,13 +65,15 @@ def replace_image_context_and_collect_media_data(
 
 
 class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
+    supports_fake_data_fallback = False
+
     def __init__(self, *args, ignore_multimodal_info: bool = False, data_judger_mapping: dict | None = None, **kwargs):
         self.ignore_multimodal_info = ignore_multimodal_info
         self.data_judger_mapping = data_judger_mapping
         super().__init__(*args, **kwargs)
 
     def __call__(self, item: dict, media_root: str = "", **kwargs) -> RolloutState | CacheItem:
-        extra_info = item.get("extra_info", {})
+        extra_info = copy.deepcopy(item.get("extra_info", {}))
         if isinstance(item["prompt"], dict):
             assert "messages" in item["prompt"], "When prompt is a dict, it must contain 'messages' key"
             assert "tools" in item["prompt"], "When prompt is a dict, it must contain 'tools' key"
@@ -82,7 +88,19 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
                 messages = messages[1:]
             messages = [{"role": "system", "content": system_prompt}] + messages
 
-        data = super().__call__({"messages": messages, "tools": tools}, media_root=media_root)
+        try:
+            data = super().__call__({"messages": messages, "tools": tools}, media_root=media_root)
+        except (FileNotFoundError, UnidentifiedImageError) as error:
+            if self.state != "runtime":
+                raise
+            return failed_image_rollout(
+                error,
+                item=item,
+                messages=messages,
+                image_paths=self._image_path,
+                media_root=media_root,
+                data_judger_mapping=self.data_judger_mapping,
+            )
 
         if self.state == "cache":
             # If return RolloutState, the cache speed will be slow because of serialization problem
@@ -95,6 +113,11 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
             image_data, _ = replace_image_context_and_collect_media_data(messages, media_root, True)
             if image_data:
                 extra_info["image_data"] = image_data
+                # Qwen 训练实际从 size 读取像素预算，不能照搬 GLM 的视觉 token 单位。
+                extra_info["image_processor_kwargs"] = {
+                    "min_pixels": self.image_processor.size["shortest_edge"],
+                    "max_pixels": self.image_processor.size["longest_edge"],
+                }
 
             # 因为 sft tokenizer fn 可能并没有完全和 apply_chat_template 中的 jinja 模块对齐，特别是 system prompt
             # 为了确保一致，必须要通过 tokenizer_fn 得到 prompt_token_ids

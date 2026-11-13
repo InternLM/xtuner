@@ -78,6 +78,7 @@ class InternS1ForConditionalGeneration(BaseComposeModel):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
+        self.precision.set_default_mp_policy(mp_policy)
 
         self.fsdp_mesh = init_world_mesh()
         # Note: 非常关键，不能删除这个 assert
@@ -85,7 +86,6 @@ class InternS1ForConditionalGeneration(BaseComposeModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh,
-            mp_policy=mp_policy,
             reshard_after_forward=fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
         )

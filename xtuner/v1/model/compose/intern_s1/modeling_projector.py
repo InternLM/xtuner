@@ -57,6 +57,7 @@ class InternS1MultiModalProjector(BaseModel):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
+        self.precision.set_default_mp_policy(mp_policy)
         self.fsdp_mesh = init_world_mesh()
         assert self.fsdp_mesh is not None
 
@@ -72,7 +73,6 @@ class InternS1MultiModalProjector(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh,
-            mp_policy=mp_policy,
             reshard_after_forward=True,
             offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
         )

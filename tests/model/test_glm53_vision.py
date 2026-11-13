@@ -80,15 +80,15 @@ class TestGlm53VisionMetaBuild:
 
 class TestGlm53VisionFp32Params:
     def test_vision_side_pins_nothing_to_fp32(self):
-        """`fp32_keys_pattern` routes a parameter to `fully_shard(ignored_params=...)`, which
-        leaves it replicated and *outside* FSDP's gradient reduction. Only
-        `MoE.scale_and_reduce_grad` all-reduces such gradients, and
-        `BaseComposeModel.scale_and_reduce_grad` forwards to `language_model` alone -- so a
-        vision-side fp32 pin would silently let those gradients diverge across ranks. Lifting
-        that reduction to `BaseModel` is a separate change; until then this stays empty."""
-        # 视觉侧 pin fp32 的参数梯度不会被 all-reduce，会静默发散，故必须为空。
-        assert not Glm53VisionConfig().hf_save_cfg.fp32_keys_pattern
-        assert not Glm53ProjectorConfig().hf_save_cfg.fp32_keys_pattern
+        """The vision tower and projector need no fp32 compute, so they declare nothing. Pinning
+        would now be safe (`BaseComposeModel.scale_and_reduce_grad` forwards to every sub-model),
+        but it would still cost one replicated copy per rank for no numerical gain."""
+        # 视觉侧 pin fp32 没有精度收益，只会多付一份完整副本。
+        with torch.device("meta"):
+            vision = Glm53VisionConfig(attn_impl="eager_attention", fully_shard=False).build()
+            projector = Glm53ProjectorConfig(fully_shard=False).build()
+        assert not vision.precision.param_names
+        assert not projector.precision.param_names
 
 
 class TestGlm53VisionWeightMapping:

@@ -221,10 +221,12 @@ class Dense(BaseModel):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
+        self.precision.set_default_mp_policy(mp_policy)
         if self.config.head_fp32(self.fsdp_config):
-            head_mp_policy = MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32)
-        else:
-            head_mp_policy = mp_policy
+            self.precision.pin_unit(self.lm_head)
+            if self.config.tie_word_embeddings:
+                # Tied weights are the same tensor, so the embedding unit must compute in fp32 too.
+                self.precision.pin_unit(self.embed_tokens)
         num_recompute_layers = int(self.config.num_hidden_layers * self.fsdp_config.recompute_ratio)
 
         generator = torch.Generator()
@@ -249,7 +251,6 @@ class Dense(BaseModel):
             self.layers[str(layer_idx)] = layer
             self._fully_shard(
                 mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-                mp_policy=mp_policy,
                 reshard_after_forward=self.fsdp_config.reshard_after_forward,
                 offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
                 module=layer,
@@ -263,7 +264,6 @@ class Dense(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=(head_mp_policy if self.config.tie_word_embeddings else mp_policy),
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.embed_tokens,
@@ -271,7 +271,6 @@ class Dense(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.norm,
@@ -279,7 +278,6 @@ class Dense(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=head_mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.lm_head,
@@ -287,7 +285,6 @@ class Dense(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )

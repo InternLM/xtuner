@@ -65,10 +65,13 @@ def _load_eval_trace_segment(artifacts: dict[str, Any]) -> tuple[list[dict[str, 
     return messages, segment.get("tools")
 
 
-def _count_tool_turns(messages: list[dict[str, Any]]) -> int:
-    """Number of assistant turns that emitted at least one tool_call."""
+def _count_tool_calls(messages: list[dict[str, Any]]) -> int:
+    """Number of tool calls across the assistant messages (parallel calls count
+    individually)."""
     return sum(
-        1 for m in messages if isinstance(m, dict) and isinstance(m.get("tool_calls"), list) and m["tool_calls"]
+        len(message["tool_calls"])
+        for message in messages
+        if isinstance(message, dict) and isinstance(message.get("tool_calls"), list)
     )
 
 
@@ -253,7 +256,7 @@ class AgentInLocalhostLoop(AgentLoop):
         if messages:
             rollout_state.extra_fields["agent_messages"] = messages
             rollout_state.extra_fields["agent_tools"] = tools
-            rollout_state.extra_fields["agent_tool_turns"] = _count_tool_turns(messages)
+            rollout_state.extra_fields["agent_tool_calls"] = _count_tool_calls(messages)
         finish_info = response_message.get("finish_info")
         if isinstance(finish_info, dict) and finish_info:
             rollout_state.extra_fields["agent_finish_info"] = finish_info
@@ -274,11 +277,10 @@ class AgentInLocalhostLoop(AgentLoop):
 
         rollout_state.input_ids = data["input_ids"]
         rollout_state.labels = data["labels"]
-        # Unified response_ids convention: the contiguous suffix of input_ids after the prompt
-        # (env-injected tokens included), aligned with response_model_steps for per-token
-        # staleness; also the token count used by rollout throughput logging.
-        prompt_len = len(rollout_state.prompt_ids or [])
-        rollout_state.response_ids = list(data["input_ids"][prompt_len:])
+        # prompt_ids/response_ids 都取自 trace（会话初始 prompt 段 + 其后的连续后缀），
+        # 恢复 input_ids == prompt_ids + response_ids，不依赖 dataset 侧 prompt_ids。
+        rollout_state.prompt_ids = list(data["prompt_ids"])
+        rollout_state.response_ids = list(data["response_ids"])
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
         content = response_message.get("content")
@@ -306,7 +308,7 @@ class AgentInLocalhostLoop(AgentLoop):
         if messages:
             rollout_state.extra_fields["agent_messages"] = messages
             rollout_state.extra_fields["agent_tools"] = tools
-            rollout_state.extra_fields["agent_tool_turns"] = _count_tool_turns(messages)
+            rollout_state.extra_fields["agent_tool_calls"] = _count_tool_calls(messages)
         finish_info = response_message.get("finish_info")
         if isinstance(finish_info, dict) and finish_info:
             rollout_state.extra_fields["agent_finish_info"] = finish_info

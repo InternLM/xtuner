@@ -1,5 +1,7 @@
+import json
 import os
 from argparse import Namespace
+from pathlib import Path
 from typing import Any, Dict, List, Mapping
 
 import numpy as np
@@ -12,6 +14,23 @@ from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
 
 from .rollout_topology import RolloutEngine, RolloutServerProcess, RolloutTopology
 from .worker import RolloutConfig, RolloutWorker
+
+
+def _model_dir_declares_custom_code(model_path: str | Path) -> bool:
+    """Return whether the tokenizer config declares ``auto_map`` custom code.
+
+    The trainer and the rollout worker already load the tokenizer with
+    ``trust_remote_code=True``; the server only needs the flag for model
+    directories that actually ship custom code, so the detection keeps stock
+    model directories byte-identical while custom-tokenizer directories
+    (e.g. Glm5Tokenizer) start without extra configuration.
+    """
+    tokenizer_config = Path(model_path) / "tokenizer_config.json"
+    try:
+        with open(tokenizer_config) as f:
+            return "auto_map" in json.load(f)
+    except (OSError, ValueError):
+        return False
 
 
 SHARED_STORE = "shared_store"
@@ -280,6 +299,10 @@ class LMDeployWorker(RolloutWorker):
             if sample_params.min_tokens > 0:
                 lmdeploy_sample_params["min_new_tokens"] = sample_params.min_tokens
             payload.update(lmdeploy_sample_params)
+        # 两种请求（token IDs / messages）共用，预算只读并交给 HTTP 客户端序列化。
+        image_options = rollout_state.extra_fields.get("image_processor_kwargs")
+        if image_options is not None:
+            payload["mm_processor_kwargs"] = {"image": image_options}
         return payload
 
     def _sleep(self, level: int = 1):
@@ -376,6 +399,15 @@ class LMDeployWorker(RolloutWorker):
         lmdeploy_config_kwargs["log_level"] = lmdeploy_config_kwargs.pop("log_level", "ERROR")
         lmdeploy_config_kwargs["uvicorn_log_level"] = lmdeploy_config_kwargs.pop("uvicorn_log_level", "ERROR")
         lmdeploy_config_kwargs["tm_log_level"] = lmdeploy_config_kwargs.pop("tm_log_level", "ERROR")
+        # The engine loads the tokenizer from the same model directory as the
+        # trainer and rollout worker, which already pass trust_remote_code=True.
+        # Trust the server only when that directory declares custom code via
+        # ``auto_map`` (custom-tokenizer model dirs fail loudly at startup
+        # otherwise, while stock dirs stay unchanged);
+        # ``lmdeploy_trust_remote_code`` in extra_rollout_config overrides the
+        # detected default in either direction.
+        default_trust = _model_dir_declares_custom_code(self.config.model_path)
+        lmdeploy_config_kwargs["trust_remote_code"] = lmdeploy_config_kwargs.pop("trust_remote_code", default_trust)
 
         speculative_config = None
         speculative_algorithm = lmdeploy_config_kwargs.pop("speculative_algorithm", None)

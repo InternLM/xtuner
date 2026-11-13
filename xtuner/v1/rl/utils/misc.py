@@ -128,6 +128,19 @@ def sort_rollout_state_for_deterministic(data_groups: list[list[RolloutState]]) 
     return sorted_groups
 
 
+def validate_image_only_rollout(state: RolloutState) -> None:
+    """Reject video inputs unsupported by the built-in online rollout
+    transports."""
+    has_video = state.extra_fields.get("video_data") or (
+        state.mm_info is not None and state.mm_info.get("pixel_values_videos") is not None
+    )
+    if has_video:
+        raise NotImplementedError(
+            "Online video rollout/teacher scoring is not supported by the built-in transports. "
+            "Use image/text prompts online; video multimodal inputs are supported for training replay only."
+        )
+
+
 def load_function(path):
     """Load a function from a module.
 

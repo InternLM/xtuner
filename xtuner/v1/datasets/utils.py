@@ -134,6 +134,9 @@ def with_proxy_attention_flops(call_fn=None, *, flash_attn_block_size: int = 128
 
 
 class CachableTokenizeFunction(ABC, Generic[T]):
+    # 是否接受 VLMJsonlDataset 的 SFT 假样本兜底；RL 的输入和返回值契约不同，需显式关闭。
+    supports_fake_data_fallback = True
+
     def __init__(self, tokenizer, *args, llm_pack_weight: float = 1.0, visual_pack_weight: float = 0.0, **kwargs):
         self.tokenizer = tokenizer
         self.llm_pack_weight = llm_pack_weight

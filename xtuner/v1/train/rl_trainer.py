@@ -17,7 +17,7 @@ from typing_extensions import Literal, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1._writer import get_writer
-from xtuner.v1.data_proto.rl_data import RolloutState, validate_train_group
+from xtuner.v1.data_proto.rl_data import MM_PIXEL_FIELDS, RolloutState, validate_train_group
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop_manager import (
@@ -913,10 +913,10 @@ class BaseRLTrainer:
         refs: list[ray.ObjectRef] = []
         for group in train_batch:
             for state in group:
-                pixels = state.mm_info.get("pixel_values") if state.mm_info is not None else None
+                pixels = [state.mm_info.get(name) for name in MM_PIXEL_FIELDS] if state.mm_info is not None else []
                 trace_released = state.session_id is not None and str(state.session_id) in released_sessions
                 routed = None if trace_released else state.routed_experts
-                for value in (pixels, routed):
+                for value in (*pixels, routed):
                     if isinstance(value, ray.ObjectRef):
                         refs.append(value)
                     elif isinstance(value, (list, tuple)):
@@ -1306,7 +1306,7 @@ class BaseRLTrainer:
                             "status": data.extra_fields.get("agent_status", None),
                             "judgers": data.extra_fields.get("agent_judgers", None),
                             "finish_info": data.extra_fields.get("agent_finish_info", None),
-                            "tool_turns": data.extra_fields.get("agent_tool_turns", None),
+                            "tool_calls": data.extra_fields.get("agent_tool_calls", None),
                             "session_id": str(data.session_id) if data.session_id is not None else None,
                             "segment_index": (
                                 data.train_meta.segment_index
@@ -1383,7 +1383,7 @@ class BaseRLTrainer:
                             "status": data.extra_fields.get("agent_status", None),
                             "judgers": data.extra_fields.get("agent_judgers", None),
                             "finish_info": data.extra_fields.get("agent_finish_info", None),
-                            "tool_turns": data.extra_fields.get("agent_tool_turns", None),
+                            "tool_calls": data.extra_fields.get("agent_tool_calls", None),
                             "session_id": str(data.session_id) if data.session_id is not None else None,
                             "segment_index": (
                                 data.train_meta.segment_index

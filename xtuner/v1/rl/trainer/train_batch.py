@@ -14,7 +14,7 @@ import numpy as np
 import ray
 import torch
 
-from xtuner.v1.data_proto.rl_data import RolloutState
+from xtuner.v1.data_proto.rl_data import MM_PIXEL_FIELDS, RolloutState
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.model.compose.base import BaseComposeConfig
 
@@ -397,7 +397,11 @@ class TrainBatch:
             # positions on every axis so text samples have the same rank as the VLM
             # samples when their sequence contexts are packed together.
             position_ids = np.broadcast_to(text_position_ids, (3, 1, seq_len)).copy()
-        seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, cast(dict | None, state.mm_info))
+        prompt_ids = state.extra_fields.get("train_prompt_ids") or state.prompt_ids
+        prompt_length = state.train_meta.prompt_length if state.train_meta is not None else len(prompt_ids or [])
+        seq_ctx = get_train_seq_ctx(
+            input_ids_t, position_ids, cast(dict | None, state.mm_info), prompt_length=prompt_length
+        )
         seq_ctx.rollout_routed_experts = state.routed_experts  # type: ignore[assignment] # n,layer*expert
         return TrainSample(
             seq_ctx=seq_ctx,
@@ -475,6 +479,8 @@ def get_train_seq_ctx(
     input_ids: torch.LongTensor,
     position_ids: np.ndarray | None = None,
     multimodal_train_info: dict | None = None,
+    *,
+    prompt_length: int | None = None,
 ) -> SequenceContext:
     """Build a CPU ``SequenceContext`` for one training sample.
 
@@ -484,7 +490,9 @@ def get_train_seq_ctx(
             the VLM MRoPE layout; a prompt-only position segment is extended to cover
             the whole input.
         multimodal_train_info (dict | None): Optional multimodal payload with
-            ``pixel_values``, ``image_grid_thw`` and ``num_img_tokens``.
+            image/video pixels, grids and prompt modality IDs.
+        prompt_length (int | None): Expanded prompt length before response tokens.
+            Defaults to the whole input for prompt-only callers.
 
     Returns:
         SequenceContext: The CPU sequence context of the sample.
@@ -510,6 +518,23 @@ def get_train_seq_ctx(
     if multimodal_train_info:
         seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
         seq_ctx.image_grid_thw = _to_cpu_tensor(multimodal_train_info.get("image_grid_thw"), dtype=torch.long)
+        seq_ctx.pixel_values_videos = multimodal_train_info.get("pixel_values_videos")
+        seq_ctx.video_grid_thw = _to_cpu_tensor(multimodal_train_info.get("video_grid_thw"), dtype=torch.long)
+        mm_token_type_ids = _to_cpu_tensor(multimodal_train_info.get("mm_token_type_ids"), dtype=torch.long)
+        if mm_token_type_ids is not None:
+            expected_prompt_length = input_ids.size(-1) if prompt_length is None else prompt_length
+            if not 0 <= expected_prompt_length <= input_ids.size(-1) or mm_token_type_ids.shape != (
+                1,
+                expected_prompt_length,
+            ):
+                raise ValueError(
+                    f"mm_token_type_ids shape {tuple(mm_token_type_ids.shape)} does not match "
+                    f"training prompt shape (1, {expected_prompt_length})"
+                )
+            # TrainBatch has already dropped the last input token; response inputs are text.
+            seq_ctx.mm_token_type_ids = torch.nn.functional.pad(
+                mm_token_type_ids, (0, input_ids.size(-1) - expected_prompt_length), value=0
+            )
         num_img_tokens = multimodal_train_info.get("num_img_tokens")
         if num_img_tokens is not None:
             seq_ctx.num_img_tokens = [num_img_tokens]
@@ -525,15 +550,14 @@ def resolve_mm_inputs(seq_ctx: SequenceContext) -> None:
     Returns:
         None
     """
-    pixel_values = seq_ctx.pixel_values
-    if pixel_values is None:
-        return
-    if isinstance(pixel_values, np.ndarray):
-        raise NotImplementedError("The case where pixel_values is a numpy array is not implemented yet.")
-    assert isinstance(pixel_values, list), f"pixel_values should be list of tensor, got {type(pixel_values)}"
-    pixel_values = ray.get(list(pixel_values))
-    pixel_values = [torch.as_tensor(pixel_value) for pixel_value in pixel_values]
-    seq_ctx.pixel_values = torch.cat(pixel_values, dim=0)
+    for name in MM_PIXEL_FIELDS:
+        value = getattr(seq_ctx, name)
+        if value is None:
+            continue
+        assert isinstance(value, list) and all(isinstance(ref, ray.ObjectRef) for ref in value), (
+            f"{name} must be a list of Ray ObjectRef, got {type(value)}"
+        )
+        setattr(seq_ctx, name, torch.cat([torch.as_tensor(item) for item in ray.get(value)], dim=0))
 
 
 def resolve_pack_refs(
