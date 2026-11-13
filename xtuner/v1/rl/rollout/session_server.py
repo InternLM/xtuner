@@ -1079,7 +1079,8 @@ class SessionServer:
                         try:
                             current_block["input"] = json.loads(raw) if raw else {}
                         except json.JSONDecodeError:
-                            current_block["input"] = {}
+                            # Keep truncated arguments so trace keys match the agent transcript.
+                            current_block["input"] = raw
                     content_blocks.append(current_block)
                     current_block = None
 
