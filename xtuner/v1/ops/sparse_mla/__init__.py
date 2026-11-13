@@ -7,6 +7,7 @@ import torch
 from xtuner.v1.data_proto import SequenceContext
 
 from .kpool import kpool_topk_indices, torch_kpool_topk_indices
+from .kpool_plan import KPoolPlan, get_kpool_plan, get_kpool_topk_indices
 from .protocol import (
     DSAIndexerBackend,
     DSATopKIndicesProtocol,
@@ -75,18 +76,6 @@ def get_dsa_topk_indices(backend: DSAIndexerBackend) -> DSATopKIndicesProtocol:
     raise ValueError(f"Unsupported DSA indexer backend: {backend}")
 
 
-def get_kpool_topk_indices(backend: KPoolIndexerBackend) -> KPoolTopKIndicesProtocol:
-    if backend == "torch":
-        return torch_kpool_topk_indices
-    if backend == "tilelang":
-        return kpool_topk_indices
-    if backend == "tilelang_deepselect":
-        return functools.partial(kpool_topk_indices, selector="deep_select")
-    if backend == "tilelang_cooperative":
-        return functools.partial(kpool_topk_indices, scorer="cooperative")
-    raise ValueError(f"Unsupported KPool indexer backend: {backend}")
-
-
 def dsa_topk_indices(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -113,6 +102,12 @@ def ensure_tilelang_runtime_available() -> None:
     from .tilelang import ensure_tilelang_runtime_available as _impl
 
     return _impl()
+
+
+def ensure_lmdeploy_kpool_runtime_available(precision: str) -> None:
+    from .lmdeploy_kpool import ensure_lmdeploy_kpool_runtime_available as _impl
+
+    _impl(precision)
 
 
 def ensure_cudnn_dsa_runtime_available() -> None:
@@ -170,6 +165,7 @@ __all__ = [
     "DSAIndexerBackend",
     "DSATopKIndicesProtocol",
     "KPoolIndexerBackend",
+    "KPoolPlan",
     "KPoolTopKIndicesProtocol",
     "SparseMLABackend",
     "SparseMLAOutputs",
@@ -180,8 +176,10 @@ __all__ = [
     "ensure_deep_select_runtime_available",
     "ensure_flash_mla_cudnn_runtime_available",
     "ensure_flash_mla_runtime_available",
+    "ensure_lmdeploy_kpool_runtime_available",
     "ensure_tilelang_runtime_available",
     "get_dsa_topk_indices",
+    "get_kpool_plan",
     "get_kpool_topk_indices",
     "get_sparse_mla",
     "indexer_fwd_interface",
