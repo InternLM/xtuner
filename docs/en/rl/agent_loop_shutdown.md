@@ -4,6 +4,12 @@
 default, so loops without persistent resources or external clients need no
 changes. Routers and Ray actors forward each hook to their workers.
 
+Ray actors build the local loop on their first asynchronous call, so construction
+errors surface on that call. All generation and lifecycle operations run
+on that same asyncio loop. Control RPCs retain their separate Ray scheduling group
+and can drain active tasks even when the generate group is full. Local loops are
+unchanged.
+
 ## `close()`
 
 Both RL trainers close their training and evaluation loop managers when `fit()`
@@ -26,4 +32,7 @@ Managers call `prepare_pause()` on every active loop before
 model calls come from an external harness use `prepare_pause()` to stop
 admitting new calls and let accepted ones finish, so the abort that follows
 does not cut a request the harness is still waiting on. If `prepare_pause()`
-raises, the manager does not abort inference.
+raises, the manager does not abort inference. The batch's
+`group_gen_pause_time_s` measures the whole pause phase, from before
+`prepare_pause()` through inference pause and producer cleanup, once at the
+manager level.

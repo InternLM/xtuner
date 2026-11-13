@@ -50,10 +50,12 @@ class TestLoopShutdown(unittest.IsolatedAsyncioTestCase):
                 worker.close.remote.assert_awaited_once()
 
     async def test_actor_forwards_close_to_its_local_loop(self):
-        actor = AgentLoopActor.__new__(AgentLoopActor)
-        actor.agent_loop = SimpleNamespace(close=AsyncMock())
+        loop = MagicMock(close=AsyncMock())
+        config = MagicMock()
+        config.build_local.return_value = loop
+        actor = AgentLoopActor(config, MagicMock())
         await actor.close()
-        actor.agent_loop.close.assert_awaited_once()
+        loop.close.assert_awaited_once()
 
     @patch.dict("os.environ", {"SANDBOX_PROVIDER_USER": "test"})
     async def test_sandbox_close_waits_for_original_runner_finally_once(self):
