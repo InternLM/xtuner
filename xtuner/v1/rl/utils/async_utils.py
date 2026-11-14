@@ -81,6 +81,37 @@ async def cancel_and_drain(tasks: list[Task | None], *, timeout: float = 5.0) ->
         return
 
 
+async def await_owned_operation(operation: Coroutine) -> Any:
+    """Await an operation this caller owns, including after cancellation.
+
+    Cancelling the waiter must not hand the in-flight work to a loop that is about to close: a thread doing a
+    training step or a checkpoint keeps using objects owned by this loop. On cancellation this waits for the
+    operation to actually finish, reports its failure, then propagates ``CancelledError``.
+
+    Args:
+        operation (Coroutine): The owned operation, usually ``asyncio.to_thread`` or an async cleanup.
+
+    Returns:
+        Any: The operation result when it completed without cancellation.
+    """
+    task = asyncio.ensure_future(operation)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break
+    if cancelled:
+        try:
+            task.result()
+        except Exception:
+            logger.exception("Owned operation failed while cancellation was pending")
+        raise asyncio.CancelledError()
+    return task.result()
+
+
 def _get_default_asyncio_loop() -> AbstractEventLoop:
     """Get a module-level event loop reused by ``asyncio_run``."""
     global _ASYNCIO_RUN_LOOP

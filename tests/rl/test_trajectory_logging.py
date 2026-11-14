@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import json
 import tempfile
@@ -79,6 +80,7 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
                 # Trace store reports the initial prompt (token [1]) and the contiguous suffix.
                 "prompt_ids": [1],
                 "response_ids": [10 + index, 20 + index],
+                "routed_experts_shared": False,
             }
             for index in range(segment_count)
         ]
@@ -391,7 +393,7 @@ class TestTrajectoryLogging(unittest.TestCase):
         good.set_training_fields(input_ids=good.input_ids, labels=good.labels, logprobs=None)
         batch = [[bad], [good]]
 
-        dropped_groups, dropped_samples = self.trainer._prepare_train_batch(batch, train_step=1)
+        dropped_groups, dropped_samples = asyncio.run(self.trainer._prepare_train_batch(batch, train_step=1))
 
         self.assertEqual(dropped_groups, 1)
         self.assertEqual(dropped_samples, 1)

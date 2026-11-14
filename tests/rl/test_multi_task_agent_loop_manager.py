@@ -221,7 +221,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         task = TaskSpecConfig.model_construct(
             task_name="single_task",
             agent_loop_config=MagicMock(),
-            produce_strategy_config=MagicMock(),
+            produce_strategy_config=MagicMock(tail_batch_trigger_size=-1),
             sampler_config=MagicMock(),
             weight=1.0,
         )
@@ -235,7 +235,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         built_agent_loop = _fake_agent_loop()
         agent_loop_config = MagicMock()
         agent_loop_config.build.return_value = built_agent_loop
-        produce_strategy_config = MagicMock()
+        produce_strategy_config = MagicMock(tail_batch_trigger_size=-1)
         produce_strategy_config.build.return_value = _FakeProduceStrategy()
         sampler_config = MagicMock()
         sampler_config.build.return_value = _FakeSampler()
@@ -356,7 +356,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
         self.assertEqual(result.rollout_states[0][0].labels, [-100, -100, -100, 4])
         trainer = SimpleNamespace(logger=MagicMock(), agent_loop_manager=manager)
-        await asyncio.to_thread(BaseRLTrainer._prepare_train_batch, trainer, result.rollout_states, 5, result)
+        await BaseRLTrainer._prepare_train_batch(trainer, result.rollout_states, 5, result)
 
         trained_state = result.rollout_states[0][0]
         self.assertEqual(trained_state.labels, [-100, -100, -100, 4])
@@ -398,7 +398,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
         self.assertEqual(result.rollout_states[0][0].labels, [-100, 2])
         trainer = SimpleNamespace(logger=MagicMock(), agent_loop_manager=manager)
-        await asyncio.to_thread(BaseRLTrainer._prepare_train_batch, trainer, result.rollout_states, 5, result)
+        await BaseRLTrainer._prepare_train_batch(trainer, result.rollout_states, 5, result)
 
         self.assertEqual(result.rollout_states[0][0].labels, [-100, 2])
 
@@ -440,7 +440,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
         self.assertEqual(result.rollout_states[0][0].labels, [-100, -100, -100, -100, 40])
         trainer = SimpleNamespace(logger=MagicMock(), agent_loop_manager=manager)
-        await asyncio.to_thread(BaseRLTrainer._prepare_train_batch, trainer, result.rollout_states, 5, result)
+        await BaseRLTrainer._prepare_train_batch(trainer, result.rollout_states, 5, result)
 
         trained_state = result.rollout_states[0][0]
         self.assertEqual(trained_state.labels, [-100, -100, -100, -100, 40])
@@ -482,7 +482,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
         self.assertEqual(result.rollout_states[0][0].labels, [-100, -100, 4, 5, -100])
         trainer = SimpleNamespace(logger=MagicMock(), agent_loop_manager=manager)
-        await asyncio.to_thread(BaseRLTrainer._prepare_train_batch, trainer, result.rollout_states, 5, result)
+        await BaseRLTrainer._prepare_train_batch(trainer, result.rollout_states, 5, result)
 
         self.assertEqual(result.rollout_states[0][0].labels, [-100, -100, 4, 5, -100])
 
