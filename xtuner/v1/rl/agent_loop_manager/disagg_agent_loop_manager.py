@@ -15,6 +15,7 @@ from xtuner.v1.rl.agent_loop import AgentLoopConfig, IsValidSampleFn
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.rollout.request_publication import TurnResumeConfig
 from xtuner.v1.utils import get_logger
 
 from .disagg_producer import (
@@ -82,6 +83,8 @@ class DisaggAgentLoopManagerConfig(BaseModel):
         logger=None,
         sync_weights_interval: int = 1,
         rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
+        *,
+        turn_resume: TurnResumeConfig | None = None,
     ) -> DisaggAgentLoopManager:
         tasks = self.tasks if isinstance(self.tasks, list) else [self.tasks]
         if not tasks:
@@ -122,6 +125,7 @@ class DisaggAgentLoopManagerConfig(BaseModel):
             replay_buffer=replay_buffer,
             rollout_controller=rollout_controller,
             logger=logger,
+            turn_resume=turn_resume,
         )
 
 
@@ -180,6 +184,7 @@ class DisaggAgentLoopManager:
         replay_buffer: ReplayBuffer,
         rollout_controller: RolloutController,
         logger=None,
+        turn_resume: TurnResumeConfig | None = None,
     ):
         if not task_runners:
             raise ValueError("DisaggAgentLoopManager requires at least one task runner.")
@@ -189,6 +194,10 @@ class DisaggAgentLoopManager:
         self.task_runners = task_runners
         self.replay_buffer = replay_buffer
         self._rollout_controller = rollout_controller
+        self.turn_resume = turn_resume
+        if turn_resume is not None:
+            for task in task_runners:
+                task.produce_strategy.retain_live_tasks = True
         self.data_sampler = (
             task_runners[0].sampler
             if len(task_runners) == 1
@@ -201,6 +210,11 @@ class DisaggAgentLoopManager:
         # consumer 同步权重前置位；producer / strategy 直接观察 event。
         self._update_event = asyncio.Event()
         self._finish_event = asyncio.Event()
+        # Group admission stops refilling; producer idle means the current produce call has finished putting.
+        self._group_admission = asyncio.Event()
+        self._group_admission.set()
+        self._producer_idle = asyncio.Event()
+        self._producer_idle.set()
 
         # rollout 侧当前模型版本；pause 清空 pending 后才能更新。
         self._model_step = 0
@@ -266,8 +280,40 @@ class DisaggAgentLoopManager:
         progress.add_produce_time(time.perf_counter() - produce_start)
         return produce_status
 
-    async def pause_produce(self) -> float:
-        # 非共卡显式刹车；共卡没有 public pause。
+    def _pending_context(self, task: _TaskRunner) -> DisaggProduceContext:
+        return DisaggProduceContext(
+            agent_loop=task.agent_loop,
+            sampler=task.sampler,
+            replay_buffer=self.replay_buffer,
+            task_batch_size=0,
+            task_name=task.task_name,
+            train_step=self._produce_progress.producer_future_step,
+            model_step=self._model_step,
+            progress=self._produce_progress,
+            update_event=self._update_event,
+            stale_threshold=task.stale_threshold,
+            token_stale_threshold=task.token_stale_threshold,
+            expired_groups_retryable=task.expired_groups_retryable,
+        )
+
+    async def pause_produce(self, *, quiesce: bool = False) -> float:
+        # Stop group admission first, then wait for the current producer call to finish putting. A claimed result
+        # is not an idle producer: only ``_producer_idle`` proves the current put has completed.
+        self._group_admission.clear()
+        for task in self.task_runners:
+            task.produce_strategy.scheduling_paused = True
+        await self._producer_idle.wait()
+        if self.turn_resume is not None and quiesce:
+
+            async def finish_live_tasks() -> None:
+                await asyncio.gather(
+                    *[
+                        cast(DisaggProduceStrategy, task.produce_strategy).quiesce(self._pending_context(task))
+                        for task in self.task_runners
+                    ]
+                )
+
+            await asyncio.wait_for(finish_live_tasks(), timeout=self.turn_resume.quiesce_timeout)
         self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
         self._update_event.set()
         await self._rollout_controller.pause_generation.remote()  # type: ignore[attr-defined]
@@ -275,35 +321,39 @@ class DisaggAgentLoopManager:
         pause_time_s = 0.0
         for task in self.task_runners:
             produce_strategy = cast(DisaggProduceStrategy, task.produce_strategy)
-            ctx = DisaggProduceContext(
-                agent_loop=task.agent_loop,
-                sampler=task.sampler,
-                replay_buffer=self.replay_buffer,
-                task_batch_size=0,
-                task_name=task.task_name,
-                train_step=self._produce_progress.producer_future_step,
-                model_step=self._model_step,
-                progress=self._produce_progress,
-                update_event=self._update_event,
-                stale_threshold=task.stale_threshold,
-                token_stale_threshold=task.token_stale_threshold,
-                expired_groups_retryable=task.expired_groups_retryable,
-            )
-            pause_time_s += await produce_strategy.pause_produce(ctx)
+            pause_time_s += await produce_strategy.pause_produce(self._pending_context(task))
         self._pause_time_s = pause_time_s
         return pause_time_s
 
     async def continue_produce(self, model_step: int) -> None:
         # 与 pause_produce 成对：同步/评测完成后，用新 model_step 恢复后台 producer。
         self._model_step = model_step
-        await self._rollout_controller.continue_generation.remote()  # type: ignore[attr-defined]
+        if self.turn_resume is None:
+            await self._rollout_controller.continue_generation.remote()  # type: ignore[attr-defined]
+        else:
+            await self._rollout_controller.continue_generation.remote(model_step=model_step)  # type: ignore[attr-defined]
         self._status = AgentLoopManagerStatus.NORMAL
         self._update_event.clear()
+        for task in self.task_runners:
+            task.produce_strategy.scheduling_paused = False
+        self._group_admission.set()
 
     def shutdown(self) -> None:
         self._status = AgentLoopManagerStatus.FINISH
         self._update_event.set()
         self._finish_event.set()
+        self._group_admission.set()
+
+    async def close(self) -> None:
+        """Stop the producer state machine and wait for every retained Agent
+        task to finish cleanup."""
+        self.shutdown()
+        results = await asyncio.gather(
+            *[task.produce_strategy.close() for task in self.task_runners], return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                raise result
 
     async def _wait_for_status_exit(self, blocked_status: AgentLoopManagerStatus) -> None:
         while not self._finish_event.is_set() and self._status == blocked_status:
@@ -312,6 +362,7 @@ class DisaggAgentLoopManager:
     async def produce_loop(self, batch_size: int) -> None:
         # 后台持续生产；前台通过 get_batch 消费。
         while not self._finish_event.is_set():
+            await self._group_admission.wait()
             if self._status == AgentLoopManagerStatus.FINISH:
                 break
             if self._status in (AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT, AgentLoopManagerStatus.EXPIRED_BATCH):
@@ -328,13 +379,17 @@ class DisaggAgentLoopManager:
                     future_step,
                 ),
             )
-            produce_status = await self._produce_batch_to_buffer(task_batch_sizes, self._produce_progress)
+            self._producer_idle.clear()
+            try:
+                produce_status = await self._produce_batch_to_buffer(task_batch_sizes, self._produce_progress)
+            finally:
+                self._producer_idle.set()
 
             if produce_status == ProduceBatchStatus.EXPIRED_BATCH:
                 # EXPIRED_BATCH 是 producer 自己检测出来的“立即停下”信号。
                 self._status = AgentLoopManagerStatus.EXPIRED_BATCH
-            elif produce_status == ProduceBatchStatus.NORMAL:
-                # 只有正常完成一轮生产时，producer 自己维护的 train_step 才前进一步。
+            elif produce_status == ProduceBatchStatus.NORMAL and self._group_admission.is_set():
+                # 只有正常完成一轮生产且未被暂停时，producer 的 train_step 才前进一步。
                 self._produce_progress.advance_future_step()
 
             # 极快路径下主动让出事件循环。
@@ -356,6 +411,8 @@ class DisaggAgentLoopManager:
         current_model_step = train_step - 1
 
         while not self._finish_event.is_set():
+            if self.turn_resume is not None:
+                await self._rollout_controller.assert_request_gates_healthy.remote()  # type: ignore[attr-defined]
             if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
                 if current_model_step > self._model_step:
                     pause_time_s = self._consume_pause_time()
@@ -488,6 +545,11 @@ class DisaggAgentLoopManager:
         self._update_event = asyncio.Event()
         self._finish_event = asyncio.Event()
         self._update_event.set()
+        self._group_admission = asyncio.Event()
+        self._producer_idle = asyncio.Event()
+        self._producer_idle.set()
+        for task in self.task_runners:
+            task.produce_strategy.scheduling_paused = True
         self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
         self._pause_time_s = 0.0
         self._model_step = saved_model_step

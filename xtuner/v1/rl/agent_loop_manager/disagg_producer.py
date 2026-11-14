@@ -1,5 +1,6 @@
 import asyncio
 import math
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional
@@ -327,6 +328,12 @@ class DisaggProduceStrategy(ABC):
     def pending_task_count(self) -> int:
         return 0
 
+    async def quiesce(self, ctx: DisaggProduceContext) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not support quiesce")
+
+    async def close(self) -> None:
+        return
+
 
 class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
     """非共卡 async strategy；pending 跨后台生产轮次存在。"""
@@ -361,6 +368,10 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         )
         self.tail_batch_trigger_size = tail_batch_trigger_size
         self._pending_tasks = _PendingTasks()
+        # Turn-resume keeps live Agent tasks with the strategy; legacy mode drains them at each pause.
+        self.retain_live_tasks = False
+        # The manager sets this before waiting for producer idle so produce_batch stops refilling.
+        self.scheduling_paused = False
 
     def is_model_expired(self, train_step: int, model_step: int) -> bool:
         staleness = calculate_seq_staleness(model_step, train_step)
@@ -370,11 +381,24 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         return self._pending_tasks.count()
 
     async def pause_produce(self, ctx: DisaggProduceContext) -> float:
-        return await pause_pending_tasks(
-            pending_tasks=self._pending_tasks,
-            ctx=ctx,
-            put_claimed_task=lambda task: ctx.put_generated_group(task.result()),
-        )
+        if not self.retain_live_tasks:
+            return await pause_pending_tasks(
+                pending_tasks=self._pending_tasks,
+                ctx=ctx,
+                put_claimed_task=lambda task: ctx.put_generated_group(task.result()),
+            )
+        start = time.perf_counter()
+        for task in await self._pending_tasks.claim_ready():
+            await ctx.put_generated_group(task.result())
+        return time.perf_counter() - start
+
+    async def quiesce(self, ctx: DisaggProduceContext) -> None:
+        while self._pending_tasks.count():
+            for task in await self._pending_tasks.wait_and_claim(timeout_s=1):
+                await ctx.put_generated_group(task.result())
+
+    async def close(self) -> None:
+        await self._pending_tasks.close()
 
     async def produce_batch(self, ctx: DisaggProduceContext) -> ProduceBatchStatus:
         if ctx.task_name not in ctx.progress.consumed_samples:
@@ -439,6 +463,9 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         )
         produce_status = ProduceBatchStatus.NORMAL
         while True:
+            if self.scheduling_paused:
+                # The manager stopped admission; return so it can observe producer idle and quiesce.
+                break
             if ctx.should_abort():
                 produce_status = ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
                 break
@@ -456,7 +483,7 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
             if available + pending_count < scheduled_target:
                 while await self._pending_tasks.schedule_one(
                     max_pending=desired_pending,
-                    should_abort=ctx.should_abort,
+                    should_abort=lambda: self.scheduling_paused or ctx.should_abort(),
                     spawn_one=spawn_one,
                 ):
                     pass

@@ -14,6 +14,7 @@ from xtuner.v1.rl.agent_loop import AgentLoopConfig, IsValidSampleFn
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.rollout.request_publication import TurnResumeConfig
 from xtuner.v1.utils import get_logger
 
 from .produce_utils import (
@@ -142,6 +143,8 @@ class AgentLoopManagerConfig(BaseModel):
         logger=None,
         sync_weights_interval: int = 1,
         rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
+        *,
+        turn_resume: TurnResumeConfig | None = None,
     ) -> AgentLoopManager:
         tasks = self.tasks if isinstance(self.tasks, list) else [self.tasks]
         if not tasks:
@@ -182,6 +185,7 @@ class AgentLoopManagerConfig(BaseModel):
             replay_buffer=replay_buffer,
             rollout_controller=rollout_controller,
             logger=logger,
+            turn_resume=turn_resume,
         )
 
 
@@ -203,6 +207,7 @@ class AgentLoopManager:
         replay_buffer: ReplayBuffer,
         rollout_controller: RolloutController,
         logger=None,
+        turn_resume: TurnResumeConfig | None = None,
     ):
         if not task_runners:
             raise ValueError("AgentLoopManager requires at least one task runner.")
@@ -212,6 +217,10 @@ class AgentLoopManager:
         self.task_runners = task_runners
         self.replay_buffer = replay_buffer
         self._rollout_controller = rollout_controller
+        self.turn_resume = turn_resume
+        if turn_resume is not None:
+            for task in task_runners:
+                task.produce_strategy.retain_live_tasks = True
         self.data_sampler = (
             task_runners[0].sampler
             if len(task_runners) == 1
@@ -227,6 +236,7 @@ class AgentLoopManager:
         train_step: int,
         *,
         model_step: int,
+        quiesce: bool = False,
     ) -> ProduceBatchResult:
         # 共卡同步入口：生产入 buffer -> pause/drain 本轮 pending -> 取非空训练 batch。
         if batch_size <= 0:
@@ -239,7 +249,11 @@ class AgentLoopManager:
         active_tasks = [task for task in self.task_runners if current_sizes[task.task_name] > 0]
         assert active_tasks, "No active tasks found"
 
-        await self._rollout_controller.continue_generation.remote()  # type: ignore[attr-defined]
+        if self.turn_resume is None:
+            await self._rollout_controller.continue_generation.remote()  # type: ignore[attr-defined]
+        else:
+            await self._rollout_controller.continue_generation.remote(model_step=model_step)  # type: ignore[attr-defined]
+            await self._rollout_controller.assert_request_gates_healthy.remote()  # type: ignore[attr-defined]
         local_progress = ProduceProgress.build(
             task_names=self.task_names,
             target_samples=current_sizes,
@@ -254,50 +268,66 @@ class AgentLoopManager:
             statuses=[Status.COMPLETED, Status.ABORTED, Status.EXPIRED],
         )
         produce_start = time.perf_counter()
-        produce_futures = []
-        for task in active_tasks:
-            produce_strategy = cast(ProduceStrategy, task.produce_strategy)
-            produce_futures.append(
-                produce_strategy.produce_batch(
-                    ProduceContext(
-                        agent_loop=task.agent_loop,
-                        sampler=task.sampler,
-                        replay_buffer=self.replay_buffer,
-                        task_batch_size=current_sizes[task.task_name],
-                        task_name=task.task_name,
-                        train_step=train_step,
-                        model_step=model_step,
-                        progress=local_progress,
-                        stale_threshold=task.stale_threshold,
-                        token_stale_threshold=task.token_stale_threshold,
-                        expired_groups_retryable=task.expired_groups_retryable,
-                    )
-                )
+        contexts = {
+            task.task_name: ProduceContext(
+                agent_loop=task.agent_loop,
+                sampler=task.sampler,
+                replay_buffer=self.replay_buffer,
+                task_batch_size=current_sizes[task.task_name],
+                task_name=task.task_name,
+                train_step=train_step,
+                model_step=model_step,
+                progress=local_progress,
+                stale_threshold=task.stale_threshold,
+                token_stale_threshold=task.token_stale_threshold,
+                expired_groups_retryable=task.expired_groups_retryable,
             )
-        await asyncio.gather(*produce_futures)
+            for task in active_tasks
+        }
+        await asyncio.gather(
+            *[
+                cast(ProduceStrategy, task.produce_strategy).produce_batch(contexts[task.task_name])
+                for task in active_tasks
+            ]
+        )
         local_progress.add_produce_time(time.perf_counter() - produce_start)
 
-        # pause 只收尾本轮本地 pending。
+        pending_contexts = {
+            task.task_name: ProduceContext(
+                agent_loop=task.agent_loop,
+                sampler=task.sampler,
+                replay_buffer=self.replay_buffer,
+                task_batch_size=0,
+                task_name=task.task_name,
+                train_step=train_step,
+                model_step=model_step,
+                progress=local_progress,
+                stale_threshold=task.stale_threshold,
+                token_stale_threshold=task.token_stale_threshold,
+                expired_groups_retryable=task.expired_groups_retryable,
+            )
+            for task in self.task_runners
+        }
+        if self.turn_resume is not None and quiesce:
+            # Checkpoint/final: gates stay open while every live Agent finishes and enters the buffer.
+            async def finish_live_tasks() -> None:
+                await asyncio.gather(
+                    *[
+                        cast(ProduceStrategy, task.produce_strategy).quiesce(pending_contexts[task.task_name])
+                        for task in self.task_runners
+                    ]
+                )
+
+            await asyncio.wait_for(finish_live_tasks(), timeout=self.turn_resume.quiesce_timeout)
         await self._rollout_controller.pause_generation.remote()  # type: ignore[attr-defined]
 
         pause_time_s = 0.0
-        for task in active_tasks:
-            produce_strategy = cast(ProduceStrategy, task.produce_strategy)
-            pause_time_s += await produce_strategy.pause_produce(
-                ProduceContext(
-                    agent_loop=task.agent_loop,
-                    sampler=task.sampler,
-                    replay_buffer=self.replay_buffer,
-                    task_batch_size=0,
-                    task_name=task.task_name,
-                    train_step=train_step,
-                    model_step=model_step,
-                    progress=local_progress,
-                    stale_threshold=task.stale_threshold,
-                    token_stale_threshold=task.token_stale_threshold,
-                    expired_groups_retryable=task.expired_groups_retryable,
-                )
-            )
+        if self.turn_resume is None:
+            # pause 只收尾本轮本地 pending。
+            for task in active_tasks:
+                produce_strategy = cast(ProduceStrategy, task.produce_strategy)
+                pause_time_s += await produce_strategy.pause_produce(pending_contexts[task.task_name])
+        # turn 模式 live future 留在原 PendingTasks，下一窗口 harvest；不变成 ABORTED。
         result = await take_train_batch(
             task_runners=self.task_runners,
             replay_buffer=self.replay_buffer,
@@ -318,6 +348,20 @@ class AgentLoopManager:
             f"elapsed={time.perf_counter() - start:.3f}, completed_groups={len(result.rollout_states)}"
         )
         return result
+
+    async def close(self) -> None:
+        """Cancel retained Agents and wait for their original Runner cleanup.
+
+        Legacy managers own pending tasks per window and are already drained by ``pause_generation``.
+        """
+        if self.turn_resume is None:
+            return
+        results = await asyncio.gather(
+            *[task.produce_strategy.close() for task in self.task_runners], return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                raise result
 
     async def save(
         self,
@@ -363,6 +407,8 @@ class AgentLoopManager:
         state_path = manager_state_path(checkpoint_path)
         with state_path.open("r") as f:
             manager_state = json.load(f)
+        if self.turn_resume is not None and not manager_state.get("replay_buffer_saved", True):
+            raise RuntimeError("Turn-resume requires a persisted replay buffer to restore completed groups")
         if manager_state.get("replay_buffer_saved", True):
             # replay buffer 恢复是 async I/O，不能在已有 event loop 中再次嵌套 asyncio_run。
             await self.replay_buffer.resume(checkpoint_path)

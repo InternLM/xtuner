@@ -164,6 +164,7 @@ class BaseProduceContext:
         for item in rollout_state:
             item.extra_fields["producer_future_step"] = self.train_step
 
+        inherited_tokens = sum(len(item.response_ids or []) for item in rollout_state)
         start = time.perf_counter()
         if isinstance(self.agent_loop, ray.actor.ActorHandle):
             result = await self.agent_loop.generate_group.remote(
@@ -177,14 +178,20 @@ class BaseProduceContext:
             )
         elapsed = time.perf_counter() - start
         if isinstance(result, list):
-            for item in result:
-                if isinstance(item, RolloutState):
-                    item.extra_fields[GROUP_GENERATE_TIME_KEY] = elapsed
+            new_tokens = max(0, sum(len(item.response_ids or []) for item in result) - inherited_tokens)
+            for index, item in enumerate(result):
+                item.extra_fields[GROUP_GENERATE_TIME_KEY] = elapsed
+                # Provenance already versions every new token, so version-array length cannot count generation.
+                # Record the suffix growth once per group without mutating token versions.
+                item.extra_fields["new_response_tokens"] = new_tokens if index == 0 else 0
         return result
 
     async def put_generated_group(self, group: list[RolloutState]) -> bool:
         produced_tokens = sum(
-            max(0, len(item.response_ids or []) - len(item.response_model_steps or [])) for item in group
+            item.extra_fields.get(
+                "new_response_tokens", max(0, len(item.response_ids or []) - len(item.response_model_steps or []))
+            )
+            for item in group
         )
         initial_status = get_group_status(group)
 
@@ -698,6 +705,7 @@ class _PendingTasks:
     def __init__(self) -> None:
         self._tasks: set[asyncio.Task] = set()
         self._lock = asyncio.Lock()
+        self._close_waiter: asyncio.Task | None = None
 
     def count(self) -> int:
         return len(self._tasks)
@@ -728,7 +736,7 @@ class _PendingTasks:
         spawn_one: Callable[[], Awaitable[asyncio.Task]],
     ) -> bool:
         async with self._lock:
-            if should_abort() or len(self._tasks) >= max_pending:
+            if self._close_waiter is not None or should_abort() or len(self._tasks) >= max_pending:
                 return False
             self._tasks.add(await spawn_one())
             return True
@@ -746,6 +754,30 @@ class _PendingTasks:
         logger.warning(f"Cancelling {len(tasks)} pending rollout tasks.")
         await cancel_and_drain(list(tasks))
         return len(tasks)
+
+    async def close(self) -> None:
+        """Cancel every live task once and wait for the original cleanup to
+        really finish.
+
+        Unlike ``cancel_all`` this does not bound the wait and reports non-cancellation errors. Turn-resume
+        needs the real end of ``Runner.finally`` (sandbox pool and route cleanup) before the event loop exits.
+        """
+        async with self._lock:
+            if self._close_waiter is None:
+                tasks = set(self._tasks)
+                self._tasks.clear()
+                self._close_waiter = asyncio.create_task(self._finish_close(tasks))
+        await asyncio.shield(self._close_waiter)
+
+    @staticmethod
+    async def _finish_close(tasks: set[asyncio.Task]) -> None:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                raise result
 
 
 class _LocalPendingTasks:

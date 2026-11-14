@@ -1,5 +1,6 @@
 import asyncio
 import math
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
@@ -15,6 +16,7 @@ from .produce_utils import (
     PERIODIC_ABORT_INTERVAL_S,
     BaseProduceContext,
     ShouldContinueFn,
+    _PendingTasks,
     _ProgressDisplayer,
     _put_claimed_tasks,
     calculate_stale_threshold,
@@ -275,6 +277,12 @@ class ProduceStrategy(ABC):
     def pending_task_count(self) -> int:
         return 0
 
+    async def quiesce(self, ctx: ProduceContext) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not support quiesce")
+
+    async def close(self) -> None:
+        return
+
 
 class SyncProduceStrategy(ProduceStrategy):
     async def produce_batch(self, ctx: ProduceContext) -> None:
@@ -360,24 +368,43 @@ class AsyncProduceStrategy(ProduceStrategy):
         )
         self.tail_batch_trigger_size = tail_batch_trigger_size
         self.max_pending_tasks = max_pending_tasks
-        self._local_pending_tasks: set[asyncio.Task] = set()
+        self._pending_tasks = _PendingTasks()
+        # Turn-resume keeps live Agent tasks across production windows; legacy mode owns them per window.
+        self.retain_live_tasks = False
 
     def pending_task_count(self) -> int:
-        return len(self._local_pending_tasks)
+        return self._pending_tasks.count()
 
     async def pause_produce(self, ctx: ProduceContext) -> float:
-        return await pause_pending_tasks(
-            pending_tasks=self._local_pending_tasks,
-            ctx=ctx,
-            put_claimed_task=lambda task: ctx.put_generated_group(task.result()),
-        )
+        if not self.retain_live_tasks:
+            return await pause_pending_tasks(
+                pending_tasks=self._pending_tasks,
+                ctx=ctx,
+                put_claimed_task=lambda task: ctx.put_generated_group(task.result()),
+            )
+        start = time.perf_counter()
+        for task in await self._pending_tasks.claim_ready():
+            await ctx.put_generated_group(task.result())
+        return time.perf_counter() - start
+
+    async def quiesce(self, ctx: ProduceContext) -> None:
+        while self._pending_tasks.count():
+            for task in await self._pending_tasks.wait_and_claim(timeout_s=1):
+                await ctx.put_generated_group(task.result())
+
+    async def close(self) -> None:
+        await self._pending_tasks.close()
 
     async def produce_batch(self, ctx: ProduceContext) -> None:
         if ctx.task_name not in ctx.progress.target_samples:
             raise KeyError(f"ProduceProgress.target_samples missing task_name={ctx.task_name!r}")
 
-        # 共卡 async 的 pending 只属于本次 produce_batch。
-        self._local_pending_tasks = set()
+        if not self.retain_live_tasks:
+            # 共卡 async 的 pending 只属于本次 produce_batch。
+            self._pending_tasks = _PendingTasks()
+        else:
+            # Harvest groups that finished while this window was training; do not rebuild the owner.
+            await _put_claimed_tasks(await self._pending_tasks.claim_ready(), ctx)
 
         if ctx.batch_target <= 0:
             return
@@ -424,22 +451,21 @@ class AsyncProduceStrategy(ProduceStrategy):
             if not self.should_continue_fn(available, batch_target):
                 break
 
-            pending_count = len(self._local_pending_tasks)
+            pending_count = self._pending_tasks.count()
             desired_pending = max(0, scheduled_target - available)
             if self.max_pending_tasks is not None:
                 desired_pending = min(desired_pending, self.max_pending_tasks)
             if pending_count < desired_pending:
-                while len(self._local_pending_tasks) < desired_pending:
-                    self._local_pending_tasks.add(await spawn_one())
+                while await self._pending_tasks.schedule_one(
+                    max_pending=desired_pending, should_abort=lambda: False, spawn_one=spawn_one
+                ):
+                    pass
 
-            if not self._local_pending_tasks:
+            if not self._pending_tasks.count():
                 logger.warning("All tasks are done but not enough samples collected.")
                 break
 
-            done_tasks, _ = await asyncio.wait(
-                set(self._local_pending_tasks), timeout=1, return_when=asyncio.FIRST_COMPLETED
-            )
-            self._local_pending_tasks.difference_update(done_tasks)
+            done_tasks = await self._pending_tasks.wait_and_claim(timeout_s=1)
             await _put_claimed_tasks(
                 done_tasks,
                 ctx,
