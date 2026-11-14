@@ -1,6 +1,5 @@
 """Canonical field validation, staleness metadata and reusable packing layouts."""
 
-import asyncio
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
@@ -145,7 +144,7 @@ class TestTrainBatchContract(unittest.IsolatedAsyncioTestCase):
         )
 
         trainer = SimpleNamespace(logger=MagicMock())
-        await asyncio.to_thread(BaseRLTrainer._prepare_train_batch, trainer, result.rollout_states, 2, result)
+        await BaseRLTrainer._prepare_train_batch(trainer, result.rollout_states, 2, result)
         return result
 
     async def test_staleness_refreshes_only_supervision_count_idempotently(self):
@@ -173,7 +172,7 @@ class TestTrainBatchContract(unittest.IsolatedAsyncioTestCase):
         trainer = SimpleNamespace(logger=MagicMock())
         batch = [invalid_group, [good]]
         with patch("xtuner.v1.train.rl_trainer.release_and_discard_rollout_groups", new=AsyncMock()) as release:
-            dropped = await asyncio.to_thread(BaseRLTrainer._prepare_train_batch, trainer, batch, 2)
+            dropped = await BaseRLTrainer._prepare_train_batch(trainer, batch, 2)
         self.assertEqual(dropped, (1, 2))
         self.assertEqual(batch, [[good]])
         release.assert_awaited_once_with([invalid_group])
@@ -186,7 +185,7 @@ class TestTrainBatchContract(unittest.IsolatedAsyncioTestCase):
         batch = [[state]]
         with patch("xtuner.v1.train.rl_trainer.release_and_discard_rollout_groups", new=AsyncMock()) as release:
             with self.assertRaisesRegex(ValueError, "No valid training data"):
-                await asyncio.to_thread(BaseRLTrainer._prepare_train_batch, trainer, batch, 2)
+                await BaseRLTrainer._prepare_train_batch(trainer, batch, 2)
         release.assert_awaited_once()
         self.assertEqual(batch, [])
 
@@ -198,7 +197,7 @@ class TestTrainBatchContract(unittest.IsolatedAsyncioTestCase):
         state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
         trainer = SimpleNamespace(logger=MagicMock())
         batch = [[state]]
-        await asyncio.to_thread(BaseRLTrainer._prepare_train_batch, trainer, batch, 2)
+        await BaseRLTrainer._prepare_train_batch(trainer, batch, 2)
         self.assertEqual(state.labels, [-100, -100, -100, -100, 22, 23])
         assert state.train_meta is not None
         self.assertEqual(state.train_meta.supervised_tokens, 2)
@@ -212,7 +211,7 @@ class TestTrainBatchContract(unittest.IsolatedAsyncioTestCase):
         )
         trainer = SimpleNamespace(logger=MagicMock())
         with patch("xtuner.v1.train.rl_trainer.release_and_discard_rollout_groups", new=AsyncMock()):
-            await asyncio.to_thread(BaseRLTrainer._prepare_train_batch, trainer, result.rollout_states, 2, result)
+            await BaseRLTrainer._prepare_train_batch(trainer, result.rollout_states, 2, result)
         self.assertEqual(result.rollout_states, [[good]])
         self.assertEqual(result.task_results["math"].rollout_states, [[good]])
 
