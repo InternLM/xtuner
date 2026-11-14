@@ -14,6 +14,7 @@ from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
 from xtuner.v1.utils import get_device, get_torch_device_module
 
 from .data import RolloutWeightUpdateInfo, WeightUpdateBatch
+from .frozen_mtp import FrozenMTPSource
 
 
 DEVICE = get_device()
@@ -28,12 +29,18 @@ class WeightIterator:
         engine: Any,
         rollout_info: RolloutWeightUpdateInfo,
         global_hf_keys_mapping_cache: dict[str, list[str]],
+        frozen_mtp_source: FrozenMTPSource | None = None,
     ):
         self.config = config
         self._engine = engine
         self.rollout_info = rollout_info
         self._global_hf_keys_mapping_cache = global_hf_keys_mapping_cache
         self.ep_gather_count = 0
+        self._frozen_mtp_source = frozen_mtp_source
+        if frozen_mtp_source is not None and (
+            rollout_info.backend != "pytorch" or rollout_info.tp != 1 or rollout_info.ep != 1
+        ):
+            raise ValueError("External frozen MTP transfer requires pytorch TP1/EP1")
 
     def iter_batch_groups(self):
         # Export path depends on rollout protocol: turbomind consumes layer-wise batches,
@@ -119,6 +126,8 @@ class WeightIterator:
         # pytorch and vLLM use an empty final update as an end marker; SGLang and
         # turbomind do not consume this marker.
         if self.rollout_info.backend in ("pytorch", "vllm") and final_update:
+            if self._frozen_mtp_source is not None:
+                yield from self._frozen_mtp_source.iter_batches(DEVICE)
             yield WeightUpdateBatch({}, train_enable_ep=train_enable_ep, finished=True)
 
         DEVICE_MODULE.empty_cache()
