@@ -9,6 +9,15 @@ from typing_extensions import Self
 from .utils import gather_for_sequence_parallel, pad_to_multiple_of, split_for_sequence_parallel
 
 
+def _reuse_single_or_cat(tensors: list[torch.Tensor]) -> torch.Tensor | None:
+    # Same contract as xtuner.v1.datasets.collator._reuse_single_or_cat; kept local to avoid an
+    # import cycle. A reused tensor shares storage with its source, so downstream consumers must
+    # keep media tensors read-only.
+    if len(tensors) == 1:
+        return tensors[0]
+    return torch.cat(tensors, dim=0) if tensors else None
+
+
 # Avoid using dataclass decorator here to get rid of extra ops called in pytorch 2.8 and above
 # The extra ops is introduced by function _apply_to_tensors in
 # https://github.com/pytorch/pytorch/blob/v2.8.0/torch/distributed/fsdp/_fully_shard/_fsdp_state.py
@@ -392,13 +401,13 @@ class SequenceContext:
 
         if pixel_values:
             if isinstance(pixel_values[0], torch.Tensor):
-                pixel_values = torch.cat(pixel_values, dim=0)
+                pixel_values = _reuse_single_or_cat(pixel_values)
         else:
             pixel_values = None
 
         if pixel_values_videos:
             if isinstance(pixel_values_videos[0], torch.Tensor):
-                pixel_values_videos = torch.cat(pixel_values_videos, dim=0)
+                pixel_values_videos = _reuse_single_or_cat(pixel_values_videos)
         else:
             pixel_values_videos = None
 
@@ -412,10 +421,10 @@ class SequenceContext:
             device=device[0],
             inputs_embeds=torch.cat(inputs_embeds, dim=1) if inputs_embeds else None,  # type: ignore
             pixel_values=pixel_values,  # type: ignore
-            image_grid_thw=torch.cat(image_grid_thw, dim=0) if image_grid_thw else None,  # type: ignore
+            image_grid_thw=_reuse_single_or_cat(image_grid_thw),  # type: ignore
             num_img_tokens=num_img_tokens if num_img_tokens else None,
             pixel_values_videos=pixel_values_videos,  # type: ignore
-            video_grid_thw=torch.cat(video_grid_thw, dim=0) if video_grid_thw else None,  # type: ignore
+            video_grid_thw=_reuse_single_or_cat(video_grid_thw),  # type: ignore
             mm_token_type_ids=torch.cat(mm_token_type_ids, dim=-1) if mm_token_type_ids else None,  # type: ignore
             position_ids=torch.cat(position_ids, dim=-1) if position_ids else None,  # type: ignore
             rollout_routed_experts=rollout_routed_experts if len(rollout_routed_experts) > 0 else None,  # type: ignore
