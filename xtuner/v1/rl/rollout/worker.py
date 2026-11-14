@@ -43,6 +43,7 @@ from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
 from .constants import ROLLOUT_HTTP_MAX_CONNECTIONS, ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY
 from .health_manager import ROLLOUT_RAY_GET_TIMEOUT
+from .request_publication import TurnResumeConfig
 from .rollout_topology import RolloutTopology, ServerLaunchSpec
 from .session_server import SessionServerActor
 from .utils import PartialRolloutHandler
@@ -339,6 +340,13 @@ class RolloutConfig(BaseModel):
             help="Timeout duration (in seconds) for SessionServer requests forwarded to rollout workers.",
         ),
     ] = 1200.0
+    turn_resume: Annotated[
+        TurnResumeConfig | None,
+        Parameter(
+            group=infer_group,
+            help="Enable complete-turn Agent RL: admission gates, version publication and cross-window Agents.",
+        ),
+    ] = None
     context_length: Annotated[
         Optional[int],
         Parameter(
@@ -432,6 +440,13 @@ class RolloutConfig(BaseModel):
             help="Number of consecutive health check failures required before marking a worker inactive.",
         ),
     ] = 3
+    session_affinity: Annotated[
+        bool,
+        Parameter(
+            group=infer_group,
+            help="Pin external HTTP sessions to one concrete DP SessionServer through an in-job affinity router.",
+        ),
+    ] = False
     enable_proxy: Annotated[
         bool,
         Parameter(
@@ -798,6 +813,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 port=self.session_server_port,
                 request_timeout=self.config.session_server_timeout,
                 enable_return_routed_experts=self.enable_return_routed_experts,
+                turn_resume=self.config.turn_resume,
             )
         )
         self.session_server_url = ray.get(
@@ -808,6 +824,9 @@ class RolloutWorker(SingleAcceleratorWorker):
             raise RuntimeError(
                 f"Request-entrypoint rollout worker rank={self.rank} did not start session server during init."
             )
+
+    def get_session_server(self) -> Any | None:
+        return self.session_server_actor
 
     def _stop_session_server(self) -> None:
         if self.session_server_actor is not None:
