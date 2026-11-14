@@ -34,6 +34,7 @@ from xtuner.v1.rl.utils import (
     AutoAcceleratorWorkers,
     CPUResourcesConfig,
     SingleAcceleratorWorker,
+    free_object_refs,
     get_eos_token,
     register_cpu_resources,
 )
@@ -45,7 +46,7 @@ from .constants import ROLLOUT_HTTP_MAX_CONNECTIONS, ROLLOUT_RAY_GENERATE_MAX_CO
 from .health_manager import ROLLOUT_RAY_GET_TIMEOUT
 from .rollout_topology import RolloutTopology, ServerLaunchSpec
 from .session_server import SessionServerActor
-from .utils import PartialRolloutHandler
+from .utils import PartialRolloutHandler, merge_incremental_routed_experts
 
 
 if TYPE_CHECKING:
@@ -566,6 +567,8 @@ class RolloutWorker(SingleAcceleratorWorker):
     or SGLang.
     """
 
+    supports_routed_experts_start_len: bool = False
+
     def __init__(
         self,
         config: RolloutConfig,
@@ -798,6 +801,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 port=self.session_server_port,
                 request_timeout=self.config.session_server_timeout,
                 enable_return_routed_experts=self.enable_return_routed_experts,
+                supports_routed_experts_start_len=self.supports_routed_experts_start_len,
             )
         )
         self.session_server_url = ray.get(
@@ -1038,6 +1042,26 @@ class RolloutWorker(SingleAcceleratorWorker):
                     update={"max_tokens": request_max_tokens}
                 )
 
+    def _get_routed_experts_start_len(self, rollout_state: RolloutState) -> int:
+        if (
+            self.supports_routed_experts_start_len
+            and self.enable_return_routed_experts
+            and rollout_state.sample_params.return_routed_experts
+            and rollout_state.sample_params.return_token_ids
+            and not rollout_state.extra_fields.get("disable_routed_experts", False)
+            and rollout_state.routed_experts is not None
+        ):
+            if self.enable_partial_rollout and rollout_state.response_ids:
+                # Image placeholders are compressed on the wire; routes use expanded positions.
+                prompt_ids = rollout_state.extra_fields.get("train_prompt_ids", rollout_state.prompt_ids)
+                return len(prompt_ids or []) + len(rollout_state.response_ids) - 1
+            prefix = rollout_state.extra_fields.get("_r3_retained_prefix_ids")
+            tokens = rollout_state.tokens
+            # An agent may append tool/user tokens, but must not edit the retained prefix.
+            if prefix and tokens is not None and tokens[: len(prefix)] == prefix:
+                return len(prefix)
+        return 0
+
     def _prepare_request_payload(
         self,
         rollout_state: RolloutState,
@@ -1058,6 +1082,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         validate_image_only_rollout(rollout_state)
         if discard_response:
             rollout_state.reset_response()
+            rollout_state.extra_fields.pop("_r3_retained_prefix_ids", None)
             rollout_state.sample_params = rollout_state.sample_params.model_copy(
                 update={"max_tokens": request_max_tokens}
             )
@@ -1065,6 +1090,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         elif not self.enable_partial_rollout and rollout_state.status == Status.ABORTED:
             # ABORTED samples can be replayed; without partial rollout, rerun from the original prompt.
             rollout_state.reset_response()
+            rollout_state.extra_fields.pop("_r3_retained_prefix_ids", None)
             rollout_state.sample_params = rollout_state.sample_params.model_copy(
                 update={"max_tokens": request_max_tokens}
             )
@@ -1201,6 +1227,7 @@ class RolloutWorker(SingleAcceleratorWorker):
 
         sample_params = rollout_state.sample_params
         is_token_out = sample_params.return_token_ids
+        routed_experts_start_len = self._get_routed_experts_start_len(rollout_state)
         response = http_response.json()
 
         if is_token_out:
@@ -1297,8 +1324,29 @@ class RolloutWorker(SingleAcceleratorWorker):
                         status=rollout_status,
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
+                        routed_experts_start_len=routed_experts_start_len,
                     )
                 else:
+                    if routed_experts_start_len and rollout_status == Status.ABORTED and not response_ids:
+                        # Non-partial replay restarts the request; no suffix is required after an empty abort.
+                        if isinstance(routed_experts, ray.ObjectRef):
+                            free_object_refs([routed_experts])
+                        routed_experts = None
+                    elif routed_experts_start_len:
+                        routed_experts = await merge_incremental_routed_experts(
+                            rollout_state.routed_experts,
+                            routed_experts,
+                            start_len=routed_experts_start_len,
+                            total_len=response["meta_info"]["prompt_tokens"]
+                            + response["meta_info"]["completion_tokens"]
+                            - 1,
+                        )
+                    # Only token-exact retained history can authorize the next incremental request.
+                    rollout_state.extra_fields.pop("_r3_retained_prefix_ids", None)
+                    if routed_experts is not None and rollout_state.tokens is not None:
+                        prefix = (rollout_state.tokens + response_ids)[:-1]
+                        if len(prefix) == response["meta_info"]["prompt_tokens"] + len(response_ids) - 1:
+                            rollout_state.extra_fields["_r3_retained_prefix_ids"] = prefix
                     rollout_state.response = returned_response
                     rollout_state.response_ids = response_ids
                     rollout_state.logprobs = logprobs
