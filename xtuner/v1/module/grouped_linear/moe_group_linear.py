@@ -159,9 +159,20 @@ class GroupedLinear(nn.Module):
                 else:
                     self.bias = nn.Parameter(bias)
 
-    def forward(self, x: torch.Tensor, tokens_per_expert: torch.Tensor, decoding: bool = False):
-        weight = self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
-        weight = weight.view(-1, self.local_out_features, self.local_in_features)
+    def forward(
+        self,
+        x: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+        *,
+        trainable_weight: torch.Tensor | None = None,
+    ):
+        # A dynamic EP backend may supply a differentiable call-local alias.
+        # The selected one-segment op still returns its dW through autograd.
+        if trainable_weight is None:
+            weight = self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
+            weight = weight.view(-1, self.local_out_features, self.local_in_features)
+        else:
+            weight = trainable_weight
         out = group_gemm(x, weight, tokens_per_expert)
 
         if self.moe_bias:

@@ -18,6 +18,7 @@ from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
 from xtuner._testing import DeterministicDDPTestCase
+from xtuner.v1.utils.dtensor import cal_total_norm
 from xtuner.v1.utils.interleaved_shard import (
     InterleavedShard,
     RuntimeLayout,
@@ -188,6 +189,47 @@ class TestInterleavedShardPostFSDP(DeterministicDDPTestCase):
             lambda _, checkpoint_tensor: checkpoint_tensor,
         )
         torch.testing.assert_close(loaded_local, local.to(global_tensor.dtype))
+
+    @property
+    def world_size(self) -> int:
+        return 8
+
+
+class TestNestedShardGradNorm(DeterministicDDPTestCase):
+    def test_cal_total_norm_for_fsdp2_ep4(self) -> None:
+        """FSDP's prepended shard and EP's shard must both contribute."""
+        self.create_pg("cuda")
+        mesh = init_device_mesh("cuda", (2, 4), mesh_dim_names=("fsdp", "ep"))
+
+        global_weight = torch.zeros(
+            GLOBAL_ROWS,
+            IN_FEATURES,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        tensor = distribute_tensor(global_weight, mesh["ep"], (Shard(0),))
+        model = _ToyGroupedLinear(tensor).cuda()
+        fully_shard(
+            model,
+            mesh=mesh["fsdp"],
+            mp_policy=MixedPrecisionPolicy(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=torch.bfloat16,
+            ),
+            reshard_after_forward=True,
+        )
+
+        inputs = torch.ones(6, IN_FEATURES, device="cuda", dtype=torch.bfloat16)
+        model(inputs).sum().backward()
+
+        assert isinstance(model.weight.grad, DTensor)
+        total_norm = cal_total_norm([model.weight.grad], foreach=True)
+        expected = torch.tensor(
+            6 * (GLOBAL_ROWS * IN_FEATURES) ** 0.5,
+            device="cuda",
+            dtype=torch.float32,
+        )
+        torch.testing.assert_close(total_norm, expected)
 
     @property
     def world_size(self) -> int:
