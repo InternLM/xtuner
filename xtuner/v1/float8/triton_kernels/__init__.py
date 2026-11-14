@@ -8,9 +8,15 @@ from xtuner.v1.utils.env_check import (
 
 if check_torch_accelerator_available() and check_triton_available():
     # Import Triton kernels only if torch.accelerator is available and Triton is installed
+    from .dual_layout_quant import (
+        per_tile_quant_with_trans_per_block,
+        per_tile_quant_with_trans_per_tile,
+    )
     from .per_block_dequant_gemm import per_block_dequant_gemm
     from .per_block_quant_gemm import per_block_quant_gemm
     from .per_tile_quant import per_tile_quant
+    from .swiglu_backward import swiglu_backward
+    from .swiglu_dual_layout_quant import swiglu_per_tile_quant_with_trans_per_block
     from .trans_per_block_quant_gemm import trans_per_block_quant_gemm
     from .trans_per_tile_quant_gemm import trans_per_tile_quant_gemm
     from .trans_quant_per_block import trans_per_block_quant_expand_128x
@@ -20,6 +26,10 @@ else:
     per_block_dequant_gemm = env_not_available_func
     per_block_quant_gemm = env_not_available_func
     per_tile_quant = env_not_available_func
+    per_tile_quant_with_trans_per_block = env_not_available_func
+    per_tile_quant_with_trans_per_tile = env_not_available_func
+    swiglu_backward = env_not_available_func
+    swiglu_per_tile_quant_with_trans_per_block = env_not_available_func
     trans_per_block_quant_gemm = env_not_available_func
     trans_per_tile_quant_gemm = env_not_available_func
     trans_per_block_quant_expand_128x = env_not_available_func
@@ -30,6 +40,10 @@ __all__ = [
     "trans_per_tile_quant_expand_128x",
     "per_block_quant_gemm",
     "per_tile_quant",
+    "per_tile_quant_with_trans_per_block",
+    "per_tile_quant_with_trans_per_tile",
+    "swiglu_backward",
+    "swiglu_per_tile_quant_with_trans_per_block",
     "trans_per_block_quant_gemm",
     "trans_per_tile_quant_gemm",
     "per_block_dequant_gemm",
