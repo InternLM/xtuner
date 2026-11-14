@@ -202,6 +202,38 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             expired_groups_retryable=getattr(strategy, "tail_batch_trigger_size", -1) >= 0,
         )
 
+    async def test_produce_counts_only_new_suffix_tokens_across_windows(self):
+        # provenance 已覆盖全部 response 版本时，generation 计数不能由版本数组长度推导。
+        task_name = "test_new_tokens"
+        strategy = AsyncProduceStrategyConfig().build()
+        state = make_rollout_state(0)
+        state.response_ids = [7, 8]
+        state.response_model_steps = [0, 0]
+
+        async def continue_generation(rollout_states, **kwargs):
+            for item in rollout_states:
+                item.response_ids = list(item.response_ids) + [9, 10]
+                item.response_model_steps = list(item.response_model_steps) + [1, 1]
+                item.status = Status.COMPLETED
+            return rollout_states
+
+        agent_loop = MagicMock()
+        agent_loop.generate_group = continue_generation
+        ctx = self._build_context(
+            strategy,
+            task_name,
+            agent_loop,
+            self._build_sampler(),
+            batch_size=1,
+            model_step=1,
+        )
+
+        await ctx.generate_group([state])
+        await ctx.put_generated_group([state])
+
+        self.assertEqual(ctx.progress.produced_tokens[task_name], 2)
+        self.assertEqual(state.extra_fields["new_response_tokens"], 2)
+
     async def test_contexts_keep_colocate_and_disagg_control_surface_separate(self):
         # 共卡 context 只表达一次本地生产窗口；update_event / abort / 绝对累计进度只属于非共卡 context。
         task_name = "test_context_surface"

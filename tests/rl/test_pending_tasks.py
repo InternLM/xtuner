@@ -38,6 +38,7 @@ class TestPendingTasks(unittest.IsolatedAsyncioTestCase):
             if isinstance(pending_tasks, set):
                 pending_tasks.add(asyncio.create_task(done()))
             else:
+
                 async def spawn_one():
                     return asyncio.create_task(done())
 
@@ -131,6 +132,68 @@ class TestPendingTasks(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(await pending_tasks.cancel_all(), 1)
         self.assertEqual(await pending_tasks.wait_and_claim(timeout_s=0), set())
+        self.assertEqual(pending_tasks.count(), 0)
+
+    async def test_close_cancels_pending_tasks_once_and_waits_for_cleanup(self):
+        # close 必须等待原任务的 finally 清理真正结束，而不是发出 cancel 就返回。
+        pending_tasks = _PendingTasks()
+        cleaned_up = asyncio.Event()
+
+        async def spawn_one():
+            async def wait_and_clean():
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    await asyncio.sleep(0.01)
+                    cleaned_up.set()
+
+            return asyncio.create_task(wait_and_clean())
+
+        self.assertTrue(
+            await pending_tasks.schedule_one(max_pending=1, should_abort=lambda: False, spawn_one=spawn_one)
+        )
+        await pending_tasks.close()
+
+        self.assertTrue(cleaned_up.is_set())
+        self.assertEqual(pending_tasks.count(), 0)
+        self.assertFalse(
+            await pending_tasks.schedule_one(max_pending=1, should_abort=lambda: False, spawn_one=spawn_one)
+        )
+
+    async def test_close_reports_cleanup_errors(self):
+        pending_tasks = _PendingTasks()
+
+        async def spawn_one():
+            async def fail_while_closing():
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    raise RuntimeError("pool cleanup failed") from None
+
+            return asyncio.create_task(fail_while_closing())
+
+        self.assertTrue(
+            await pending_tasks.schedule_one(max_pending=1, should_abort=lambda: False, spawn_one=spawn_one)
+        )
+        await asyncio.sleep(0)
+
+        with self.assertRaisesRegex(RuntimeError, "pool cleanup failed"):
+            await pending_tasks.close()
+
+    async def test_close_is_idempotent(self):
+        pending_tasks = _PendingTasks()
+
+        async def spawn_one():
+            async def wait_forever():
+                await asyncio.Event().wait()
+
+            return asyncio.create_task(wait_forever())
+
+        self.assertTrue(
+            await pending_tasks.schedule_one(max_pending=1, should_abort=lambda: False, spawn_one=spawn_one)
+        )
+        await pending_tasks.close()
+        await pending_tasks.close()
         self.assertEqual(pending_tasks.count(), 0)
 
     async def test_wait_and_claim_ignores_tasks_claimed_by_another_path(self):
