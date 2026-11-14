@@ -6,7 +6,7 @@ import importlib
 import json
 import traceback
 import uuid
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict, cast
 
 from lagent.utils import create_object
 
@@ -81,18 +81,31 @@ def _trim_to_last_assistant_turn(messages: list[dict[str, Any]]) -> list[dict[st
     return []
 
 
-def _load_train_trace_segments(artifacts: dict[str, Any]) -> list[tuple[list[dict[str, Any]], Any]]:
+class TraceRecord(TypedDict):
+    messages: list[dict[str, Any]]
+    tools: Any
+    # Older Agent recorders do not emit request ids; the loader normalizes them to an empty list.
+    request_ids: list[str]
+
+
+def _load_train_trace_segments(
+    artifacts: dict[str, Any], *, require_turn_provenance: bool = False
+) -> list[TraceRecord]:
     trace = _load_messages_artifact(artifacts)
     if not trace:
         raise ValueError("Agent artifacts must contain at least one messages trace segment.")
-    segments: list[tuple[list[dict[str, Any]], Any]] = []
+    segments: list[TraceRecord] = []
     for segment in trace:
         if not isinstance(segment, dict):
             raise TypeError("Agent messages trace segment must be a dict.")
         messages, tools = _validate_trace_segment(segment, require_tools=True)
         messages = _trim_to_last_assistant_turn(messages)
-        if messages:
-            segments.append((messages, tools))
+        if not messages:
+            continue
+        if require_turn_provenance and any(old["messages"] == messages and old["tools"] == tools for old in segments):
+            # A cancelled retry may relocate the same turn; provenance still requires one unique record.
+            raise ValueError("Provenance requires a unique messages/tools record")
+        segments.append({"messages": messages, "tools": tools, "request_ids": segment.get("request_ids", [])})
     return segments
 
 
@@ -206,6 +219,8 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
     timeout_reward: float = -1.0
     mode: Literal["train", "eval"] = "train"
     requires_rollout_proxy: bool = True
+    require_turn_provenance: bool = False
+    retire_route_on_completion: bool = False
 
     def build_local(
         self, rollout_controller: RolloutController | None = None, judger: Judger | None = None, logger=None
@@ -220,10 +235,15 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
             train_on_timeout=self.train_on_timeout,
             timeout_reward=self.timeout_reward,
             mode=self.mode,
+            require_turn_provenance=self.require_turn_provenance,
+            retire_route_on_completion=self.retire_route_on_completion,
         )
 
 
 class AgentInSandboxLoop(AgentLoop):
+    require_turn_provenance: bool = False
+    retire_route_on_completion: bool = False
+
     def __init__(
         self,
         rollout_ctl: RolloutController | None = None,
@@ -235,6 +255,8 @@ class AgentInSandboxLoop(AgentLoop):
         train_on_timeout: bool = False,
         timeout_reward: float = -1.0,
         mode: Literal["train", "eval"] = "train",
+        require_turn_provenance: bool = False,
+        retire_route_on_completion: bool = False,
     ):
         if hf_checkpoint is None:
             raise ValueError("hf_checkpoint must be provided for AgentInSandboxLoop.")
@@ -244,6 +266,8 @@ class AgentInSandboxLoop(AgentLoop):
         self.timeout_reward = timeout_reward
         self._sample_semaphore = asyncio.Semaphore(max_concurrent_samples) if max_concurrent_samples else None
         self.mode = mode
+        self.require_turn_provenance = require_turn_provenance
+        self.retire_route_on_completion = retire_route_on_completion
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         async def generate_one(state: RolloutState) -> list[RolloutState]:
@@ -299,6 +323,16 @@ class AgentInSandboxLoop(AgentLoop):
             rollout_state.error_msg = f"{type(exc).__name__}: {exc}"
             self.logger.error(f"[AgentInSandboxLoop] failed: {exc}\n{traceback.format_exc()}")
             return [rollout_state]
+        finally:
+            # This loop returns terminal Agent executions, never partial continuations. Retire HTTP ownership after
+            # runner completion/cancellation, independently of later filtering or replay consumption; the trace stays
+            # owned by completed segments and training consumers.
+            if (
+                self.retire_route_on_completion
+                and self.rollout_ctl is not None
+                and rollout_state.session_id is not None
+            ):
+                await cast(Any, self.rollout_ctl.retire_route_sessions).remote([str(rollout_state.session_id)])
 
     async def _run_item(self, item: AgentRolloutItem) -> AgentRolloutItem:
         runner = _resolve_runner(item.pipeline, str(item.uid))
@@ -343,15 +377,14 @@ class AgentInSandboxLoop(AgentLoop):
             timeout_state = await self._try_keep_timeout_sample(rollout_state, item)
             return [timeout_state or rollout_state]
 
-        segments = _load_train_trace_segments(item.artifacts)
+        segments = _load_train_trace_segments(item.artifacts, require_turn_provenance=self.require_turn_provenance)
         if not segments:
             raise ValueError("Agent artifacts must contain at least one trainable messages trace.")
 
         rollout_states: list[RolloutState] = []
         trace_store = get_store()
-        for segment_index, (messages, tools) in enumerate(segments):
-            if not messages:
-                raise ValueError("Agent artifacts must contain at least one trainable messages trace.")
+        for segment_index, record in enumerate(segments):
+            messages, tools = record["messages"], record["tools"]
             segment_state = rollout_state.model_copy(deep=True)
             segment_state.extra_fields["agent_messages"] = messages
             segment_state.extra_fields["agent_tools"] = tools
@@ -367,7 +400,12 @@ class AgentInSandboxLoop(AgentLoop):
                 add_generation_prompt=False,
             )
             prompt_text = text[:-1] if text.endswith("\n") else text
-            data = await trace_store.export_training_trace.remote(str(rollout_state.session_id), prompt_text)
+            data = await trace_store.export_training_trace.remote(
+                str(rollout_state.session_id),
+                prompt_text,
+                expected_request_ids=record["request_ids"] if self.require_turn_provenance else None,
+                require_routed_experts=self.require_turn_provenance,
+            )
             segment_state.input_ids = data["input_ids"]
             segment_state.labels = data["labels"]
             # prompt_ids/response_ids both come from the trace: the session's initial prompt
@@ -376,6 +414,11 @@ class AgentInSandboxLoop(AgentLoop):
             # because agent requests render with system/tools.
             segment_state.prompt_ids = list(data["prompt_ids"])
             segment_state.response_ids = list(data["response_ids"])
+            if self.require_turn_provenance:
+                # The trace owns the real prompt and a complete suffix version per token, including tool/history
+                # positions the model did not generate in this window.
+                segment_state.response_model_steps = data["response_model_steps"]
+                segment_state.extra_fields["request_ids"] = data["request_ids"]
             segment_state.logprobs = data["logprobs"]
             # ``routed_experts`` is a per-node list for a MoE trace or ``None`` for a dense one; trace_store's
             # ``_resolve_routed_experts`` already enforces the all-or-nothing invariant (a trace mixing MoE turns with
@@ -384,6 +427,7 @@ class AgentInSandboxLoop(AgentLoop):
             # indistinguishable from a dense trace; catching that would need the MoE-vs-dense signal the loop lacks
             # (session_server gates on ``enable_return_routed_experts``).
             segment_state.routed_experts = data["routed_experts"]
+            segment_state.routed_experts_shared = data.get("routed_experts_shared", False)
             if segment_state.response_ids:
                 segment_state.response = self.tokenizer.decode(segment_state.response_ids)
             else:
@@ -422,6 +466,7 @@ class AgentInSandboxLoop(AgentLoop):
         rollout_state.response_ids = list(data["response_ids"])
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
+        rollout_state.routed_experts_shared = data.get("routed_experts_shared", False)
         rollout_state.response = (
             self.tokenizer.decode(rollout_state.response_ids) if rollout_state.response_ids else ""
         )

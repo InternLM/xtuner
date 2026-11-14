@@ -15,6 +15,7 @@ from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 from .constants import ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY
 from .health_manager import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthManager
 from .proxy_manager import RolloutProxyManager
+from .request_publication import RequestPublication
 from .rollout_topology import RolloutTopology
 from .utils import SessionRouter
 from .worker import (
@@ -65,6 +66,11 @@ class RolloutController:
             worker_lifecycle_listeners=[self.proxy_manager] if self.proxy_manager is not None else None,
         )
         self.health_manager.start()
+        self._publication = (
+            RequestPublication(self.registry, self.health_manager, self.config.turn_resume)
+            if self.config.turn_resume is not None
+            else None
+        )
 
     def get_weight_update_targets(
         self, target_state: WorkerLifecycleState | None = None, return_group_ranks: bool = False
@@ -174,7 +180,17 @@ class RolloutController:
             ]
         )
 
+    def assert_request_gates_healthy(self) -> None:
+        """Fail fast if an admission gate or its settled-request ledger is
+        unhealthy."""
+        if self._publication is None:
+            raise RuntimeError("Turn-resume request gates are not enabled")
+        self._publication.assert_healthy()
+
     def pause_generation(self):
+        if self._publication is not None:
+            self._publication.pause()
+            return
         self.health_manager.pause()
         # Wait for the health manager to finish recovery before pausing generation.
         if not self.health_manager.wait_recovery_done(timeout=600.0):
@@ -238,7 +254,12 @@ class RolloutController:
         elif target_state is WorkerLifecycleState.INACTIVE:
             self.health_manager.notify_worker_group_inactive(updated_groups)
 
-    def continue_generation(self):
+    def continue_generation(self, model_step: int | None = None):
+        if self._publication is not None:
+            if model_step is None:
+                raise ValueError("Turn-resume requires the actual rollout model_step")
+            self._publication.publish(model_step)
+            return
         self._broadcast_to_workers("continue_generation", WorkerLifecycleState.ACTIVE)
         self.health_manager.resume()
 
@@ -255,14 +276,24 @@ class RolloutController:
     def onload_kvcache(self, target_state: WorkerLifecycleState = WorkerLifecycleState.ACTIVE):
         self._broadcast_to_workers("onload_kvcache", target_state)
 
+    def retire_route_sessions(self, session_ids: list[str]) -> None:
+        """Retire finished Agent sessions so a late retry cannot start a second
+        attempt."""
+        if self.proxy_manager is not None:
+            self.proxy_manager.retire_sessions(session_ids)
+
     def shutdown(self):
         """Shut down all rollout workers tracked by the controller."""
         self.health_manager.stop()
-        actors = self.registry.all_actors()
-        ray.get(
-            [actor.shutdown.remote(stop_session_server=True) for actor in actors],  # type: ignore[attr-defined]
-            timeout=ROLLOUT_RAY_GET_TIMEOUT,
-        )
+        try:
+            actors = self.registry.all_actors()
+            ray.get(
+                [actor.shutdown.remote(stop_session_server=True) for actor in actors],  # type: ignore[attr-defined]
+                timeout=ROLLOUT_RAY_GET_TIMEOUT,
+            )
+        finally:
+            if self.proxy_manager is not None:
+                self.proxy_manager.close()
 
     def _broadcast_to_workers(self, method_name: str, target_state: WorkerLifecycleState, **kwargs):
         workers = self.registry.get_target_state_workers(target_state)

@@ -365,6 +365,7 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
         controller.timeout_multiplier = 1.0
         controller.router = router
         controller.logger = MagicMock()
+        controller._publication = None
         return controller
 
     def _build_registry(self, ranks):
@@ -453,6 +454,7 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
 
     def test_pause_generation_waits_for_worker_recovery(self):
         controller = RolloutController.__new__(RolloutController)
+        controller._publication = None
         controller.health_manager = MagicMock()
         controller.health_manager.wait_recovery_done.return_value = True
         controller.registry = MagicMock()
@@ -468,6 +470,7 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
 
     def test_pause_generation_fails_when_worker_recovery_times_out(self):
         controller = RolloutController.__new__(RolloutController)
+        controller._publication = None
         controller.health_manager = MagicMock()
         controller.health_manager.wait_recovery_done.return_value = False
 
@@ -507,6 +510,8 @@ class TestRolloutProxyManager(unittest.TestCase):
             routed_proxy_url=self._ROUTED_PROXY_URL,
             routed_proxy_admin_url=self._ROUTED_PROXY_ADMIN_URL,
             worker_log_dir=None,
+            turn_resume=None,
+            session_affinity=False,
         )
         return RolloutProxyManager(config)
 
@@ -1271,12 +1276,8 @@ class TestRolloutHealthManager(unittest.TestCase):
             rollout_controller=MagicMock(),
             rollout_config=SimpleNamespace(weight_transport_type="checkpoint_engine"),
         )
-        manager._pending_rollout_weight_update_stop_event = SimpleNamespace(
-            wait=MagicMock(side_effect=(False, True))
-        )
-        manager._rollout_resources_available = SimpleNamespace(
-            is_set=MagicMock(side_effect=(True, False))
-        )
+        manager._pending_rollout_weight_update_stop_event = SimpleNamespace(wait=MagicMock(side_effect=(False, True)))
+        manager._rollout_resources_available = SimpleNamespace(is_set=MagicMock(side_effect=(True, False)))
         manager._rollout_weight_update_lock = SimpleNamespace(
             acquire=MagicMock(return_value=True),
             release=MagicMock(),
@@ -1659,6 +1660,7 @@ class TestRolloutHealthManager(unittest.TestCase):
         self.assertEqual(actor.check_health.calls, [()])
         self.assertEqual(actor.offload.calls, [()])
         self.assertEqual(actor.restore_skip_load_weights.calls, [()])
+
 
 class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
     async def test_preprocess_and_postprocess_preserve_response_prefix(self):
