@@ -29,6 +29,7 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     RolloutStatus,
     StageRecord,
 )
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.task_control import watch_task
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.trace import span
 from xtuner.v1.utils import get_logger
 
@@ -83,21 +84,29 @@ class Runner:
             if override:
                 _deep_merge(pool_cfg, override)
             pool = create_object(pool_cfg)
-        pool.set_cleanup_context(str(item.uid) if item.uid is not None else item.id)
-        infer_sandbox = _stage_sandbox_name(self.infer, pool)
-        infer_spec = pool.spec(infer_sandbox)
+        async with watch_task(pool._journal_dir) as stopped:
+            result = await self._run_with_pool(item, pool)
+            if stopped.is_set():
+                # A hook may swallow cancellation; never train on that result.
+                raise asyncio.CancelledError("sandbox_run_stopping")
+            return result
 
-        item.status = RolloutStatus.RUNNING
-        item.infer.sandbox_name = infer_sandbox
-        item.infer.sandbox_image = infer_spec.image
-        item.infer.workspace = infer_spec.workspace_path
-
+    async def _run_with_pool(self, item: AgentRolloutItem, pool: SandboxPool) -> AgentRolloutItem:
         tid = item.id
         uid_obs = str(item.uid) if item.uid is not None else ""
         t_acquire: float | None = None
         t_infer: float | None = None
         t_validate: float | None = None
         try:
+            pool.set_cleanup_context(str(item.uid) if item.uid is not None else item.id)
+            infer_sandbox = _stage_sandbox_name(self.infer, pool)
+            infer_spec = pool.spec(infer_sandbox)
+
+            item.status = RolloutStatus.RUNNING
+            item.infer.sandbox_name = infer_sandbox
+            item.infer.sandbox_image = infer_spec.image
+            item.infer.workspace = infer_spec.workspace_path
+
             with span(uid_obs, "run_total", task_id=tid) as total_span:
                 # ─── acquire infer sandbox ───────────────────────────────
                 t0 = time.monotonic()

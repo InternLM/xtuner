@@ -153,10 +153,13 @@ def register_cleanup() -> None:
         signal.signal(signal.SIGINT, handler)
         signal.signal(signal.SIGTERM, handler)
         return
+    owner_pid = os.getpid()
     _cleaned = False
 
-    def cleanup_once() -> None:
+    def cleanup_once(outcome: str | None = None) -> None:
         nonlocal _cleaned
+        if os.getpid() != owner_pid:
+            return  # Inherited atexit callbacks do not own the parent run.
         if not _cleaned:
             _cleaned = True
             # Also protect the atexit path if a later library replaced our
@@ -164,7 +167,22 @@ def register_cleanup() -> None:
             signal.signal(signal.SIGINT, signal_handler)
             signal.signal(signal.SIGTERM, signal_handler)
             try:
-                close_ray()
+                try:
+                    if os.environ.get("XTUNER_SANDBOX_CLEANUP_DIR"):
+                        from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import request_stop_from_environment
+
+                        if not request_stop_from_environment():
+                            logger.error("Sandbox stop barrier unconfirmed; final recovery must retry it")
+                finally:
+                    if os.environ.get("XTUNER_SANDBOX_CLEANUP_DIR"):
+                        from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import guard_ray_shutdown
+
+                        # Keep Ray shutdown on its original thread. An independent
+                        # guard recovers abandoned ledgers if it never returns.
+                        with guard_ray_shutdown(training_outcome=outcome):
+                            close_ray()
+                    else:
+                        close_ray()
             finally:
                 # Ray workers may die before their Trial finally completes.
                 # Recover only journaled IDs whose owner locks are now free.
@@ -174,18 +192,24 @@ def register_cleanup() -> None:
                     ):
                         from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import cleanup_from_environment
 
-                        if not cleanup_from_environment():
+                        if not cleanup_from_environment(finalize=True, training_outcome=outcome):
                             logger.error("Sandbox cleanup incomplete; inspect the run's cleanup-report.json")
                 except Exception as exc:
                     logger.error(f"Sandbox cleanup failed ({type(exc).__name__}); retain the run journal")
 
     def signal_handler(signum: int, frame: FrameType | None) -> None:
+        if os.getpid() != owner_pid:
+            # A forked helper must still terminate, but must never stop its
+            # parent's run or execute the parent's Ray shutdown callback.
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+            return
         if _cleaned:
             # A repeated TERM/INT must not interrupt the bounded recovery child.
             logger.info(f"Deferring signal {signum} while shutdown cleanup runs")
             return
         logger.info(f"Received signal {signum}, cleaning up...")
-        cleanup_once()
+        cleanup_once("interrupted")
         import sys
 
         sys.exit(128 + signum)

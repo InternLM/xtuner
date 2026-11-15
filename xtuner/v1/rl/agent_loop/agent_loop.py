@@ -151,7 +151,25 @@ class AgentLoopConfig(ABC, BaseModel):
             runtime_env={
                 "env_vars": {
                     key: os.environ[key]
-                    for key in ("XTUNER_SANDBOX_CLEANUP_DIR", "XTUNER_SANDBOX_PROVIDER_KEY")
+                    for key in (
+                        "XTUNER_SANDBOX_CLEANUP_DIR",
+                        "XTUNER_SANDBOX_PROVIDER_KEY",
+                        "XTUNER_SANDBOX_CLEANUP_EXIT_TIMEOUT",
+                        "XTUNER_SANDBOX_CLEANUP_FACTORY",
+                        "XTUNER_SANDBOX_RECOVERY_CONCURRENCY",
+                        "XTUNER_SANDBOX_RECOVERY_ATTEMPTS",
+                        "XTUNER_SANDBOX_RECOVERY_BACKOFF",
+                        "XTUNER_SANDBOX_RECOVERY_MAX_BACKOFF",
+                        "XTUNER_SANDBOX_RECOVERY_ATTEMPT_TIMEOUT",
+                        "XTUNER_SANDBOX_RECOVERY_BUDGET",
+                        *(
+                            [
+                                "XTUNER_SANDBOX_CLEANUP_PEERS",
+                            ]
+                            if os.environ.get("XTUNER_SANDBOX_CLEANUP_PEERS") == "1"
+                            else []
+                        ),
+                    )
                     if key in os.environ
                 }
             },
@@ -192,7 +210,25 @@ class AgentLoopConfig(ABC, BaseModel):
             runtime_env={
                 "env_vars": {
                     key: os.environ[key]
-                    for key in ("XTUNER_SANDBOX_CLEANUP_DIR", "XTUNER_SANDBOX_PROVIDER_KEY")
+                    for key in (
+                        "XTUNER_SANDBOX_CLEANUP_DIR",
+                        "XTUNER_SANDBOX_PROVIDER_KEY",
+                        "XTUNER_SANDBOX_CLEANUP_EXIT_TIMEOUT",
+                        "XTUNER_SANDBOX_CLEANUP_FACTORY",
+                        "XTUNER_SANDBOX_RECOVERY_CONCURRENCY",
+                        "XTUNER_SANDBOX_RECOVERY_ATTEMPTS",
+                        "XTUNER_SANDBOX_RECOVERY_BACKOFF",
+                        "XTUNER_SANDBOX_RECOVERY_MAX_BACKOFF",
+                        "XTUNER_SANDBOX_RECOVERY_ATTEMPT_TIMEOUT",
+                        "XTUNER_SANDBOX_RECOVERY_BUDGET",
+                        *(
+                            [
+                                "XTUNER_SANDBOX_CLEANUP_PEERS",
+                            ]
+                            if os.environ.get("XTUNER_SANDBOX_CLEANUP_PEERS") == "1"
+                            else []
+                        ),
+                    )
                     if key in os.environ
                 }
             },
@@ -476,6 +512,11 @@ class AgentLoopActor:
         *,
         rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
     ):
+        if os.environ.get("XTUNER_SANDBOX_CLEANUP_PEERS") == "1":
+            from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import start_cleanup_supervisor
+
+            start_cleanup_supervisor(peer=True)
+
         from xtuner.v1.rl.distillation import RolloutTeacherScorer
 
         self.agent_loop = agent_loop_config.build_local(

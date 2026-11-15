@@ -20,17 +20,24 @@ import sys
 import time
 import uuid
 import weakref
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TextIO
 
 
 if __package__:
+    from . import recycler, run_control
     from .finalization import CleanupError, finalize_bounded
 else:
+    import recycler
+    import run_control
     from finalization import CleanupError, finalize_bounded
 
 
-_SUPERVISOR: tuple[int, subprocess.Popen] | None = None
+_SUPERVISOR: tuple[int, str, str, bool, subprocess.Popen] | None = None
+_DRIVER_LEASE: TextIO | None = None
+_SHUTDOWN_GUARD: subprocess.Popen | None = None
 _TASKS: set[asyncio.Task] = set()
 _WRITES: set[asyncio.Task] = set()
 _LIMITS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
@@ -42,24 +49,7 @@ def _positive(value: float) -> float:
     return value
 
 
-def _atomic_json(path: Path, data: dict) -> None:
-    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    try:
-        with temporary.open("x", encoding="utf-8") as stream:
-            os.chmod(temporary, 0o600)
-            # Preserve acquisition order for dependency-aware recovery.
-            json.dump(data, stream)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        temporary.unlink(missing_ok=True)
+_atomic_json = run_control.atomic_json
 
 
 class CleanupJournal:
@@ -76,19 +66,24 @@ class CleanupJournal:
             raise ValueError("persistent cleanup requires an explicit provider key")
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
-        self.path = directory / (uuid.uuid4().hex + ".json")
-        self.lock = self.path.with_suffix(".lock").open("a")
-        fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        self.data = {
-            "version": 1,
-            "provider_key": provider_key,
-            "state": "active",
-            "resources": {},
-            "ambiguous_creates": 0,
-            "creating": False,
-        }
-        self._write_task: asyncio.Task | None = None
-        self.flush()
+        with run_control.admission(directory):
+            self.path = directory / (uuid.uuid4().hex + ".json")
+            self.lock = run_control.track_lock(self.path.with_suffix(".lock").open("a"))
+            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.data = {
+                "version": 1,
+                "provider_key": provider_key,
+                "state": "active",
+                "resources": {},
+                "ambiguous_creates": 0,
+                "creating": False,
+            }
+            self._write_task: asyncio.Task | None = None
+            try:
+                self.flush()
+            except BaseException:
+                self.lock.close()
+                raise
 
     async def write(self, method: str, *args: Any, **kwargs: Any) -> None:
         """Serialize disk writes, retaining them across coroutine cancellation.
@@ -121,7 +116,16 @@ class CleanupJournal:
         async def wait() -> None:
             await asyncio.shield(task)
 
-        await finalize_bounded(wait(), timeout_seconds=5, diagnostic={})
+        try:
+            await finalize_bounded(wait(), timeout_seconds=5, diagnostic={})
+        except CleanupError:
+            # Admission rejection is a control decision, not a disk failure.
+            # Keep its allocation marker so the outer group cannot retry it.
+            if task.done() and not task.cancelled() and isinstance(task.exception(), run_control.RunStoppingError):
+                stopped = task.exception()
+                assert stopped is not None
+                raise stopped
+            raise
 
     def flush(self) -> None:
         self.data["updated_at"] = time.time()
@@ -133,13 +137,22 @@ class CleanupJournal:
         self.data["resources"].setdefault(env_id, {"confirmed": False})
         self.flush()
 
+    def allocated(self, env_id: str) -> None:
+        """Atomically resolve the create intent before provider readiness waits."""
+        if not isinstance(env_id, str) or not env_id:
+            raise ValueError("sandbox ID must be a nonempty string")
+        self.data["resources"].setdefault(env_id, {"confirmed": False})
+        self.data["creating"] = False
+        self.flush()
+
     def confirmed(self, env_id: str) -> None:
         self.data["resources"][env_id] = {"confirmed": True}
         self.flush()
 
     def begin_create(self) -> None:
-        self.data["creating"] = True
-        self.flush()
+        with run_control.admission(self.path.parent):
+            self.data["creating"] = True
+            self.flush()
 
     def identify(self, trial_id: str) -> None:
         self.data["trial_id"] = trial_id
@@ -277,7 +290,7 @@ async def _recover(
 
 async def reconcile_file(path: Path, resolver: Callable[[str], Any], timeout: float) -> dict[str, Any]:
     """Skip live owners; an invalid journal fails this file, not the whole run."""
-    with path.with_suffix(".lock").open("a") as lock:
+    with run_control.track_lock(path.with_suffix(".lock").open("a")) as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -304,7 +317,7 @@ async def reconcile_file(path: Path, resolver: Callable[[str], Any], timeout: fl
                 and not data["ambiguous_creates"]
                 and all(row["confirmed"] for row in data["resources"].values())
             ):
-                # Periodic sweeps must not fsync every completed Trial again.
+                # Repeated sweeps must not fsync every completed Trial again.
                 return {"journal": path.name, "ok": True, "pending_ids": [], "ambiguous_creates": 0}
             result = await _recover(
                 data, lambda: resolver(data["provider_key"]), lambda: _atomic_json(path, data), timeout
@@ -322,6 +335,14 @@ def defer_cleanup(
     limit = _LIMITS.setdefault(loop, asyncio.Semaphore(8))
 
     async def work() -> dict[str, Any]:
+        factory_path = os.environ.get("XTUNER_SANDBOX_CLEANUP_FACTORY")
+        if journal is not None and factory_path:
+            queued = await asyncio.to_thread(
+                recycler.handoff_recovery, journal.path.parent, factory_path, journal.path, timeout=5
+            )
+            if not queued:
+                raise RuntimeError("Sandbox recovery handoff unconfirmed; retain journal")
+            return {"ok": False, "state": "queued", "journal": journal.path.name}
         async with limit:
             if journal is not None:
                 return await reconcile_file(journal.path, lambda _: factory(), timeout)
@@ -353,7 +374,11 @@ async def drain_cleanup_tasks(timeout: float = 30) -> bool:
 
 
 async def reconcile(
-    directory: Path, resolver: Callable[[str], Any], timeout: float, concurrency: int = 8
+    directory: Path,
+    resolver: Callable[[str], Any],
+    timeout: float,
+    concurrency: int = 8,
+    journals: list[Path] | None = None,
 ) -> dict[str, Any]:
     _positive(timeout)
     if concurrency < 1:
@@ -372,7 +397,7 @@ async def reconcile(
     # UUID filenames exclude reports/configs and scope this command to one run.
     paths = sorted(
         path
-        for path in directory.glob("*.json")
+        for path in (directory.glob("*.json") if journals is None else journals)
         if len(path.stem) == 32 and all(c in "0123456789abcdef" for c in path.stem)
     )
     rows = await asyncio.gather(*(one(path) for path in paths))
@@ -381,15 +406,15 @@ async def reconcile(
     return report
 
 
-def start_cleanup_supervisor() -> None:
-    """Start one independent recovery owner for a configured training driver.
+def start_cleanup_supervisor(*, peer: bool = False) -> None:
+    """Register a passive driver-exit witness, without periodic resource scans.
 
     The environment is explicit because only the caller knows the provider's
     backend, namespace and credentials. An incomplete configuration fails before
-    training allocates resources. The pipe stays open until process exit;
+    training allocates resources. The driver lease stays open until process exit;
     foreground fit cleanup does not stop recovery of still-live Ray workers.
     """
-    global _SUPERVISOR
+    global _SUPERVISOR, _DRIVER_LEASE
     directory = os.environ.get("XTUNER_SANDBOX_CLEANUP_DIR")
     factory = os.environ.get("XTUNER_SANDBOX_CLEANUP_FACTORY")
     if not directory and not factory:
@@ -397,19 +422,29 @@ def start_cleanup_supervisor() -> None:
     if not directory or not factory:
         raise ValueError("sandbox recovery requires both CLEANUP_DIR and CLEANUP_FACTORY")
     if _SUPERVISOR is not None and _SUPERVISOR[0] == os.getpid():
-        if _SUPERVISOR[1].poll() is not None:
+        if _SUPERVISOR[1:4] != (directory, factory, peer):
+            raise RuntimeError("A process cannot switch sandbox recovery runs or roles")
+        if run_control.is_stopping(Path(directory)):
+            raise run_control.RunStoppingError()
+        if _SUPERVISOR[4].poll() is not None:
             raise RuntimeError("sandbox recovery supervisor exited unexpectedly")
         return
     _positive(float(os.environ.get("XTUNER_SANDBOX_CLEANUP_EXIT_TIMEOUT", "180")))
-    _positive(float(os.environ.get("XTUNER_SANDBOX_CLEANUP_INTERVAL", "30")))
+    _positive(float(os.environ.get("XTUNER_SANDBOX_RAY_SHUTDOWN_TIMEOUT", "30")))
+    recycler.settings()
     path = Path(directory)
     if not path.is_absolute():
         raise ValueError("sandbox recovery directory must be absolute and shared by all workers")
     path.mkdir(parents=True, exist_ok=True)
+    if peer:
+        if not run_control.driver_alive(path) or run_control.is_stopping(path):
+            raise RuntimeError("Cannot join sandbox recovery after driver shutdown")
+    elif _DRIVER_LEASE is None or _DRIVER_LEASE.closed:
+        _DRIVER_LEASE = run_control.claim_driver(path)
     with (path / "supervisor.log").open("a") as log:
         child = subprocess.Popen(
             [sys.executable, str(Path(__file__).with_name("supervisor.py"))],
-            stdin=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=log,
             start_new_session=True,
@@ -420,14 +455,88 @@ def start_cleanup_supervisor() -> None:
         child.kill()
         child.wait(timeout=5)
         child.stdout.close()
-        assert child.stdin is not None
-        child.stdin.close()
         raise RuntimeError("sandbox recovery supervisor failed to start; inspect supervisor.log")
-    _SUPERVISOR = (os.getpid(), child)
+    child.stdout.close()
+    _SUPERVISOR = (os.getpid(), directory, factory, peer, child)
 
 
-def cleanup_from_environment() -> bool:
-    """Driver exit fallback, after Ray workers have stopped (fresh interpreter)."""
+@contextmanager
+def guard_ray_shutdown(*, training_outcome: str | None = None) -> Iterator[None]:
+    """Arm exit recovery before entering a possibly blocking Ray shutdown.
+
+    Ray keeps its original calling thread. The guard only waits on a pipe:
+    normal completion disarms it; timeout or driver death runs the bounded
+    exit sweep, respecting Pool owner locks, then hands failures to recovery.
+    """
+    global _SHUTDOWN_GUARD
+    directory = os.environ.get("XTUNER_SANDBOX_CLEANUP_DIR")
+    factory = os.environ.get("XTUNER_SANDBOX_CLEANUP_FACTORY")
+    if not directory or not factory:
+        yield
+        return
+    timeout = _positive(float(os.environ.get("XTUNER_SANDBOX_RAY_SHUTDOWN_TIMEOUT", "30")))
+    read_fd, write_fd = os.pipe()
+    try:
+        try:
+            _SHUTDOWN_GUARD = subprocess.Popen(
+                [
+                    sys.executable, str(Path(__file__).resolve()),
+                    "--directory", directory, "--factory", factory, "--finalize",
+                    "--watch-ray-fd", str(read_fd), "--watch-timeout", str(timeout),
+                    *(["--training-outcome", training_outcome] if training_outcome is not None else []),
+                ],
+                pass_fds=(read_fd,),
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            # If no guard can be launched, do not defer the only recovery
+            # opportunity until after the potentially blocking Ray call.
+            cleanup_from_environment(finalize=True, training_outcome=training_outcome)
+        finally:
+            os.close(read_fd)
+        yield
+    finally:
+        try:
+            os.write(write_fd, b"D")
+        except BrokenPipeError:
+            pass  # The guard already took over after its deadline.
+        finally:
+            os.close(write_fd)
+        if _SHUTDOWN_GUARD is not None:
+            try:
+                _SHUTDOWN_GUARD.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                pass  # Retain Popen while independent cleanup completes.
+
+
+def request_stop_from_environment() -> bool:
+    """Close creation admission in a killable child before stopping Ray workers."""
+    directory = os.environ.get("XTUNER_SANDBOX_CLEANUP_DIR")
+    factory = os.environ.get("XTUNER_SANDBOX_CLEANUP_FACTORY")
+    if not directory and not factory:
+        return True
+    if not directory:
+        return False
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--directory",
+                directory,
+                "--stop-only",
+            ],
+            timeout=10,
+            check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def cleanup_from_environment(*, finalize: bool = False, training_outcome: str | None = None) -> bool:
+    """Run one exit sweep; hand failures to the durable background recycler."""
     directory = os.environ.get("XTUNER_SANDBOX_CLEANUP_DIR")
     factory = os.environ.get("XTUNER_SANDBOX_CLEANUP_FACTORY")
     if not directory and not factory:
@@ -435,6 +544,11 @@ def cleanup_from_environment() -> bool:
     if not directory or not factory:
         return False
     timeout = _positive(float(os.environ.get("XTUNER_SANDBOX_CLEANUP_EXIT_TIMEOUT", "180")))
+    deadline = time.monotonic() + timeout
+    # The failure handoff is part of the exit budget, not an unbounded finally.
+    handoff_reserve = min(5.0, timeout * 0.2) if finalize else 0.0
+    sweep_timeout = timeout - handoff_reserve
+    confirmed = False
     try:
         result = subprocess.run(
             [
@@ -445,28 +559,204 @@ def cleanup_from_environment() -> bool:
                 "--factory",
                 factory,
                 "--timeout",
-                str(min(30, timeout / 2)),
+                str(min(30, sweep_timeout / 2)),
+                "--concurrency",
+                str(recycler.settings()["concurrency"]),
+                *(["--finalize", "--budget", str(sweep_timeout * 0.9)] if finalize else []),
+                *(["--training-outcome", training_outcome] if training_outcome is not None else []),
             ],
-            timeout=timeout,
+            timeout=sweep_timeout,
             check=False,
         )
-        return result.returncode == 0
-    except subprocess.TimeoutExpired:
-        return False
+        confirmed = result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        pass  # Durable queue handles the failed/terminated exit subprocess.
+    finally:
+        if finalize and not confirmed:
+            try:
+                if not recycler.handoff_recovery(Path(directory), factory, timeout=deadline - time.monotonic()):
+                    print("Sandbox recovery handoff unconfirmed; retain journals", file=sys.stderr)
+            except Exception as exc:
+                print(f"Sandbox recovery handoff failed ({type(exc).__name__}); retain journals", file=sys.stderr)
+    return confirmed
+
+
+def finish_training(training_outcome: str) -> None:
+    """Require confirmed cleanup on successful fit; preserve an existing training error."""
+    try:
+        confirmed = cleanup_from_environment(finalize=True, training_outcome=training_outcome)
+    except Exception:
+        if training_outcome == "succeeded":
+            raise CleanupError("cleanup_unconfirmed", "training_exit") from None
+        return
+    if not confirmed and training_outcome == "succeeded":
+        raise CleanupError("cleanup_unconfirmed", "training_exit")
+
+
+@asynccontextmanager
+async def cleanup_owner(directory: Path, budget: float) -> AsyncIterator[None]:
+    """Serialize head, peers and background attempts under one run-level lock."""
+    deadline = time.monotonic() + _positive(budget)
+    with run_control.track_lock((directory / "run-cleanup.lock").open("a")) as lock:
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise CleanupError("cleanup_owner_busy", "run_exit") from None
+                await asyncio.sleep(min(0.1, max(0, deadline - time.monotonic())))
+        yield
+
+
+async def finalize_run(
+    directory: Path,
+    resolver: Callable[[str], Any],
+    timeout: float,
+    budget: float,
+    concurrency: int = 8,
+    training_outcome: str | None = None,
+) -> dict[str, Any]:
+    """Perform one bounded exit sweep and publish the explicit training outcome."""
+    await asyncio.to_thread(run_control.request_stop, directory, "training_exit")
+    await asyncio.to_thread(
+        run_control.record_result, directory, cleanup_confirmed=False, training_outcome=training_outcome
+    )
+    async with cleanup_owner(directory, budget):
+        report = await reconcile(directory, resolver, min(timeout, budget), concurrency)
+        return await asyncio.to_thread(
+            run_control.record_result,
+            directory,
+            cleanup_confirmed=report["ok"],
+            training_outcome=training_outcome,
+            finalization_failed=not report["ok"] and training_outcome is not None,
+        )
+
+
+async def recover_queued(
+    directory: Path,
+    resolver: Callable[[str], Any],
+    timeout: float,
+    budget: float,
+    concurrency: int,
+) -> dict[str, Any]:
+    """Recover only explicit failures; acknowledge immutable request snapshots."""
+    queued = recycler.requests(directory)
+    if not queued:
+        return {"ok": True, "requests": 0}
+    rows = []
+    invalid = []
+    for path in queued:
+        try:
+            row = json.loads(path.read_text())
+            if not isinstance(row, dict):
+                raise ValueError("request must be an object")
+            name = row.get("journal")
+            if not (row.get("kind") == "exit" and name is None) and (
+                row.get("kind") != "journal"
+                or not isinstance(name, str)
+                or len(name) != 37
+                or not name.endswith(".json")
+                or any(c not in "0123456789abcdef" for c in name[:-5])
+            ):
+                raise ValueError("invalid recovery request")
+        except (OSError, ValueError) as exc:
+            # Retain the original request for inspection. One damaged entry
+            # must neither block valid work nor be acknowledged by an exit scan.
+            invalid.append({"request": path.name, "error_kind": type(exc).__name__})
+            continue
+        rows.append((path, row))
+    if not rows:
+        return {"ok": False, "requests": len(queued), "acknowledged": 0, "invalid_requests": invalid}
+    if any(row["kind"] == "exit" for _, row in rows):
+        result = await finalize_run(directory, resolver, timeout, budget, concurrency)
+        ok = result["cleanup_confirmed"]
+        acknowledged = [path for path, _ in rows] if ok else []
+    else:
+        async with cleanup_owner(directory, budget):
+            names = sorted({row["journal"] for _, row in rows})
+            result = await reconcile(directory, resolver, timeout, concurrency, [directory / name for name in names])
+            completed = {row["journal"] for row in result["results"] if row["ok"]}
+            acknowledged = [path for path, row in rows if row["journal"] in completed]
+            ok = result["ok"]
+    for path in acknowledged:
+        path.unlink(missing_ok=True)  # Unique names cannot remove a later request.
+    return {
+        "ok": ok and not invalid,
+        "requests": len(queued),
+        "acknowledged": len(acknowledged),
+        "invalid_requests": invalid,
+    }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--directory", required=True, type=Path, help="exact run-owned journal directory")
-    parser.add_argument(
-        "--factory", required=True, help="trusted module:function resolving provider_key to a NEW provider"
-    )
+    parser.add_argument("--factory", help="trusted module:function resolving provider_key to a NEW provider")
     parser.add_argument("--timeout", type=float, default=30, help="per-journal retry budget in seconds")
     parser.add_argument("--concurrency", type=int, default=8)
+    parser.add_argument("--recover-queued", action="store_true", help="one pass over explicit failed work")
+    parser.add_argument("--finalize", action="store_true", help="permanently stop creates and finalize this run")
+    parser.add_argument(
+        "--budget", type=float, default=180, help="owner-lock wait budget; caller must bound total process lifetime"
+    )
+    parser.add_argument("--training-outcome", choices=["succeeded", "failed", "interrupted"])
+    parser.add_argument("--stop-only", action="store_true", help="close admission without loading the provider")
+    parser.add_argument("--watch-ray-fd", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--watch-timeout", type=float, default=30, help=argparse.SUPPRESS)
     args = parser.parse_args()
-    module, name = args.factory.split(":", 1)
-    resolver = getattr(importlib.import_module(module), name)
-    report = asyncio.run(reconcile(args.directory, resolver, args.timeout, args.concurrency))
+    if args.watch_ray_fd is not None:
+        if not args.finalize or not args.factory or args.recover_queued or args.stop_only:
+            parser.error("--watch-ray-fd requires --finalize and --factory")
+        # No shared-filesystem operations before the drain deadline. A normal
+        # Ray return sends D; EOF means the driver disappeared mid-shutdown.
+        try:
+            ready, _, _ = select.select([args.watch_ray_fd], [], [], _positive(args.watch_timeout))
+            if ready and os.read(args.watch_ray_fd, 1) == b"D":
+                return 0
+        finally:
+            os.close(args.watch_ray_fd)
+        return 0 if cleanup_from_environment(finalize=True, training_outcome=args.training_outcome) else 1
+    if args.recover_queued and (args.finalize or args.stop_only or args.training_outcome):
+        parser.error("--recover-queued cannot be combined with exit/stop flags")
+    if args.training_outcome and not args.finalize:
+        parser.error("--training-outcome requires --finalize")
+    if args.stop_only:
+        run_control.request_stop(args.directory, "driver_shutdown")
+        return 0
+    if not args.factory:
+        parser.error("--factory is required for recovery")
+    if args.finalize:
+        run_control.request_stop(args.directory, "training_exit")
+        run_control.record_result(args.directory, cleanup_confirmed=False, training_outcome=args.training_outcome)
+    try:
+        module, name = args.factory.split(":", 1)
+        resolver = getattr(importlib.import_module(module), name)
+        if args.recover_queued:
+            report = asyncio.run(recover_queued(args.directory, resolver, args.timeout, args.budget, args.concurrency))
+            print(json.dumps(report))
+            return 0 if report["ok"] else 1
+        if args.finalize:
+            report = asyncio.run(
+                finalize_run(
+                    args.directory, resolver, args.timeout, args.budget, args.concurrency, args.training_outcome
+                )
+            )
+            print(json.dumps(report))
+            confirmed = report["success"] if args.training_outcome == "succeeded" else report["cleanup_confirmed"]
+            return 0 if confirmed else 1
+    except BaseException:
+        if args.finalize:
+            run_control.record_result(
+                args.directory, cleanup_confirmed=False, finalization_failed=args.training_outcome is not None
+            )
+        raise
+
+    async def manual_sweep() -> dict[str, Any]:
+        async with cleanup_owner(args.directory, args.budget):
+            return await reconcile(args.directory, resolver, args.timeout, args.concurrency)
+
+    report = asyncio.run(manual_sweep())
     print(json.dumps({"ok": report["ok"], "journals": len(report["results"])}))
     return 0 if report["ok"] else 1
 

@@ -1667,13 +1667,11 @@ class RLColocateTrainer(BaseRLTrainer):
         try:
             return self._fit_with_cleanup()
         finally:
-            from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import cleanup_from_environment
+            from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import finish_training
 
-            try:
-                if not cleanup_from_environment():
-                    self.logger.error("Sandbox recovery pending; supervisor will retry abandoned journals")
-            except Exception:
-                self.logger.exception("Sandbox recovery failed; retain cleanup journals")
+            error = sys.exc_info()[1]
+            outcome = "succeeded" if error is None else "failed" if isinstance(error, Exception) else "interrupted"
+            finish_training(outcome)
 
     def _fit_with_cleanup(self) -> None:
         self.rl_health_manager.start()
@@ -1681,6 +1679,10 @@ class RLColocateTrainer(BaseRLTrainer):
             self._fit()
         finally:
             original_error = sys.exc_info()[0] is not None
+            from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import request_stop_from_environment
+
+            if not request_stop_from_environment():
+                self.logger.error("Sandbox admission stop pending; final recovery will retry")
             cleanup_error = None
             if self._turn_keepalive and not self._debug_train:
                 try:
@@ -1963,13 +1965,11 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         try:
             return self._fit_with_cleanup()
         finally:
-            from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import cleanup_from_environment
+            from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import finish_training
 
-            try:
-                if not cleanup_from_environment():
-                    self.logger.error("Sandbox recovery pending; supervisor will retry abandoned journals")
-            except Exception:
-                self.logger.exception("Sandbox recovery failed; retain cleanup journals")
+            error = sys.exc_info()[1]
+            outcome = "succeeded" if error is None else "failed" if isinstance(error, Exception) else "interrupted"
+            finish_training(outcome)
 
     def _fit_with_cleanup(self) -> None:
         # 对外同步 fit；内部用 async loop 组织 producer/consumer。
@@ -2122,6 +2122,10 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 self._cur_step = train_step
                 train_step = self._cur_step + 1
         finally:
+            from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import request_stop_from_environment
+
+            if not await asyncio.to_thread(request_stop_from_environment):
+                self.logger.error("Sandbox admission stop pending; final recovery will retry")
             self.agent_loop_manager.shutdown()
             await asyncio.sleep(0)
             if not producer_task.done():

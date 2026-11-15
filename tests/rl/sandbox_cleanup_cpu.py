@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextvars
+import fcntl
 import importlib
 import importlib.util
 import json
@@ -507,6 +508,203 @@ sys.stdin.read()
                 child.kill()
                 await child.wait()
 
+    async def test_cancel_during_create_limit_does_not_leave_unknown_allocation(self):
+        pool = self.pool()
+        entered = asyncio.Event()
+
+        class Limiter:
+            async def acquire(self):
+                entered.set()
+                await asyncio.Event().wait()
+
+        pool._create_limiter = Limiter()
+        task = asyncio.create_task(pool.get("main"))
+        await asyncio.wait_for(entered.wait(), 2)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        await pool.aclose()
+        self.assertFalse(self.live)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(pool._journal.data["ambiguous_creates"], 0)
+        self.assertFalse(pool._journal.data["creating"])
+        self.assertTrue((await cleanup.reconcile(self.directory, self.provider, 0.2))["ok"])
+
+    async def test_stop_during_create_limit_prevents_post_without_unknown_allocation(self):
+        pool = self.pool()
+        entered, resume = asyncio.Event(), asyncio.Event()
+
+        class Limiter:
+            async def acquire(self):
+                entered.set()
+                await resume.wait()
+
+        pool._create_limiter = Limiter()
+        task = asyncio.create_task(pool.get("main"))
+        await asyncio.wait_for(entered.wait(), 2)
+        cleanup.run_control.request_stop(self.directory, "test")
+        resume.set()
+        with self.assertRaises(cleanup.run_control.RunStoppingError):
+            await task
+        await pool.aclose()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(pool._journal.data["ambiguous_creates"], 0)
+        self.assertTrue((await cleanup.reconcile(self.directory, self.provider, 0.2))["ok"])
+
+    async def test_invalid_create_parameters_do_not_open_intent(self):
+        pool = self.pool()
+        with patch.dict(os.environ, {"SANDBOX_PROVIDER_USER": ""}):
+            with self.assertRaises(ValueError) as error:
+                await pool.get("main")
+        self.assertEqual(error.exception.allocation_state, "not_allocated")
+        await pool.aclose()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(pool._journal.data["ambiguous_creates"], 0)
+
+    async def test_allocation_callback_failure_retains_id_for_final_delete(self):
+        pool = self.pool()
+        original = pool._provider.create
+        pool._provider.supports_allocation_callback = True
+
+        async def create(*, on_allocated, **kwargs):
+            client, env_id = await original(**kwargs)
+            await on_allocated(env_id)
+            raise AssertionError("readiness must not run after callback failure")
+
+        pool._provider.create = create
+        with patch.object(cleanup.CleanupJournal, "allocated", side_effect=OSError("disk unavailable")):
+            with self.assertRaises(CleanupError):
+                await pool.get("main")
+        self.assertEqual(len(self.live), 1)
+        await pool.aclose()
+        self.assertFalse(self.live)
+        self.assertEqual(pool._journal.data["ambiguous_creates"], 0)
+        self.assertTrue((await cleanup.reconcile(self.directory, self.provider, 0.2))["ok"])
+
+    async def test_crash_during_provider_readiness_recovers_callback_id(self):
+        code = """
+import asyncio, sys
+sys.path.insert(0, sys.argv[1])
+from sandbox_cleanup_cpu import Provider, sandbox, schemas
+class PendingProvider(Provider):
+    supports_allocation_callback = True
+    async def create(self, *, on_allocated, **kwargs):
+        client, env_id = await super().create(**kwargs)
+        await on_allocated(env_id)
+        print(env_id, flush=True)
+        await asyncio.Event().wait()
+async def main():
+    pool = sandbox.SandboxPool(provider=PendingProvider(int(sys.argv[3])), close_provider=True,
+        specs={'main': schemas.SandboxSpec(image='main', user='test')}, creates_per_sec=None,
+        cleanup_dir=sys.argv[2], cleanup_provider_key='gateway-test')
+    await pool.get('main')
+asyncio.run(main())
+"""
+        child = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", code, str(Path(__file__).parent), str(self.directory), str(self.port),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            env_id = (await asyncio.wait_for(child.stdout.readline(), 5)).decode().strip()
+            self.assertIn(env_id, self.live)
+            path = next(p for p in self.directory.glob("*.json") if len(p.stem) == 32)
+            data = json.loads(path.read_text())
+            self.assertIn(env_id, data["resources"])
+            self.assertFalse(data["creating"])
+            self.assertFalse((await cleanup.reconcile(self.directory, self.provider, 0.2))["ok"])
+            self.assertIn(env_id, self.live)
+            child.kill()
+            await child.wait()
+            self.assertTrue((await cleanup.reconcile(self.directory, self.provider, 0.2))["ok"])
+            self.assertFalse(self.live)
+        finally:
+            if child.returncode is None:
+                child.kill()
+            await child.wait()
+
+    async def test_exit_handoff_lock_wait_obeys_total_budget_and_retains_journal(self):
+        journal = cleanup.CleanupJournal(self.directory, "gateway-test")
+        journal.created("retained")
+        journal.detach()
+        self.live.add("retained")
+        env = self._recovery_environment()
+        env.update(XTUNER_SANDBOX_CLEANUP_FACTORY="missing_test_factory:resolve",
+                   XTUNER_SANDBOX_CLEANUP_EXIT_TIMEOUT="0.6")
+        with cleanup.recycler.queue_gate(self.directory), patch.dict(os.environ, env):
+            started = time.monotonic()
+            confirmed = await asyncio.to_thread(cleanup.cleanup_from_environment, finalize=True)
+            elapsed = time.monotonic() - started
+        self.assertFalse(confirmed)
+        self.assertLess(elapsed, 1.6)
+        self.assertFalse(json.loads(journal.path.read_text())["resources"]["retained"]["confirmed"])
+        self.assertTrue((await cleanup.reconcile(self.directory, self.provider, 0.2))["ok"])
+        self.assertFalse(self.live)
+
+    async def test_handoff_bounds_stalled_fsync_and_can_resume(self):
+        journal = cleanup.CleanupJournal(self.directory, "gateway-test")
+        journal.created("retained")
+        journal.detach()
+        self.live.add("retained")
+        site = self.directory / "sitecustomize.py"
+        marker = self.directory / "fsync-entered"
+        site.write_text(
+            "import os, time\nfrom pathlib import Path\n"
+            "def blocked(fd):\n"
+            f"    Path({str(marker)!r}).touch()\n"
+            "    time.sleep(60)\n"
+            "os.fsync = blocked\n"
+        )
+        env = self._recovery_environment()
+        with patch.dict(os.environ, env):
+            started = time.monotonic()
+            confirmed = await asyncio.to_thread(
+                cleanup.recycler.handoff_recovery, self.directory, "recovery_fixture:resolve", journal.path,
+                timeout=0.7,
+            )
+        self.assertTrue(marker.exists())
+        self.assertFalse(confirmed)
+        self.assertLess(time.monotonic() - started, 1.7)
+        self.assertTrue(journal.path.exists())
+        site.unlink()
+        with patch.dict(os.environ, env):
+            self.assertTrue(await asyncio.to_thread(
+                cleanup.recycler.handoff_recovery, self.directory, "recovery_fixture:resolve", journal.path,
+                timeout=3,
+            ))
+        await self._wait_deleted("retained")
+        await self._wait_recycler_idle()
+
+    async def test_handoff_launch_failure_preserves_queued_request(self):
+        journal = cleanup.CleanupJournal(self.directory, "gateway-test")
+        journal.created("retained")
+        journal.detach()
+        self.live.add("retained")
+        site = self.directory / "sitecustomize.py"
+        site.write_text(
+            "import subprocess\noriginal = subprocess.Popen\n"
+            "def launch(args, *a, **kw):\n"
+            "    if '--lease-fd' in args: raise OSError('injected launch failure')\n"
+            "    return original(args, *a, **kw)\n"
+            "subprocess.Popen = launch\n"
+        )
+        env = self._recovery_environment()
+        with patch.dict(os.environ, env):
+            self.assertFalse(await asyncio.to_thread(
+                cleanup.recycler.handoff_recovery, self.directory, "recovery_fixture:resolve", journal.path,
+                timeout=3,
+            ))
+        self.assertEqual(len(cleanup.recycler.requests(self.directory)), 1)
+        self.assertTrue(journal.path.exists())
+        site.unlink()
+        with patch.dict(os.environ, env):
+            self.assertTrue(await asyncio.to_thread(
+                cleanup.recycler.handoff_recovery, self.directory, "recovery_fixture:resolve", journal.path,
+                timeout=3,
+            ))
+        await self._wait_deleted("retained")
+        await self._wait_recycler_idle()
+        self.assertEqual(cleanup.recycler.requests(self.directory), [])
+
     async def test_unknown_create_never_reports_cleanup_success(self):
         journal = cleanup.CleanupJournal(self.directory, "gateway-test")
         journal.begin_create()
@@ -564,6 +762,309 @@ sys.stdin.read()
         exits[0]()
         self.assertEqual(events, ["ray-close-start", "ray-close-finish"])
 
+        # A configured signal path closes admission before Ray, then records
+        # interruption in final recovery. The atexit callback remains idempotent.
+        handlers.clear()
+        exits.clear()
+        events.clear()
+        namespace["_cleanup_registration"] = None
+        namespace["os"].environ = {"XTUNER_SANDBOX_CLEANUP_DIR": str(self.directory)}
+
+        def stop():
+            events.append("stop")
+            return True
+
+        def recover(**kwargs):
+            self.assertEqual(kwargs, {"finalize": True, "training_outcome": "interrupted"})
+            events.append("recover")
+            return True
+
+        with (
+            patch.object(cleanup, "request_stop_from_environment", stop),
+            patch.object(cleanup, "cleanup_from_environment", recover),
+        ):
+            namespace["register_cleanup"]()
+            with self.assertRaises(SystemExit) as captured:
+                handlers[15](15, None)
+            self.assertEqual(captured.exception.code, 143)
+            exits[0]()
+        self.assertEqual(events, ["stop", "ray-close-start", "ray-close-finish", "recover"])
+
+    async def test_rollback_must_confirm_release_before_retry(self):
+        for failure in ("delete", "confirmation"):
+            with self.subTest(failure=failure):
+                pool = self.pool()
+                pool._max_attempts = 2
+                checks = 0
+                before = self.next_id
+
+                async def first_unhealthy(client):
+                    nonlocal checks
+                    checks += 1
+                    return checks > 1
+
+                pool._wait_healthy = first_unhealthy
+                self.fail_delete = failure == "delete"
+                self.accept_only = failure == "confirmation"
+                with self.assertRaisesRegex(RuntimeError, "unhealthy"):
+                    await pool.get("main")
+                self.assertEqual(self.next_id - before, 1)
+                self.assertEqual(pool._pending_delete_ids, {f"dep-{before + 1}"})
+                self.assertIn(f"dep-{before + 1}", self.live)
+                self.fail_delete = False
+                self.accept_only = False
+                await pool.aclose()
+                self.assertFalse(self.live)
+
+    async def test_confirmed_rollback_still_allows_retry(self):
+        pool = self.pool()
+        pool._max_attempts = 2
+        checks = 0
+
+        async def first_unhealthy(client):
+            nonlocal checks
+            checks += 1
+            return checks > 1
+
+        pool._wait_healthy = first_unhealthy
+        await pool.get("main")
+        posts = [key for method, key in self.calls if method == "POST"]
+        self.assertEqual(posts, ["dep", "dep", "main"])
+        self.assertNotIn("dep-1", self.live)
+        self.assertFalse(pool._pending_delete_ids)
+        await pool.aclose()
+        self.assertFalse(self.live)
+
+    async def test_corrupt_requests_do_not_block_or_get_acknowledged(self):
+        queue = self.directory / "recovery-requests"
+        queue.mkdir()
+        for i, content in enumerate(("{broken", "null", "[]", '{"kind":"journal","journal":"../bad"}')):
+            (queue / f"bad-{i}.json").write_text(content)
+        # Test both journal-only recovery and an exit sweep. Neither may
+        # acknowledge corrupt requests just because valid resources are gone.
+        for kind in ("journal", "exit"):
+            journal = cleanup.CleanupJournal(self.directory, "gateway-test")
+            journal.allocated(kind)
+            journal.detach()
+            self.live.add(kind)
+            valid = queue / "valid.json"
+            valid.write_text(json.dumps({"kind": kind, "journal": journal.path.name if kind == "journal" else None}))
+            result = await cleanup.recover_queued(self.directory, self.provider, .4, 2, 8)
+            self.assertFalse(result["ok"])
+            self.assertEqual(len(result["invalid_requests"]), 4)
+            self.assertEqual(result["acknowledged"], 1)
+            self.assertFalse(valid.exists())
+            self.assertFalse(self.live)
+            self.assertEqual(len(list(queue.glob("*.json"))), 4)
+        result = await cleanup.recover_queued(self.directory, self.provider, .4, 2, 8)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["acknowledged"], 0)
+
+    async def test_witness_retries_io_errors_without_false_driver_death(self):
+        environment = self._recovery_environment()
+        # Test the actual supervisor process, after READY. The second probe
+        # checks that the first error never initiated a premature exit sweep.
+        code = '''
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import supervisor
+calls = 0
+def probe(directory):
+    global calls
+    calls += 1
+    if calls <= 2:
+        assert not (directory / 'stop.requested.json').exists()
+        raise OSError('transient lease I/O')
+    if calls == 3:
+        assert not (directory / 'stop.requested.json').exists()
+        return True
+    return False
+supervisor.driver_alive = probe
+raise SystemExit(supervisor.main())
+'''
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", code, str(SOURCE), env=environment,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), 10)
+        self.assertEqual(proc.returncode, 0, stderr.decode())
+        self.assertTrue(stdout.startswith(b"READY\n"))
+        self.assertTrue((self.directory / "stop.requested.json").exists())
+        self.assertEqual(stderr.count(b"Driver lease probe failed"), 2)
+        self.assertFalse(cleanup.recycler.requests(self.directory))
+
+    async def test_forked_signal_and_atexit_callbacks_do_not_stop_parent(self):
+        code = '''
+import ast, atexit, logging, os, signal, sys, time
+from types import FrameType
+from pathlib import Path
+import sandbox_cleanup_cpu as runtime
+source = runtime.ROOT / 'xtuner/v1/rl/utils/ray_utils.py'
+node = next(n for n in ast.parse(source.read_text()).body if isinstance(n, ast.FunctionDef) and n.name == 'register_cleanup')
+callbacks = []
+import types
+scope = dict(os=os, signal=signal, FrameType=FrameType, atexit=types.SimpleNamespace(register=callbacks.append),
+             logger=logging.getLogger('test'), close_ray=lambda: None, _cleanup_registration=None)
+exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), 'exec'), scope)
+lease = runtime.cleanup.run_control.claim_driver(Path(sys.argv[1]))
+scope['register_cleanup']()
+for mode in ('signal', 'atexit'):
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        if mode == 'atexit':
+            callbacks[0]()
+            os._exit(0)
+        os.write(write_fd, b'R')
+        os.close(write_fd)
+        while True: time.sleep(.1)
+    os.close(write_fd)
+    if mode == 'signal':
+        assert os.read(read_fd, 1) == b'R'
+        os.kill(pid, signal.SIGTERM)
+    os.close(read_fd)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == (-15 if mode == 'signal' else 0)
+    assert runtime.cleanup.run_control.driver_alive(Path(sys.argv[1]))
+    assert not Path(sys.argv[1], 'stop.requested.json').exists()
+    assert not Path(sys.argv[1], 'run-cleanup.json').exists()
+print('fork callbacks isolated', flush=True)
+'''
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", code, str(self.directory), env=self._recovery_environment(),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), 10)
+        self.assertEqual(proc.returncode, 0, stderr.decode())
+        self.assertIn(b"fork callbacks isolated", stdout)
+        self.assertFalse(self.calls)
+
+    async def test_ray_shutdown_guard_disarms_after_normal_drain(self):
+        journal = cleanup.CleanupJournal(self.directory, "gateway-test")
+        journal.allocated("normal-drain")
+        journal.detach()
+        self.live.add("normal-drain")
+        environment = self._recovery_environment()
+        environment["XTUNER_SANDBOX_RAY_SHUTDOWN_TIMEOUT"] = ".3"
+        with patch.dict(os.environ, environment):
+            with cleanup.guard_ray_shutdown(training_outcome="interrupted"):
+                pass
+        await asyncio.sleep(.5)
+        self.assertIn("normal-drain", self.live)
+        self.assertFalse(self.calls)
+        self.assertFalse(cleanup.recycler.requests(self.directory))
+        self.assertFalse((self.directory / "stop.requested.json").exists())
+        self.assertEqual(cleanup._SHUTDOWN_GUARD.poll(), 0)
+        await cleanup.reconcile(self.directory, self.provider, .4)
+
+    async def test_blocked_ray_shutdown_recovers_with_driver_alive_and_protects_live_pool(self):
+        journal = cleanup.CleanupJournal(self.directory, "gateway-test")
+        journal.allocated("abandoned-before-ray-drain")
+        journal.detach()
+        self.live.add("abandoned-before-ray-drain")
+        active = cleanup.CleanupJournal(self.directory, "gateway-test")
+        active.allocated("still-owned")
+        self.live.add("still-owned")
+        environment = self._recovery_environment()
+        environment["XTUNER_SANDBOX_RAY_SHUTDOWN_TIMEOUT"] = ".2"
+        code = '''
+import ast, atexit, logging, os, signal, sys, time
+from types import FrameType
+from pathlib import Path
+import sandbox_cleanup_cpu as runtime
+source = runtime.ROOT / 'xtuner/v1/rl/utils/ray_utils.py'
+node = next(n for n in ast.parse(source.read_text()).body if isinstance(n, ast.FunctionDef) and n.name == 'register_cleanup')
+def close_ray():
+    Path(sys.argv[1], 'ray-entered').touch()
+    time.sleep(60)
+scope = dict(os=os, signal=signal, FrameType=FrameType, atexit=atexit, logger=logging.getLogger('test'),
+             close_ray=close_ray, _cleanup_registration=None)
+exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), 'exec'), scope)
+lease = runtime.cleanup.run_control.claim_driver(Path(sys.argv[1]))
+scope['register_cleanup']()
+print('READY', flush=True)
+while True: time.sleep(.1)
+'''
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", code, str(self.directory), env=environment,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            import signal
+            self.assertEqual(await asyncio.wait_for(proc.stdout.readline(), 10), b"READY\n")
+            proc.send_signal(signal.SIGTERM)
+            async with asyncio.timeout(5):
+                while not (self.directory / "ray-entered").exists():
+                    await asyncio.sleep(.02)
+            proc.send_signal(signal.SIGTERM)
+            await self._wait_deleted("abandoned-before-ray-drain")
+            self.assertIsNone(proc.returncode, "Blocked driver must still be alive at recovery")
+            self.assertTrue(cleanup.run_control.driver_alive(self.directory))
+            self.assertIn("still-owned", self.live)
+            self.assertNotIn(("DELETE", "still-owned"), self.calls)
+            # The failed exit sweep retains the active ledger in the durable
+            # queue; later release allows the recycler to finish it.
+            async with asyncio.timeout(5):
+                while not cleanup.recycler.requests(self.directory):
+                    await asyncio.sleep(.02)
+            active.detach()
+            await self._wait_deleted("still-owned")
+            await self._wait_recycler_idle()
+            result = json.loads((self.directory / "run-cleanup.json").read_text())
+            self.assertTrue(result["cleanup_confirmed"])
+            self.assertEqual(result["training_outcome"], "interrupted")
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+            await asyncio.wait_for(proc.communicate(), 5)
+            active.lock.close()
+
+    async def test_shutdown_guard_recovers_on_pipe_eof_before_deadline(self):
+        journal = cleanup.CleanupJournal(self.directory, "gateway-test")
+        journal.allocated("driver-died-in-drain")
+        journal.detach()
+        self.live.add("driver-died-in-drain")
+        environment = self._recovery_environment()
+        environment["XTUNER_SANDBOX_RAY_SHUTDOWN_TIMEOUT"] = "60"
+        code = """
+from sandbox_cleanup_cpu import cleanup
+with cleanup.guard_ray_shutdown(training_outcome='interrupted'):
+    print('READY', flush=True)
+    import time
+    time.sleep(60)
+"""
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", code, env=environment,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            self.assertEqual(await asyncio.wait_for(proc.stdout.readline(), 10), b"READY\n")
+            proc.kill()
+            await self._wait_deleted("driver-died-in-drain")
+            # The guard inherited stdout. Drain EOF as well as reaping the
+            # driver, so its transport cannot outlive this test's event loop.
+            await asyncio.wait_for(proc.communicate(), 5)
+            self.assertEqual(proc.returncode, -9)
+            self.assertFalse(cleanup.recycler.requests(self.directory))
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+
+    async def test_shutdown_guard_launch_failure_runs_recovery_before_ray(self):
+        events = []
+        environment = self._recovery_environment()
+        with (
+            patch.dict(os.environ, environment),
+            patch.object(cleanup.subprocess, "Popen", side_effect=OSError("cannot spawn guard")),
+            patch.object(cleanup, "cleanup_from_environment", side_effect=lambda **kw: events.append("recover")),
+        ):
+            with cleanup.guard_ray_shutdown(training_outcome="interrupted"):
+                events.append("ray")
+        self.assertEqual(events, ["recover", "ray"])
+
     async def test_completed_journal_is_not_rewritten_by_periodic_scan(self):
         journal = cleanup.CleanupJournal(self.directory, "gateway-test")
         journal.created("done")
@@ -608,7 +1109,7 @@ sys.stdin.read()
         self.assertEqual(calls, 1)
         await pool.aclose()
 
-    async def _supervised_driver(self):
+    def _recovery_environment(self):
         (self.directory / "recovery_fixture.py").write_text(
             "import os\nfrom sandbox_cleanup_cpu import Provider\n"
             "def resolve(key):\n"
@@ -621,9 +1122,18 @@ sys.stdin.read()
             "CLEANUP_TEST_PORT": str(self.port),
             "XTUNER_SANDBOX_CLEANUP_DIR": str(self.directory),
             "XTUNER_SANDBOX_CLEANUP_FACTORY": "recovery_fixture:resolve",
-            "XTUNER_SANDBOX_CLEANUP_INTERVAL": "0.1",
             "XTUNER_SANDBOX_CLEANUP_EXIT_TIMEOUT": "3",
+            "XTUNER_SANDBOX_RECOVERY_ATTEMPT_TIMEOUT": "2",
+            "XTUNER_SANDBOX_RECOVERY_BUDGET": "8",
+            "XTUNER_SANDBOX_RECOVERY_ATTEMPTS": "3",
+            "XTUNER_SANDBOX_RECOVERY_BACKOFF": ".1",
+            "XTUNER_SANDBOX_RECOVERY_MAX_BACKOFF": ".2",
         }
+        return environment
+
+    async def _supervised_driver(self):
+        environment = self._recovery_environment()
+        self.supervisor_environment = environment
         code = """
 import sys
 sys.path.insert(0, sys.argv[1])
@@ -632,6 +1142,8 @@ cleanup.start_cleanup_supervisor()
 cleanup.start_cleanup_supervisor()
 j = cleanup.CleanupJournal(sys.argv[2], 'gateway-test')
 j.created('active-driver')
+from pathlib import Path
+Path(sys.argv[2], 'driver-witness.pid').write_text(str(cleanup._SUPERVISOR[4].pid))
 print('ready', flush=True)
 sys.stdin.read()
 """
@@ -655,6 +1167,146 @@ sys.stdin.read()
             while env_id in self.live:
                 await asyncio.sleep(0.05)
 
+    async def _wait_recycler_idle(self):
+        async with asyncio.timeout(25):
+            while True:
+                with (self.directory / "recovery-worker.lock").open("a") as lease:
+                    try:
+                        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        return
+                    except BlockingIOError:
+                        pass
+                await asyncio.sleep(0.05)
+
+    async def test_exit_sweeps_serialize_and_limit_delete_concurrency(self):
+        for index in range(6):
+            journal = cleanup.CleanupJournal(self.directory, "gateway-test")
+            env_id = f"orphan-{index}"
+            journal.created(env_id)
+            journal.detach()
+            self.live.add(env_id)
+        running, peak = 0, 0
+        original_provider = self.provider
+
+        def resolve(key):
+            provider = original_provider(key)
+            original_delete = provider.delete
+
+            async def delete(env_id):
+                nonlocal running, peak
+                running += 1
+                peak = max(peak, running)
+                try:
+                    await asyncio.sleep(0.05)
+                    await original_delete(env_id)
+                finally:
+                    running -= 1
+
+            provider.delete = delete
+            return provider
+
+        reports = await asyncio.gather(
+            cleanup.finalize_run(self.directory, resolve, 2, 5, concurrency=2),
+            cleanup.finalize_run(self.directory, resolve, 2, 5, concurrency=2),
+        )
+        self.assertTrue(all(report["cleanup_confirmed"] for report in reports))
+        self.assertEqual(peak, 2)
+        self.assertFalse(self.live)
+        self.assertEqual(len([call for call in self.calls if call[0] == "DELETE"]), 6)
+
+    async def test_recycler_singleton_only_handles_explicit_failures(self):
+        environment = self._recovery_environment()
+        journals = []
+        for index in range(7):
+            journal = cleanup.CleanupJournal(self.directory, "gateway-test")
+            env_id = f"queued-{index}"
+            journal.created(env_id)
+            journal.detach()
+            self.live.add(env_id)
+            journals.append(journal)
+        # Parent enqueue calls are synchronous; worker lease remains inherited
+        # while its HTTP requests wait for this event loop to run again.
+        launched = []
+        popen = cleanup.recycler.subprocess.Popen
+
+        def launch(*args, **kwargs):
+            process = popen(*args, **kwargs)
+            launched.append(process)
+            return process
+
+        with patch.dict(os.environ, environment), patch.object(cleanup.recycler.subprocess, "Popen", launch):
+            for journal in journals[:6]:
+                cleanup.recycler.request_recovery(self.directory, "recovery_fixture:resolve", journal.path)
+        self.assertEqual(len(launched), 1)
+        await self._wait_recycler_idle()
+        await asyncio.to_thread(launched[0].wait, 5)
+        self.assertEqual(launched[0].returncode, 0)
+        self.assertEqual(self.live, {"queued-6"})
+        self.assertFalse(cleanup.recycler.requests(self.directory))
+        self.assertEqual(len([call for call in self.calls if call[0] == "DELETE"]), 6)
+        self.assertFalse((self.directory / "stop.requested.json").exists())
+
+    async def test_failed_exit_retries_with_backoff_and_retains_exhausted_work(self):
+        journal = cleanup.CleanupJournal(self.directory, "gateway-test")
+        journal.created("exit-failure")
+        journal.detach()
+        self.live.add("exit-failure")
+        self.fail_delete = True
+        environment = self._recovery_environment()
+        environment.update(
+            {
+                "XTUNER_SANDBOX_CLEANUP_EXIT_TIMEOUT": "6",
+                "XTUNER_SANDBOX_RECOVERY_ATTEMPT_TIMEOUT": "4",
+                "XTUNER_SANDBOX_RECOVERY_BUDGET": "20",
+                "XTUNER_SANDBOX_RECOVERY_BACKOFF": ".2",
+                "XTUNER_SANDBOX_RECOVERY_MAX_BACKOFF": ".4",
+            }
+        )
+        with patch.dict(os.environ, environment):
+            confirmed = await asyncio.to_thread(
+                cleanup.cleanup_from_environment, finalize=True, training_outcome="succeeded"
+            )
+            self.assertFalse(confirmed)
+            await self._wait_recycler_idle()
+            status = json.loads((self.directory / "recovery-status.json").read_text())
+            self.assertEqual(status["status"], "exhausted")
+            history = status["history"]
+            self.assertEqual(len(history), 3)
+            for index, (before, after) in enumerate(zip(history, history[1:])):
+                self.assertGreaterEqual(after["started_at"] - before["finished_at"], 0.16 * 2**index)
+                self.assertLessEqual(before["next_delay_seconds"], 0.4)
+            self.assertTrue(cleanup.recycler.requests(self.directory))
+            self.assertIn("exit-failure", self.live)
+            self.assertFalse(json.loads(journal.path.read_text())["resources"]["exit-failure"]["confirmed"])
+            # A later explicit handoff restarts recovery with a fresh connection.
+            self.fail_delete = False
+            cleanup.recycler.request_recovery(self.directory, "recovery_fixture:resolve")
+            await self._wait_recycler_idle()
+        self.assertFalse(self.live)
+        self.assertFalse(cleanup.recycler.requests(self.directory))
+        report = json.loads((self.directory / "run-cleanup.json").read_text())
+        self.assertTrue(report["cleanup_confirmed"])
+        self.assertTrue(report["finalization_failed"])
+        self.assertFalse(report["success"])
+
+    async def test_pool_failure_hands_off_to_durable_recycler(self):
+        environment = self._recovery_environment()
+        self.fail_delete = True
+        with patch.dict(os.environ, environment):
+            pool = self.pool(recovery=False)
+            await pool.get("main")
+            with self.assertRaises(CleanupError):
+                await pool.aclose()
+            await cleanup.drain_cleanup_tasks(3)
+            self.assertTrue(cleanup.recycler.requests(self.directory))
+            self.assertTrue(pool._journal.lock.closed)
+            self.assertTrue(pool._provider.closed)
+            self.fail_delete = False
+            await self._wait_recycler_idle()
+        self.assertFalse(self.live)
+        self.assertFalse(cleanup.recycler.requests(self.directory))
+        self.assertFalse((self.directory / "stop.requested.json").exists())
+
     async def test_supervisor_recovers_driver_sigkill_automatically(self):
         driver = await self._supervised_driver()
         try:
@@ -664,19 +1316,123 @@ sys.stdin.read()
             await driver.wait()
             await self._wait_deleted("active-driver")
             self.assertEqual(driver.returncode, -9)
+            await asyncio.sleep(0.3)
+            self.assertFalse(
+                (self.directory / "recovery-worker.lock").exists(),
+                "Successful exit sweep must not enqueue background retries",
+            )
         finally:
             if driver.returncode is None:
                 driver.kill()
                 await driver.wait()
             await asyncio.sleep(0.2)
 
-    async def test_supervisor_recovers_orphan_while_driver_and_trial_live(self):
+    async def test_exit_witness_bounds_admission_lock_and_hands_off(self):
+        journal = cleanup.CleanupJournal(self.directory, "gateway-test")
+        journal.allocated("blocked-admission")
+        journal.detach()
+        self.live.add("blocked-admission")
+        # An unlocked registered lease is exactly the state after driver death.
+        (self.directory / "driver.started.json").write_text("{}")
+        environment = self._recovery_environment()
+        environment["XTUNER_SANDBOX_CLEANUP_EXIT_TIMEOUT"] = "1.5"
+        with (self.directory / "admission.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_SH)
+            witness = await asyncio.create_subprocess_exec(
+                sys.executable, str(SOURCE / "supervisor.py"), env=environment,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                self.assertEqual(await asyncio.wait_for(witness.stdout.readline(), 10), b"READY\n")
+                started = time.monotonic()
+                await asyncio.wait_for(witness.wait(), 4)
+                self.assertLess(time.monotonic() - started, 3)
+                self.assertEqual(witness.returncode, 1)
+                self.assertFalse((self.directory / "stop.requested.json").exists())
+                self.assertTrue(cleanup.recycler.requests(self.directory))
+                self.assertIn("blocked-admission", self.live)
+            finally:
+                if witness.returncode is None:
+                    witness.kill()
+                    await witness.wait()
+        await self._wait_deleted("blocked-admission")
+        await self._wait_recycler_idle()
+        self.assertTrue(json.loads((self.directory / "run-cleanup.json").read_text())["cleanup_confirmed"])
+
+    async def test_recycler_total_budget_covers_status_and_cleanup_child_fsync(self):
+        for target in ("status", "journal"):
+            with self.subTest(blocked_write=target):
+                first = cleanup.CleanupJournal(self.directory, "gateway-test")
+                first.allocated("first-" + target)
+                first.detach()
+                self.live.add("first-" + target)
+                site = self.directory / "sitecustomize.py"
+                marker = self.directory / (target + "-fsync-entered")
+                role = "--run-worker" if target == "status" else "--recover-queued"
+                prefix = "recovery-status.json." if target == "status" else first.path.name + "."
+                site.write_text(
+                    "import os, sys, time\nfrom pathlib import Path\noriginal = os.fsync\n"
+                    "def blocked(fd):\n"
+                    f"    if {role!r} in sys.argv and Path(os.readlink('/proc/self/fd/' + str(fd))).name.startswith({prefix!r}):\n"
+                    f"        Path({str(marker)!r}).write_text(str(os.getpid()))\n"
+                    "        time.sleep(60)\n"
+                    "    return original(fd)\n"
+                    "os.fsync = blocked\n"
+                )
+                environment = self._recovery_environment()
+                environment.update(XTUNER_SANDBOX_RECOVERY_BUDGET="2",
+                                   XTUNER_SANDBOX_RECOVERY_ATTEMPT_TIMEOUT="10")
+                with patch.dict(os.environ, environment):
+                    self.assertTrue(await asyncio.to_thread(
+                        cleanup.recycler.handoff_recovery, self.directory, "recovery_fixture:resolve",
+                        first.path, timeout=3,
+                    ))
+                    async with asyncio.timeout(5):
+                        while not marker.exists():
+                            await asyncio.sleep(.02)
+                    # A second handoff succeeds while the stalled worker owns
+                    # the lease. Its request must survive budget termination.
+                    second = cleanup.CleanupJournal(self.directory, "gateway-test")
+                    second.allocated("second-" + target)
+                    second.detach()
+                    self.live.add("second-" + target)
+                    self.assertTrue(await asyncio.to_thread(
+                        cleanup.recycler.handoff_recovery, self.directory, "recovery_fixture:resolve",
+                        second.path, timeout=3,
+                    ))
+                    started = time.monotonic()
+                    await asyncio.wait_for(self._wait_recycler_idle(), 4)
+                    self.assertLess(time.monotonic() - started, 3)
+                self.assertTrue(cleanup.recycler.requests(self.directory))
+                self.assertIn("second-" + target, self.live)
+                # The cleanup child must also be dead; otherwise it could
+                # overwrite a later reconciler's durable confirmation.
+                stat = Path("/proc") / marker.read_text() / "stat"
+                if stat.exists():
+                    self.assertEqual(stat.read_text().split(") ", 1)[1][0], "Z")
+                site.unlink()
+                with patch.dict(os.environ, self._recovery_environment()):
+                    self.assertTrue(await asyncio.to_thread(
+                        cleanup.recycler.handoff_recovery, self.directory, "recovery_fixture:resolve",
+                        second.path, timeout=3,
+                    ))
+                await self._wait_deleted("second-" + target)
+                await self._wait_recycler_idle()
+                self.assertFalse(self.live)
+                self.assertFalse(cleanup.recycler.requests(self.directory))
+
+    async def test_exit_witness_does_not_scan_until_failure_is_handed_off(self):
         driver = await self._supervised_driver()
         try:
             journal = cleanup.CleanupJournal(self.directory, "gateway-test")
             journal.created("dead-worker")
             journal.detach()
             self.live.add("dead-worker")
+            await asyncio.sleep(0.4)
+            self.assertIn("dead-worker", self.live)
+            self.assertFalse(self.calls, "An exit witness must not scan during normal training")
+            with patch.dict(os.environ, self.supervisor_environment):
+                cleanup.recycler.request_recovery(self.directory, "recovery_fixture:resolve", journal.path)
             await self._wait_deleted("dead-worker")
             self.assertIsNone(driver.returncode)
             self.assertIn("active-driver", self.live)
@@ -689,11 +1445,299 @@ sys.stdin.read()
                 await driver.wait()
             await asyncio.sleep(0.2)
 
+    async def test_forked_helper_does_not_keep_dead_driver_or_pool_lease(self):
+        code = """
+import os, sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import cleanup
+lease = cleanup.run_control.claim_driver(Path(sys.argv[2]))
+journal = cleanup.CleanupJournal(sys.argv[2], 'gateway-test')
+journal.created('fork-owned')
+pid = os.fork()
+if pid == 0:
+    time.sleep(20)
+    os._exit(0)
+print(pid, flush=True)
+sys.stdin.read()
+"""
+        driver = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            code,
+            str(SOURCE),
+            str(self.directory),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+        )
+        helper_pid = None
+        try:
+            helper_pid = int(await asyncio.wait_for(driver.stdout.readline(), 5))
+            self.live.add("fork-owned")
+            self.assertTrue(cleanup.run_control.driver_alive(self.directory))
+            driver.kill()
+            # The forked helper still owns stdout, so communicate()/wait() on
+            # asyncio's pipe transport cannot complete until it exits as well.
+            async with asyncio.timeout(5):
+                while driver.returncode is None:
+                    await asyncio.sleep(0.02)
+            self.assertFalse(cleanup.run_control.driver_alive(self.directory))
+            os.kill(helper_pid, 0)
+            report = await cleanup.reconcile(self.directory, self.provider, 0.2)
+            self.assertTrue(report["ok"])
+            self.assertFalse(self.live)
+        finally:
+            if helper_pid is not None:
+                try:
+                    os.kill(helper_pid, 9)
+                except ProcessLookupError:
+                    pass
+            if driver.returncode is None:
+                driver.kill()
+            await driver.wait()
+
+    async def test_successful_finish_publishes_confirmed_run_status(self):
+        (self.directory / "empty_recovery.py").write_text(
+            "def resolve(key):\n    raise AssertionError('no resources')\n"
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "PYTHONPATH": str(self.directory),
+                "XTUNER_SANDBOX_CLEANUP_DIR": str(self.directory),
+                "XTUNER_SANDBOX_CLEANUP_FACTORY": "empty_recovery:resolve",
+                "XTUNER_SANDBOX_CLEANUP_EXIT_TIMEOUT": "3",
+                "XTUNER_SANDBOX_RECOVERY_ATTEMPT_TIMEOUT": "2",
+                "XTUNER_SANDBOX_RECOVERY_BUDGET": "8",
+                "XTUNER_SANDBOX_RECOVERY_ATTEMPTS": "3",
+                "XTUNER_SANDBOX_RECOVERY_BACKOFF": ".1",
+                "XTUNER_SANDBOX_RECOVERY_MAX_BACKOFF": ".2",
+            },
+        ):
+            await asyncio.to_thread(cleanup.finish_training, "succeeded")
+        report = json.loads((self.directory / "run-cleanup.json").read_text())
+        self.assertTrue(report["cleanup_confirmed"])
+        self.assertTrue(report["fit_cleanup_confirmed"])
+        self.assertTrue(report["success"])
+        self.assertFalse((self.directory / "recovery-requests").exists())
+        self.assertFalse((self.directory / "recovery-worker.lock").exists())
+        with self.assertRaises(cleanup.run_control.RunStoppingError):
+            cleanup.CleanupJournal(self.directory, "gateway-test")
+
+    def test_final_success_requires_stop_barrier(self):
+        with self.assertRaises(RuntimeError):
+            cleanup.run_control.record_result(self.directory, cleanup_confirmed=True, training_outcome="succeeded")
+        self.assertFalse((self.directory / "run-cleanup.json").exists())
+
+    def test_pool_cannot_escape_driver_cleanup_directory(self):
+        with patch.dict(os.environ, {"XTUNER_SANDBOX_CLEANUP_DIR": str(self.directory / "driver")}):
+            with self.assertRaisesRegex(ValueError, "match the driver"):
+                self.pool()
+        self.assertEqual(self.calls, [])
+
+    def test_colocate_stop_barrier_precedes_manager_drain(self):
+        source = ROOT / "xtuner/v1/train/rl_trainer.py"
+        cls = next(
+            node
+            for node in ast.parse(source.read_text()).body
+            if isinstance(node, ast.ClassDef) and node.name == "RLColocateTrainer"
+        )
+        method = next(
+            node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "_fit_with_cleanup"
+        )
+        events = []
+        namespace = {"sys": sys, "asyncio_run": lambda value: value, "close_trace": lambda: events.append("trace")}
+        exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
+        trainer = types.SimpleNamespace(
+            rl_health_manager=types.SimpleNamespace(start=lambda: None, stop=lambda: None),
+            _fit=lambda: events.append("fit"),
+            _turn_keepalive=True,
+            _debug_train=False,
+            agent_loop_manager=types.SimpleNamespace(close=lambda: events.append("manager-close")),
+            _exp_tracker=types.SimpleNamespace(close=lambda: None),
+            logger=logging.getLogger("test"),
+        )
+        with patch.object(cleanup, "request_stop_from_environment", lambda: events.append("stop") or True):
+            namespace["_fit_with_cleanup"](trainer)
+        self.assertEqual(events, ["fit", "stop", "manager-close", "trace"])
+
+    async def test_stop_barrier_rejects_new_pool_and_phase_creates(self):
+        pool = self.pool()
+        await pool.get("main")
+        await pool.release_all()
+        before = list(self.calls)
+        cleanup.run_control.request_stop(self.directory, "test_stop")
+        with self.assertRaises(cleanup.run_control.RunStoppingError):
+            await pool.get("verifier")
+        with self.assertRaises(cleanup.run_control.RunStoppingError):
+            cleanup.CleanupJournal(self.directory, "gateway-test")
+        self.assertEqual(self.calls, before)
+        await pool.aclose()
+        report = await cleanup.finalize_run(self.directory, self.provider, 0.1, 0.2, training_outcome="succeeded")
+        self.assertTrue(report["success"])
+
+    async def test_inflight_create_is_accounted_for_before_final_confirmation(self):
+        pool = self.pool()
+        entered, resume = asyncio.Event(), asyncio.Event()
+        original = pool._provider.create
+
+        async def delayed_create(**kwargs):
+            entered.set()
+            await resume.wait()
+            return await original(**kwargs)
+
+        pool._provider.create = delayed_create
+        acquiring = asyncio.create_task(pool.get("main"))
+        await entered.wait()
+        report = await cleanup.finalize_run(self.directory, self.provider, 0.05, 0.1)
+        self.assertFalse(report["cleanup_confirmed"])
+        resume.set()
+        with self.assertRaises(cleanup.run_control.RunStoppingError) as error:
+            await acquiring
+        self.assertEqual(error.exception.allocation_state, "allocated")
+        await pool.aclose()
+        self.assertFalse(self.live)
+        report = await cleanup.finalize_run(self.directory, self.provider, 0.1, 0.2, training_outcome="succeeded")
+        self.assertTrue(report["success"])
+        self.assertEqual(pool._journal.data["ambiguous_creates"], 0)
+
+    async def test_stop_and_journal_registration_are_serialized(self):
+        for index in range(10):
+            directory = self.directory / str(index)
+            barrier = threading.Barrier(2)
+
+            def allocate():
+                barrier.wait()
+                try:
+                    return cleanup.CleanupJournal(directory, "gateway-test")
+                except cleanup.run_control.RunStoppingError:
+                    return None
+
+            def stop():
+                barrier.wait()
+                cleanup.run_control.request_stop(directory, "race")
+
+            journal, _ = await asyncio.gather(asyncio.to_thread(allocate), asyncio.to_thread(stop))
+            self.assertTrue(cleanup.run_control.is_stopping(directory))
+            report = await cleanup.reconcile(directory, self.provider, 0.1)
+            self.assertEqual(report["ok"], journal is None)
+            if journal is not None:
+                journal.detach()
+            with self.assertRaises(cleanup.run_control.RunStoppingError):
+                cleanup.CleanupJournal(directory, "gateway-test")
+
+    async def test_unconfirmed_fit_cannot_be_relabelled_success_by_later_recovery(self):
+        journal = cleanup.CleanupJournal(self.directory, "gateway-test")
+        journal.created("still-live")
+        self.live.add("still-live")
+        try:
+            result = await cleanup.finalize_run(self.directory, self.provider, 0.05, 0.1, training_outcome="succeeded")
+            self.assertFalse(result["success"])
+            self.assertTrue(result["finalization_failed"])
+        finally:
+            journal.detach()
+        result = await cleanup.finalize_run(self.directory, self.provider, 0.1, 0.2)
+        self.assertTrue(result["cleanup_confirmed"])
+        self.assertFalse(result["success"])
+        self.assertFalse(self.live)
+
+    def test_recovery_without_fit_ack_does_not_invent_training_success(self):
+        control = cleanup.run_control
+        control.request_stop(self.directory, "driver_lost")
+        control.record_result(self.directory, cleanup_confirmed=False, training_outcome="succeeded")
+        result = control.record_result(self.directory, cleanup_confirmed=True)
+        self.assertFalse(result["success"])
+        self.assertFalse(result["fit_cleanup_confirmed"])
+        result = control.record_result(self.directory, cleanup_confirmed=True, training_outcome="failed")
+        self.assertFalse(result["success"])
+        result = control.record_result(self.directory, cleanup_confirmed=False)
+        self.assertTrue(result["cleanup_confirmed"])
+        self.assertEqual(result["training_outcome"], "failed")
+
+    async def test_surviving_peer_performs_exit_sweep_after_head_witness_dies(self):
+        driver = await self._supervised_driver()
+        peer = None
+        try:
+            code = """
+import sys
+sys.path.insert(0, sys.argv[1])
+import cleanup
+cleanup.start_cleanup_supervisor(peer=True)
+print('ready', flush=True)
+sys.stdin.read()
+"""
+            peer = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                code,
+                str(SOURCE),
+                env=self.supervisor_environment,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            self.assertEqual(await asyncio.wait_for(peer.stdout.readline(), 15), b"ready\n")
+            owner_pid = int((self.directory / "driver-witness.pid").read_text())
+            os.kill(owner_pid, 9)
+            # Standby outlives its own actor and must not interpret actor death
+            # as permission to stop the still-live driver.
+            peer.kill()
+            await peer.wait()
+            journal = cleanup.CleanupJournal(self.directory, "gateway-test")
+            journal.created("orphan-after-owner-kill")
+            journal.detach()
+            self.live.add("orphan-after-owner-kill")
+            await asyncio.sleep(0.4)
+            self.assertIn("orphan-after-owner-kill", self.live)
+            self.assertFalse(cleanup.run_control.is_stopping(self.directory))
+            self.assertIn("active-driver", self.live)
+            driver.kill()
+            await driver.wait()
+            await self._wait_deleted("active-driver")
+            await self._wait_deleted("orphan-after-owner-kill")
+        finally:
+            for process in (driver, peer):
+                if process is not None and process.returncode is None:
+                    process.kill()
+                    await process.wait()
+            await asyncio.sleep(0.3)
+
+    async def test_factory_import_failure_still_seals_run_and_records_failure(self):
+        child = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(SOURCE / "cleanup.py"),
+            "--directory",
+            str(self.directory),
+            "--factory",
+            "missing_cleanup_factory:resolve",
+            "--finalize",
+            "--training-outcome",
+            "succeeded",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await asyncio.wait_for(child.communicate(), 5)
+        self.assertNotEqual(child.returncode, 0)
+        self.assertTrue(cleanup.run_control.is_stopping(self.directory))
+        report = json.loads((self.directory / "run-cleanup.json").read_text())
+        self.assertFalse(report["success"])
+        self.assertTrue(report["finalization_failed"])
+
     def test_supervisor_rejects_incomplete_configuration(self):
         with patch.dict(os.environ, {"XTUNER_SANDBOX_CLEANUP_DIR": str(self.directory)}):
             os.environ.pop("XTUNER_SANDBOX_CLEANUP_FACTORY", None)
             with self.assertRaises(ValueError):
                 cleanup.start_cleanup_supervisor()
+
+    def test_shutdown_guard_rejects_invalid_timeout_before_training(self):
+        environment = self._recovery_environment()
+        for value in ("0", "-1", "nan", "inf", "bad"):
+            with self.subTest(timeout=value), patch.dict(
+                os.environ, {**environment, "XTUNER_SANDBOX_RAY_SHUTDOWN_TIMEOUT": value}
+            ):
+                with self.assertRaises(ValueError):
+                    cleanup.start_cleanup_supervisor()
+                self.assertFalse((self.directory / "driver.started.json").exists())
 
     def test_both_trainer_fit_paths_recover_and_preserve_original_outcome(self):
         source = ROOT / "xtuner/v1/train/rl_trainer.py"
@@ -702,7 +1746,7 @@ sys.stdin.read()
             if cls.name not in {"RLColocateTrainer", "RLDisaggregatedTrainer"}:
                 continue
             fit = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "fit")
-            namespace = {}
+            namespace = {"sys": sys}
             exec(compile(ast.Module(body=[fit], type_ignores=[]), str(source), "exec"), namespace)
             for failure in (None, ValueError("training failed"), KeyboardInterrupt()):
                 events = []
@@ -713,14 +1757,15 @@ sys.stdin.read()
                         raise failure
                     return "trained"
 
-                def recover():
+                def recover(**kwargs):
                     events.append("recover")
                     raise RuntimeError("cleanup unavailable")
 
                 trainer = types.SimpleNamespace(_fit_with_cleanup=run, logger=logging.getLogger("test"))
                 with patch.object(cleanup, "cleanup_from_environment", recover):
                     if failure is None:
-                        self.assertEqual(namespace["fit"](trainer), "trained")
+                        with self.assertRaises(CleanupError):
+                            namespace["fit"](trainer)
                     else:
                         with self.assertRaises(type(failure)) as caught:
                             namespace["fit"](trainer)
@@ -761,16 +1806,23 @@ sys.stdin.read()
                     "XTUNER_SANDBOX_CLEANUP_DIR": "/shared/run-1",
                     "XTUNER_SANDBOX_PROVIDER_KEY": "backend-a",
                     "XTUNER_SANDBOX_CLEANUP_FACTORY": "private:factory",
+                    "XTUNER_SANDBOX_CLEANUP_PEERS": "0",
                 },
             ):
                 namespace[name](object(), object(), resources, 256)
-        self.assertEqual(len(options), 2)
-        for option in options:
+                os.environ["XTUNER_SANDBOX_CLEANUP_PEERS"] = "1"
+                namespace[name](object(), object(), resources, 256)
+        self.assertEqual(len(options), 4)
+        for option in options[1::2]:
+            self.assertEqual(option["runtime_env"]["env_vars"]["XTUNER_SANDBOX_CLEANUP_FACTORY"], "private:factory")
+            self.assertEqual(option["runtime_env"]["env_vars"]["XTUNER_SANDBOX_CLEANUP_PEERS"], "1")
+        for option in options[::2]:
             self.assertEqual(
                 option["runtime_env"]["env_vars"],
                 {
                     "XTUNER_SANDBOX_CLEANUP_DIR": "/shared/run-1",
                     "XTUNER_SANDBOX_PROVIDER_KEY": "backend-a",
+                    "XTUNER_SANDBOX_CLEANUP_FACTORY": "private:factory",
                 },
             )
             self.assertEqual(option["concurrency_groups"], {"generate": 256})
@@ -814,6 +1866,63 @@ sys.stdin.read()
         self.assertEqual(calls[1]["env_vars"], {"TASK_MODE": "preview"})
         await pool.aclose()
         self.assertFalse(self.live)
+
+    async def _stopped_runner(self, phase, *, driver_loss=False):
+        driver = await self._supervised_driver() if driver_loss else None
+        pool = self.pool()
+        entered = asyncio.Event()
+
+        async def block(client, item, record):
+            entered.set()
+            await asyncio.Event().wait()
+
+        runner = Runner(
+            pool=pool,
+            infer=sandbox.SandboxStage(post=[block] if phase == "infer" else []),
+            validate=Judger("score", sandbox.SandboxStage(post=[block] if phase == "validate" else [])),
+        )
+        item = schemas.AgentRolloutItem(
+            id="stop", uid=4, data_source="test", instruction="test", task_root=self.directory
+        )
+        task = asyncio.create_task(runner.run(item))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            if driver is not None:
+                driver.kill()
+                await driver.wait()
+            else:
+                cleanup.run_control.request_stop(self.directory, "test")
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 3)
+            self.assertEqual(item.status, schemas.RolloutStatus.FAILED)
+            self.assertTrue(pool._journal.lock.closed)
+            if driver is not None:
+                await self._wait_deleted("active-driver")
+            self.assertFalse(self.live)
+        finally:
+            if driver is not None and driver.returncode is None:
+                driver.kill()
+                await driver.wait()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def test_finished_runner_stop_observer_is_removed(self):
+        control = importlib.import_module(PACKAGE + ".task_control")
+        async with control.watch_task(str(self.directory)) as stopped:
+            pass
+        cleanup.run_control.request_stop(self.directory, "test")
+        await asyncio.sleep(0.6)
+        self.assertFalse(stopped.is_set(), "Later caller work must not receive a stale stop cancellation")
+
+    async def test_stop_marker_cancels_live_infer_and_releases_pool(self):
+        await self._stopped_runner("infer")
+
+    async def test_stop_marker_cancels_live_verifier_and_releases_pool(self):
+        await self._stopped_runner("validate")
+
+    async def test_driver_sigkill_supervisor_stops_surviving_runner(self):
+        await self._stopped_runner("infer", driver_loss=True)
 
     async def test_runner_repeated_cancellation_finishes_cleanup(self):
         pool = self.pool()

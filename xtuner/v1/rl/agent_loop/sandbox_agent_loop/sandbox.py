@@ -42,6 +42,7 @@ from lagent.utils.rate_limiter import get_shared_async_token_bucket
 
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import CleanupJournal, defer_cleanup, delete_confirmed
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.finalization import CleanupError, finalize_bounded
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.run_control import RunStoppingError, is_stopping
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     AgentRolloutItem,
     EntryOutcome,
@@ -924,7 +925,10 @@ class SandboxPool:
             raise TypeError("cleanup_provider must be a reconstructible provider config")
         recovery_config = cleanup_provider if cleanup_provider is not None else provider
         self._recovery_config = deepcopy(recovery_config) if isinstance(recovery_config, dict) else None
-        self._journal_dir = cleanup_dir or os.environ.get("XTUNER_SANDBOX_CLEANUP_DIR")
+        run_directory = os.environ.get("XTUNER_SANDBOX_CLEANUP_DIR")
+        if cleanup_dir and run_directory and Path(cleanup_dir).resolve() != Path(run_directory).resolve():
+            raise ValueError("Pool cleanup_dir must match the driver's run directory")
+        self._journal_dir = cleanup_dir or run_directory
         self._provider_key = cleanup_provider_key or os.environ.get("XTUNER_SANDBOX_PROVIDER_KEY")
         if self._journal_dir and not self._provider_key:
             raise ValueError("cleanup_dir requires cleanup_provider_key for exact backend recovery")
@@ -1150,10 +1154,19 @@ class SandboxPool:
                     self._closed = True
                     if self._journal is not None:
                         await self._journal.write("detach")
-                    if pending and self._recovery_config is not None:
+                    durable_recovery = self._journal is not None and bool(
+                        os.environ.get("XTUNER_SANDBOX_CLEANUP_FACTORY")
+                    )
+                    can_recover = self._recovery_config is not None or durable_recovery
+                    ambiguous = self._journal is not None and bool(
+                        self._journal.data["creating"] or self._journal.data["ambiguous_creates"]
+                    )
+                    if (pending or ambiguous) and can_recover:
                         config = deepcopy(self._recovery_config)
 
                         def fresh_provider() -> Any:
+                            if config is None:
+                                raise RuntimeError("Recovery requires the configured durable factory")
                             provider = create_object(deepcopy(config))
                             if provider is self._provider:
                                 raise RuntimeError("Cleanup factory must return a fresh provider")
@@ -1176,9 +1189,13 @@ class SandboxPool:
                                 self.cleanup["deferred_result"] = task.result()
 
                         self._deferred_cleanup.add_done_callback(record_result)
+                        if durable_recovery:
+                            # Finish durable enqueue before closing the original
+                            # connection or returning from finalization.
+                            await self._deferred_cleanup
                     # Without a fresh factory, retain the transport for explicit
                     # retries. A journal still permits recovery in a new process.
-                    if self._close_provider and (not pending or self._recovery_config is not None):
+                    if self._close_provider and (not pending or can_recover):
                         close = getattr(self._provider, "aclose", None)
                         if close is not None:
                             await finalize_bounded(close(), timeout_seconds=5, diagnostic={})
@@ -1250,6 +1267,11 @@ class SandboxPool:
                 # whole-group retry (including already exhausted 429 retries).
                 if getattr(exc, "allocation_state", None) is not None:
                     raise
+                if self._pending_delete_ids or self._pending_verification_ids or self._cleanup_clients:
+                    # Preserve the acquisition error and let Runner's final
+                    # close retry/handoff. Do not accumulate another group
+                    # while the previous rollback remains incomplete.
+                    raise
                 if attempt < self._max_attempts:
                     await asyncio.sleep(min(2**attempt, 8))
 
@@ -1260,7 +1282,8 @@ class SandboxPool:
         )
         raise RuntimeError(f"could not acquire sandbox group after {self._max_attempts} attempts: {last_err_msg}")
 
-    async def _create(self, spec: SandboxSpec, *, record: StageRecord | None = None) -> tuple[Any, str]:
+    async def _prepare_create(self, spec: SandboxSpec, *, record: StageRecord | None = None) -> dict[str, Any]:
+        """Validate and wait for rate limiting before admitting an allocation."""
         user = spec.user and _expand_env_refs(spec.user) or os.getenv("SANDBOX_PROVIDER_USER")
         if not user:
             raise ValueError("sandbox spec must have user or SANDBOX_PROVIDER_USER must be set")
@@ -1284,44 +1307,53 @@ class SandboxPool:
                 record.metadata["sandbox_acquire_rate_limit_wait_s"] = (
                     record.metadata.get("sandbox_acquire_rate_limit_wait_s", 0.0) + time.monotonic() - t_limit
                 )
-        try:
-            return await self._provider.create(
-                image_tag=spec.image,
-                ttl_seconds=spec.ttl_seconds,
-                **create_kwargs,
-            )
-        except Exception as exc:
-            # An unclassified create failure can hide an allocation even when
-            # persistence is disabled. Never replay that POST as a group retry.
-            if not hasattr(exc, "allocation_state"):
-                setattr(exc, "allocation_state", "unknown")
-            raise
+        return {"image_tag": spec.image, "ttl_seconds": spec.ttl_seconds, **create_kwargs}
 
     async def _create_tracked(self, spec: SandboxSpec, *, record: StageRecord | None = None) -> tuple[Any, str]:
-        # Keep the creation policy separate: admission/rate-limit changes can
-        # evolve independently of ownership and cleanup.
+        try:
+            create_kwargs = await self._prepare_create(spec, record=record)
+        except Exception as exc:
+            # No provider call has occurred, including validation and limiter failures.
+            setattr(exc, "allocation_state", "not_allocated")
+            raise
         before = self._owned_orphan_ids()
         started = False
-        allocated_id = None
+        allocated_ids: set[str] = set()
+
+        async def on_allocated(env_id: str) -> None:
+            if not isinstance(env_id, str) or not env_id:
+                raise ValueError("sandbox ID must be a nonempty string")
+            if env_id not in allocated_ids:
+                allocated_ids.add(env_id)
+                self._known_ids[env_id] = None  # Retain ownership even if persistence fails.
+                if self._journal is not None:
+                    await self._journal.write("allocated", env_id)
+            if self._journal is not None and is_stopping(self._journal.path.parent):
+                raise RunStoppingError("allocated")
+
         try:
             if self._journal is not None:
                 await self._journal.write("begin_create")
             started = True
-            client, env_id = await self._create(spec, record=record)
-            allocated_id = env_id
+            # Explicit capability opt-in: never retry a POST after TypeError,
+            # and never forward a callback through an unaware provider's **kwargs.
+            if getattr(self._provider, "supports_allocation_callback", False):
+                create_kwargs["on_allocated"] = on_allocated
+            client, env_id = await self._provider.create(**create_kwargs)
             self._unclaimed_creates[env_id] = client
-            await self._remember_created(env_id)
+            await on_allocated(env_id)
         except BaseException as exc:
-            known = self._owned_orphan_ids() - before
-            if allocated_id is not None:
-                known.add(allocated_id)
+            known = (self._owned_orphan_ids() - before) | allocated_ids
             for env_id in known:
+                self._pending_delete_ids.add(env_id)
                 await self._remember_created(env_id)
+            ambiguous = started and not known and getattr(exc, "allocation_state", None) != "not_allocated"
             if self._journal is not None:
-                ambiguous = started and not known and getattr(exc, "allocation_state", None) != "not_allocated"
                 await self._journal.write("end_create", ambiguous=ambiguous)
-                if ambiguous and isinstance(exc, Exception):
-                    setattr(exc, "allocation_state", "unknown")
+            if ambiguous and isinstance(exc, Exception):
+                setattr(exc, "allocation_state", "unknown")
+            elif started and isinstance(exc, Exception) and not hasattr(exc, "allocation_state"):
+                setattr(exc, "allocation_state", "allocated" if known else "unknown")
             raise
         else:
             if self._journal is not None:

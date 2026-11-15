@@ -1,73 +1,55 @@
-"""Independent recovery supervisor; stdin EOF means the owning driver exited.
+"""Passive exit witness: no periodic sandbox scans while the driver is alive.
 
-Only the driver owns the pipe's write end. SIGKILL closes it in the kernel.
-Each scan uses a fresh interpreter with a wall-clock limit, so a stuck provider
-cannot prevent subsequent scans. The supervisor must run outside any cgroup
-that the scheduler kills if recovery after whole-job termination is required.
+Normal exit cleanup belongs to the trainer. A surviving head/peer witness takes
+that role only after driver death; failed cleanup is handed to the recycler.
 """
 
 from __future__ import annotations
 
+import contextlib
 import importlib
-import json
+import logging
 import os
-import select
-import subprocess
 import sys
 import time
 from pathlib import Path
 
-
-HERE = Path(__file__).resolve().parent
+from cleanup import cleanup_from_environment
+from run_control import driver_alive
 
 
 def main() -> int:
-    """Watch the driver and reconcile abandoned Pool journals until exit."""
+    """Observe driver exit and execute the same bounded exit-cleanup path."""
     directory = Path(os.environ["XTUNER_SANDBOX_CLEANUP_DIR"])
     factory = os.environ["XTUNER_SANDBOX_CLEANUP_FACTORY"]
-    budget = float(os.environ.get("XTUNER_SANDBOX_CLEANUP_EXIT_TIMEOUT", "180"))
-    interval = float(os.environ.get("XTUNER_SANDBOX_CLEANUP_INTERVAL", "30"))
     module, name = factory.split(":", 1)
-    if not callable(getattr(importlib.import_module(module), name)):
-        raise TypeError("cleanup factory must be callable")
+    with contextlib.redirect_stdout(sys.stderr):
+        if not callable(getattr(importlib.import_module(module), name)):
+            raise TypeError("cleanup factory must be callable")
     print("READY", flush=True)
-    deadline: float | None = None
-    last_ok = False
+    # The parent closes its handshake pipe after READY. Exit subprocesses must
+    # write reports to the log, not that now-unread pipe.
+    os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+    failures = 0
     while True:
-        readable, _, _ = select.select([sys.stdin], [], [], interval if deadline is None else min(interval, 1))
-        if readable and not os.read(sys.stdin.fileno(), 4096) and deadline is None:
-            deadline = time.monotonic() + budget
-        remaining = budget if deadline is None else deadline - time.monotonic()
-        if remaining <= 0:
-            return 0 if last_ok else 1
         try:
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(HERE / "cleanup.py"),
-                    "--directory",
-                    str(directory),
-                    "--factory",
-                    factory,
-                    "--timeout",
-                    str(min(30, remaining / 2)),
-                ],
-                timeout=min(budget, remaining),
-                stdout=subprocess.DEVNULL,
-                # Errors go to the supervisor log; no provider payloads are printed.
-                check=False,
-            )
-            last_ok = result.returncode == 0
-        except subprocess.TimeoutExpired:
-            last_ok = False
-        if deadline is not None and last_ok:
-            return 0
-        if deadline is not None:
-            # EOF is always readable; avoid spinning on failed or live journals.
-            time.sleep(min(1, max(0, deadline - time.monotonic())))
-        (directory / "supervisor-status.json").write_text(
-            json.dumps({"ok": last_ok, "driver_exited": deadline is not None, "updated_at": time.time()}) + "\n"
-        )
+            alive = driver_alive(directory)
+        except OSError:
+            # An unreadable lease is unknown, never evidence of driver death.
+            # Retry without sandbox scans; log only at powers of two to avoid
+            # flooding logs during a sustained filesystem outage.
+            failures += 1
+            if failures & (failures - 1) == 0:
+                logging.warning("Driver lease probe failed (%s attempts); retrying", failures)
+            time.sleep(min(5.0, 0.2 * 2 ** min(failures - 1, 5)))
+            continue
+        failures = 0
+        if not alive:
+            break
+        time.sleep(0.2)
+    # Stop admission and read/write final status only inside the bounded child.
+    # A live worker may hold admission while its shared-filesystem write stalls.
+    return 0 if cleanup_from_environment(finalize=True) else 1
 
 
 if __name__ == "__main__":
