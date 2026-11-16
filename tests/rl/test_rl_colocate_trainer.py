@@ -114,8 +114,6 @@ class TestRLColocateTrainer(unittest.TestCase):
             weight_transport_type="ipc", turn_resume=None, skip_load_weights=False
         )
         trainer._load_checkpoint_cfg = SimpleNamespace(checkpoint_path=None)
-        trainer._cfg = SimpleNamespace(replay_buffer_config=SimpleNamespace(build=MagicMock(return_value=None)))
-        trainer._build_agent_loop_components = MagicMock()
         trainer.logger = MagicMock()
         trainer._total_train_steps = total_train_steps
         trainer._cur_step = 0

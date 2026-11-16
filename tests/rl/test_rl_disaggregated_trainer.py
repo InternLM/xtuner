@@ -58,8 +58,6 @@ def make_train_state(session_id=None):
 
 
 class _FakeManager:
-    task_runners: list = []
-
     def __init__(self, get_batch_results):
         self._results = list(get_batch_results)
         self._status = AgentLoopManagerStatus.NORMAL
@@ -150,8 +148,6 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             weight_update_host=None, weight_update_port=30000, turn_resume=None, skip_load_weights=False
         )
         trainer._load_checkpoint_cfg = SimpleNamespace(checkpoint_path=None)
-        trainer._cfg = SimpleNamespace(replay_buffer_config=SimpleNamespace(build=MagicMock(return_value=None)))
-        trainer._build_agent_loop_components = MagicMock()
         trainer._meta = SimpleNamespace(
             latest_exp=SimpleNamespace(exp_dir=str(Path(self.temp_dir.name) / "exp")),
         )

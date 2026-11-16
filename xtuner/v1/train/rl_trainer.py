@@ -614,7 +614,6 @@ class BaseRLTrainer:
 
         self._distillation = DistillationTrainerAdapter(distillation_config)
         self._distillation_config = distillation_config
-        self._cfg = cfg
 
         check_fa3()
         self._init_work_dir_and_meta(cfg, meta_path)
@@ -745,10 +744,12 @@ class BaseRLTrainer:
         self._debug_train_files: dict[int, Path] = {}
 
     def _build_agent_loop_components(self, cfg: BaseRLTrainerConfig, replay_buffer) -> None:
-        """Build loop-owned managers inside the fit loop.
+        """Build managers, samplers and Agent clients in the original
+        construction flow.
 
-        Sampler, ReplayBuffer and Agent clients bind to the running loop; constructing them outside would recreate the
-        cross-loop plumbing this design removes.
+        Construction only creates synchronous fields and lazily bound asyncio primitives; async resume, first I/O,
+        produce, save and close run on the fit loop. The same loop is an activation constraint, not a construction
+        constraint.
         """
         self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_path, trust_remote_code=True)
         agent_loop_manager = cfg.agent_loop_manager_cfg.build(
@@ -781,8 +782,6 @@ class BaseRLTrainer:
             assert cfg.evaluator_config is not None
             self.evaluator = cfg.evaluator_config.build(total_eval_samples=total_eval_samples)
         self._resolve_total_train_steps(cfg)
-        assert self._cpu_resource_manager is not None
-        self._cpu_resource_manager.log_registered_summary()
 
     def _resolve_total_train_steps(self, cfg: BaseRLTrainerConfig) -> None:
         if cfg.total_train_steps is not None:
@@ -1515,6 +1514,10 @@ class RLColocateTrainer(BaseRLTrainer):
                 )
                 self._rollout_config.skip_load_weights = False
             self.rollout_controller = self._rollout_config.build(self._pg)
+
+            replay_buffer = cfg.replay_buffer_config.build()
+            self._build_agent_loop_components(cfg, replay_buffer)
+            self._cpu_resource_manager.log_registered_summary()
             self.logger.warning("Debug rollout mode is enabled. Only rollout workers will be started.")
             return
 
@@ -1558,7 +1561,12 @@ class RLColocateTrainer(BaseRLTrainer):
             rollout_controller=self.rollout_controller,
             rollout_config=self._rollout_config,
         )
-        # ReplayBuffer, samplers and Agent clients are built inside the fit loop; see _fit.
+
+        # 原构造流程：同步构造 ReplayBuffer、sampler、Agent 与 manager，并推导 total_epochs。
+        # 异步恢复、首次权重 I/O 与发布在 _fit 中执行。
+        replay_buffer = cfg.replay_buffer_config.build()
+        self._build_agent_loop_components(cfg, replay_buffer)
+        self._cpu_resource_manager.log_registered_summary()
 
     def _init_work_dir_and_meta(self, cfg: BaseRLTrainerConfig, meta_path: str) -> None:
         if cfg.rollout_config.turn_resume is not None and cfg.auto_resume:
@@ -1617,8 +1625,6 @@ class RLColocateTrainer(BaseRLTrainer):
                 await self._fit_debug_train()
                 return
 
-            replay_buffer = self._cfg.replay_buffer_config.build()
-            self._build_agent_loop_components(self._cfg, replay_buffer)
             manager = self.agent_loop_manager
             if self._cur_step >= self._total_train_steps:
                 self.logger.info(f"Train steps {self._total_train_steps} reached, stop training")
@@ -1867,6 +1873,15 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 "Currently, disaggregated mode only support nccl as weight update transport. It will use NCCL for weight transport."
             )
             self._rollout_config.weight_transport_type = "nccl"
+        replay_buffer = cfg.replay_buffer_config.build()
+        self._build_agent_loop_components(cfg, replay_buffer)
+        # 非共卡 producer 不允许早停，否则 consumer 可能永久等不到 batch。
+        for task_runner in self.agent_loop_manager.task_runners:
+            if task_runner.produce_strategy.should_continue_fn is not default_should_continue_fn:
+                raise ValueError(
+                    "In disaggregated mode, should_continue_fn must be default, "
+                    "because it does not allow early stopping in production."
+                )
 
         bind_train_rollout(
             train_controller=self.train_controller,
@@ -1875,7 +1890,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         )
         if self._load_checkpoint_cfg.checkpoint_path is not None:
             self._resume_train_controller_and_state(self._load_checkpoint_cfg.checkpoint_path)
-        # ReplayBuffer, samplers and Agent clients are built inside the fit loop; see _fit.
+
+        self._cpu_resource_manager.log_registered_summary()
 
     def _build_disaggregated_placement_groups(
         self,
@@ -1965,16 +1981,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         manager: DisaggAgentLoopManager | None = None
         producer_task: asyncio.Task | None = None
         try:
-            replay_buffer = self._cfg.replay_buffer_config.build()
-            self._build_agent_loop_components(self._cfg, replay_buffer)
             manager = self.agent_loop_manager
-            # 非共卡 producer 不允许早停，否则 consumer 可能永久等不到 batch。
-            for task_runner in manager.task_runners:
-                if task_runner.produce_strategy.should_continue_fn is not default_should_continue_fn:
-                    raise ValueError(
-                        "In disaggregated mode, should_continue_fn must be default, "
-                        "because it does not allow early stopping in production."
-                    )
             if self._cur_step >= self._total_train_steps:
                 self.logger.info(f"Train steps {self._total_train_steps} reached, stop training")
                 return
