@@ -92,6 +92,36 @@ trainer = Trainer(
 ```
 
 
+## 实验日志
+
+`Trainer` 和 `TrainerConfig` 支持 `exp_tracker="jsonl"`（默认）、
+`"tensorboard"` 和 `"swanlab"`。已有配置可以这样启用 SwanLab：
+
+```python
+from xtuner.v1._writer import SwanLabConfig
+from xtuner.v1.train import Trainer
+
+trainer_cfg.exp_tracker = "swanlab"
+trainer_cfg.swanlab_config = SwanLabConfig(
+    project="xtuner",
+    experiment_name="sft",
+    mode="online",
+)
+trainer = Trainer.from_config(trainer_cfg)
+trainer.fit()
+```
+
+通过 `pip install 'xtuner[swanlab]'` 安装可选 SDK，并用 `swanlab login` 登录。
+`mode="offline"` 仅记录本地日志。只有 rank 0 创建 SwanLab 实验，沿用该进程已有的
+指标数值和 `cur_step`，不会额外聚合其他 rank 的数据。TensorBoard 和 JSONL
+继续保留原有的逐 rank 日志。
+显存和耗时等本地指标只代表 rank 0，不包含其他 rank 的统计。
+
+实验标识保存在 `logs/exp_tracking/rank0/swanlab_run.json`，并写入原生 checkpoint
+的 `train_state.json`。自动续训和显式指定 checkpoint 都会复用该标识，也支持更换
+日志目录。`fit()` 正常结束或抛出异常时都会关闭 writer。
+SDK 配置和续训选项见 [RL 实验日志](../../rl/advanced_tutorial/rl_trainer.md#实验日志)。
+
 ## 启动训练
 
 完整代码如下：

@@ -92,6 +92,40 @@ trainer = Trainer(
 ```
 
 
+## Experiment Tracking
+
+`Trainer` and `TrainerConfig` accept `exp_tracker="jsonl"` (the default),
+`"tensorboard"`, or `"swanlab"`. To enable SwanLab on an existing configuration:
+
+```python
+from xtuner.v1._writer import SwanLabConfig
+from xtuner.v1.train import Trainer
+
+trainer_cfg.exp_tracker = "swanlab"
+trainer_cfg.swanlab_config = SwanLabConfig(
+    project="xtuner",
+    experiment_name="sft",
+    mode="online",
+)
+trainer = Trainer.from_config(trainer_cfg)
+trainer.fit()
+```
+
+Install the optional SDK with `pip install 'xtuner[swanlab]'` and authenticate
+with `swanlab login`. Use `mode="offline"` for local logging without an upload.
+Only rank 0 creates a SwanLab run. Its existing metric values and `cur_step`
+are forwarded without additional cross-rank aggregation. TensorBoard and JSONL
+continue to write per-rank logs.
+Rank-local values such as memory usage and timings describe rank 0; they do not
+summarize the other ranks.
+
+The run identity is saved in `logs/exp_tracking/rank0/swanlab_run.json` and in
+native checkpoints' `train_state.json`. Both automatic and explicit checkpoint
+resume reuse that identity, including when the log directory changes. `fit()`
+closes the writer on completion or an exception.
+See [RL experiment tracking](../../rl/advanced_tutorial/rl_trainer.md#experiment-tracking)
+for SDK options and resume behavior.
+
 ## Launch Training
 
 Complete code is as follows:

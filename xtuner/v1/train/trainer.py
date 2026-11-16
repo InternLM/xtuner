@@ -39,7 +39,7 @@ from torch.optim.lr_scheduler import LambdaLR, LinearLR, SequentialLR
 from typing_extensions import NotRequired, Self, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1._writer import get_writer
+from xtuner.v1._writer import NoOpWriter, SwanLabConfig, SwanLabWriter, get_writer
 from xtuner.v1.config import FSDPConfig, LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import BaseDataloaderConfig, DataloaderConfig, DatasetConfigList
@@ -431,7 +431,8 @@ class TrainerConfig(BaseModel):
     check_health_interval: int | None = None
     hf_interval: int | None = None
     hf_max_keep: int | None = None
-    exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl"
+    exp_tracker: Literal["tensorboard", "jsonl", "swanlab"] = "jsonl"
+    swanlab_config: SwanLabConfig | None = None
     profile_step: list[int] | int | None = None
     profile_time_step: list[int] | None = None
     profile_memory_step: list[int] | None = None
@@ -560,7 +561,8 @@ class Trainer:
         check_health_interval: int | None = None,
         hf_interval: int | None = None,
         hf_max_keep: int | None = None,
-        exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl",
+        exp_tracker: Literal["tensorboard", "jsonl", "swanlab"] = "jsonl",
+        swanlab_config: SwanLabConfig | None = None,
         profile_step: list[int] | int | None = None,
         profile_time_step: list[int] | None = None,
         profile_memory_step: list[int] | None = None,
@@ -675,7 +677,7 @@ class Trainer:
         self._load_checkpoint_cfg = self._resolve_load_checkpoint_cfg(self._auto_resume, load_checkpoint_cfg)
 
         self._exp_tracker = self._init_tracker(
-            exp_tracker, self._log_dir / f"{self._EXP_TRACKING_PATH}/rank{self.rank}"
+            exp_tracker, self._log_dir / f"{self._EXP_TRACKING_PATH}/rank{self.rank}", swanlab_config
         )
 
         self.data_mesh = self._init_data_mesh(
@@ -860,6 +862,7 @@ class Trainer:
             hf_interval=config.hf_interval,
             hf_max_keep=config.hf_max_keep,
             exp_tracker=config.exp_tracker,
+            swanlab_config=config.swanlab_config,
             profile_step=config.profile_step,
             profile_time_step=config.profile_time_step,
             profile_memory_step=config.profile_memory_step,
@@ -887,6 +890,12 @@ class Trainer:
         This method executes the main training loop, iterating through the dataset and performing training steps. It
         handles data loading, forward pass, backward pass, optimization, logging, and checkpointing.
         """
+        try:
+            self._fit()
+        finally:
+            self._exp_tracker.close()
+
+    def _fit(self):
         if self._async_hf_export or self._async_checkpoint:
             self._async_save_monitor.start()
 
@@ -971,7 +980,6 @@ class Trainer:
         # TODO: Should use flush rather than close
         if self._async_hf_export or self._async_checkpoint:
             self._async_save_monitor.stop()
-        self._exp_tracker.close()
         if self._metrics_recorder:
             self._metrics_recorder.close()
         log_rank0.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
@@ -1136,9 +1144,25 @@ class Trainer:
         logger.add(sys.stderr, format=log_format(rank=get_rank()), level=log_level)
         return logger, log_dir
 
-    def _init_tracker(self, exp_tracker: Literal["tensorboard", "jsonl"], log_dir: Path):
-        writer = get_writer(writer_type=exp_tracker, log_dir=log_dir)
-        return writer
+    def _init_tracker(
+        self,
+        exp_tracker: Literal["tensorboard", "jsonl", "swanlab"],
+        log_dir: Path,
+        swanlab_config: SwanLabConfig | None = None,
+    ):
+        resume_run = None
+        if exp_tracker == "swanlab":
+            if self.rank != 0:
+                return NoOpWriter()
+            if self._load_checkpoint_cfg.checkpoint_path is not None:
+                state_path = Path(self._load_checkpoint_cfg.checkpoint_path) / self._SAVE_TRAIN_STATE_PATH
+                resume_run = json.loads(state_path.read_text()).get("swanlab_run")
+        return get_writer(
+            writer_type=exp_tracker,
+            log_dir=log_dir,
+            swanlab_config=swanlab_config,
+            resume_run=resume_run,
+        )
 
     def _init_data_mesh(
         self,
@@ -1373,17 +1397,16 @@ class Trainer:
 
         # Save train state
         if self.rank == 0:
+            train_state: dict[str, object] = {
+                "cur_step": self.cur_step,
+                "cur_epoch": self._cur_epoch,
+                "total_consumed_tokens": total_consumed_tokens,
+                "train_time_offset": self._train_time + self._train_time_offset,
+            }
+            if isinstance(self._exp_tracker, SwanLabWriter):
+                train_state["swanlab_run"] = self._exp_tracker.run_info
             with train_state_path.open("w") as f:
-                f.write(
-                    json.dumps(
-                        {
-                            "cur_step": self.cur_step,
-                            "cur_epoch": self._cur_epoch,
-                            "total_consumed_tokens": total_consumed_tokens,
-                            "train_time_offset": self._train_time + self._train_time_offset,
-                        }
-                    )
-                )
+                f.write(json.dumps(train_state))
 
         if self._async_checkpoint:
             assert async_dcp_future is not None

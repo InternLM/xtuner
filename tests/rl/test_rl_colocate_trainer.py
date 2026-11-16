@@ -19,6 +19,8 @@ Bad Tests:
 """
 
 import asyncio
+import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,13 +30,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import ray
 import torch
 
+from xtuner.v1._writer import SwanLabConfig
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.agent_loop_manager import AsyncProduceStrategyConfig, ProduceBatchResult
 from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import AgentLoopManager
 from xtuner.v1.rl.agent_loop_manager.produce_utils import _TaskRunner
+from xtuner.v1.rl.distillation import DistillationTrainerAdapter
 from xtuner.v1.rl.health_manager import RLHealthManager
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SerializedRayObjectRef
-from xtuner.v1.train.rl_trainer import RLColocateTrainer, RLThroughputBenchmark
+from xtuner.v1.train.rl_trainer import BaseRLTrainerConfig, RLColocateTrainer, RLThroughputBenchmark
 
 
 class _FakeRolloutState(RolloutState):
@@ -212,6 +216,81 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer.train_controller.fit.assert_called_once()
         trainer._release_trace_sessions.assert_called_once()
         self.assertEqual(trainer._cur_step, 1)
+
+    def test_swanlab_checkpoint_resume_preserves_run_identity(self):
+        group = asyncio.run(_build_fake_agent_loop().generate_group([_FakeRolloutState(1)]))
+        run = SimpleNamespace(id="rl-run", mode="offline", log=MagicMock(), finish=MagicMock())
+        sdk = SimpleNamespace(init=MagicMock(return_value=run))
+        config = BaseRLTrainerConfig.model_construct(
+            exp_tracker="swanlab",
+            swanlab_config=SwanLabConfig(project="rl", mode="offline"),
+        )
+        self.assertEqual(BaseRLTrainerConfig.model_fields["exp_tracker"].default, "tensorboard")
+
+        def make_trainer(exp_name, total_steps, checkpoint_path=None):
+            manager = SimpleNamespace(
+                produce_batch=AsyncMock(return_value=ProduceBatchResult(rollout_states=[group])),
+                save=AsyncMock(),
+                checkpoint_resumable=True,
+            )
+            trainer = self._make_trainer(manager, total_train_steps=total_steps)
+            trainer._meta.latest_exp.exp_dir = str(Path(self.temp_dir.name) / exp_name)
+            trainer.exp_dir.mkdir()
+            trainer._meta.latest_exp.checkpoint_list = []
+            trainer._meta.model_dump_json = MagicMock(return_value="{}")
+            trainer._meta_path = trainer._META_PATH
+            trainer._checkpoint_interval = 1
+            trainer._checkpoint_maxkeep = None
+            trainer._checkpoint_no_save_optimizer = False
+            trainer._checkpoint_no_save_replay_buffer = True
+            trainer._load_checkpoint_cfg = SimpleNamespace(checkpoint_path=checkpoint_path)
+            trainer._distillation = DistillationTrainerAdapter(None)
+            trainer.train_controller.save = MagicMock()
+            trainer.train_controller.resume = MagicMock()
+            trainer.train_controller.fit.return_value[0][0]["train_metrics"] = [
+                {"policy_loss": 0.8},
+                {"policy_loss": 0.4},
+            ]
+            trainer._init_exp_tracker(config, trainer.exp_dir / "logs")
+            trainer._log_step = RLColocateTrainer._log_step.__get__(trainer)
+
+            def save_checkpoint(train_step, timers):
+                asyncio.run(trainer._maybe_save_checkpoint(train_step))
+                return False
+
+            trainer._sync_weights_and_save.side_effect = save_checkpoint
+            return trainer
+
+        with (
+            patch.dict(sys.modules, {"swanlab": sdk}),
+            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
+        ):
+            original = make_trainer("original", 1)
+            original.fit()
+            checkpoint = original.exp_dir / "checkpoints/ckpt-step-1"
+            state = json.loads((checkpoint / "train_state.json").read_text())
+            self.assertEqual(state["cur_step"], 1)
+            self.assertEqual(state["swanlab_run"]["id"], "rl-run")
+            detail_steps = [
+                call.kwargs["step"]
+                for call in run.log.call_args_list
+                if "train_metrics/worker_0/policy_loss" in call.args[0]
+            ]
+            self.assertEqual(detail_steps, [1, 2])
+
+            resumed = make_trainer("resumed", 2, checkpoint)
+            self.assertEqual(sdk.init.call_args.kwargs["id"], "rl-run")
+            self.assertEqual(sdk.init.call_args.kwargs["resume"], "allow")
+            resumed._resume_train_controller_and_state(checkpoint)
+            resumed.fit()
+
+        logged = run.log.call_args_list
+        summaries = [call for call in logged if "train_metrics/worker_0/step_avg_policy_loss" in call.args[0]]
+        self.assertEqual([call.kwargs["step"] for call in summaries], [1, 2])
+        for call in summaries:
+            self.assertAlmostEqual(call.args[0]["train_metrics/worker_0/step_avg_policy_loss"], 0.6)
+        self.assertEqual(run.finish.call_count, 2)
 
     def test_fit_requires_non_empty_batch_from_manager(self):
         # 验证空 rollout batch 会 fail fast，并且不会推进训练 step。

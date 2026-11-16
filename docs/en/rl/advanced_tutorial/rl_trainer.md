@@ -381,6 +381,82 @@ When using disaggregated training, note that:
 - The current disaggregated weight synchronization entry point is encapsulated by the trainer. Users usually only
   need to configure `sync_weights_interval`.
 
+## Experiment Tracking
+
+Both RL trainer configurations accept `exp_tracker="tensorboard"` (the default),
+`"jsonl"`, or `"swanlab"`. The Trainer driver owns the writer and closes it when
+`fit()` exits. Selecting SwanLab forwards the existing metric names and values;
+rollout and training workers do not create separate SwanLab runs.
+
+Install the optional SDK in the training environment:
+
+```bash
+pip install 'swanlab>=0.10.1'
+```
+
+It is also available through the `xtuner[swanlab]` installation extra. After
+constructing either RL trainer configuration, select the backend:
+
+```python
+from xtuner.v1._writer import SwanLabConfig
+
+trainer.exp_tracker = "swanlab"
+trainer.swanlab_config = SwanLabConfig(
+    project="agentic-rl",
+    experiment_name="qwen-cybergym",
+    mode="online",
+    config={"batch_size": 48, "optimizer_steps": 1},
+)
+```
+
+For online mode, authenticate with `swanlab login` or the SDK's `SWANLAB_API_KEY`
+environment variable. Use `mode="offline"` to write local logs without uploading.
+Only the explicit `swanlab_config.config` dictionary is passed as experiment
+configuration; XTuner does not upload its full trainer configuration.
+
+### Metric Steps
+
+The original TensorBoard calls already use two step axes. Reward, throughput,
+phase timings, and `train_metrics/worker_0/step_avg_*` use the outer RL
+`train_step`. A step consumes one rollout batch and can
+perform several optimizer updates. Detailed `train_metrics/worker_0/*` series use
+the cumulative optimizer-step axis.
+
+For example, two outer steps with three optimizer updates each produce summary
+points at steps `1, 2`, and detailed loss points at `1, 2, 3, 4, 5, 6`. Gradient
+accumulation combines multiple microbatch forward/backward passes into one
+optimizer update; it does not advance either counter for every microbatch.
+Packing determines the actual number of optimizer steps, which can be less than
+`train_worker_cfg.optimizer_steps` when there are too few packs.
+
+The optimizer-step axis counts attempted updates, including updates skipped by
+the gradient-norm guard. It is not a count of successful parameter changes.
+SwanLab receives each series' original step, so the summary and detailed loss
+series retain their distinct axes.
+
+### Resuming a SwanLab Run
+
+The writer saves the run ID, project, and workspace to
+`<exp_dir>/logs/exp_tracking/swanlab_run.json`. Native checkpoints also save this
+identity as `swanlab_run` in `train_state.json`.
+
+With `exp_tracker="swanlab"`, both `auto_resume=True` and an explicit
+`load_checkpoint_cfg.checkpoint_path` reuse the checkpoint's run ID with SwanLab's
+`resume="allow"` behavior. This also works when resuming into a new experiment
+directory. Reusing the run identity does not change XTuner's metric step axes.
+
+To select a run explicitly, set `SwanLabConfig(run_id="...", resume="must", ...)`.
+To start a separate experiment from the same training checkpoint, set
+`resume="never"` and omit `run_id`. Reusing a run ID does not rewind already
+uploaded history; prefer a new run when comparing a replay from an older
+checkpoint.
+
+Older checkpoints without a SwanLab identity start a new SwanLab run unless a
+run ID or an existing local run-info file supplies one. The outer training step
+resumes from the checkpoint; the detailed optimizer logging counter restarts at
+`1`, as with TensorBoard and JSONL.
+
+
 ## How to Choose
 
 | Scenario | Recommendation |

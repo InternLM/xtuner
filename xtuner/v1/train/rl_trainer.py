@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Literal, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1._writer import get_writer
+from xtuner.v1._writer import SwanLabConfig, SwanLabWriter, get_writer
 from xtuner.v1.data_proto.rl_data import MM_PIXEL_FIELDS, RolloutState, validate_train_group
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
@@ -333,7 +333,8 @@ class BaseRLTrainerConfig(BaseModel):
     debug_rollout_dir: Path | str | None = None
     debug_train: bool = False
     skip_checkpoint_validation: bool = False
-    exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard"
+    exp_tracker: Literal["tensorboard", "jsonl", "swanlab"] = "tensorboard"
+    swanlab_config: SwanLabConfig | None = None
     trace_config: TraceConfig = Field(default_factory=TraceConfig)
 
     @model_validator(mode="after")
@@ -422,8 +423,9 @@ class RLColocateTrainerConfig(BaseRLTrainerConfig):
             False.
         skip_checkpoint_validation (bool): Whether to skip checkpoint
             validation. Defaults to False.
-        exp_tracker (Literal["tensorboard", "jsonl"]): Experiment tracker type.
+        exp_tracker (Literal["tensorboard", "jsonl", "swanlab"]): Experiment tracker type.
             Defaults to "tensorboard".
+        swanlab_config (SwanLabConfig | None): Optional SwanLab settings. Defaults to None.
         resources (AcceleratorResourcesConfig): Shared accelerator resources
             used by both training and rollout workers.
 
@@ -510,8 +512,9 @@ class RLDisaggregatedTrainerConfig(BaseRLTrainerConfig):
             False.
         skip_checkpoint_validation (bool): Whether to skip checkpoint
             validation. Defaults to False.
-        exp_tracker (Literal["tensorboard", "jsonl"]): Experiment tracker type.
+        exp_tracker (Literal["tensorboard", "jsonl", "swanlab"]): Experiment tracker type.
             Defaults to "tensorboard".
+        swanlab_config (SwanLabConfig | None): Optional SwanLab settings. Defaults to None.
         train_resources (AcceleratorResourcesConfig): Accelerator resources for
             training workers.
         rollout_resources (AcceleratorResourcesConfig): Accelerator resources
@@ -586,8 +589,20 @@ class BaseRLTrainer:
         self._benchmark_training_samples: int = 0
         self._benchmark_training_tokens: int = 0
 
-        self._exp_tracker = get_writer(writer_type=cfg.exp_tracker, log_dir=log_dir / self._EXP_TRACKING_PATH)
+        self._init_exp_tracker(cfg, log_dir)
         self._display_all_workers_log = False
+
+    def _init_exp_tracker(self, cfg: BaseRLTrainerConfig, log_dir: Path) -> None:
+        resume_run = None
+        if cfg.exp_tracker == "swanlab" and self._load_checkpoint_cfg.checkpoint_path is not None:
+            state_path = Path(self._load_checkpoint_cfg.checkpoint_path) / self._SAVE_TRAIN_STATE_PATH
+            resume_run = json.loads(state_path.read_text()).get("swanlab_run")
+        self._exp_tracker = get_writer(
+            writer_type=cfg.exp_tracker,
+            log_dir=log_dir / self._EXP_TRACKING_PATH,
+            swanlab_config=cfg.swanlab_config,
+            resume_run=resume_run,
+        )
 
     def _init_work_dir_and_meta(self, cfg: BaseRLTrainerConfig, meta_path: str) -> None:
         work_dir = Path(cfg.work_dir) if cfg.work_dir else Path.cwd() / "work_dirs"
@@ -798,8 +813,11 @@ class BaseRLTrainer:
 
         # 3. Save train state JSON
         train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
+        train_state: dict[str, Any] = {"cur_step": cur_step}
+        if isinstance(self._exp_tracker, SwanLabWriter):
+            train_state["swanlab_run"] = self._exp_tracker.run_info
         with train_state_path.open("w") as f:
-            json.dump({"cur_step": cur_step}, f)
+            json.dump(train_state, f)
 
         # 4. Update meta
         current_exp = self._meta.latest_exp
