@@ -389,7 +389,7 @@ SwanLab 使用各指标原本的 step，因此汇总曲线和详细 loss 曲线�
 
 ### SwanLab 续跑
 
-writer 将 run ID、project 和 workspace 写入
+writer 将 run ID、project、workspace 和可选的 group 写入
 `<exp_dir>/logs/exp_tracking/swanlab_run.json`。原生 checkpoint 的 `train_state.json`
 还会保存 `swanlab_run` 实验标识。
 

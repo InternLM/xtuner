@@ -42,7 +42,7 @@ def test_metrics_keep_names_and_independent_step_axes(tmp_path, sdk):
 
 
 def test_resume_uses_persisted_run_id(tmp_path, sdk):
-    original = SwanLabWriter(tmp_path, config=SwanLabConfig(project="rl", workspace="team"))
+    original = SwanLabWriter(tmp_path, config=SwanLabConfig(project="rl", workspace="team", group="training"))
     original.close()
     resumed = SwanLabWriter(tmp_path)
     resumed.close()
@@ -51,10 +51,11 @@ def test_resume_uses_persisted_run_id(tmp_path, sdk):
     assert sdk.init.call_args.kwargs["resume"] == "allow"
     assert sdk.init.call_args.kwargs["project"] == "rl"
     assert sdk.init.call_args.kwargs["workspace"] == "team"
+    assert sdk.init.call_args.kwargs["group"] == "training"
 
 
 def test_checkpoint_run_identity_survives_a_new_log_directory(tmp_path, sdk):
-    saved = {"id": "checkpoint-run", "project": "rl", "workspace": "team"}
+    saved = {"id": "checkpoint-run", "project": "rl", "workspace": "team", "group": "training"}
     writer = SwanLabWriter(tmp_path / "new-exp", resume_run=saved)
     writer.close()
 
@@ -62,6 +63,7 @@ def test_checkpoint_run_identity_survives_a_new_log_directory(tmp_path, sdk):
     assert sdk.init.call_args.kwargs["resume"] == "allow"
     assert sdk.init.call_args.kwargs["project"] == "rl"
     assert sdk.init.call_args.kwargs["workspace"] == "team"
+    assert sdk.init.call_args.kwargs["group"] == "training"
 
 
 def test_online_run_persists_resolved_project_and_workspace(tmp_path, sdk):
@@ -74,6 +76,7 @@ def test_online_run_persists_resolved_project_and_workspace(tmp_path, sdk):
         "id": "test-run-id",
         "project": "resolved-project",
         "workspace": "resolved-team",
+        "group": None,
     }
 
 

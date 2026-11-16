@@ -30,19 +30,6 @@ class Writer(Protocol):
     def close(self) -> None: ...
 
 
-class NoOpWriter:
-    """Ignore experiment metrics on non-logging ranks."""
-
-    def add_scalar(self, *, tag: str, scalar_value: float, global_step: int):
-        pass
-
-    def add_scalars(self, *, tag_scalar_dict: dict[str, float], global_step: int):
-        pass
-
-    def close(self) -> None:
-        pass
-
-
 def get_writer(
     *,
     writer_type: str,
@@ -60,4 +47,4 @@ def get_writer(
         raise ValueError(f"Unknown writer type: {writer_type}")
 
 
-__all__ = ["JsonlWriter", "NoOpWriter", "SwanLabConfig", "SwanLabWriter", "TensorboardWriter"]
+__all__ = ["JsonlWriter", "SwanLabConfig", "SwanLabWriter", "TensorboardWriter"]

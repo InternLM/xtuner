@@ -17,14 +17,27 @@ from xtuner.v1.train.trainer import HooksConfig, LoadCheckpointConfig, Trainer, 
 
 @pytest.fixture
 def sdk(monkeypatch):
-    run = SimpleNamespace(id="sft-run", mode="offline", log=Mock(), finish=Mock())
-    sdk = SimpleNamespace(init=Mock(return_value=run), run=run)
+    sdk = SimpleNamespace(runs=[])
+
+    def init(**kwargs):
+        run = SimpleNamespace(
+            id=kwargs.get("id") or f"sft-run-{len(sdk.runs)}",
+            mode="offline",
+            log=Mock(),
+            finish=Mock(),
+        )
+        sdk.runs.append(run)
+        sdk.run = run
+        return run
+
+    sdk.init = Mock(side_effect=init)
     monkeypatch.setitem(sys.modules, "swanlab", sdk)
     return sdk
 
 
-def test_only_rank_zero_creates_a_swanlab_run(tmp_path, monkeypatch, sdk):
+def test_all_ranks_create_independent_runs_in_one_group(tmp_path, monkeypatch, sdk):
     trainer = Trainer.__new__(Trainer)
+    trainer._meta = SimpleNamespace(latest_exp=SimpleNamespace(exp_dir=str(tmp_path / "exp")))
     trainer._load_checkpoint_cfg = LoadCheckpointConfig()
     for rank in (1, 0):
         monkeypatch.setattr(trainer_module, "get_rank", lambda: rank)
@@ -32,11 +45,50 @@ def test_only_rank_zero_creates_a_swanlab_run(tmp_path, monkeypatch, sdk):
         writer.add_scalar(tag="loss", scalar_value=0.5, global_step=2)
         writer.close()
 
-    sdk.init.assert_called_once()
-    sdk.run.log.assert_called_once_with({"loss": 0.5}, step=2)
-    sdk.run.finish.assert_called_once()
-    assert not (tmp_path / "rank1").exists()
+    assert sdk.init.call_count == 2
+    assert len({run.id for run in sdk.runs}) == 2
+    calls = sdk.init.call_args_list
+    assert calls[0].kwargs["group"] == calls[1].kwargs["group"]
+    assert calls[0].kwargs["group"]
+    assert [call.kwargs["experiment_name"].rsplit("-", 1)[-1] for call in calls] == ["rank1", "rank0"]
+    for rank, run in zip((1, 0), sdk.runs):
+        run.log.assert_called_once_with({"loss": 0.5}, step=2)
+        run.finish.assert_called_once()
+        assert json.loads((tmp_path / f"rank{rank}/swanlab_run.json").read_text())["id"] == run.id
     assert TrainerConfig.model_fields["exp_tracker"].default == "jsonl"
+
+
+def test_explicit_id_and_name_distinguish_ranks(tmp_path, monkeypatch, sdk):
+    trainer = Trainer.__new__(Trainer)
+    trainer._meta = SimpleNamespace(latest_exp=SimpleNamespace(exp_dir=str(tmp_path / "exp")))
+    trainer._load_checkpoint_cfg = LoadCheckpointConfig()
+    config = SwanLabConfig(group="training", experiment_name="sft", run_id="manual-run", resume="must")
+    for rank in (0, 1):
+        monkeypatch.setattr(trainer_module, "get_rank", lambda: rank)
+        trainer._init_tracker("swanlab", tmp_path / f"rank{rank}", config).close()
+
+    assert [call.kwargs["id"] for call in sdk.init.call_args_list] == ["manual-run", "manual-run-rank1"]
+    assert [call.kwargs["experiment_name"] for call in sdk.init.call_args_list] == ["sft-rank0", "sft-rank1"]
+    assert all(call.kwargs["group"] == "training" for call in sdk.init.call_args_list)
+    assert config.run_id == "manual-run"
+    assert config.experiment_name == "sft"
+
+
+@pytest.mark.parametrize("rank", [0, 2])
+def test_legacy_checkpoint_identity_is_only_reused_by_rank_zero(tmp_path, monkeypatch, sdk, rank):
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "train_state.json").write_text(
+        json.dumps({"swanlab_run": {"id": "original-run", "project": "sft", "group": "original-group"}})
+    )
+    monkeypatch.setattr(trainer_module, "get_rank", lambda: rank)
+    trainer = Trainer.__new__(Trainer)
+    trainer._meta = SimpleNamespace(latest_exp=SimpleNamespace(exp_dir=str(tmp_path / "new-exp")))
+    trainer._load_checkpoint_cfg = LoadCheckpointConfig(checkpoint_path=checkpoint)
+    trainer._init_tracker("swanlab", tmp_path / f"rank{rank}").close()
+
+    assert sdk.init.call_args.kwargs["id"] == ("original-run" if rank == 0 else None)
+    assert sdk.init.call_args.kwargs["group"] == "original-group"
 
 
 @pytest.mark.parametrize("backend", ["tensorboard", "jsonl"])
@@ -65,13 +117,14 @@ def make_trainer(tmp_path, monkeypatch):
     device.max_memory_reserved.return_value = 0
     monkeypatch.setattr(trainer_module, "DEVICE_MODULE", device)
 
-    def build(name, total_steps, checkpoint=None, *, auto_resume=False):
+    def build(name, total_steps, checkpoint=None, *, auto_resume=False, rank=0):
         # Exercise fit, logging and checkpoint I/O with only the engine and
         # distributed resources replaced; no model assets or GPU are needed.
         trainer = Trainer.__new__(Trainer)
+        monkeypatch.setattr(trainer_module, "get_rank", lambda: rank)
         trainer._init_async_save_resources(async_hf_export=False, async_checkpoint=False)
         trainer._work_dir = tmp_path / name
-        trainer._work_dir.mkdir()
+        trainer._work_dir.mkdir(exist_ok=True)
         trainer._meta = SimpleNamespace(
             latest_exp=SimpleNamespace(
                 exp_dir=str(trainer._work_dir / "exp"),
@@ -86,7 +139,7 @@ def make_trainer(tmp_path, monkeypatch):
             auto_resume, LoadCheckpointConfig(checkpoint_path=None if auto_resume else checkpoint)
         )
         trainer._exp_tracker = trainer._init_tracker(
-            "swanlab", trainer.exp_dir / "logs/exp_tracking/rank0", SwanLabConfig(project="sft", mode="offline")
+            "swanlab", trainer.exp_dir / f"logs/exp_tracking/rank{rank}", SwanLabConfig(project="sft", mode="offline")
         )
         trainer._cur_step = 0
         trainer._cur_epoch = 1
@@ -116,7 +169,7 @@ def make_trainer(tmp_path, monkeypatch):
         trainer._prepare_model_input = Mock(return_value=[])
         trainer._engine = Mock()
         trainer._engine.train_step.return_value = {
-            "total_loss": 0.5,
+            "total_loss": 0.5 + rank,
             "step_consumed_tokens": 8,
             "step_seqlen_tokens": 8,
             "efficient_attn_ratio": 1.0,
@@ -125,7 +178,7 @@ def make_trainer(tmp_path, monkeypatch):
             "extra_info": ModelForwardExtraLogInfo(),
         }
         trainer._engine.clip_grad_norm.return_value = torch.tensor(1.0)
-        trainer._engine.save_dcp.side_effect = lambda weights_dir: weights_dir.mkdir(parents=True)
+        trainer._engine.save_dcp.side_effect = lambda weights_dir: weights_dir.mkdir(parents=True, exist_ok=True)
         trainer._lr_scheduler = Mock()
         trainer._lr_scheduler.get_last_lr.return_value = [0.001]
         trainer._lr_scheduler.state_dict.return_value = {}
@@ -138,21 +191,34 @@ def make_trainer(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("auto_resume", [False, True])
 def test_fit_saves_run_identity_and_resumes_in_a_new_directory(make_trainer, sdk, auto_resume):
-    original = make_trainer("original", 1)
-    original.fit()
-    checkpoint = original.checkpoint_dir / "ckpt-step-1"
+    identities = []
+    for rank in (0, 1):
+        original = make_trainer("original", 1, rank=rank)
+        original.fit()
+        checkpoint = original.checkpoint_dir / "ckpt-step-1"
+        identity = json.loads((checkpoint / f"swanlab/rank{rank}.json").read_text())
+        assert identity["id"] == sdk.run.id
+        identities.append(identity)
     state = json.loads((checkpoint / "train_state.json").read_text())
-    assert state["swanlab_run"] == {"id": "sft-run", "project": "sft", "workspace": None}
+    assert state["swanlab_run"] == identities[0]
+    assert identities[0]["id"] != identities[1]["id"]
+    assert identities[0]["group"] == identities[1]["group"] == "original-exp"
 
-    resumed = make_trainer("resumed", 2, checkpoint, auto_resume=auto_resume)
-    assert sdk.init.call_args.kwargs["id"] == "sft-run"
-    assert sdk.init.call_args.kwargs["resume"] == "allow"
-    assert resumed.cur_step == 1
-    resumed.fit()
+    for rank in (0, 1):
+        resumed = make_trainer("resumed", 2, checkpoint, auto_resume=auto_resume, rank=rank)
+        assert sdk.init.call_args.kwargs["id"] == identities[rank]["id"]
+        assert sdk.init.call_args.kwargs["group"] == identities[rank]["group"]
+        assert sdk.init.call_args.kwargs["resume"] == "allow"
+        assert resumed.cur_step == 1
+        resumed.fit()
 
-    assert [call.kwargs["step"] for call in sdk.run.log.call_args_list] == [1, 2]
-    assert all(call.args[0]["loss/reduced_llm_loss"] == 0.5 for call in sdk.run.log.call_args_list)
-    assert sdk.run.finish.call_count == 2
+    for rank in (0, 1):
+        runs = [run for run in sdk.runs if run.id == identities[rank]["id"]]
+        calls = [call for run in runs for call in run.log.call_args_list]
+        assert [call.kwargs["step"] for call in calls] == [1, 2]
+        assert all(call.args[0]["loss/local_loss"] == 0.5 + rank for call in calls)
+        assert all(call.args[0]["loss/reduced_llm_loss"] == 0.5 for call in calls)
+        assert all(run.finish.call_count == 1 for run in runs)
     assert json.loads((resumed.checkpoint_dir / "ckpt-step-2/train_state.json").read_text())["cur_step"] == 2
 
 

@@ -39,7 +39,8 @@ from torch.optim.lr_scheduler import LambdaLR, LinearLR, SequentialLR
 from typing_extensions import NotRequired, Self, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1._writer import NoOpWriter, SwanLabConfig, SwanLabWriter, get_writer
+from xtuner.v1._writer import SwanLabConfig, SwanLabWriter, get_writer
+from xtuner.v1._writer.swanlab_writer import RUN_INFO_FILE
 from xtuner.v1.config import FSDPConfig, LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import BaseDataloaderConfig, DataloaderConfig, DatasetConfigList
@@ -1152,11 +1153,36 @@ class Trainer:
     ):
         resume_run = None
         if exp_tracker == "swanlab":
-            if self.rank != 0:
-                return NoOpWriter()
+            config = swanlab_config or SwanLabConfig()
+            checkpoint_group = None
             if self._load_checkpoint_cfg.checkpoint_path is not None:
-                state_path = Path(self._load_checkpoint_cfg.checkpoint_path) / self._SAVE_TRAIN_STATE_PATH
-                resume_run = json.loads(state_path.read_text()).get("swanlab_run")
+                checkpoint = Path(self._load_checkpoint_cfg.checkpoint_path)
+                rank_run_path = checkpoint / "swanlab" / f"rank{self.rank}.json"
+                if rank_run_path.exists():
+                    resume_run = json.loads(rank_run_path.read_text())
+                else:
+                    state = json.loads((checkpoint / self._SAVE_TRAIN_STATE_PATH).read_text())
+                    checkpoint_group = (state.get("swanlab_run") or {}).get("group")
+                    if self.rank == 0:
+                        resume_run = state.get("swanlab_run")
+            local_run_path = log_dir / RUN_INFO_FILE
+            if resume_run is None and local_run_path.exists():
+                resume_run = json.loads(local_run_path.read_text())
+            saved_group = None
+            if config.resume != "never":
+                saved_group = (resume_run or {}).get("group") or checkpoint_group
+            group = config.group or saved_group or os.getenv("SWANLAB_GROUP")
+            group = group or f"{self.exp_dir.parent.name}-{self.exp_dir.name}"
+            run_id = config.run_id
+            if run_id is not None and self.rank != 0:
+                run_id = f"{run_id}-rank{self.rank}"
+            swanlab_config = config.model_copy(
+                update={
+                    "group": group,
+                    "experiment_name": f"{config.experiment_name or group}-rank{self.rank}",
+                    "run_id": run_id,
+                }
+            )
         return get_writer(
             writer_type=exp_tracker,
             log_dir=log_dir,
@@ -1392,6 +1418,11 @@ class Trainer:
 
             with config_bin.open("wb") as config_bin_file:
                 pickle.dump(self._trainer_cfg, config_bin_file)
+
+        if isinstance(self._exp_tracker, SwanLabWriter):
+            rank_run_path = checkpoint_path / "swanlab" / f"rank{self.rank}.json"
+            rank_run_path.parent.mkdir(parents=True, exist_ok=True)
+            rank_run_path.write_text(json.dumps(self._exp_tracker.run_info))
 
         dist.barrier()
 

@@ -448,7 +448,7 @@ current batch. Their logging overhead is included in `time/step`.
 
 ### Resuming a SwanLab Run
 
-The writer saves the run ID, project, and workspace to
+The writer saves the run ID, project, workspace, and optional group to
 `<exp_dir>/logs/exp_tracking/swanlab_run.json`. Native checkpoints also save this
 identity as `swanlab_run` in `train_state.json`.
 

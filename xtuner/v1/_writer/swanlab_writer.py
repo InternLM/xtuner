@@ -17,6 +17,7 @@ class SwanLabConfig(BaseModel):
     project: str | None = None
     workspace: str | None = None
     experiment_name: str | None = None
+    group: str | None = None
     mode: Literal["online", "offline", "local", "disabled"] | None = None
     run_id: str | None = None
     resume: Literal["allow", "must", "never"] | None = None
@@ -56,6 +57,7 @@ class SwanLabWriter:
         run_id = config.run_id or saved.get("id")
         project = config.project or saved.get("project") or os.getenv("SWANLAB_PROJ_NAME") or "xtuner"
         workspace = config.workspace or saved.get("workspace") or os.getenv("SWANLAB_WORKSPACE")
+        group = config.group or saved.get("group") or os.getenv("SWANLAB_GROUP")
         if saved:
             for field, value in (("project", project), ("workspace", workspace)):
                 if saved.get(field) is not None and value != saved[field]:
@@ -68,6 +70,7 @@ class SwanLabWriter:
             project=project,
             workspace=workspace,
             experiment_name=config.experiment_name,
+            group=group,
             logdir=str(directory),
             mode=config.mode,
             id=run_id,
@@ -76,7 +79,12 @@ class SwanLabWriter:
         )
         self._closed = False
         try:
-            self.run_info: dict[str, Any] = {"id": self._run.id, "project": project, "workspace": workspace}
+            self.run_info: dict[str, Any] = {
+                "id": self._run.id,
+                "project": project,
+                "workspace": workspace,
+                "group": group,
+            }
             if self._run.mode == "online":
                 # The online run path includes the resolved account/organization.
                 workspace, project, _ = self._run.path.strip("/").split("/")
