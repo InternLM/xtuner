@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.rl.agent_loop import IsValidSampleFn
-from xtuner.v1.rl.utils import create_task
+from xtuner.v1.rl.utils import await_cancellable_tasks, await_owned_operation, create_task
 from xtuner.v1.utils import get_logger
 
 from .produce_utils import (
@@ -18,7 +18,6 @@ from .produce_utils import (
     ShouldContinueFn,
     _PendingTasks,
     _ProgressDisplayer,
-    _put_claimed_tasks,
     calculate_stale_threshold,
     default_should_continue_fn,
     pause_pending_tasks,
@@ -34,9 +33,10 @@ logger = get_logger()
 
 @dataclass
 class ProduceProgress:
-    """共卡单次 produce_batch 的局部指标，不进入 checkpoint。"""
+    """共卡 manager 持有的稳定生产账本；窗口只更新目标与当前消费步。"""
 
     target_samples: dict[str, int] = field(default_factory=dict)
+    consumer_step: int = 1
     raw_rewards_sum: dict[str, float] = field(default_factory=dict)
     raw_rewards_count: dict[str, int] = field(default_factory=dict)
     produced_samples: dict[str, int] = field(default_factory=dict)
@@ -54,6 +54,7 @@ class ProduceProgress:
     ) -> "ProduceProgress":
         return cls(
             target_samples=dict(target_samples),
+            consumer_step=1,
             raw_rewards_sum={task_name: 0.0 for task_name in task_names},
             raw_rewards_count={task_name: 0 for task_name in task_names},
             produced_samples={task_name: 0 for task_name in task_names},
@@ -112,6 +113,13 @@ class ProduceProgress:
 @dataclass(kw_only=True)
 class ProduceContext(BaseProduceContext):
     """共卡本地生产窗口；不暴露非共卡状态机字段。"""
+
+    progress: ProduceProgress
+
+    @property
+    def consumer_step(self) -> int:
+        # Stable ledger across windows: a group delivered after the window returns uses the next consume step.
+        return self.progress.consumer_step
 
     @property
     def batch_target(self) -> int:
@@ -300,13 +308,13 @@ class ProduceStrategy(ABC):
 
 class SyncProduceStrategy(ProduceStrategy):
     async def produce_batch(self, ctx: ProduceContext) -> None:
+        # 保留原局部 set、初始 buffer 计数与补组循环；完整组 Task 自行交付。
         pending_tasks = set()
         completed_sample_count = await ctx.replay_buffer.count(task_name=ctx.task_name, group_status=Status.COMPLETED)
 
         for _ in range(ctx.task_batch_size):
-            rollout_state = await ctx.sampler.sample(task_name=ctx.task_name)
-            task = create_task(ctx.generate_group(rollout_state))
-            pending_tasks.add(task)
+            # None 表示只从 dataloader 采新数据；采样仍在完整组 Task 内完成。
+            pending_tasks.add(create_task(ctx.produce_group(sample_expired=None)))
 
         logger.info(f"[SyncProduceStrategy] Started {len(pending_tasks)} initial tasks.")
 
@@ -316,31 +324,30 @@ class SyncProduceStrategy(ProduceStrategy):
             total=ctx.batch_target,
             initial=completed_sample_count,
         )
-        while self.should_continue_fn(completed_sample_count, ctx.task_batch_size):
-            if not pending_tasks:
-                logger.warning("[SyncProduceStrategy] All tasks are done but not enough samples collected.")
-                break
-            done_tasks, pending_tasks = await asyncio.wait(
-                pending_tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED
-            )
-            # AgentLoop 已完成过滤；put_generated_group 只处理状态、数据入库和释放。
-            for task in done_tasks:
-                items = task.result()
+        try:
+            while self.should_continue_fn(completed_sample_count, ctx.task_batch_size):
+                if not pending_tasks:
+                    logger.warning("[SyncProduceStrategy] All tasks are done but not enough samples collected.")
+                    break
+                done_tasks, pending_tasks = await asyncio.wait(
+                    pending_tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done_tasks:
+                    # 完整组 Task 已自行交付，这里只读取 bool 结果。
+                    is_completed = task.result()
+                    if not is_completed:
+                        continue
+                    completed_sample_count += 1
+                    progress_displayer.update(completed_sample_count)
 
-                is_completed = await ctx.put_generated_group(items)
-                if not is_completed:
-                    continue
-
-                completed_sample_count += 1
-                progress_displayer.update(completed_sample_count)
-
-            while len(pending_tasks) + completed_sample_count < ctx.task_batch_size and self.should_continue_fn(
-                completed_sample_count, ctx.task_batch_size
-            ):
-                rollout_state = await ctx.sampler.sample(task_name=ctx.task_name)
-                task = create_task(ctx.generate_group(rollout_state))
-                pending_tasks.add(task)
-        progress_displayer.close()
+                while len(pending_tasks) + completed_sample_count < ctx.task_batch_size and self.should_continue_fn(
+                    completed_sample_count, ctx.task_batch_size
+                ):
+                    pending_tasks.add(create_task(ctx.produce_group(sample_expired=None)))
+        finally:
+            # 返回/抛错前结清剩余局部任务，防止后台继续 put。
+            await await_owned_operation(_PendingTasks._finish_close(pending_tasks))
+            progress_displayer.close()
 
 
 class AsyncProduceStrategy(ProduceStrategy):
@@ -392,20 +399,14 @@ class AsyncProduceStrategy(ProduceStrategy):
 
     async def pause_produce(self, ctx: ProduceContext) -> float:
         if not self._retain_live_tasks:
-            return await pause_pending_tasks(
-                pending_tasks=self._pending_tasks,
-                ctx=ctx,
-                put_claimed_task=lambda task: ctx.put_generated_group(task.result()),
-            )
+            return await pause_pending_tasks(pending_tasks=self._pending_tasks, ctx=ctx)
         start = time.perf_counter()
-        for task in await self._pending_tasks.claim_ready():
-            await ctx.put_generated_group(task.result())
+        await await_cancellable_tasks(await self._pending_tasks.claim_ready())
         return time.perf_counter() - start
 
     async def quiesce(self, ctx: ProduceContext) -> None:
         while self._pending_tasks.count():
-            for task in await self._pending_tasks.wait_and_claim(timeout_s=1):
-                await ctx.put_generated_group(task.result())
+            await await_cancellable_tasks(await self._pending_tasks.wait_and_claim(timeout_s=1))
 
     async def close(self) -> None:
         await self._pending_tasks.close()
@@ -418,8 +419,8 @@ class AsyncProduceStrategy(ProduceStrategy):
             # 共卡 async 的 pending 只属于本次 produce_batch。
             self._pending_tasks = _PendingTasks()
         else:
-            # Harvest groups that finished while this window was training; do not rebuild the owner.
-            await _put_claimed_tasks(await self._pending_tasks.claim_ready(), ctx)
+            # Harvest groups that finished while this window was training; they already delivered themselves.
+            await await_cancellable_tasks(await self._pending_tasks.claim_ready())
 
         if ctx.batch_target <= 0:
             return
@@ -445,10 +446,10 @@ class AsyncProduceStrategy(ProduceStrategy):
         )
 
         async def spawn_one() -> asyncio.Task:
-            rollout_state = await ctx.sample_group(from_expired_pool=sample_expired)
+            # Registration happens before any business await: sampling runs inside the complete group Task.
             return create_task(
-                ctx.generate_group(
-                    rollout_state,
+                ctx.produce_group(
+                    sample_expired=sample_expired,
                     enable_partial_rollout=self.enable_partial_rollout,
                 )
             )
@@ -461,6 +462,7 @@ class AsyncProduceStrategy(ProduceStrategy):
             initial=initial_available,
         )
         while True:
+            await await_cancellable_tasks(await self._pending_tasks.claim_ready())
             available = await ctx.completed_count()
             progress_displayer.update(available)
             if not self.should_continue_fn(available, batch_target):
@@ -480,11 +482,5 @@ class AsyncProduceStrategy(ProduceStrategy):
                 logger.warning("All tasks are done but not enough samples collected.")
                 break
 
-            done_tasks = await self._pending_tasks.wait_and_claim(timeout_s=1)
-            await _put_claimed_tasks(
-                done_tasks,
-                ctx,
-                available_base=available,
-                progress_displayer=progress_displayer,
-            )
+            await await_cancellable_tasks(await self._pending_tasks.wait_and_claim(timeout_s=1))
         progress_displayer.close()

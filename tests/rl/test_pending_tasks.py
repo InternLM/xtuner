@@ -24,43 +24,30 @@ from xtuner.v1.rl.agent_loop_manager.produce_utils import _PendingTasks, pause_p
 
 
 class TestPendingTasks(unittest.IsolatedAsyncioTestCase):
-    async def test_pause_pending_tasks_drains_local_set_and_pending_container(self):
-        # 验证共卡本地 set 和非共卡 _PendingTasks 都复用同一套 pause/drain 协议。
-        for pending_tasks in (set(), _PendingTasks()):
-            ctx = MagicMock()
-            ctx.task_name = "test_pause_helper"
-            ctx.agent_loop.pause = AsyncMock(return_value=None)
-            claimed_results: list[str] = []
+    async def test_pause_pending_tasks_drains_complete_group_tasks(self):
+        # 完整组 Task 已自行交付；pause 只读取终态，不再通过回调二次 put。
+        pending_tasks = _PendingTasks()
+        ctx = MagicMock()
+        ctx.task_name = "test_pause_helper"
+        ctx.agent_loop.pause = AsyncMock(return_value=None)
 
+        async def spawn_one():
             async def done():
                 return "done"
 
-            if isinstance(pending_tasks, set):
-                pending_tasks.add(asyncio.create_task(done()))
-            else:
+            return asyncio.create_task(done())
 
-                async def spawn_one():
-                    return asyncio.create_task(done())
+        await pending_tasks.schedule_one(
+            max_pending=1,
+            should_abort=lambda: False,
+            spawn_one=spawn_one,
+        )
 
-                await pending_tasks.schedule_one(
-                    max_pending=1,
-                    should_abort=lambda: False,
-                    spawn_one=spawn_one,
-                )
+        pause_time_s = await pause_pending_tasks(pending_tasks=pending_tasks, ctx=ctx)
 
-            async def put_claimed_task(task: asyncio.Task) -> None:
-                claimed_results.append(task.result())
-
-            pause_time_s = await pause_pending_tasks(
-                pending_tasks=pending_tasks,
-                ctx=ctx,
-                put_claimed_task=put_claimed_task,
-            )
-
-            self.assertGreaterEqual(pause_time_s, 0.0)
-            self.assertEqual(claimed_results, ["done"])
-            self.assertEqual(len(pending_tasks) if isinstance(pending_tasks, set) else pending_tasks.count(), 0)
-            self.assertGreaterEqual(ctx.agent_loop.pause.await_count, 1)
+        self.assertGreaterEqual(pause_time_s, 0.0)
+        self.assertEqual(pending_tasks.count(), 0)
+        self.assertGreaterEqual(ctx.agent_loop.pause.await_count, 1)
 
     async def test_claim_ready_returns_each_done_task_once(self):
         # 验证 done task 被 claim 后会从 pending 集合移除，避免 producer/pause 重复处理同一结果。

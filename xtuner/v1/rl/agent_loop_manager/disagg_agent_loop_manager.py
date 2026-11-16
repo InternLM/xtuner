@@ -16,6 +16,7 @@ from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.rollout.request_publication import TurnResumeConfig
+from xtuner.v1.rl.utils import await_cancellable_tasks, await_owned_operation
 from xtuner.v1.utils import get_logger
 
 from .disagg_producer import (
@@ -208,10 +209,9 @@ class DisaggAgentLoopManager:
         # consumer 同步权重前置位；producer / strategy 直接观察 event。
         self._update_event = asyncio.Event()
         self._finish_event = asyncio.Event()
-        # Producer idle means the current produce call has finished putting. Pausing is expressed by the
-        # existing UPDATE status plus _update_event; no separate admission flag is needed.
-        self._producer_idle = asyncio.Event()
-        self._producer_idle.set()
+        # The actual scheduling round. pause waits this Task; registering it has no await after the status
+        # check, so a pause cannot miss a round that already started.
+        self._produce_pass: asyncio.Task | None = None
 
         # rollout 侧当前模型版本；pause 清空 pending 后才能更新。
         self._model_step = 0
@@ -231,51 +231,58 @@ class DisaggAgentLoopManager:
         return pause_time_s
 
     async def _produce_batch_to_buffer(
-        self,
-        task_batch_sizes: dict[str, int],
-        progress: DisaggProduceProgress,
+        self, task_batch_sizes: dict[str, int], progress: DisaggProduceProgress
     ) -> ProduceBatchStatus:
-        producer_train_step = progress.producer_future_step
-        expired_tasks = []
-        for task in self.task_runners:
-            produce_strategy = cast(DisaggProduceStrategy, task.produce_strategy)
-            if produce_strategy.is_model_expired(producer_train_step, self._model_step):
-                expired_tasks.append(task.task_name)
+        """One scheduling round: run the task strategies for the planned targets.
+
+        Target planning, the future step and the manager status stay in ``produce_loop``; this method only reports
+        the aggregated round result.
+        """
+        train_step = progress.producer_future_step
+        expired_tasks = [
+            task.task_name
+            for task in self.task_runners
+            if cast(DisaggProduceStrategy, task.produce_strategy).is_model_expired(train_step, self._model_step)
+        ]
         if expired_tasks:
             self.logger.info(
-                f"[DisaggAgentLoopManager][{self.name}] EXPIRED_BATCH: "
-                f"future_step={producer_train_step}, tasks={expired_tasks}"
+                f"[DisaggAgentLoopManager][{self.name}] EXPIRED_BATCH: future_step={train_step}, tasks={expired_tasks}"
             )
             return ProduceBatchStatus.EXPIRED_BATCH
-
         active_tasks = [task for task in self.task_runners if progress.target_samples[task.task_name] > 0]
         assert active_tasks, "No active tasks found"
 
         produce_start = time.perf_counter()
-        produce_futures = []
-        for task in active_tasks:
-            produce_strategy = cast(DisaggProduceStrategy, task.produce_strategy)
-            produce_futures.append(
-                produce_strategy.produce_batch(
-                    DisaggProduceContext(
-                        agent_loop=task.agent_loop,
-                        sampler=task.sampler,
-                        replay_buffer=self.replay_buffer,
-                        task_batch_size=task_batch_sizes[task.task_name],
-                        task_name=task.task_name,
-                        train_step=producer_train_step,
-                        model_step=self._model_step,
-                        progress=progress,
-                        update_event=self._update_event,
-                        stale_threshold=task.stale_threshold,
-                        token_stale_threshold=task.token_stale_threshold,
-                        expired_groups_retryable=task.expired_groups_retryable,
-                    )
-                )
+        contexts = {
+            task.task_name: DisaggProduceContext(
+                agent_loop=task.agent_loop,
+                sampler=task.sampler,
+                replay_buffer=self.replay_buffer,
+                task_batch_size=task_batch_sizes[task.task_name],
+                task_name=task.task_name,
+                train_step=train_step,
+                model_step=self._model_step,
+                progress=progress,
+                update_event=self._update_event,
+                stale_threshold=task.stale_threshold,
+                token_stale_threshold=task.token_stale_threshold,
+                expired_groups_retryable=task.expired_groups_retryable,
             )
-        produce_status = _aggregate_status(await asyncio.gather(*produce_futures))
+            for task in active_tasks
+        }
+
+        async def run_strategy(task: _TaskRunner) -> ProduceBatchStatus:
+            try:
+                return await cast(DisaggProduceStrategy, task.produce_strategy).produce_batch(contexts[task.task_name])
+            except (Exception, asyncio.CancelledError):
+                # One failing scheduler stops the others from refilling; wait for them all before propagating.
+                self._update_event.set()
+                raise
+
+        status = _aggregate_status(await await_cancellable_tasks(run_strategy(task) for task in active_tasks))
+        # 原计时边界：目标规划、提前过期、异常路径都不计入生产耗时。
         progress.add_produce_time(time.perf_counter() - produce_start)
-        return produce_status
+        return status
 
     def _pending_context(self, task: _TaskRunner) -> DisaggProduceContext:
         return DisaggProduceContext(
@@ -295,11 +302,11 @@ class DisaggAgentLoopManager:
 
     async def pause_produce(self, *, quiesce: bool = False) -> float:
         # Set the pause state first: the status stops the next round and _update_event tells the running strategy
-        # to stop scheduling new groups. Then wait for the current produce call to finish putting. A claimed
-        # result is not an idle producer: only ``_producer_idle`` proves the current put has completed.
+        # to stop scheduling new groups. Then wait for the actual scheduling round (including result delivery).
         self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
         self._update_event.set()
-        await self._producer_idle.wait()
+        if self._produce_pass is not None:
+            await await_owned_operation(self._produce_pass)
         if self.turn_resume is not None and quiesce:
 
             async def finish_live_tasks() -> None:
@@ -323,8 +330,10 @@ class DisaggAgentLoopManager:
     async def continue_produce(self, model_step: int) -> None:
         # 与 pause_produce 成对：同步/评测完成后，用新 model_step 恢复后台 producer。
         self._model_step = model_step
-        # The legacy controller accepts and ignores model_step; keep one call shape.
-        await self._rollout_controller.continue_generation.remote(model_step=model_step)  # type: ignore[attr-defined]
+        if self.turn_resume is None:
+            await self._rollout_controller.continue_generation.remote()  # type: ignore[attr-defined]
+        else:
+            await self._rollout_controller.continue_generation.remote(model_step=model_step)  # type: ignore[attr-defined]
         self._update_event.clear()
         self._status = AgentLoopManagerStatus.NORMAL
 
@@ -337,12 +346,20 @@ class DisaggAgentLoopManager:
         """Stop the producer state machine and wait for every retained Agent
         task to finish cleanup."""
         self.shutdown()
+        errors: list[BaseException] = []
+        if self._produce_pass is not None:
+            try:
+                await await_owned_operation(self._produce_pass)
+            except (Exception, asyncio.CancelledError) as scheduling_failure:
+                errors.append(scheduling_failure)
+        # Close every registered complete group even if the scheduling round failed.
         results = await asyncio.gather(
             *[task.produce_strategy.close() for task in self.task_runners], return_exceptions=True
         )
-        for result in results:
-            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
-                raise result
+        errors.extend(result for result in results if isinstance(result, BaseException))
+        for cleanup_failure in errors:
+            if not isinstance(cleanup_failure, asyncio.CancelledError):
+                raise cleanup_failure
 
     async def _wait_for_status_exit(self, blocked_status: AgentLoopManagerStatus) -> None:
         while not self._finish_event.is_set() and self._status == blocked_status:
@@ -353,7 +370,7 @@ class DisaggAgentLoopManager:
         while not self._finish_event.is_set():
             if self._status == AgentLoopManagerStatus.FINISH:
                 break
-            if self._status != AgentLoopManagerStatus.NORMAL:
+            if self._status in (AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT, AgentLoopManagerStatus.EXPIRED_BATCH):
                 # 暂停/过期只能由 trainer 调用 continue_produce 恢复。
                 await self._wait_for_status_exit(self._status)
                 continue
@@ -367,17 +384,18 @@ class DisaggAgentLoopManager:
                     future_step,
                 ),
             )
-            self._producer_idle.clear()
-            try:
-                produce_status = await self._produce_batch_to_buffer(task_batch_sizes, self._produce_progress)
-            finally:
-                self._producer_idle.set()
+            # 仅将原调用登记为实际 Task；登记前没有 await，pause 不会漏等本轮调度。
+            self._produce_pass = asyncio.create_task(
+                self._produce_batch_to_buffer(task_batch_sizes, self._produce_progress)
+            )
+            produce_status = await self._produce_pass
 
             if produce_status == ProduceBatchStatus.EXPIRED_BATCH:
-                # EXPIRED_BATCH 是 producer 自己检测出来的“立即停下”信号。
-                self._status = AgentLoopManagerStatus.EXPIRED_BATCH
-            elif produce_status == ProduceBatchStatus.NORMAL and self._status == AgentLoopManagerStatus.NORMAL:
-                # 只有正常完成一轮生产且未被暂停时，producer 的 train_step 才前进一步。
+                # 已生效的暂停/退出状态不能被旧轮次的 EXPIRED 覆盖。
+                if self._status == AgentLoopManagerStatus.NORMAL:
+                    self._status = AgentLoopManagerStatus.EXPIRED_BATCH
+            elif produce_status == ProduceBatchStatus.NORMAL:
+                # 正常完成一轮即推进，不附加 manager 状态或模型版本条件。
                 self._produce_progress.advance_future_step()
 
             # 极快路径下主动让出事件循环。
@@ -503,6 +521,8 @@ class DisaggAgentLoopManager:
         with state_path.open("w") as f:
             json.dump(
                 {
+                    # 完整组 Task 存档格式标识；恢复时先验证，旧格式直接拒绝。
+                    "group_task_lifecycle_version": 1,
                     "status": self._status.name,
                     "model_step": self._model_step,
                     "replay_buffer_saved": not no_save_replay_buffer,
@@ -514,13 +534,16 @@ class DisaggAgentLoopManager:
     async def resume(self, checkpoint_path: Path | str) -> int:
         """恢复非共卡 sampler、replay buffer 和后台生产进度。"""
         checkpoint_path = Path(checkpoint_path)
-        for task in self.task_runners:
-            task.sampler.resume(task_checkpoint_path(checkpoint_path, task.task_name))
-
         state_path = manager_state_path(checkpoint_path)
         with state_path.open("r") as f:
             manager_state = json.load(f)
-        if manager_state.get("replay_buffer_saved", True):
+        # 在恢复任何数据前拒绝旧格式，不补字段、不转换。
+        if manager_state.get("group_task_lifecycle_version") != 1:
+            raise ValueError("Only complete-group checkpoint version 1 is supported")
+        for task in self.task_runners:
+            task.sampler.resume(task_checkpoint_path(checkpoint_path, task.task_name))
+
+        if manager_state["replay_buffer_saved"]:
             # replay buffer 恢复是 async I/O，不能在已有 event loop 中再次嵌套 asyncio_run。
             await self.replay_buffer.resume(checkpoint_path)
         elif len(self.replay_buffer) > 0:
@@ -533,8 +556,7 @@ class DisaggAgentLoopManager:
         self._update_event = asyncio.Event()
         self._finish_event = asyncio.Event()
         self._update_event.set()
-        self._producer_idle = asyncio.Event()
-        self._producer_idle.set()
+        self._produce_pass = None
         self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
         self._pause_time_s = 0.0
         self._model_step = saved_model_step

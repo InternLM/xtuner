@@ -137,6 +137,8 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         # 测试只走新的 ProduceContext 入口，不再覆盖旧散装参数兼容逻辑。
         if progress is None:
             progress = self._build_progress(task_name, target=batch_size)
+        # The manager re-targets the shared ledger and moves the consume step at each window start.
+        progress.consumer_step = train_step
         return ProduceContext(
             agent_loop=agent_loop,
             sampler=sampler,
@@ -1071,15 +1073,13 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed[0][0].response_model_steps, [1, 3, 3])
         self.assertEqual(completed[0][0].seq_staleness, 3)
 
-    async def test_async_produce_strategy_does_not_reclaim_previous_call_pending(self):
-        # 共卡 async 的 pending 只属于一次 produce_batch；下一次调用不能回收上一次遗留结果。
-        task_name = "test_task"
+    async def test_legacy_complete_group_tasks_deliver_once_and_pause_owns_them(self):
+        # 完整组 Task 自己交付；legacy 窗口结束后由 pause 收尾，不能再次 put 同一组。
+        task_name = "test_legacy_complete_group"
         mock_agent_loop = self._build_agent_loop({0: 0.01, 1: 0.05, 2: 0.05})
-        produce_strategy_cfg = AsyncProduceStrategyConfig(over_sample_threshold=2.0, enable_partial_rollout=True)
+        strategy = AsyncProduceStrategyConfig(over_sample_threshold=2.0, enable_partial_rollout=True).build()
         sampler = self._build_sampler()
-        strategy = produce_strategy_cfg.build()
         progress = self._build_progress(task_name, target=1)
-
         ctx = self._build_context(
             strategy,
             task_name,
@@ -1089,29 +1089,22 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             model_step=0,
             progress=progress,
         )
+
         await strategy.produce_batch(ctx)
         self.assertGreater(strategy.pending_task_count(), 0)
 
-        await asyncio.sleep(0.08)
-
-        ctx = self._build_context(
-            strategy,
-            task_name,
-            mock_agent_loop,
-            sampler,
-            batch_size=1,
-            model_step=0,
-            progress=progress,
-        )
-        await strategy.produce_batch(ctx)
+        await strategy.pause_produce(ctx)
         self.assertEqual(strategy.pending_task_count(), 0)
 
-        final_data = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
-        self.assertEqual(len(final_data), 1)
-        self.assertEqual(final_data[0][0].group_id, 0)
-        for group in final_data:
-            self.assertIn("group_generate_time_s", group[0].extra_fields)
-            self.assertGreater(group[0].extra_fields["group_generate_time_s"], 0.0)
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 3)
+
+        # 再次 pause 不得重复交付。
+        await strategy.pause_produce(ctx)
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 3)
+
+        completed = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
+        self.assertEqual(sorted(len(group) for group in completed), [1, 1, 1])
+        self.assertEqual(len({group[0].group_id for group in completed}), 3)
 
     async def test_async_produce_strategy_pause_produce_is_explicit(self):
         # 验证显式 pause_produce 会暂停 rollout controller、drain pending，并把结果落到 replay buffer。

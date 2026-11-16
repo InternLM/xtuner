@@ -105,6 +105,8 @@ class TestProduceProgress(unittest.TestCase):
                 "raw_rewards_count": {"task_a": 2, "task_b": 1},
                 "produced_samples": {"task_a": 3, "task_b": 4},
                 "produced_tokens": {"task_a": 30, "task_b": 40},
+                "failed_samples": {"task_a": 1, "task_b": 0},
+                "filtered_samples": {"task_a": 0, "task_b": 2},
                 "produce_time_s": 2.5,
             }
         )

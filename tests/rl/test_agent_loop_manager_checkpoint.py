@@ -41,6 +41,7 @@ from xtuner.v1.rl.agent_loop_manager import (
     SamplerConfig,
     SyncProduceStrategyConfig,
 )
+from xtuner.v1.rl.agent_loop_manager.produce_utils import manager_state_path
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
 
 
@@ -396,6 +397,28 @@ class TestAgentLoopManagerCheckpoint(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.rollout_states), 1)
         self.assertEqual(len(restored_rollout_controller.continue_generation.calls), 1)
         self.assertGreaterEqual(len(restored_rollout_controller.generate.calls), 1)
+
+    @unittest.skipUnless(QWEN3_4B_PATH, "QWEN3_4B_PATH is required for AgentLoopManager checkpoint tests")
+    async def test_resume_rejects_checkpoint_without_complete_group_version(self):
+        # 两种 manager 都在恢复 sampler/buffer 前拒绝缺少格式标识的旧 checkpoint。
+        for mode, produce_strategy_config in (
+            ("colocate", SyncProduceStrategyConfig()),
+            ("disaggregated", DisaggAsyncProduceStrategyConfig()),
+        ):
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                checkpoint_path = Path(tmp_dir) / "ckpt"
+                checkpoint_path.mkdir()
+                manager_state_path(checkpoint_path).write_text(
+                    json.dumps({"model_step": 1, "replay_buffer_saved": True}), encoding="utf-8"
+                )
+                with patch("ray.get", side_effect=lambda ref, *_, **__: ref):
+                    manager = self._build_manager(
+                        SyncReplayBufferConfig(),
+                        produce_strategy_config=produce_strategy_config,
+                        mode=mode,
+                    )
+                with self.assertRaisesRegex(ValueError, "complete-group checkpoint version 1"):
+                    await manager.resume(checkpoint_path)
 
 
 if __name__ == "__main__":
