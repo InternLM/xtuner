@@ -62,19 +62,37 @@ def _is_lmdeploy_context_rejection(status: int, body: bytes) -> bool:
         payload = json.loads(body)
     except (ValueError, UnicodeDecodeError):
         return False
-    if not isinstance(payload, dict) or (
-        payload.get("object") != "error"
-        or payload.get("type") != "invalid_request_error"
-        or payload.get("code") != 400
-        or "choices" in payload
-        or not isinstance(payload.get("message"), str)
-    ):
+    if not isinstance(payload, dict):
+        return False
+    if "choices" in payload:
+        return False
+    expected = {"object": "error", "type": "invalid_request_error", "code": 400}
+    if any(payload.get(key) != value for key, value in expected.items()):
+        return False
+    message = payload.get("message")
+    if not isinstance(message, str):
         return False
     match = re.fullmatch(
         r"Input length \(([0-9]{1,20})\) must be smaller than the model context length \(([0-9]{1,20})\)\.",
-        payload["message"],
+        message,
     )
-    return match is not None and int(match[1]) >= int(match[2]) > 0
+    if match is None:
+        return False
+    return int(match[1]) >= int(match[2]) > 0
+
+
+COMPLETE_TURN_FINISH_REASONS = {"stop", "length", "tool_calls"}
+
+
+def _is_complete_turn(response: dict | None) -> bool:
+    """Whether a parsed non-stream generation response is one successful
+    complete turn."""
+    if response is None:
+        return False
+    choices = response.get("choices")
+    if not choices:
+        return False
+    return all(choice.get("finish_reason") in COMPLETE_TURN_FINISH_REASONS for choice in choices)
 
 
 class _UpstreamResponseError(RuntimeError):
@@ -459,13 +477,7 @@ class SessionServer:
             dict: The (possibly trimmed) response — currently unused by the
             caller but kept for symmetry.
         """
-        if lease is not None and (
-            not worker_resp.get("choices")
-            or any(
-                choice.get("finish_reason") not in {"stop", "length", "tool_calls"}
-                for choice in worker_resp["choices"]
-            )
-        ):
+        if lease is not None and not _is_complete_turn(worker_resp):
             # A leased request may only commit a successful generation terminal. An error terminal is a safe
             # failure handled by the forwarding layer, not a trainable trace node.
             raise RuntimeError(
@@ -729,7 +741,7 @@ class SessionServer:
                 get_logger().error(message)
                 if lease is not None:
                     # Preparation failed before any backend send.
-                    lease.settlement = SettlementReceipt(True, True, "not_started")
+                    lease.settlement = SettlementReceipt(backend_ended=True, outcome="not_started")
                 return web.json_response(_error_payload(fmt, message), status=500)
 
         trace_active = is_generation_endpoint and trace_enabled
@@ -895,22 +907,13 @@ class SessionServer:
                     session_error_msg = f"SessionServer response hook failed: {type(exc).__name__}: {exc}"
 
         if lease is not None:
-            complete = (
-                not is_stream
-                and is_success_response
-                and response_data is not None
-                and not _is_error_payload(response_data)
-                and bool(response_data.get("choices"))
-                and all(
-                    choice.get("finish_reason") in {"stop", "length", "tool_calls"}
-                    for choice in response_data["choices"]
-                )
-            )
+            # A lease only exists for non-stream traced generation. ``response_data`` is therefore either a parsed
+            # successful non-error object or None (non-2xx / error payload); entry and parsing guarantees cover the
+            # streaming, HTTP-status and error-payload checks that used to be repeated here.
+            complete = _is_complete_turn(response_data)
             # A known pre-generation rejection is a safely ended failed attempt, not a successful trace and not an
             # ambiguous in-flight request.
-            rejected_before_generation = not is_stream and _is_lmdeploy_context_rejection(
-                upstream_status, raw_response
-            )
+            rejected_before_generation = _is_lmdeploy_context_rejection(upstream_status, raw_response)
             terminal = "trace_committed" if complete and not session_error_msg else "failed"
             backend_ended = complete or rejected_before_generation
             get_logger().info(
@@ -921,7 +924,9 @@ class SessionServer:
                 f"forward_s={forward_s:.6f} trace_s={trace_s:.6f} "
                 f"total_s={time.perf_counter() - request_start:.6f}"
             )
-            lease.settlement = SettlementReceipt(backend_ended, True, terminal)
+            # The receipt is assigned only after the terminal outcome above is handled; its presence means
+            # "terminal recorded", so only the backend outcome needs to be judged by the gate.
+            lease.settlement = SettlementReceipt(backend_ended=backend_ended, outcome=terminal)
             if terminal == "trace_committed":
                 payload = json.loads(response.body)
                 payload["id"] = lease.request_id

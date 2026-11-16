@@ -20,21 +20,18 @@ from uuid import uuid4
 
 @dataclass(frozen=True)
 class SettlementReceipt:
-    """Evidence that one admitted request reached a safe terminal state.
+    """Evidence that one admitted request reached a terminal state.
+
+    The receipt is assigned only after the success/failure terminal state has been handled, so its presence
+    already means "terminal recorded"; only the backend outcome remains to be judged.
 
     Args:
         backend_ended (bool): The backend finished execution (or provably never started it).
-        terminal_recorded (bool): The trace store recorded the terminal state.
         outcome (str): Human-readable terminal outcome used by logs and errors.
     """
 
     backend_ended: bool
-    terminal_recorded: bool
     outcome: str
-
-    @property
-    def safe_for_weight_update(self) -> bool:
-        return self.backend_ended and self.terminal_recorded
 
 
 @dataclass
@@ -105,7 +102,8 @@ class RequestGate:
             yield lease
         finally:
             async with self._condition:
-                if lease.settlement is None or not lease.settlement.safe_for_weight_update:
+                receipt = lease.settlement
+                if receipt is None or not receipt.backend_ended:
                     # An unknown exit keeps blocking later drains. Do not silently drop the lease.
                     self._open = False
                     self._failures[lease.request_id] = "backend_or_trace_unsettled"
@@ -141,8 +139,12 @@ class RequestGate:
 
     async def install_version(self, epoch: int, model_step: int) -> None:
         async with self._condition:
-            if self._open or epoch != self._epoch or self._active or self._failures:
-                raise RuntimeError("Version publication requires the drained current barrier")
+            if self._open:
+                raise RuntimeError("Version publication requires the gate to be sealed")
+            if epoch != self._epoch:
+                raise RuntimeError("Barrier epoch mismatch")
+            if self._active or self._failures:
+                raise RuntimeError("Barrier has unsettled or failed requests")
             if model_step < self._model_step:
                 raise ValueError("Model versions cannot move backwards")
             if self._installed_epoch == epoch and model_step != self._model_step:
@@ -152,7 +154,11 @@ class RequestGate:
 
     async def reopen(self, epoch: int) -> None:
         async with self._condition:
-            if epoch != self._epoch or self._installed_epoch != epoch or self._active or self._failures:
-                raise RuntimeError("Cannot reopen an uninstalled or unsafe barrier")
+            if epoch != self._epoch:
+                raise RuntimeError("Barrier epoch mismatch")
+            if self._installed_epoch != epoch:
+                raise RuntimeError("Cannot reopen an uninstalled barrier")
+            if self._active or self._failures:
+                raise RuntimeError("Cannot reopen a barrier with unsettled or failed requests")
             self._open = True
             self._condition.notify_all()

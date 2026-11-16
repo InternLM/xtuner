@@ -44,7 +44,7 @@ class TestRequestGate(unittest.IsolatedAsyncioTestCase):
             async with gate.request("session-0") as lease:
                 entered.set()
                 await release.wait()
-                lease.settlement = SettlementReceipt(True, True, "trace_committed")
+                lease.settlement = SettlementReceipt(True, "trace_committed")
 
         server = asyncio.create_task(serve())
         await entered.wait()
@@ -100,7 +100,7 @@ class TestRequestGate(unittest.IsolatedAsyncioTestCase):
             async with gate.request("session-0") as lease:
                 entered.set()
                 await release.wait()
-                lease.settlement = SettlementReceipt(True, True, "trace_committed")
+                lease.settlement = SettlementReceipt(True, "trace_committed")
 
         first = asyncio.create_task(serve())
         await entered.wait()
@@ -112,16 +112,16 @@ class TestRequestGate(unittest.IsolatedAsyncioTestCase):
 
     async def test_version_publication_requires_drained_current_epoch(self):
         gate = RequestGate(wait_timeout=5, initially_open=True)
-        with self.assertRaisesRegex(RuntimeError, "drained current barrier"):
+        with self.assertRaisesRegex(RuntimeError, "gate to be sealed"):
             await gate.install_version(0, 1)
 
         await gate.seal(1)
         await gate.drain(timeout=1)
         await gate.install_version(1, 2)
-        with self.assertRaisesRegex(RuntimeError, "Cannot reopen"):
+        with self.assertRaisesRegex(RuntimeError, "Barrier epoch mismatch"):
             await gate.reopen(0)
         await gate.reopen(1)
-        with self.assertRaisesRegex(RuntimeError, "Version publication"):
+        with self.assertRaisesRegex(RuntimeError, "gate to be sealed"):
             await gate.install_version(1, 3)
 
     async def test_model_versions_cannot_move_backwards(self):
