@@ -458,138 +458,44 @@ class DetachedShellEntry:
         entry: EntryRecord,
         pid: int,
     ) -> EntryOutcome:
-        if self.pid_check_recovery_timeout_sec > 0:
-            from .process_monitor import observe_process
-            reason, rc, details = await observe_process(
-                client, pid=pid, timeout=self.timeout,
-                recovery_timeout=self.pid_check_recovery_timeout_sec,
-                poll_interval=self.poll_interval_sec,
-                retry_interval=self.pid_check_retry_interval_sec,
-                rc_wait_timeout=self.rc_wait_timeout_sec,
-                rc_poll_interval=self.rc_poll_interval_sec,
-                read_rc=lambda: self._read_int_capture_file(client, entry.rc_file))
-            if rc is not None:
-                return _entry_completed_outcome(source='detach_exec', return_code=rc, details=details)
-            return EntryOutcome(source='detach_exec', reason=reason, retryable=True,
-                                details=details, result=StageResult(return_code=None, error=reason))
-        is_pid_running = client.is_pid_running
-        deadline = time.monotonic() + self.timeout
-        poll = max(0.2, self.poll_interval_sec)
-        polls = 0
-        last_error: str | None = None
-        pid_check_failures = 0
-        while time.monotonic() <= deadline:
-            polls += 1
-            try:
-                running = await is_pid_running(pid)
-                last_error = None
-                pid_check_failures = 0
-            except httpx.HTTPError as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
-                pid_check_failures += 1
-                if pid_check_failures >= self.pid_check_max_failures:
-                    return EntryOutcome(
-                        source="detach_exec",
-                        reason="pid_monitor_error",
-                        retryable=True,
-                        details={
-                            "pid": pid,
-                            "polls": polls,
-                            "pid_check_failures": pid_check_failures,
-                            "pid_check_retry_interval_sec": self.pid_check_retry_interval_sec,
-                            "error": last_error,
-                        },
-                        result=StageResult(
-                            return_code=None,
-                            stderr=f"[{item.id}] entry {entry.name} failed to query pid {pid}: {last_error}",
-                            error="detached entry pid monitor failed",
-                        ),
-                    )
-                retry_sleep = min(self.pid_check_retry_interval_sec, max(0.0, deadline - time.monotonic()))
-                if retry_sleep > 0:
-                    await asyncio.sleep(retry_sleep)
-                continue
-
-            if not running:
-                rc = await self._wait_int_capture_file(
-                    client,
-                    entry.rc_file,
-                    timeout_sec=self.rc_wait_timeout_sec,
-                    poll_interval_sec=self.rc_poll_interval_sec,
-                )
-                if rc is None:
-                    sandbox_alive = await _sandbox_alive(client)
-                    return EntryOutcome(
-                        source="detach_exec",
-                        reason="rc_missing",
-                        retryable=True,
-                        details={
-                            "pid": pid,
-                            "polls": polls,
-                            "rc_wait_timeout_sec": self.rc_wait_timeout_sec,
-                            "rc_poll_interval_sec": self.rc_poll_interval_sec,
-                            "sandbox_alive": sandbox_alive,
-                        },
-                        result=StageResult(
-                            return_code=None,
-                            stderr=f"[{item.id}] entry {entry.name} pid {pid} exited without rc file",
-                            error="detached entry rc missing",
-                        ),
-                    )
-                return _entry_completed_outcome(
-                    source="detach_exec",
-                    return_code=rc,
-                    details={"pid": pid, "polls": polls},
-                )
-
-            sleep_sec = min(poll, max(0.0, deadline - time.monotonic()))
-            if sleep_sec > 0:
-                await asyncio.sleep(sleep_sec)
-
-        rc = await self._read_int_capture_file(client, entry.rc_file)
+        from .process_monitor import observe_process
+        reason, rc, details = await observe_process(
+            client, pid=pid, timeout=self.timeout,
+            recovery_timeout=self.pid_check_recovery_timeout_sec,
+            max_failures=self.pid_check_max_failures,
+            poll_interval=self.poll_interval_sec,
+            retry_interval=self.pid_check_retry_interval_sec,
+            rc_wait_timeout=self.rc_wait_timeout_sec,
+            rc_poll_interval=self.rc_poll_interval_sec,
+            read_rc=lambda: self._read_int_capture_file(client, entry.rc_file))
         if rc is not None:
-            return _entry_completed_outcome(
-                source="detach_exec",
-                return_code=rc,
-                details={
-                    "pid": pid,
-                    "polls": polls,
-                    "timeout": self.timeout,
-                    "timeout_with_rc": True,
-                    "last_pid_check_error": last_error,
-                    "pid_check_failures": pid_check_failures,
-                },
-            )
-
-        return EntryOutcome(
-            source="detach_exec",
-            reason="timeout",
-            retryable=True,
-            details={
-                "pid": pid,
-                "polls": polls,
-                "timeout": self.timeout,
-                "last_pid_check_error": last_error,
-                "pid_check_failures": pid_check_failures,
-                "pid_check_retry_interval_sec": self.pid_check_retry_interval_sec,
-            },
-            result=StageResult(
-                return_code=None,
-                stderr=f"[{item.id}] entry {entry.name} pid {pid} exceeded max runtime {self.timeout}s",
-                error=f"entry {entry.name} timed out",
-            ),
-        )
+            return _entry_completed_outcome(source="detach_exec", return_code=rc, details=details)
+        return EntryOutcome(source="detach_exec", reason=reason, retryable=True,
+                            details=details, result=StageResult(return_code=None, error=reason))
 
     async def _read_int_capture_file(self, client: Any, path: str | None) -> int | None:
         if not path:
+            raise ValueError("Exit-code capture path is required")
+        read = getattr(client, "download_optional_file", None) or client.download_file
+        try:
+            blob = await asyncio.wait_for(read(path), timeout=5)
+        except FileNotFoundError:
             return None
-        blob = await self._read_capture_file(client, path)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        except (httpx.HTTPError, TimeoutError):
+            raise
+        except Exception as exc:
+            # Legacy providers may wrap transport failures in RuntimeError.
+            raise httpx.ReadError("Exit-code observation failed") from exc
         if blob is None:
             return None
         try:
             return int(blob.strip())
-        except ValueError:
-            return None
+        except (ValueError, TypeError):
+            raise httpx.RemoteProtocolError("Malformed exit-code capture") from None
 
     async def _wait_int_capture_file(
         self,

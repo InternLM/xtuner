@@ -91,3 +91,53 @@ class TestSessionTemplateBoundary:
             ]
         }
         return request, response
+
+
+@pytest.mark.parametrize("message", [
+    {"role": "assistant", "reasoning_content": "thinking"},
+    {"role": "assistant", "content": None, "reasoning_content": "thinking"},
+    {"role": "assistant", "content": None, "tool_calls": [
+        {"function": {"name": "bash", "arguments": '{"command":"pwd"}'}}]},
+])
+def test_null_content_is_template_only(message):
+    import copy
+    from xtuner.v1.rl.rollout.chat_template import canonicalize_messages_for_chat_template
+    original = copy.deepcopy(message)
+    normalized = canonicalize_messages_for_chat_template([message])
+    assert normalized[0]["content"] == ""
+    assert message == original
+    assert normalized[0].get("reasoning_content") == message.get("reasoning_content")
+
+
+def test_content_text_and_multimodal_are_preserved():
+    from xtuner.v1.rl.rollout.chat_template import canonicalize_messages_for_chat_template
+    messages = [{"role": "user", "content": [{"type": "text", "text": "x"},
+                 {"type": "image_url", "image_url": {"url": "test"}}]},
+                {"role": "assistant", "content": "answer"}]
+    normalized = canonicalize_messages_for_chat_template(messages)
+    assert normalized == messages
+    assert normalized[0]["content"] is not messages[0]["content"]
+
+
+def test_null_content_trace_write_matches_omitted_content_lookup():
+    from xtuner.v1.rl.rollout.chat_template import canonicalize_messages_for_chat_template
+    server = TestSessionTemplateBoundary._server("")
+    # Deliberately expose None vs missing, as the production GLM template does.
+    server.tokenizer.chat_template = (
+        "{% for m in messages %}{{ m.role }}:"
+        "{% if m.role == 'assistant' %}<think>{{ m.reasoning_content }}</think>{% endif %}"
+        "{{ m.content }}{% endfor %}"
+        "{% if add_generation_prompt %}assistant:<think>{% endif %}"
+    )
+    request, response = TestSessionTemplateBoundary._turn(True)
+    response["choices"][0]["message"]["content"] = None
+    asyncio.run(server.on_response(response, FMT_OPENAI, request))
+    write = server.store.insert.remote.await_args_list[-1].kwargs
+    exported = [*request["messages"], {"role": "assistant", "reasoning_content": "thinking"}]
+    query = server.tokenizer.apply_chat_template(
+        canonicalize_messages_for_chat_template(exported), tokenize=False, add_generation_prompt=False)
+    assert write["key"] == query
+    assert "None" not in query
+    assert response["choices"][0]["message"]["content"] is None
+    assert write["value"].token_ids == [7, 8, 9]
+    assert write["value"].logprobs == [-0.1, -0.2, -0.3]

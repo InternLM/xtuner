@@ -592,7 +592,8 @@ class SessionServer:
         if self._site is not None:
             return
 
-        self._app = web.Application()
+        # Long-context JSON requests can exceed aiohttp's default 1 MiB.
+        self._app = web.Application(client_max_size=16 * 1024 * 1024)
         self._app.router.add_route("*", "/{path:.*}", self._handle_request)
 
         self._runner = web.AppRunner(self._app)
@@ -662,7 +663,14 @@ class SessionServer:
             )
 
         # Read the request body
-        request_body = await request.read()
+        try:
+            request_body = await request.read()
+        except web.HTTPRequestEntityTooLarge:
+            get_logger().warning(
+                "SessionServer rejected request body: content_length=%s limit_bytes=16777216"
+                % request.content_length
+            )
+            raise
         request_data = None
         orig_req_body: Optional[dict] = None
         trace_enabled = False

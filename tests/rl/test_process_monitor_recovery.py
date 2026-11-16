@@ -66,4 +66,28 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.run_monitor(self.client([True]),timeout=.03))[0],'timeout')
         self.assertEqual((await self.run_monitor(self.client([None]),recovery_timeout=.03))[0],'pid_monitor_error')
 
+    async def test_rc_errors_are_not_missing_and_good_pid_does_not_reset_budget(self):
+        async def read_rc():
+            raise httpx.ReadTimeout('fixture')
+        for recovery in (0, .04):
+            result = await monitor.observe_process(self.client([False]), pid=123,
+                timeout=.3, recovery_timeout=recovery, poll_interval=.01,
+                retry_interval=.01, rc_wait_timeout=.01, rc_poll_interval=.01, read_rc=read_rc)
+            self.assertEqual(result[0], 'pid_monitor_error')
+            self.assertEqual(result[2]['probe_kind'], 'rc')
+            self.assertLessEqual(len(result[2]['rc_checks']), 3)
+
+    async def test_rc_recovers_after_read_outage(self):
+        reads = iter([httpx.ReadError('fixture'), None, 0])
+        async def read_rc():
+            value = next(reads)
+            if isinstance(value, Exception):
+                raise value
+            return value
+        result = await monitor.observe_process(self.client([False]), pid=123,
+            timeout=.3, recovery_timeout=.1, poll_interval=.01,
+            retry_interval=.01, rc_wait_timeout=.05, rc_poll_interval=.01, read_rc=read_rc)
+        self.assertEqual(result[:2], ('entry_completed', 0))
+        self.assertEqual(result[2]['rc_check_errors_total'], 1)
+
 if __name__=='__main__': unittest.main(verbosity=2)
