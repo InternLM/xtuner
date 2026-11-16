@@ -305,8 +305,8 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         )
 
     def test_fit_keeps_background_producer_running_while_training_blocks(self):
-        # 验证非共卡训练阻塞在同步训练 batch 时，后台 producer 仍能继续调度。
-        train_sample = SimpleNamespace(group_id=1, rollout_id=1, session_id=None)
+        # 验证真实 _train_one_batch 把阻塞训练放进线程时，后台 producer 仍能在 fit loop 上推进。
+        train_sample = make_train_state()
         training_started = threading.Event()
         producer_ticked = threading.Event()
         manager = _TickingManager(
@@ -317,22 +317,30 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer = self._make_trainer(manager)
         trainer._sync_weights_and_save = AsyncMock()
 
-        async def blocking_train_one_batch(*args, **kwargs):
+        def blocking_fit(*args, **kwargs):
+            # 在线程内阻塞，模拟真实训练；只有 fit loop 空闲时 producer 才能 tick。
             training_started.set()
-            # 训练 await 期间必须让出 loop，后台 producer 才能继续推进。
-            for _ in range(100):
-                if producer_ticked.is_set():
-                    break
-                await asyncio.sleep(0.01)
-            if not producer_ticked.is_set():
+            if not producer_ticked.wait(timeout=2.0):
                 raise AssertionError("background producer did not run while training was blocked")
-            return self._minimal_train_info(training_samples=1, training_tokens=4)
+            return (
+                [
+                    {
+                        "rollout_is_metrics": {},
+                        "mismatch_metrics": {},
+                        "rollout_entropy": 0.0,
+                        "train_entropy": 0.0,
+                        "train_metrics": [],
+                        "sft_train_metrics": {},
+                    }
+                ],
+                {"batch_size": 1, "rewards/mean": 1.0},
+            )
 
-        trainer._train_one_batch = AsyncMock(side_effect=blocking_train_one_batch)
+        trainer.train_controller.fit.side_effect = blocking_fit
 
         self._run_fit(trainer)
 
-        trainer._train_one_batch.assert_called_once()
+        trainer.train_controller.fit.assert_called_once()
         self.assertIn("produce_loop_tick_during_training", manager.calls)
         self.assertEqual(trainer._cur_step, 1)
 

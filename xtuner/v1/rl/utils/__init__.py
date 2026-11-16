@@ -1,5 +1,6 @@
 from .async_utils import (
     asyncio_run,
+    await_cancellable_tasks,
     await_owned_operation,
     cancel_and_drain,
     create_task,
