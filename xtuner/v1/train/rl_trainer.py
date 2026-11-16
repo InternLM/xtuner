@@ -59,6 +59,7 @@ from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 from xtuner.v1.utils.env_check import get_rollout_engine_version
+from xtuner.v1.utils.memory_watch import log_memory_event
 
 
 # TODO: Move DEVICE to `xtuner.utils.device`
@@ -1238,6 +1239,7 @@ class BaseRLTrainer:
         if eval_str:
             self.logger.info(f"Eval: {eval_str}")
         self._exp_tracker.add_scalars(tag_scalar_dict=all_scalars, global_step=train_step)
+        log_memory_event(tag="rl_trainer", marker=f"train_step={train_step}")
 
     def _save_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
         rewards = []
