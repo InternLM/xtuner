@@ -303,14 +303,15 @@ def _validate_turn_resume_config(cfg: "BaseRLTrainerConfig") -> None:
         raise ValueError("Turn-resume requires a fixed topology: disable automatic worker recovery")
     if cfg.enable_evaluate or cfg.enable_initial_evaluate or cfg.eval_agent_loop_manager_cfg is not None:
         raise ValueError("Turn-resume rejects every online evaluation entrypoint")
-    if (cfg.debug_rollout or cfg.debug_train) and (
-        cfg.load_checkpoint_cfg.checkpoint_path is not None or cfg.auto_resume
-    ):
-        raise ValueError("Use a full online run for cold resume; debug modes start fresh")
-    if cfg.auto_resume and cfg.load_checkpoint_cfg.checkpoint_path is not None:
-        raise ValueError("Choose explicit checkpoint_path or auto_resume, not both")
-    if cfg.load_checkpoint_cfg.checkpoint_path is not None or cfg.auto_resume:
-        if not (cfg.load_checkpoint_cfg.load_optimizer_states and cfg.load_checkpoint_cfg.load_optimizer_args):
+    load = cfg.load_checkpoint_cfg
+    has_checkpoint = load.checkpoint_path is not None
+    resuming = has_checkpoint or cfg.auto_resume
+    if resuming:
+        if cfg.debug_rollout or cfg.debug_train:
+            raise ValueError("Use a full online run for cold resume; debug modes start fresh")
+        if has_checkpoint and cfg.auto_resume:
+            raise ValueError("Choose explicit checkpoint_path or auto_resume, not both")
+        if not load.load_optimizer_states or not load.load_optimizer_args:
             raise ValueError("Turn-resume cold resume requires optimizer states and optimizer args")
     tasks = cfg.agent_loop_manager_cfg.tasks
     for task in tasks if isinstance(tasks, list) else [tasks]:
