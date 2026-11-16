@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.rl.agent_loop import IsValidSampleFn
-from xtuner.v1.rl.utils import calculate_seq_staleness, create_task
+from xtuner.v1.rl.utils import await_cancellable_tasks, calculate_seq_staleness, create_task
 from xtuner.v1.utils import get_logger
 
 from .produce_utils import (
@@ -19,7 +19,6 @@ from .produce_utils import (
     ShouldContinueFn,
     _PendingTasks,
     _ProgressDisplayer,
-    _put_claimed_tasks,
     calculate_stale_threshold,
     default_should_continue_fn,
     pause_pending_tasks,
@@ -172,35 +171,28 @@ class DisaggProduceProgress:
         self.target_samples.clear()
         self.target_samples.update(state["target_samples"])
         task_names = set(self.consumed_samples) | set(self.target_samples)
+        # 新格式字段必须完整存在；旧 checkpoint 已在 manager.resume 前被格式标识拒绝。
         self.raw_rewards_sum.clear()
         self.raw_rewards_sum.update(
-            {task_name: float(state.get("raw_rewards_sum", {}).get(task_name, 0.0)) for task_name in task_names}
+            {task_name: float(state["raw_rewards_sum"][task_name]) for task_name in task_names}
         )
         self.raw_rewards_count.clear()
         self.raw_rewards_count.update(
-            {task_name: int(state.get("raw_rewards_count", {}).get(task_name, 0)) for task_name in task_names}
+            {task_name: int(state["raw_rewards_count"][task_name]) for task_name in task_names}
         )
-        produced_samples_state = state.get("produced_samples", {})
-        produced_tokens_state = state.get("produced_tokens", {})
-        failed_samples_state = state.get("failed_samples", {})
-        filtered_samples_state = state.get("filtered_samples", {})
         self.produced_samples.clear()
         self.produced_samples.update(
-            {task_name: int(produced_samples_state.get(task_name, 0)) for task_name in task_names}
+            {task_name: int(state["produced_samples"][task_name]) for task_name in task_names}
         )
         self.produced_tokens.clear()
-        self.produced_tokens.update(
-            {task_name: int(produced_tokens_state.get(task_name, 0)) for task_name in task_names}
-        )
+        self.produced_tokens.update({task_name: int(state["produced_tokens"][task_name]) for task_name in task_names})
         self.failed_samples.clear()
-        self.failed_samples.update(
-            {task_name: int(failed_samples_state.get(task_name, 0)) for task_name in task_names}
-        )
+        self.failed_samples.update({task_name: int(state["failed_samples"][task_name]) for task_name in task_names})
         self.filtered_samples.clear()
         self.filtered_samples.update(
-            {task_name: int(filtered_samples_state.get(task_name, 0)) for task_name in task_names}
+            {task_name: int(state["filtered_samples"][task_name]) for task_name in task_names}
         )
-        self.produce_time_s = float(state.get("produce_time_s", 0.0))
+        self.produce_time_s = float(state["produce_time_s"])
 
 
 @dataclass(kw_only=True)
@@ -386,20 +378,14 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
 
     async def pause_produce(self, ctx: DisaggProduceContext) -> float:
         if not self._retain_live_tasks:
-            return await pause_pending_tasks(
-                pending_tasks=self._pending_tasks,
-                ctx=ctx,
-                put_claimed_task=lambda task: ctx.put_generated_group(task.result()),
-            )
+            return await pause_pending_tasks(pending_tasks=self._pending_tasks, ctx=ctx)
         start = time.perf_counter()
-        for task in await self._pending_tasks.claim_ready():
-            await ctx.put_generated_group(task.result())
+        await await_cancellable_tasks(await self._pending_tasks.claim_ready())
         return time.perf_counter() - start
 
     async def quiesce(self, ctx: DisaggProduceContext) -> None:
         while self._pending_tasks.count():
-            for task in await self._pending_tasks.wait_and_claim(timeout_s=1):
-                await ctx.put_generated_group(task.result())
+            await await_cancellable_tasks(await self._pending_tasks.wait_and_claim(timeout_s=1))
 
     async def close(self) -> None:
         await self._pending_tasks.close()
@@ -416,9 +402,8 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         if self.is_model_expired(ctx.train_step, ctx.model_step):
             return ProduceBatchStatus.EXPIRED_BATCH
 
-        # 进入下一轮前先回收已完成的旧 pending。
-        claimed_done = await self._pending_tasks.claim_ready()
-        await _put_claimed_tasks(claimed_done, ctx)
+        # 进入下一轮前先回收已完成的旧 pending；完整组任务已自行交付，claim 只读取终态。
+        await await_cancellable_tasks(await self._pending_tasks.claim_ready())
 
         # TODO: remove this check
         if ctx.should_abort():
@@ -450,10 +435,10 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         )
 
         async def spawn_one() -> asyncio.Task:
-            rollout_state = await ctx.sample_group(from_expired_pool=sample_expired)
+            # Registration happens before any business await: sampling runs inside the complete group Task.
             return create_task(
-                ctx.generate_group(
-                    rollout_state,
+                ctx.produce_group(
+                    sample_expired=sample_expired,
                     enable_partial_rollout=self.enable_partial_rollout,
                 )
             )
@@ -500,12 +485,6 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
                 logger.warning("All tasks are done but not enough samples collected.")
                 break
 
-            claimed_done = await self._pending_tasks.wait_and_claim(timeout_s=1)
-            await _put_claimed_tasks(
-                claimed_done,
-                ctx,
-                available_base=available,
-                progress_displayer=progress_displayer,
-            )
+            await await_cancellable_tasks(await self._pending_tasks.wait_and_claim(timeout_s=1))
         progress_displayer.close()
         return produce_status
