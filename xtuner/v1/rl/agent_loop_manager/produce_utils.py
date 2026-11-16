@@ -25,6 +25,7 @@ from xtuner.v1.rl.rollout.trace_store import release_and_discard_rollout_groups
 from xtuner.v1.rl.utils import (
     AGENT_LOOP_PAUSE_REQUEST_TIMEOUT_S,
     PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S,
+    await_cancellable_tasks,
     cancel_and_drain,
     create_task,
 )
@@ -167,9 +168,14 @@ class BaseProduceContext:
         inherited_tokens = sum(len(item.response_ids or []) for item in rollout_state)
         start = time.perf_counter()
         if isinstance(self.agent_loop, ray.actor.ActorHandle):
-            result = await self.agent_loop.generate_group.remote(
-                rollout_state,
-                enable_partial_rollout=enable_partial_rollout,
+            # Keep the original ObjectRef so cancellation reaches the remote Agent, not only the local waiter.
+            (result,) = await await_cancellable_tasks(
+                [
+                    self.agent_loop.generate_group.remote(
+                        rollout_state,
+                        enable_partial_rollout=enable_partial_rollout,
+                    )
+                ]
             )
         else:
             result = await self.agent_loop.generate_group(

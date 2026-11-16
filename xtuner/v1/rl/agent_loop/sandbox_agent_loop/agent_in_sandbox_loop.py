@@ -13,7 +13,7 @@ from lagent.utils import create_object
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
-from xtuner.v1.rl.utils import create_task
+from xtuner.v1.rl.utils import await_cancellable_tasks
 
 from ...rollout.chat_template import canonicalize_messages_for_chat_template
 from ...rollout.trace_store import get_store
@@ -278,13 +278,10 @@ class AgentInSandboxLoop(AgentLoop):
                     samples = await self.generate_sample(state)
             return [await self._teacher_scorer.on_sample_ready(sample) for sample in samples]
 
-        pending_tasks = []
         for state in rollout_state:
             state.sample_params = self.sample_params
-            task = create_task(generate_one(state))
-            pending_tasks.append(task)
-        generated_samples = asyncio.gather(*pending_tasks)
-        sample_groups = await generated_samples
+        # Cancellation must reach every sample and wait for all Runner.finally cleanups before this group ends.
+        sample_groups = await await_cancellable_tasks(generate_one(state) for state in rollout_state)
         samples = [sample for sample_group in sample_groups for sample in sample_group]
         samples = _drop_failed_train_samples(samples, self.mode)
         samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
