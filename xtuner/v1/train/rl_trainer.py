@@ -777,6 +777,11 @@ class BaseRLTrainer:
         with train_state_path.open("r") as f:
             train_state = json.load(f)
         self._cur_step = train_state["cur_step"]
+        self._global_train_step = train_state.get("global_train_step", 0)
+        if "global_train_step" not in train_state:
+            self.logger.warning(
+                "Checkpoint has no optimizer logging counter; detailed optimizer-step metrics restart at 1."
+            )
         return checkpoint_path
 
     async def _resume_agent_loop_manager(self, checkpoint_path: Path | str) -> int:
@@ -813,7 +818,7 @@ class BaseRLTrainer:
 
         # 3. Save train state JSON
         train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
-        train_state: dict[str, Any] = {"cur_step": cur_step}
+        train_state: dict[str, Any] = {"cur_step": cur_step, "global_train_step": self._global_train_step}
         if isinstance(self._exp_tracker, SwanLabWriter):
             train_state["swanlab_run"] = self._exp_tracker.run_info
         with train_state_path.open("w") as f:
@@ -1043,6 +1048,9 @@ class BaseRLTrainer:
         data_info["invalid_train_samples"] = dropped_samples
         self._release_train_batch_resources(train_batch)
 
+        # Checkpoints are saved before the outer-step summary. Record this
+        # batch's optimizer steps first so their counter resumes correctly.
+        self._log_mini_batch_metrics(workers_log_item)
         return {
             "data_info": data_info,
             "workers_log_item": workers_log_item,
@@ -1243,8 +1251,6 @@ class BaseRLTrainer:
                     all_scalars.update({f"sft_train_metrics/worker_{worker_idx}/{k}": v})
 
             all_scalars.update(self._distillation.metric_scalars(rank0_log_item["train_metrics"]))
-
-            self._log_mini_batch_metrics(train_info["workers_log_item"])
 
         if eval_info:
             all_scalars.update({f"eval/{k}": v for k, v in eval_info.items()})

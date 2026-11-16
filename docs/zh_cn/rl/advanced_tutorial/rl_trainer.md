@@ -377,6 +377,16 @@ trainer.swanlab_config = SwanLabConfig(
 optimizer 横轴统计更新尝试，也包括因梯度范数检查而跳过的更新，不代表参数成功更新次数。
 SwanLab 使用各指标原本的 step，因此汇总曲线和详细 loss 曲线保留各自的横轴。
 
+### 恢复 optimizer 日志计数
+
+原生 RL checkpoint 在 `train_state.json` 中保存详细 optimizer 日志计数
+`global_train_step`，三种后端均适用。恢复 checkpoint 时，外层训练 step 和详细日志计数
+都会恢复。旧 checkpoint 如果缺少该字段，仍会恢复外层 step，但详细 optimizer 横轴从
+`1` 重新开始，并输出警告。
+
+每批训练结束后、保存 checkpoint、同步权重和评估之前，先记录详细指标，使保存的计数
+包含当前批次。这部分日志开销会计入 `time/step`。
+
 ### SwanLab 续跑
 
 writer 将 run ID、project 和 workspace 写入
@@ -393,8 +403,7 @@ checkpoint 中的 run ID。恢复到新的实验目录时也可以关联同一�
 复用 run ID 不会回退已上传的历史数据；比较旧 checkpoint 的重跑结果时，建议创建新实验。
 
 旧 checkpoint 如果没有 SwanLab 标识，则创建新实验，除非显式指定 run ID 或本地已有
-run-info 文件。外层训练 step 从 checkpoint 恢复；详细 optimizer 日志计数则与
-TensorBoard、JSONL 一样从 `1` 重新开始。
+run-info 文件。
 
 
 ## 如何选择

@@ -402,7 +402,7 @@ class TestRLTrainerCheckpoint(unittest.TestCase):
         self.assertEqual(checkpoint_path.name, f"ckpt-step-{step}")
         self.assertTrue((checkpoint_path / "fake_train_controller_checkpoint.txt").exists())
         with (checkpoint_path / TRAIN_STATE_PATH).open("r", encoding="utf-8") as f:
-            self.assertEqual(json.load(f), {"cur_step": step})
+            self.assertEqual(json.load(f), {"cur_step": step, "global_train_step": 0})
         with (checkpoint_path / MANAGER_STATE_PATH).open("r", encoding="utf-8") as f:
             self.assertEqual(json.load(f)["model_step"], step)
 

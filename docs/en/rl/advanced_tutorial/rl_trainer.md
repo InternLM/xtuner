@@ -434,6 +434,18 @@ the gradient-norm guard. It is not a count of successful parameter changes.
 SwanLab receives each series' original step, so the summary and detailed loss
 series retain their distinct axes.
 
+### Resuming Optimizer-Step Logs
+
+Native RL checkpoints save the detailed optimizer logging counter as
+`global_train_step` in `train_state.json` for all three backends. Restoring a
+checkpoint resumes both the outer training step and the detailed logging counter.
+Older checkpoints without this field still restore the outer step, but restart
+the detailed optimizer-step axis at `1` with a warning.
+
+Detailed metrics are written after each training batch and before checkpointing,
+weight synchronization, and evaluation, so the saved counter includes the
+current batch. Their logging overhead is included in `time/step`.
+
 ### Resuming a SwanLab Run
 
 The writer saves the run ID, project, and workspace to
@@ -452,9 +464,7 @@ uploaded history; prefer a new run when comparing a replay from an older
 checkpoint.
 
 Older checkpoints without a SwanLab identity start a new SwanLab run unless a
-run ID or an existing local run-info file supplies one. The outer training step
-resumes from the checkpoint; the detailed optimizer logging counter restarts at
-`1`, as with TensorBoard and JSONL.
+run ID or an existing local run-info file supplies one.
 
 
 ## How to Choose

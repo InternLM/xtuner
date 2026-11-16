@@ -234,7 +234,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         checkpoint_path = Path(trainer.exp_dir) / trainer._CHECKPOINT_DIR / "ckpt-step-1"
         manager.save.assert_awaited_once_with(checkpoint_path, model_step=1, no_save_replay_buffer=False)
         with (checkpoint_path / trainer._SAVE_TRAIN_STATE_PATH).open("r") as f:
-            self.assertEqual(json.load(f), {"cur_step": 1})
+            self.assertEqual(json.load(f), {"cur_step": 1, "global_train_step": 0})
         self.assertIn(("continue_produce", 1), manager.calls)
         self.assertEqual(trainer._cur_step, 1)
 
