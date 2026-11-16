@@ -376,8 +376,6 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         self._pending_tasks = _PendingTasks()
         # Turn-resume keeps live Agent tasks with the strategy; legacy mode drains them at each pause.
         self._retain_live_tasks = retain_live_tasks
-        # The manager sets this before waiting for producer idle so produce_batch stops refilling.
-        self.scheduling_paused = False
 
     def is_model_expired(self, train_step: int, model_step: int) -> bool:
         staleness = calculate_seq_staleness(model_step, train_step)
@@ -469,9 +467,6 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         )
         produce_status = ProduceBatchStatus.NORMAL
         while True:
-            if self.scheduling_paused:
-                # The manager stopped admission; return so it can observe producer idle and quiesce.
-                break
             if ctx.should_abort():
                 produce_status = ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
                 break
@@ -489,7 +484,7 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
             if available + pending_count < scheduled_target:
                 while await self._pending_tasks.schedule_one(
                     max_pending=desired_pending,
-                    should_abort=lambda: self.scheduling_paused or ctx.should_abort(),
+                    should_abort=ctx.should_abort,
                     spawn_one=spawn_one,
                 ):
                     pass

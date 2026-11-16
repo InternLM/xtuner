@@ -87,6 +87,38 @@ class _FakeProduceStrategy:
         return self.cleanup_pause_time_s
 
 
+class _BlockingDisaggStrategy:
+    """Disagg strategy whose scheduling round blocks until the test releases it."""
+
+    def __init__(self) -> None:
+        self.produce_calls = 0
+        self.pause_calls = 0
+        self.started_events: list[asyncio.Event] = [asyncio.Event(), asyncio.Event()]
+        self.release = asyncio.Event()
+
+    def is_model_expired(self, train_step: int, model_step: int) -> bool:
+        return False
+
+    def pending_task_count(self) -> int:
+        return 0
+
+    async def produce_batch(self, ctx: Any) -> ProduceBatchStatus:
+        index = self.produce_calls
+        self.produce_calls += 1
+        if index < len(self.started_events):
+            self.started_events[index].set()
+        await self.release.wait()
+        self.release.clear()
+        return ProduceBatchStatus.NORMAL
+
+    async def pause_produce(self, ctx: Any) -> float:
+        self.pause_calls += 1
+        return 0.0
+
+    async def close(self) -> None:
+        return
+
+
 class _FakeTimedProduceStrategy:
     def __init__(self, pause_time_s: float):
         self.pause_time_s = pause_time_s
@@ -562,6 +594,51 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy_a.cleanup_expired_groups_retryable, [True])
         self.assertEqual(strategy_b.called_expired_groups_retryable, [False])
         self.assertEqual(strategy_b.cleanup_expired_groups_retryable, [False])
+
+    async def test_disagg_pause_waits_for_producer_idle_and_resumes_next_round(self):
+        # 过渡方案：pause 先置 UPDATE/update_event，等当前生产调用（含结果处理）退出；continue 后才开始下一轮。
+        strategy = _BlockingDisaggStrategy()
+        rollout_controller = _fake_rollout_controller()
+        manager = DisaggAgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task_a",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=strategy,
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                )
+            ],
+            replay_buffer=MagicMock(),
+            rollout_controller=rollout_controller,
+        )
+
+        producer_task = asyncio.create_task(manager.produce_loop(batch_size=1))
+        await asyncio.wait_for(strategy.started_events[0].wait(), timeout=5)
+
+        pause_task = asyncio.create_task(manager.pause_produce())
+        await asyncio.sleep(0)
+        self.assertFalse(pause_task.done())
+
+        strategy.release.set()
+        await asyncio.wait_for(pause_task, timeout=5)
+        self.assertEqual(strategy.produce_calls, 1)
+        self.assertEqual(strategy.pause_calls, 1)
+        self.assertEqual(rollout_controller.pause_generation.remote.await_count, 1)
+
+        # 暂停期间不会开始新的一轮；continue 发布后才恢复调度。
+        await asyncio.sleep(0.05)
+        self.assertEqual(strategy.produce_calls, 1)
+        await manager.continue_produce(model_step=1)
+        await asyncio.wait_for(strategy.started_events[1].wait(), timeout=5)
+        self.assertEqual(strategy.produce_calls, 2)
+
+        strategy.release.set()
+        manager.shutdown()
+        producer_task.cancel()
+        await asyncio.gather(producer_task, return_exceptions=True)
+        await manager.close()
 
     async def test_disagg_get_batch_aggregates_multi_task_results_without_colocate_surface(self):
         # 非共卡 get_batch 使用后台 progress 消费 replay buffer，不依赖共卡 produce_batch 继承面。
