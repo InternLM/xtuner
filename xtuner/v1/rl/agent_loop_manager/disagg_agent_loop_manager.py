@@ -107,6 +107,7 @@ class DisaggAgentLoopManagerConfig(BaseModel):
             produce_strategy = task_cfg.produce_strategy_config.build(
                 sync_weights_interval=sync_weights_interval,
                 rollout_controller=rollout_controller,
+                retain_live_tasks=turn_resume is not None,
             )
             sampler = task_cfg.sampler_config.build(tokenizer=tokenizer, replay_buffer=replay_buffer)
             task_runners.append(
@@ -195,9 +196,6 @@ class DisaggAgentLoopManager:
         self.replay_buffer = replay_buffer
         self._rollout_controller = rollout_controller
         self.turn_resume = turn_resume
-        if turn_resume is not None:
-            for task in task_runners:
-                task.produce_strategy.retain_live_tasks = True
         self.data_sampler = (
             task_runners[0].sampler
             if len(task_runners) == 1
@@ -328,10 +326,8 @@ class DisaggAgentLoopManager:
     async def continue_produce(self, model_step: int) -> None:
         # 与 pause_produce 成对：同步/评测完成后，用新 model_step 恢复后台 producer。
         self._model_step = model_step
-        if self.turn_resume is None:
-            await self._rollout_controller.continue_generation.remote()  # type: ignore[attr-defined]
-        else:
-            await self._rollout_controller.continue_generation.remote(model_step=model_step)  # type: ignore[attr-defined]
+        # The legacy controller accepts and ignores model_step; keep one call shape.
+        await self._rollout_controller.continue_generation.remote(model_step=model_step)  # type: ignore[attr-defined]
         self._status = AgentLoopManagerStatus.NORMAL
         self._update_event.clear()
         for task in self.task_runners:

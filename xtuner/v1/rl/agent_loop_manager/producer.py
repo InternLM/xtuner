@@ -133,6 +133,10 @@ class ProduceStrategyConfig(ABC, BaseModel):
         should_continue_fn (ShouldContinueFn): Function used to decide whether
             production should continue after a group is processed. Defaults to
             ``default_should_continue_fn``.
+
+    ``build(..., retain_live_tasks=...)`` lets each concrete strategy decide
+    whether Agent tasks survive across production windows. It is fixed at
+    construction time; callers do not flip it afterwards.
     """
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
@@ -145,6 +149,7 @@ class ProduceStrategyConfig(ABC, BaseModel):
         *,
         sync_weights_interval: int = 1,
         rollout_controller: "Optional[RolloutControllerProxy]" = None,
+        retain_live_tasks: bool = False,
     ) -> "ProduceStrategy": ...
 
 
@@ -160,6 +165,9 @@ class SyncProduceStrategyConfig(ProduceStrategyConfig):
             production should continue after a group is processed. Defaults to
             ``default_should_continue_fn``.
 
+    ``retain_live_tasks`` is accepted for a uniform build interface and ignored:
+    the synchronous strategy owns its tasks per window.
+
     **Examples:**
 
     Example synchronous strategy::
@@ -172,6 +180,7 @@ class SyncProduceStrategyConfig(ProduceStrategyConfig):
         *,
         sync_weights_interval: int = 1,
         rollout_controller: "Optional[RolloutControllerProxy]" = None,
+        retain_live_tasks: bool = False,
     ) -> "SyncProduceStrategy":
         return SyncProduceStrategy(should_continue_fn=self.should_continue_fn)
 
@@ -210,6 +219,9 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
         max_pending_tasks (int | None): Maximum number of concurrently pending
             rollout groups in one produce_batch call. Defaults to None, which
             keeps the existing unbounded scheduling behavior.
+        retain_live_tasks (bool): Build-time mode. True keeps live Agent tasks
+            and claims completed groups across windows (turn-resume); False
+            owns and drains them per window. Defaults to False.
 
     **Examples:**
 
@@ -234,6 +246,7 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
         *,
         sync_weights_interval: int = 1,
         rollout_controller: "Optional[RolloutControllerProxy]" = None,
+        retain_live_tasks: bool = False,
     ) -> "AsyncProduceStrategy":
         if self.max_token_staleness is not None and self.max_token_staleness > self.max_staleness:
             logger.warning(
@@ -258,6 +271,7 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
             tail_batch_trigger_size=self.tail_batch_trigger_size,
             max_pending_tasks=self.max_pending_tasks,
             should_continue_fn=self.should_continue_fn,
+            retain_live_tasks=retain_live_tasks,
         )
 
 
@@ -342,6 +356,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         max_token_staleness: int | None,
         sync_weights_interval: int,
         should_continue_fn: ShouldContinueFn,
+        retain_live_tasks: bool = False,
     ):
         super().__init__(should_continue_fn)
 
@@ -370,13 +385,13 @@ class AsyncProduceStrategy(ProduceStrategy):
         self.max_pending_tasks = max_pending_tasks
         self._pending_tasks = _PendingTasks()
         # Turn-resume keeps live Agent tasks across production windows; legacy mode owns them per window.
-        self.retain_live_tasks = False
+        self._retain_live_tasks = retain_live_tasks
 
     def pending_task_count(self) -> int:
         return self._pending_tasks.count()
 
     async def pause_produce(self, ctx: ProduceContext) -> float:
-        if not self.retain_live_tasks:
+        if not self._retain_live_tasks:
             return await pause_pending_tasks(
                 pending_tasks=self._pending_tasks,
                 ctx=ctx,
@@ -399,7 +414,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         if ctx.task_name not in ctx.progress.target_samples:
             raise KeyError(f"ProduceProgress.target_samples missing task_name={ctx.task_name!r}")
 
-        if not self.retain_live_tasks:
+        if not self._retain_live_tasks:
             # 共卡 async 的 pending 只属于本次 produce_batch。
             self._pending_tasks = _PendingTasks()
         else:
