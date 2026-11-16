@@ -45,6 +45,7 @@ class SamplerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
     dataloader_cfg: DataloaderConfig
     prompt_repeat_k: int = 1
+    seed: int = 1
 
     def build(
         self, tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast | str, replay_buffer: ReplayBuffer
@@ -54,7 +55,7 @@ class SamplerConfig(BaseModel):
         else:
             tokenizer_obj = tokenizer
         dataloader = self.dataloader_cfg.build(
-            tokenizer=tokenizer_obj, dp_mesh=None, global_batch_size=1, micro_batch_size=1, seed=1
+            tokenizer=tokenizer_obj, dp_mesh=None, global_batch_size=1, micro_batch_size=1, seed=self.seed
         )
         return Sampler(dataloader=dataloader, prompt_repeat_k=self.prompt_repeat_k, replay_buffer=replay_buffer)
 
