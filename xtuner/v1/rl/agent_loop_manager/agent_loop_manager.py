@@ -167,6 +167,7 @@ class AgentLoopManagerConfig(BaseModel):
             produce_strategy = task_cfg.produce_strategy_config.build(
                 sync_weights_interval=sync_weights_interval,
                 rollout_controller=rollout_controller,
+                retain_live_tasks=turn_resume is not None,
             )
             sampler = task_cfg.sampler_config.build(tokenizer=tokenizer, replay_buffer=replay_buffer)
             task_runners.append(
@@ -218,9 +219,6 @@ class AgentLoopManager:
         self.replay_buffer = replay_buffer
         self._rollout_controller = rollout_controller
         self.turn_resume = turn_resume
-        if turn_resume is not None:
-            for task in task_runners:
-                task.produce_strategy.retain_live_tasks = True
         self.data_sampler = (
             task_runners[0].sampler
             if len(task_runners) == 1
@@ -249,10 +247,9 @@ class AgentLoopManager:
         active_tasks = [task for task in self.task_runners if current_sizes[task.task_name] > 0]
         assert active_tasks, "No active tasks found"
 
-        if self.turn_resume is None:
-            await self._rollout_controller.continue_generation.remote()  # type: ignore[attr-defined]
-        else:
-            await self._rollout_controller.continue_generation.remote(model_step=model_step)  # type: ignore[attr-defined]
+        # The legacy controller accepts and ignores model_step; keep one call shape.
+        await self._rollout_controller.continue_generation.remote(model_step=model_step)  # type: ignore[attr-defined]
+        if self.turn_resume is not None:
             await self._rollout_controller.assert_request_gates_healthy.remote()  # type: ignore[attr-defined]
         local_progress = ProduceProgress.build(
             task_names=self.task_names,
@@ -321,13 +318,12 @@ class AgentLoopManager:
             await asyncio.wait_for(finish_live_tasks(), timeout=self.turn_resume.quiesce_timeout)
         await self._rollout_controller.pause_generation.remote()  # type: ignore[attr-defined]
 
+        # Delegate the retain/legacy difference to the strategy: legacy drains, turn mode claims the results that
+        # completed during gate drain. Turn-mode live futures stay in the original PendingTasks, never ABORTED.
         pause_time_s = 0.0
-        if self.turn_resume is None:
-            # pause 只收尾本轮本地 pending。
-            for task in active_tasks:
-                produce_strategy = cast(ProduceStrategy, task.produce_strategy)
-                pause_time_s += await produce_strategy.pause_produce(pending_contexts[task.task_name])
-        # turn 模式 live future 留在原 PendingTasks，下一窗口 harvest；不变成 ABORTED。
+        for task in self.task_runners:
+            produce_strategy = cast(ProduceStrategy, task.produce_strategy)
+            pause_time_s += await produce_strategy.pause_produce(pending_contexts[task.task_name])
         result = await take_train_batch(
             task_runners=self.task_runners,
             replay_buffer=self.replay_buffer,

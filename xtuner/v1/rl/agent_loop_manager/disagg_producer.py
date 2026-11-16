@@ -240,6 +240,7 @@ class DisaggProduceStrategyConfig(ABC, BaseModel):
         *,
         sync_weights_interval: int = 1,
         rollout_controller: "Optional[RolloutControllerProxy]" = None,
+        retain_live_tasks: bool = False,
     ) -> "DisaggProduceStrategy": ...
 
 
@@ -269,6 +270,8 @@ class DisaggAsyncProduceStrategyConfig(DisaggProduceStrategyConfig):
             rerolls out immediately without entering tail-batch mode, and
             ``N > 0`` waits until the expired pool contains at least ``N``
             groups before entering tail-batch mode.
+        retain_live_tasks (bool): Build-time mode. True keeps live Agent tasks
+            across pauses (turn-resume); False drains them at each pause.
     """
 
     over_sample_threshold: float = 0.0
@@ -282,6 +285,7 @@ class DisaggAsyncProduceStrategyConfig(DisaggProduceStrategyConfig):
         *,
         sync_weights_interval: int = 1,
         rollout_controller: "Optional[RolloutControllerProxy]" = None,
+        retain_live_tasks: bool = False,
     ) -> "DisaggAsyncProduceStrategy":
         if self.max_token_staleness is not None:
             if self.max_token_staleness > self.max_staleness:
@@ -306,6 +310,7 @@ class DisaggAsyncProduceStrategyConfig(DisaggProduceStrategyConfig):
             sync_weights_interval=sync_weights_interval,
             tail_batch_trigger_size=self.tail_batch_trigger_size,
             should_continue_fn=self.should_continue_fn,
+            retain_live_tasks=retain_live_tasks,
         )
 
 
@@ -349,6 +354,7 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         max_token_staleness: int | None,
         sync_weights_interval: int,
         should_continue_fn: ShouldContinueFn,
+        retain_live_tasks: bool = False,
     ):
         super().__init__(should_continue_fn)
 
@@ -369,7 +375,7 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         self.tail_batch_trigger_size = tail_batch_trigger_size
         self._pending_tasks = _PendingTasks()
         # Turn-resume keeps live Agent tasks with the strategy; legacy mode drains them at each pause.
-        self.retain_live_tasks = False
+        self._retain_live_tasks = retain_live_tasks
         # The manager sets this before waiting for producer idle so produce_batch stops refilling.
         self.scheduling_paused = False
 
@@ -381,7 +387,7 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         return self._pending_tasks.count()
 
     async def pause_produce(self, ctx: DisaggProduceContext) -> float:
-        if not self.retain_live_tasks:
+        if not self._retain_live_tasks:
             return await pause_pending_tasks(
                 pending_tasks=self._pending_tasks,
                 ctx=ctx,

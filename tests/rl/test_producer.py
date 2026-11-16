@@ -1174,6 +1174,51 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed + aborted + expired, 3)
         self.assertEqual(mock_agent_loop.rollout_ctl.pause_generation.remote.await_count, 1)
 
+    async def test_retain_mode_is_fixed_at_build_time_and_keeps_live_tasks(self):
+        # build(retain_live_tasks=True) 让 pause 只 claim 已完成结果，live group 跨窗口保留。
+        task_name = "test_retain_mode"
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocking_generate(rollout_states, **kwargs):
+            started.set()
+            await release.wait()
+            for state in rollout_states:
+                state.status = Status.COMPLETED
+            return rollout_states
+
+        agent_loop = MagicMock()
+        agent_loop.rollout_ctl.continue_generation.remote = AsyncMock(return_value=None)
+        agent_loop.rollout_ctl.pause_generation.remote = AsyncMock(return_value=None)
+        agent_loop.rollout_ctl.get_weight_update_targets.remote = AsyncMock(return_value=())
+        agent_loop.generate_group = blocking_generate
+        agent_loop.pause = AsyncMock(return_value=None)
+        agent_loop.is_valid_sample_fn = None
+
+        strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0).build(retain_live_tasks=True)
+        ctx = self._build_context(
+            strategy,
+            task_name,
+            agent_loop,
+            self._build_sampler(),
+            batch_size=1,
+            progress=self._build_progress(task_name, target=1),
+        )
+
+        producer = asyncio.create_task(strategy.produce_batch(ctx))
+        await started.wait()
+        await strategy.pause_produce(ctx)
+        self.assertEqual(strategy.pending_task_count(), 1)
+
+        producer.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await producer
+
+        release.set()
+        await strategy.quiesce(ctx)
+        self.assertEqual(strategy.pending_task_count(), 0)
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 1)
+
     async def test_async_produce_strategy_returns_update_abort_without_sampling(self):
         # 验证 update_event 已设置时策略立即返回 UPDATE_WEIGHT_AND_ABORT，不再采样新 rollout。
         task_name = "test_update_abort"
