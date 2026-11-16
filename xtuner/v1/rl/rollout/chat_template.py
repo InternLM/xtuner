@@ -22,6 +22,10 @@ def canonicalize_messages_for_chat_template(messages: list[dict]) -> list[dict]:
 
     messages = copy.deepcopy(messages)
     for message in messages:
+        # GLM renders explicit null as "None", while a missing field is empty.
+        # Use one template-only representation for trace writes and lookups.
+        if message.get("content") is None:
+            message["content"] = ""
         tool_calls = message.get("tool_calls")
         if not isinstance(tool_calls, list):
             continue
