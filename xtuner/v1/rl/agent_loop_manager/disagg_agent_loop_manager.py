@@ -208,9 +208,8 @@ class DisaggAgentLoopManager:
         # consumer 同步权重前置位；producer / strategy 直接观察 event。
         self._update_event = asyncio.Event()
         self._finish_event = asyncio.Event()
-        # Group admission stops refilling; producer idle means the current produce call has finished putting.
-        self._group_admission = asyncio.Event()
-        self._group_admission.set()
+        # Producer idle means the current produce call has finished putting. Pausing is expressed by the
+        # existing UPDATE status plus _update_event; no separate admission flag is needed.
         self._producer_idle = asyncio.Event()
         self._producer_idle.set()
 
@@ -295,11 +294,11 @@ class DisaggAgentLoopManager:
         )
 
     async def pause_produce(self, *, quiesce: bool = False) -> float:
-        # Stop group admission first, then wait for the current producer call to finish putting. A claimed result
-        # is not an idle producer: only ``_producer_idle`` proves the current put has completed.
-        self._group_admission.clear()
-        for task in self.task_runners:
-            task.produce_strategy.scheduling_paused = True
+        # Set the pause state first: the status stops the next round and _update_event tells the running strategy
+        # to stop scheduling new groups. Then wait for the current produce call to finish putting. A claimed
+        # result is not an idle producer: only ``_producer_idle`` proves the current put has completed.
+        self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
+        self._update_event.set()
         await self._producer_idle.wait()
         if self.turn_resume is not None and quiesce:
 
@@ -312,8 +311,6 @@ class DisaggAgentLoopManager:
                 )
 
             await asyncio.wait_for(finish_live_tasks(), timeout=self.turn_resume.quiesce_timeout)
-        self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
-        self._update_event.set()
         await self._rollout_controller.pause_generation.remote()  # type: ignore[attr-defined]
 
         pause_time_s = 0.0
@@ -328,17 +325,13 @@ class DisaggAgentLoopManager:
         self._model_step = model_step
         # The legacy controller accepts and ignores model_step; keep one call shape.
         await self._rollout_controller.continue_generation.remote(model_step=model_step)  # type: ignore[attr-defined]
-        self._status = AgentLoopManagerStatus.NORMAL
         self._update_event.clear()
-        for task in self.task_runners:
-            task.produce_strategy.scheduling_paused = False
-        self._group_admission.set()
+        self._status = AgentLoopManagerStatus.NORMAL
 
     def shutdown(self) -> None:
         self._status = AgentLoopManagerStatus.FINISH
         self._update_event.set()
         self._finish_event.set()
-        self._group_admission.set()
 
     async def close(self) -> None:
         """Stop the producer state machine and wait for every retained Agent
@@ -358,10 +351,9 @@ class DisaggAgentLoopManager:
     async def produce_loop(self, batch_size: int) -> None:
         # 后台持续生产；前台通过 get_batch 消费。
         while not self._finish_event.is_set():
-            await self._group_admission.wait()
             if self._status == AgentLoopManagerStatus.FINISH:
                 break
-            if self._status in (AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT, AgentLoopManagerStatus.EXPIRED_BATCH):
+            if self._status != AgentLoopManagerStatus.NORMAL:
                 # 暂停/过期只能由 trainer 调用 continue_produce 恢复。
                 await self._wait_for_status_exit(self._status)
                 continue
@@ -384,7 +376,7 @@ class DisaggAgentLoopManager:
             if produce_status == ProduceBatchStatus.EXPIRED_BATCH:
                 # EXPIRED_BATCH 是 producer 自己检测出来的“立即停下”信号。
                 self._status = AgentLoopManagerStatus.EXPIRED_BATCH
-            elif produce_status == ProduceBatchStatus.NORMAL and self._group_admission.is_set():
+            elif produce_status == ProduceBatchStatus.NORMAL and self._status == AgentLoopManagerStatus.NORMAL:
                 # 只有正常完成一轮生产且未被暂停时，producer 的 train_step 才前进一步。
                 self._produce_progress.advance_future_step()
 
@@ -541,11 +533,8 @@ class DisaggAgentLoopManager:
         self._update_event = asyncio.Event()
         self._finish_event = asyncio.Event()
         self._update_event.set()
-        self._group_admission = asyncio.Event()
         self._producer_idle = asyncio.Event()
         self._producer_idle.set()
-        for task in self.task_runners:
-            task.produce_strategy.scheduling_paused = True
         self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
         self._pause_time_s = 0.0
         self._model_step = saved_model_step
