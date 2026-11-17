@@ -138,21 +138,24 @@ def k_grouped_gemm_kernel(
         c_desc.store([offs_cm, offs_cn], c)
 
 
-@torch.library.custom_op("moe::k_grouped_gemm", mutates_args=())
-def k_grouped_gemm(A: Tensor, B: Tensor, size_per_group: torch.Tensor) -> Tensor:
+def _launch_k_grouped_gemm(A: Tensor, B: Tensor, size_per_group: torch.Tensor, C: Tensor) -> None:
     assert A.dim() == 2
     assert B.dim() == 2
 
     K, M = A.shape
     K_, N = B.shape
 
-    assert A.stride(-1) == 1, "Please make sure A is K-major"
-    assert B.stride(-1) == 1, "Please make sure B is K-major"
     assert K == K_, "Please make sure that A and B have the same seqlen"
     # assert K * A.element_size() % 128 == 0, "A and B should be 128-byte aligned"
     num_groups = size_per_group.shape[0]
 
-    C = A.new_empty(num_groups, M, N)
+    assert C.shape == (num_groups, M, N)
+    assert C.dtype == A.dtype and C.device == A.device and C.is_contiguous()
+    if K == 0:
+        C.zero_()
+        return
+    assert A.stride(-1) == 1, "Please make sure A is K-major"
+    assert B.stride(-1) == 1, "Please make sure B is K-major"
     group_end = size_per_group.cumsum(0) - size_per_group + size_per_group
     group_start = size_per_group.cumsum(0) - size_per_group
 
@@ -193,6 +196,12 @@ def k_grouped_gemm(A: Tensor, B: Tensor, size_per_group: torch.Tensor) -> Tensor
         dtype_b,
         dtype_c,
     )
+
+
+@torch.library.custom_op("moe::k_grouped_gemm", mutates_args=())
+def k_grouped_gemm(A: Tensor, B: Tensor, size_per_group: torch.Tensor) -> Tensor:
+    C = A.new_empty(size_per_group.shape[0], A.shape[1], B.shape[1])
+    _launch_k_grouped_gemm(A, B, size_per_group, C)
     return C
 
 
@@ -203,6 +212,17 @@ def _(A: Tensor, B: Tensor, size_per_group: torch.Tensor) -> Tensor:
     num_groups = size_per_group.shape[0]
     C = A.new_empty(num_groups, M, N)
     return C
+
+
+@torch.library.custom_op("moe::k_grouped_gemm_out", mutates_args={"out"})
+def k_grouped_gemm_out(A: Tensor, B: Tensor, size_per_group: torch.Tensor, out: Tensor) -> None:
+    """Write grouped WGrad directly into caller-owned storage."""
+    _launch_k_grouped_gemm(A, B, size_per_group, out)
+
+
+@k_grouped_gemm_out.register_fake
+def _(A: Tensor, B: Tensor, size_per_group: torch.Tensor, out: Tensor) -> None:
+    return None
 
 
 if __name__ == "__main__":
