@@ -81,7 +81,7 @@ class SessionRouter:
         self._round_robin_cursor += 1
         return worker.rank, worker.actor
 
-    async def get_worker(self, session_id: int) -> Optional[Any]:
+    async def get_worker(self, session_id: int) -> Optional[tuple[int, Any]]:
         async with self._lock:
             self._evict_expired()
 
@@ -90,14 +90,14 @@ class SessionRouter:
                 info = self._registry.active_entrypoint_by_rank(worker_rank)
                 if info is not None:
                     self._map[session_id] = (worker_rank, self._now())
-                    return info.actor
+                    return worker_rank, info.actor
 
             rank, worker = self._choose_next_active_worker()
             if rank == -1:
                 return None
             self._map[session_id] = (rank, self._now())
             self._evict_lru_to_capacity()
-            return worker
+            return rank, worker
 
 
 async def _resolve_routed_experts(routed_experts: np.ndarray | RayObjectRef) -> np.ndarray:

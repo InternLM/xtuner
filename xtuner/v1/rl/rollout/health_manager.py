@@ -218,6 +218,35 @@ class RolloutHealthManager:
             # 标记恢复已完成
             self._recovery_done.set()
 
+    def handle_worker_failure(self, rank: int) -> None:
+        """Remove a dead actor's group from routing and immediately recover
+        it."""
+        # 并发请求可能同时上报同一故障，仅由将 ACTIVE 组标记为 INACTIVE 的调用执行恢复。
+        claimed_failure = False
+        failed_groups: tuple[WorkerGroup, ...] = ()
+        try:
+            with self._lifecycle_operation_lock:
+                was_active = any(
+                    rank in group.ranks
+                    for group in self._registry.get_target_state_worker_groups(WorkerLifecycleState.ACTIVE)
+                )
+                failed_groups = self._registry.mark_unhealthy_ranks({rank})
+                claimed_failure = was_active and bool(failed_groups)
+                if claimed_failure:
+                    self._recovery_done.clear()
+
+            if not claimed_failure:
+                return
+            self._notify_worker_lifecycle_listeners(
+                failed_groups,
+                event_name="inactive",
+                notify_listener=lambda listener, group: listener.on_worker_group_inactive(group),
+            )
+            self._restart_inactive_workers()
+        finally:
+            if claimed_failure:
+                self._recovery_done.set()
+
     def restart_inactive_workers(self) -> tuple[WorkerGroup, ...]:
         """Synchronously restart inactive groups before the next sync-step
         weight update."""
