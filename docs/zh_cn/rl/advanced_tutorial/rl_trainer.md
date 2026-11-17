@@ -346,7 +346,7 @@ pip install 'swanlab>=0.10.1'
 也可以通过 `xtuner[swanlab]` 安装扩展依赖。构建任意一种 RL Trainer 配置后，选择日志后端：
 
 ```python
-from xtuner.v1._writer import SwanLabConfig
+from xtuner.v1.train import SwanLabConfig
 
 trainer.exp_tracker = "swanlab"
 trainer.swanlab_config = SwanLabConfig(
@@ -384,8 +384,9 @@ SwanLab 使用各指标原本的 step，因此汇总曲线和详细 loss 曲线�
 都会恢复。旧 checkpoint 如果缺少该字段，仍会恢复外层 step，但详细 optimizer 横轴从
 `1` 重新开始，并输出警告。
 
-每批训练结束后、保存 checkpoint、同步权重和评估之前，先记录详细指标，使保存的计数
-包含当前批次。这部分日志开销会计入 `time/step`。
+每批训练结束后、保存 checkpoint 之前先推进 optimizer 日志计数，使保存的计数包含当前
+批次。详细指标会在 checkpoint 保存完成、外层 step 计时结束后再 flush，因此 writer 开销
+不会计入 `time/step`。
 
 ### SwanLab 续跑
 
@@ -398,7 +399,10 @@ writer 将 run ID、project、workspace 和可选的 group 写入
 checkpoint 中的 run ID。恢复到新的实验目录时也可以关联同一个实验。复用实验标识不会
 改变 XTuner 各指标的横轴。
 
-手动选择实验时，设置 `SwanLabConfig(run_id="...", resume="must", ...)`。
+手动选择实验时，设置 `SwanLabConfig(run_id="...", resume="must", ...)`。多卡首次启动并
+使用基础 `run_id` 时，rank 0 保留用户指定的恢复策略；如果还没有 checkpoint identity，
+非 0 rank 派生的 run ID 使用 `resume="allow"`。包含各 rank identity 的 checkpoint 续跑时
+仍保持严格恢复语义。
 如果希望从同一训练 checkpoint 开始一个独立实验，设置 `resume="never"`，并省略 `run_id`。
 复用 run ID 不会回退已上传的历史数据；比较旧 checkpoint 的重跑结果时，建议创建新实验。
 

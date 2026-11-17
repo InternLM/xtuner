@@ -334,6 +334,18 @@ class TestRLColocateTrainer(unittest.TestCase):
                 self.assertEqual(details, [1, 2, 3, 4])
                 self.assertEqual(summaries, [1, 2])
 
+    def test_detailed_metric_write_failure_does_not_escape_training(self):
+        trainer = self._make_trainer(MagicMock())
+        trainer._exp_tracker.add_scalars.side_effect = RuntimeError("tracker unavailable")
+        workers_log_item = [{"train_metrics": [{"policy_loss": 0.5}]}]
+
+        start_step = trainer._advance_mini_batch_step(workers_log_item)
+        trainer._flush_mini_batch_metrics(workers_log_item, start_step)
+
+        self.assertEqual(start_step, 1)
+        self.assertEqual(trainer._global_train_step, 1)
+        trainer.logger.warning.assert_called_once()
+
     def test_legacy_checkpoint_resets_only_optimizer_logging_counter(self):
         checkpoint = Path(self.temp_dir.name) / "legacy"
         checkpoint.mkdir()

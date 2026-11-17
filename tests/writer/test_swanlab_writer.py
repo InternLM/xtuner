@@ -113,17 +113,45 @@ def test_resuming_in_a_different_project_fails_before_init(tmp_path, sdk):
     sdk.init.assert_not_called()
 
 
-def test_run_is_finished_if_identity_cannot_be_saved(tmp_path, sdk, monkeypatch):
+def test_identity_save_failure_is_non_fatal(tmp_path, sdk, monkeypatch, caplog):
     monkeypatch.setattr(type(tmp_path), "replace", Mock(side_effect=OSError("storage unavailable")))
-    with pytest.raises(OSError, match="storage unavailable"):
-        SwanLabWriter(tmp_path)
+    writer = SwanLabWriter(tmp_path)
+    writer.close()
+
+    assert "Could not persist SwanLab local run identity" in caplog.text
     sdk.run.finish.assert_called_once()
+
+
+def test_checkpoint_identity_is_persisted_by_the_writer(tmp_path, sdk):
+    checkpoint = tmp_path / "checkpoint"
+    writer = SwanLabWriter(tmp_path / "logs", rank=2)
+    writer.persist_state(checkpoint)
+    writer.close()
+
+    assert json.loads((checkpoint / "swanlab/rank2.json").read_text()) == writer.run_info
 
 
 def test_missing_optional_sdk_has_actionable_error(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "swanlab", None)
     with pytest.raises(ImportError, match=r"xtuner\[swanlab\]"):
         get_writer(writer_type="swanlab", log_dir=tmp_path)
+
+
+def test_real_swanlab_sdk_offline_contract(tmp_path):
+    pytest.importorskip("swanlab")
+    writer = SwanLabWriter(
+        tmp_path,
+        config=SwanLabConfig(
+            project="xtuner-writer-test",
+            experiment_name="offline-contract",
+            mode="offline",
+        ),
+    )
+    writer.add_scalars(tag_scalar_dict={"train_metrics/loss": 0.8}, global_step=2)
+    writer.add_scalars(tag_scalar_dict={"response/reward": 0.5}, global_step=1)
+    writer.close()
+
+    assert json.loads((tmp_path / RUN_INFO_FILE).read_text()) == writer.run_info
 
 
 def test_tensorboard_remains_usable_without_swanlab(tmp_path, monkeypatch):

@@ -69,6 +69,7 @@ def test_explicit_id_and_name_distinguish_ranks(tmp_path, monkeypatch, sdk):
 
     assert [call.kwargs["id"] for call in sdk.init.call_args_list] == ["manual-run", "manual-run-rank1"]
     assert [call.kwargs["experiment_name"] for call in sdk.init.call_args_list] == ["sft-rank0", "sft-rank1"]
+    assert [call.kwargs["resume"] for call in sdk.init.call_args_list] == ["must", "allow"]
     assert all(call.kwargs["group"] == "training" for call in sdk.init.call_args_list)
     assert config.run_id == "manual-run"
     assert config.experiment_name == "sft"
@@ -228,3 +229,14 @@ def test_fit_closes_the_run_on_training_failure(make_trainer, sdk):
     with pytest.raises(RuntimeError, match="training failed"):
         trainer.fit()
     sdk.run.finish.assert_called_once()
+
+
+def test_tracker_close_failure_does_not_replace_training_failure(make_trainer, sdk):
+    trainer = make_trainer("close-failed", 1)
+    trainer._engine.train_step.side_effect = RuntimeError("training failed")
+    sdk.run.finish.side_effect = RuntimeError("finish failed")
+
+    with pytest.raises(RuntimeError, match="training failed"):
+        trainer.fit()
+
+    trainer.logger.exception.assert_called_once_with("Failed to close the experiment tracker.")

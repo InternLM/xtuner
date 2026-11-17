@@ -39,8 +39,7 @@ from torch.optim.lr_scheduler import LambdaLR, LinearLR, SequentialLR
 from typing_extensions import NotRequired, Self, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1._writer import SwanLabConfig, SwanLabWriter, get_writer
-from xtuner.v1._writer.swanlab_writer import RUN_INFO_FILE
+from xtuner.v1._writer import SwanLabConfig, get_writer
 from xtuner.v1.config import FSDPConfig, LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import BaseDataloaderConfig, DataloaderConfig, DatasetConfigList
@@ -894,7 +893,10 @@ class Trainer:
         try:
             self._fit()
         finally:
-            self._exp_tracker.close()
+            try:
+                self._exp_tracker.close()
+            except Exception:
+                self.logger.exception("Failed to close the experiment tracker.")
 
     def _fit(self):
         if self._async_hf_export or self._async_checkpoint:
@@ -1151,43 +1153,17 @@ class Trainer:
         log_dir: Path,
         swanlab_config: SwanLabConfig | None = None,
     ):
-        resume_run = None
-        if exp_tracker == "swanlab":
-            config = swanlab_config or SwanLabConfig()
-            checkpoint_group = None
-            if self._load_checkpoint_cfg.checkpoint_path is not None:
-                checkpoint = Path(self._load_checkpoint_cfg.checkpoint_path)
-                rank_run_path = checkpoint / "swanlab" / f"rank{self.rank}.json"
-                if rank_run_path.exists():
-                    resume_run = json.loads(rank_run_path.read_text())
-                else:
-                    state = json.loads((checkpoint / self._SAVE_TRAIN_STATE_PATH).read_text())
-                    checkpoint_group = (state.get("swanlab_run") or {}).get("group")
-                    if self.rank == 0:
-                        resume_run = state.get("swanlab_run")
-            local_run_path = log_dir / RUN_INFO_FILE
-            if resume_run is None and local_run_path.exists():
-                resume_run = json.loads(local_run_path.read_text())
-            saved_group = None
-            if config.resume != "never":
-                saved_group = (resume_run or {}).get("group") or checkpoint_group
-            group = config.group or saved_group or os.getenv("SWANLAB_GROUP")
-            group = group or f"{self.exp_dir.parent.name}-{self.exp_dir.name}"
-            run_id = config.run_id
-            if run_id is not None and self.rank != 0:
-                run_id = f"{run_id}-rank{self.rank}"
-            swanlab_config = config.model_copy(
-                update={
-                    "group": group,
-                    "experiment_name": f"{config.experiment_name or group}-rank{self.rank}",
-                    "run_id": run_id,
-                }
-            )
+        checkpoint_cfg = getattr(self, "_load_checkpoint_cfg", None)
+        default_group = None
+        if hasattr(self, "_meta"):
+            default_group = f"{self.exp_dir.parent.name}-{self.exp_dir.name}"
         return get_writer(
             writer_type=exp_tracker,
             log_dir=log_dir,
             swanlab_config=swanlab_config,
-            resume_run=resume_run,
+            checkpoint_path=getattr(checkpoint_cfg, "checkpoint_path", None),
+            rank=self.rank,
+            default_group=default_group,
         )
 
     def _init_data_mesh(
@@ -1419,10 +1395,7 @@ class Trainer:
             with config_bin.open("wb") as config_bin_file:
                 pickle.dump(self._trainer_cfg, config_bin_file)
 
-        if isinstance(self._exp_tracker, SwanLabWriter):
-            rank_run_path = checkpoint_path / "swanlab" / f"rank{self.rank}.json"
-            rank_run_path.parent.mkdir(parents=True, exist_ok=True)
-            rank_run_path.write_text(json.dumps(self._exp_tracker.run_info))
+        self._exp_tracker.persist_state(checkpoint_path)
 
         dist.barrier()
 
@@ -1434,8 +1407,9 @@ class Trainer:
                 "total_consumed_tokens": total_consumed_tokens,
                 "train_time_offset": self._train_time + self._train_time_offset,
             }
-            if isinstance(self._exp_tracker, SwanLabWriter):
-                train_state["swanlab_run"] = self._exp_tracker.run_info
+            tracker_state = self._exp_tracker.get_state()
+            if isinstance(tracker_state, dict):
+                train_state["swanlab_run"] = tracker_state
             with train_state_path.open("w") as f:
                 f.write(json.dumps(train_state))
 

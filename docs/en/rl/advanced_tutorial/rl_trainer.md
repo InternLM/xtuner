@@ -398,7 +398,7 @@ It is also available through the `xtuner[swanlab]` installation extra. After
 constructing either RL trainer configuration, select the backend:
 
 ```python
-from xtuner.v1._writer import SwanLabConfig
+from xtuner.v1.train import SwanLabConfig
 
 trainer.exp_tracker = "swanlab"
 trainer.swanlab_config = SwanLabConfig(
@@ -442,9 +442,10 @@ checkpoint resumes both the outer training step and the detailed logging counter
 Older checkpoints without this field still restore the outer step, but restart
 the detailed optimizer-step axis at `1` with a warning.
 
-Detailed metrics are written after each training batch and before checkpointing,
-weight synchronization, and evaluation, so the saved counter includes the
-current batch. Their logging overhead is included in `time/step`.
+The optimizer logging counter advances after each training batch and before
+checkpointing, so the saved counter includes the current batch. The detailed
+metrics themselves are flushed after checkpointing and outside the outer-step
+timer; their writer overhead is not included in `time/step`.
 
 ### Resuming a SwanLab Run
 
@@ -458,6 +459,10 @@ With `exp_tracker="swanlab"`, both `auto_resume=True` and an explicit
 directory. Reusing the run identity does not change XTuner's metric step axes.
 
 To select a run explicitly, set `SwanLabConfig(run_id="...", resume="must", ...)`.
+For a first multi-rank launch with a base `run_id`, rank 0 keeps the requested
+resume policy while derived non-zero-rank IDs use `resume="allow"` when no
+checkpoint identity exists. A checkpoint containing per-rank identities keeps
+strict resume behavior.
 To start a separate experiment from the same training checkpoint, set
 `resume="never"` and omit `run_id`. Reusing a run ID does not rewind already
 uploaded history; prefer a new run when comparing a replay from an older

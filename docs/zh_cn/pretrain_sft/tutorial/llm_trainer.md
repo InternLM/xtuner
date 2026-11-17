@@ -98,7 +98,7 @@ trainer = Trainer(
 `"tensorboard"` 和 `"swanlab"`。已有配置可以这样启用 SwanLab：
 
 ```python
-from xtuner.v1._writer import SwanLabConfig
+from xtuner.v1.train import SwanLabConfig
 from xtuner.v1.train import Trainer
 
 trainer_cfg.exp_tracker = "swanlab"

@@ -4,6 +4,7 @@ import time
 import weakref
 from pathlib import Path
 from queue import Empty, Queue
+from typing import Any
 
 from xtuner.v1.utils import get_logger
 
@@ -80,6 +81,12 @@ class JsonlWriter:
             self._async_writer.join()
             self._flush()
             self._file_writer.close()
+
+    def get_state(self) -> dict[str, Any] | None:
+        return None
+
+    def persist_state(self, checkpoint_dir: str | Path) -> None:
+        return
 
     def _flush(self):
         self._queue.join()

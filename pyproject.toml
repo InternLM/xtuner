@@ -95,7 +95,8 @@ all = [
   "parametrize",
   "mathruler",
   "pylatexenc",
-  "flash-linear-attention==0.5.2"
+  "flash-linear-attention==0.5.2",
+  "swanlab>=0.10.1"
 ]
 
 [tool.mypy]
