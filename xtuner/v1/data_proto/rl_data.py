@@ -64,6 +64,14 @@ class MultimodalInfo(TypedDict):
     pixel_values: NotRequired[np.ndarray | RayObjectRef | None]
     image_grid_thw: NotRequired[np.ndarray | None]
     num_img_tokens: NotRequired[list[int]]
+    pixel_values_videos: NotRequired[np.ndarray | RayObjectRef | None]
+    video_grid_thw: NotRequired[np.ndarray | None]
+    mm_token_type_ids: NotRequired[np.ndarray | None]
+
+
+# Tensor payload keys that the sampler moves into the Ray object store; SequenceContext mirrors them.
+MMPixelField: TypeAlias = Literal["pixel_values", "pixel_values_videos"]
+MM_PIXEL_FIELDS: tuple[MMPixelField, ...] = ("pixel_values", "pixel_values_videos")
 
 
 class RolloutFunctionCall(BaseModel):
@@ -136,7 +144,8 @@ class RolloutState(BaseModel):
     # Samples generated from the same prompt share one group_id.
     group_id: int | None = None
     message: list[dict[str, Any]]  # dataset输出，需要在AgentLoop中转换成input_ids
-    prompt_ids: list[int] | None = None  # 原始 prompt的token ids
+    # 原始 prompt 的 token ids；agentic trace 样本为 trace 首个 prompt 段（会话初始 prompt）。
+    prompt_ids: list[int] | None = None
     num_tokens: int | None = None
     proxy_attn_flops: float | None = None
     data_source: dict[str, Any] | str | None = None

@@ -50,4 +50,8 @@ if [[ $TORCH_VERSION == "2.9.1" ]]; then
     pip install nvidia-cudnn-cu12==9.15.1.9
 fi
 
+# 非必要依赖:lagent,指定版本 v1.0.0(@ 46e07b9f)
+if [[ -n "${LAGENT:-}" ]]; then
+    export PYTHONPATH=${LAGENT}:$PYTHONPATH
+fi
 export PYTHONPATH=${LM_DEPLOY}:$PYTHONPATH
