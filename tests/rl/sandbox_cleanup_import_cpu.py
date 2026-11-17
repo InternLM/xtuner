@@ -63,8 +63,9 @@ class ImportCompatibility(unittest.TestCase):
         self.assertIn("Runner", dir(package))
         self.assertIs(package.SandboxSpec, importlib.import_module(PACKAGE + ".schemas").SandboxSpec)
         with self.assertRaises(ModuleNotFoundError):
-            _ = package.AgentInSandboxLoop
-        self.assertNotIn("AgentInSandboxLoop", vars(package), "A failed lazy export must not be cached")
+            _ = package.Runner
+        self.assertNotIn("Runner", vars(package), "A failed lazy export must not be cached")
+        self.assertIs(package.run_trial_process, importlib.import_module(PACKAGE + ".trial_process").run_trial_process)
 
     def test_trainer_common_init_reaches_training_configuration_without_lagent(self):
         events = []
@@ -80,14 +81,22 @@ class ImportCompatibility(unittest.TestCase):
         init = trainer_method("BaseRLTrainer", "_init_common", scope)
         trainer = types.SimpleNamespace(logger=logging.getLogger("import-test"), _EXP_TRACKING_PATH="tracker")
         for name in (
-            "_init_work_dir_and_meta", "_init_load_source", "_init_save_config", "_init_trace",
-            "_save_runtime_environment", "_init_train_state", "_init_train_worker_config",
-            "_init_rollout_config", "_ensure_rollout_proxy_config", "_init_runtime_flags",
+            "_init_work_dir_and_meta",
+            "_init_load_source",
+            "_init_save_config",
+            "_init_trace",
+            "_save_runtime_environment",
+            "_init_train_state",
+            "_init_train_worker_config",
+            "_init_rollout_config",
+            "_ensure_rollout_proxy_config",
+            "_init_runtime_flags",
         ):
             setattr(trainer, name, lambda *args: None)
         trainer._init_logger = lambda *args: Path("unused")
         config = types.SimpleNamespace(
-            distillation_config=None, advantage_estimator_config=types.SimpleNamespace(build=lambda: "estimator"),
+            distillation_config=None,
+            advantage_estimator_config=types.SimpleNamespace(build=lambda: "estimator"),
             exp_tracker="none",
         )
         init(trainer, config, meta_path="unused", logger_tag="test")
@@ -99,6 +108,7 @@ class ImportCompatibility(unittest.TestCase):
         for cls in ("RLColocateTrainer", "RLDisaggregatedTrainer"):
             fit = trainer_method(cls, "fit", {"sys": sys})
             for failure in (None, ValueError("fit failed"), KeyboardInterrupt()):
+
                 def train():
                     if failure is not None:
                         raise failure

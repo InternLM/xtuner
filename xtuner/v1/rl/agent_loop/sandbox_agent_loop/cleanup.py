@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import fcntl
 import importlib
 import json
 import math
@@ -17,6 +16,7 @@ import os
 import select
 import subprocess
 import sys
+import threading
 import time
 import uuid
 import weakref
@@ -27,9 +27,10 @@ from typing import Any, Callable, TextIO
 
 
 if __package__:
-    from . import recycler, run_control
+    from . import locking, recycler, run_control
     from .finalization import CleanupError, finalize_bounded
 else:
+    import locking
     import recycler
     import run_control
     from finalization import CleanupError, finalize_bounded
@@ -58,8 +59,80 @@ class CleanupJournal:
     A reconciler must acquire this same lock, so it cannot reclaim an active
     Trial, including between training updates or between inference and judging.
     A dead process releases its lock without PID/clock/lease-expiry heuristics.
-    Use a run-specific shared filesystem with working cross-node flock semantics.
+    Use a run-specific shared filesystem with validated cross-node OFD record-lock semantics.
     """
+
+    @classmethod
+    async def open(cls, directory: str | Path, provider_key: str, *, timeout_seconds: float = 5) -> CleanupJournal:
+        """Register without blocking the actor, owning late initialization on cancellation.
+
+        The I/O thread keeps ownership until the caller accepts the journal. If
+        registration times out or is cancelled, that same thread detaches the
+        unused journal after its initial write finishes. No event-loop callback
+        is required to release a late owner, including during loop shutdown.
+        """
+        _positive(timeout_seconds)
+        loop = asyncio.get_running_loop()
+        ready: asyncio.Future[CleanupJournal] = loop.create_future()
+        resolved = threading.Event()
+        adopted = False
+
+        def publish(journal: CleanupJournal | None, error: BaseException | None) -> None:
+            if ready.done():
+                return
+            if error is not None:
+                ready.set_exception(error)
+            else:
+                assert journal is not None
+                ready.set_result(journal)
+
+        def initialize() -> None:
+            try:
+                journal = cls(directory, provider_key)
+            except BaseException as exc:
+                if not resolved.is_set():
+                    loop.call_soon_threadsafe(publish, None, exc)
+                return
+            try:
+                loop.call_soon_threadsafe(publish, journal, None)
+            except RuntimeError:  # The event loop ended before registration.
+                journal.detach()
+                return
+            resolved.wait()
+            if not adopted:
+                journal.detach()
+
+        task = asyncio.create_task(asyncio.to_thread(initialize), name="sandbox-journal-open")
+        _WRITES.add(task)
+
+        def finished(result: asyncio.Task[None]) -> None:
+            _WRITES.discard(result)
+            if not result.cancelled():
+                result.exception()
+
+        task.add_done_callback(finished)
+
+        async def receive() -> CleanupJournal:
+            return await asyncio.shield(ready)
+
+        try:
+            journal = await finalize_bounded(receive(), timeout_seconds=timeout_seconds, diagnostic={})
+            adopted = True
+            return journal
+        except CleanupError:
+            if ready.done() and not ready.cancelled():
+                error = ready.exception()
+                if error is not None:
+                    raise error  # Preserve admission rejection and allocation markers.
+            raise
+        finally:
+            # Cancellation must also abandon a result already published but not
+            # yet accepted. Cancelling this Future never cancels the I/O thread.
+            if not adopted:
+                if ready.done() and not ready.cancelled():
+                    ready.exception()
+                ready.cancel()
+            resolved.set()
 
     def __init__(self, directory: str | Path, provider_key: str) -> None:
         if not provider_key or not isinstance(provider_key, str):
@@ -68,8 +141,12 @@ class CleanupJournal:
         directory.mkdir(parents=True, exist_ok=True)
         with run_control.admission(directory):
             self.path = directory / (uuid.uuid4().hex + ".json")
-            self.lock = run_control.track_lock(self.path.with_suffix(".lock").open("a"))
-            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.lock = run_control.track_lock(locking.open_lock(self.path.with_suffix(".lock")))
+            try:
+                locking.acquire(self.lock)
+            except BaseException:
+                self.lock.close()
+                raise
             self.data = {
                 "version": 1,
                 "provider_key": provider_key,
@@ -78,14 +155,24 @@ class CleanupJournal:
                 "ambiguous_creates": 0,
                 "creating": False,
             }
+            # None is the legacy serial API's independent create intent.
+            # Per-request tokens remain in memory; the persisted boolean still
+            # conservatively records whether any POST lacks an exact ID.
+            self._pending_creates: set[str | None] = set()
             self._write_task: asyncio.Task | None = None
             try:
                 self.flush()
+                if __package__:
+                    from .trial_process import register_trial_journal
+                else:
+                    from trial_process import register_trial_journal
+
+                register_trial_journal(self.path)
             except BaseException:
                 self.lock.close()
                 raise
 
-    async def write(self, method: str, *args: Any, **kwargs: Any) -> None:
+    async def persist(self, mutation: Callable[..., None], *args: Any, **kwargs: Any) -> None:
         """Serialize disk writes, retaining them across coroutine cancellation.
 
         Detach queues behind earlier writes; no late write can recreate stale
@@ -100,7 +187,7 @@ class CleanupJournal:
                     await asyncio.shield(previous)
                 except Exception:
                     pass  # The next full snapshot may recover a failed write.
-            await asyncio.to_thread(getattr(self, method), *args, **kwargs)
+            await asyncio.to_thread(mutation, *args, **kwargs)
 
         task = asyncio.create_task(operation(), name="sandbox-journal-write")
         self._write_task = task
@@ -127,6 +214,16 @@ class CleanupJournal:
                 raise stopped
             raise
 
+    @property
+    def has_unresolved_creation(self) -> bool:
+        """Whether recovery still lacks an exact ID for an admitted request."""
+        return bool(self.data["creating"] or self.data["ambiguous_creates"])
+
+    async def remember_created(self, env_id: str) -> None:
+        """Persist newly observed ownership without rewriting already known IDs."""
+        if env_id not in self.data["resources"]:
+            await self.persist(self.created, env_id)
+
     def flush(self) -> None:
         self.data["updated_at"] = time.time()
         _atomic_json(self.path, self.data)
@@ -137,30 +234,36 @@ class CleanupJournal:
         self.data["resources"].setdefault(env_id, {"confirmed": False})
         self.flush()
 
-    def allocated(self, env_id: str) -> None:
-        """Atomically resolve the create intent before provider readiness waits."""
+    def allocated(self, env_id: str, *, create_id: str | None = None) -> None:
+        """Resolve only this request's intent before provider readiness waits."""
         if not isinstance(env_id, str) or not env_id:
             raise ValueError("sandbox ID must be a nonempty string")
         self.data["resources"].setdefault(env_id, {"confirmed": False})
-        self.data["creating"] = False
+        self._pending_creates.discard(create_id)
+        self.data["creating"] = bool(self._pending_creates)
         self.flush()
 
     def confirmed(self, env_id: str) -> None:
         self.data["resources"][env_id] = {"confirmed": True}
         self.flush()
 
-    def begin_create(self) -> None:
+    def begin_create(self, *, create_id: str | None = None) -> None:
         with run_control.admission(self.path.parent):
-            self.data["creating"] = True
+            self._pending_creates.add(create_id)
+            self.data["creating"] = bool(self._pending_creates)
             self.flush()
 
     def identify(self, trial_id: str) -> None:
         self.data["trial_id"] = trial_id
         self.flush()
 
-    def end_create(self, *, ambiguous: bool) -> None:
-        self.data["creating"] = False
-        self.data["ambiguous_creates"] += int(ambiguous)
+    def end_create(self, *, ambiguous: bool, create_id: str | None = None) -> None:
+        # A prior allocated() resolved this request, or an earlier end_create()
+        # already accounted for it. Repeated completion must not add ambiguity.
+        unresolved = create_id in self._pending_creates
+        self._pending_creates.discard(create_id)
+        self.data["creating"] = bool(self._pending_creates)
+        self.data["ambiguous_creates"] += int(ambiguous and unresolved)
         self.flush()
 
     def detach(self) -> None:
@@ -236,10 +339,18 @@ async def delete_confirmed(provider: Any, env_id: str, *, poll_seconds: float = 
 
 
 async def _recover(
-    data: dict[str, Any], factory: Callable[[], Any], persist: Callable[[], None], timeout: float
+    data: dict[str, Any],
+    factory: Callable[[], Any],
+    persist: Callable[[], None],
+    timeout: float,
+    *,
+    verify_deletion: bool = True,
 ) -> dict[str, Any]:
+    if not verify_deletion and "version" in data:
+        raise ValueError("persistent recovery requires deletion confirmation")
+    completion_key = "confirmed" if verify_deletion else "delete_accepted"
     deadline = time.monotonic() + _positive(timeout)
-    pending = [key for key, value in data["resources"].items() if not value["confirmed"]]
+    pending = [key for key, value in data["resources"].items() if not value.get(completion_key, False)]
     provider = factory() if pending else None
     failures: dict[str, str] = {}
     try:
@@ -247,7 +358,7 @@ async def _recover(
         # only a share of the budget so other members still get an attempt.
         delay = 0.1
         while time.monotonic() < deadline:
-            pending = [key for key, value in data["resources"].items() if not value["confirmed"]][::-1]
+            pending = [key for key, value in data["resources"].items() if not value.get(completion_key, False)][::-1]
             if not pending:
                 break
             for index, env_id in enumerate(pending):
@@ -256,17 +367,17 @@ async def _recover(
                     break
                 try:
                     await finalize_bounded(
-                        delete_confirmed(provider, env_id),
+                        delete_confirmed(provider, env_id) if verify_deletion else provider.delete(env_id),
                         timeout_seconds=remaining / (len(pending) - index) / 2,
                         diagnostic={},
                     )
                 except CleanupError as exc:
                     failures[env_id] = exc.kind
                 else:
-                    data["resources"][env_id]["confirmed"] = True
+                    data["resources"][env_id][completion_key] = True
                     failures.pop(env_id, None)
                     await _persist(persist)
-            if all(row["confirmed"] for row in data["resources"].values()):
+            if all(row.get(completion_key, False) for row in data["resources"].values()):
                 break
             await asyncio.sleep(min(delay, max(0, deadline - time.monotonic())))
             delay = min(delay * 2, 5)
@@ -277,12 +388,14 @@ async def _recover(
                 await finalize_bounded(close(), timeout_seconds=min(5, timeout), diagnostic={})
             except CleanupError:
                 data["transport_close_failed"] = True
-    pending = [key for key, value in data["resources"].items() if not value["confirmed"]]
+    pending = [key for key, value in data["resources"].items() if not value.get(completion_key, False)]
     complete = not pending and not data["creating"] and not data["ambiguous_creates"]
-    data.update(state="complete" if complete else "pending", pending_ids=pending, failures=failures)
+    state = ("complete" if verify_deletion else "delete_accepted") if complete else "pending"
+    data.update(state=state, pending_ids=pending, failures=failures)
     await _persist(persist)
     return {
         "ok": complete,
+        "deletion_confirmed": complete and verify_deletion,
         "pending_ids": pending,
         "ambiguous_creates": data["ambiguous_creates"] + int(data["creating"]),
     }
@@ -290,9 +403,9 @@ async def _recover(
 
 async def reconcile_file(path: Path, resolver: Callable[[str], Any], timeout: float) -> dict[str, Any]:
     """Skip live owners; an invalid journal fails this file, not the whole run."""
-    with run_control.track_lock(path.with_suffix(".lock").open("a")) as lock:
+    with run_control.track_lock(locking.open_lock(path.with_suffix(".lock"))) as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locking.acquire(lock)
         except BlockingIOError:
             return {"journal": path.name, "ok": False, "state": "active"}
         try:
@@ -327,10 +440,53 @@ async def reconcile_file(path: Path, resolver: Callable[[str], Any], timeout: fl
             return {"journal": path.name, "ok": False, "error_type": type(exc).__name__}
 
 
+def observe_journals(paths: list[Path]) -> dict[str, Any]:
+    """Check durable completion without acquiring resources or issuing DELETE.
+
+    A live owner, unresolved creation, malformed snapshot or missing journal is
+    pending evidence even when a stale snapshot happens to say complete.
+    """
+    rows = []
+    for path in paths:
+        try:
+            with run_control.track_lock(locking.open_lock(path.with_suffix(".lock"))) as lock:
+                try:
+                    locking.acquire(lock)
+                except BlockingIOError:
+                    rows.append({"journal": path.name, "ok": False, "state": "active"})
+                    continue
+                data = json.loads(path.read_text())
+                confirmed = (
+                    data.get("version") == 1
+                    and isinstance(data.get("provider_key"), str)
+                    and bool(data["provider_key"])
+                    and data.get("state") == "complete"
+                    and data.get("creating") is False
+                    and type(data.get("ambiguous_creates")) is int
+                    and data["ambiguous_creates"] == 0
+                    and isinstance(data.get("resources"), dict)
+                    and all(
+                        isinstance(key, str) and bool(key) and isinstance(row, dict) and row.get("confirmed") is True
+                        for key, row in data["resources"].items()
+                    )
+                )
+                rows.append({"journal": path.name, "ok": confirmed})
+        except (OSError, ValueError, AttributeError, TypeError) as error:
+            rows.append({"journal": path.name, "ok": False, "error_type": type(error).__name__})
+    return {"ok": all(row["ok"] for row in rows), "results": rows}
+
+
 def defer_cleanup(
-    env_ids: list[str], factory: Callable[[], Any], *, journal: CleanupJournal | None, timeout: float
+    env_ids: list[str],
+    factory: Callable[[], Any],
+    *,
+    journal: CleanupJournal | None,
+    timeout: float,
+    verify_deletion: bool = True,
 ) -> asyncio.Task:
     """Strongly own one bounded retry worker after foreground cleanup ends."""
+    if journal is not None and not verify_deletion:
+        raise ValueError("persistent recovery requires deletion confirmation")
     loop = asyncio.get_running_loop()
     limit = _LIMITS.setdefault(loop, asyncio.Semaphore(8))
 
@@ -351,7 +507,7 @@ def defer_cleanup(
                 "creating": False,
                 "ambiguous_creates": 0,
             }
-            return await _recover(data, factory, lambda: None, timeout)
+            return await _recover(data, factory, lambda: None, timeout, verify_deletion=verify_deletion)
 
     task = asyncio.create_task(work(), name="sandbox-cleanup")
     _TASKS.add(task)
@@ -395,11 +551,7 @@ async def reconcile(
                 return {"journal": path.name, "ok": False, "error_type": type(exc).__name__}
 
     # UUID filenames exclude reports/configs and scope this command to one run.
-    paths = sorted(
-        path
-        for path in (directory.glob("*.json") if journals is None else journals)
-        if len(path.stem) == 32 and all(c in "0123456789abcdef" for c in path.stem)
-    )
+    paths = recycler.journal_paths(directory) if journals is None else journals
     rows = await asyncio.gather(*(one(path) for path in paths))
     report = {"ok": all(row["ok"] for row in rows), "results": rows, "finished_at": time.time()}
     await asyncio.to_thread(_atomic_json, directory / "cleanup-report.json", report)
@@ -480,9 +632,17 @@ def guard_ray_shutdown(*, training_outcome: str | None = None) -> Iterator[None]
         try:
             _SHUTDOWN_GUARD = subprocess.Popen(
                 [
-                    sys.executable, str(Path(__file__).resolve()),
-                    "--directory", directory, "--factory", factory, "--finalize",
-                    "--watch-ray-fd", str(read_fd), "--watch-timeout", str(timeout),
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--directory",
+                    directory,
+                    "--factory",
+                    factory,
+                    "--finalize",
+                    "--watch-ray-fd",
+                    str(read_fd),
+                    "--watch-timeout",
+                    str(timeout),
                     *(["--training-outcome", training_outcome] if training_outcome is not None else []),
                 ],
                 pass_fds=(read_fd,),
@@ -547,7 +707,8 @@ def cleanup_from_environment(*, finalize: bool = False, training_outcome: str | 
     deadline = time.monotonic() + timeout
     # The failure handoff is part of the exit budget, not an unbounded finally.
     handoff_reserve = min(5.0, timeout * 0.2) if finalize else 0.0
-    sweep_timeout = timeout - handoff_reserve
+    report_reserve = min(2.0, timeout * 0.1) if finalize and training_outcome is not None else 0.0
+    sweep_timeout = timeout - handoff_reserve - report_reserve
     confirmed = False
     try:
         result = subprocess.run(
@@ -572,6 +733,19 @@ def cleanup_from_environment(*, finalize: bool = False, training_outcome: str | 
     except (OSError, subprocess.TimeoutExpired):
         pass  # Durable queue handles the failed/terminated exit subprocess.
     finally:
+        if finalize and training_outcome is not None:
+            # This reports a fact already observed by the driver. A reporting
+            # failure cannot undo a confirmed sweep or introduce a fit failure.
+            reported = _record_fit_result(
+                Path(directory),
+                training_outcome,
+                confirmed=confirmed,
+                # A confirmed sweep needs no failure handoff, so its report can
+                # use that remaining reserve without extending the exit budget.
+                timeout=min(5.0 if confirmed else report_reserve, max(0, deadline - time.monotonic())),
+            )
+            if not reported:
+                print("Sandbox fit report unconfirmed; retain the run journal", file=sys.stderr)
         if finalize and not confirmed:
             try:
                 if not recycler.handoff_recovery(Path(directory), factory, timeout=deadline - time.monotonic()):
@@ -579,6 +753,31 @@ def cleanup_from_environment(*, finalize: bool = False, training_outcome: str | 
             except Exception as exc:
                 print(f"Sandbox recovery handoff failed ({type(exc).__name__}); retain journals", file=sys.stderr)
     return confirmed
+
+
+def _record_fit_result(directory: Path, outcome: str, *, confirmed: bool, timeout: float) -> bool:
+    """Bound driver acknowledgement/failure reporting, independently of the factory."""
+    if timeout <= 0:
+        return False
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--directory",
+                str(directory),
+                "--record-fit",
+                "confirmed" if confirmed else "unconfirmed",
+                "--training-outcome",
+                outcome,
+            ],
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def finish_training(training_outcome: str) -> None:
@@ -597,10 +796,10 @@ def finish_training(training_outcome: str) -> None:
 async def cleanup_owner(directory: Path, budget: float) -> AsyncIterator[None]:
     """Serialize head, peers and background attempts under one run-level lock."""
     deadline = time.monotonic() + _positive(budget)
-    with run_control.track_lock((directory / "run-cleanup.lock").open("a")) as lock:
+    with run_control.track_lock(locking.open_lock(directory / "run-cleanup.lock")) as lock:
         while True:
             try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locking.acquire(lock)
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
@@ -616,6 +815,9 @@ async def finalize_run(
     budget: float,
     concurrency: int = 8,
     training_outcome: str | None = None,
+    journals: list[Path] | None = None,
+    known_journals: list[Path] | None = None,
+    request_batch: Path | None = None,
 ) -> dict[str, Any]:
     """Perform one bounded exit sweep and publish the explicit training outcome."""
     await asyncio.to_thread(run_control.request_stop, directory, "training_exit")
@@ -623,7 +825,23 @@ async def finalize_run(
         run_control.record_result, directory, cleanup_confirmed=False, training_outcome=training_outcome
     )
     async with cleanup_owner(directory, budget):
-        report = await reconcile(directory, resolver, min(timeout, budget), concurrency)
+        if request_batch is not None:
+            # This process is bounded by the recycler's attempt and guardian
+            # deadlines, including stop, directory I/O and the atomic seal.
+            journals, known = await asyncio.to_thread(
+                recycler.batch_journals, directory, request_batch, seal_exit=True
+            )
+            known_journals = [directory / name for name in sorted(known)]
+        report = await reconcile(directory, resolver, min(timeout, budget), concurrency, journals)
+        if journals is not None or known_journals is not None:
+            # Selection controls DELETE budget ownership. Completion still
+            # observes the whole stopped run without expanding that selection.
+            # Preserve selected/ancestor paths even if their files disappeared:
+            # a directory listing cannot turn missing ownership into success.
+            observed = set(recycler.journal_paths(directory))
+            observed.update(journals or ())
+            observed.update(known_journals or ())
+            report = await asyncio.to_thread(observe_journals, sorted(observed))
         return await asyncio.to_thread(
             run_control.record_result,
             directory,
@@ -639,27 +857,20 @@ async def recover_queued(
     timeout: float,
     budget: float,
     concurrency: int,
+    request_batch: Path | None = None,
 ) -> dict[str, Any]:
     """Recover only explicit failures; acknowledge immutable request snapshots."""
-    queued = recycler.requests(directory)
+    queued = (
+        recycler.requests(directory) if request_batch is None else recycler.batch_requests(directory, request_batch)[0]
+    )
     if not queued:
         return {"ok": True, "requests": 0}
     rows = []
     invalid = []
     for path in queued:
         try:
-            row = json.loads(path.read_text())
-            if not isinstance(row, dict):
-                raise ValueError("request must be an object")
-            name = row.get("journal")
-            if not (row.get("kind") == "exit" and name is None) and (
-                row.get("kind") != "journal"
-                or not isinstance(name, str)
-                or len(name) != 37
-                or not name.endswith(".json")
-                or any(c not in "0123456789abcdef" for c in name[:-5])
-            ):
-                raise ValueError("invalid recovery request")
+            kind, name = recycler.read_request(path)
+            row = {"kind": kind, "journal": name}
         except (OSError, ValueError) as exc:
             # Retain the original request for inspection. One damaged entry
             # must neither block valid work nor be acknowledged by an exit scan.
@@ -669,13 +880,23 @@ async def recover_queued(
     if not rows:
         return {"ok": False, "requests": len(queued), "acknowledged": 0, "invalid_requests": invalid}
     if any(row["kind"] == "exit" for _, row in rows):
-        result = await finalize_run(directory, resolver, timeout, budget, concurrency)
+        result = await finalize_run(
+            directory,
+            resolver,
+            timeout,
+            budget,
+            concurrency,
+            request_batch=request_batch,
+        )
         ok = result["cleanup_confirmed"]
         acknowledged = [path for path, _ in rows] if ok else []
     else:
+        journals = recycler.batch_journals(directory, request_batch)[0] if request_batch is not None else None
         async with cleanup_owner(directory, budget):
             names = sorted({row["journal"] for _, row in rows})
-            result = await reconcile(directory, resolver, timeout, concurrency, [directory / name for name in names])
+            requested = [directory / name for name in names]
+            await reconcile(directory, resolver, timeout, concurrency, requested if journals is None else journals)
+            result = await asyncio.to_thread(observe_journals, requested)
             completed = {row["journal"] for row in result["results"] if row["ok"]}
             acknowledged = [path for path, row in rows if row["journal"] in completed]
             ok = result["ok"]
@@ -696,15 +917,32 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=30, help="per-journal retry budget in seconds")
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--recover-queued", action="store_true", help="one pass over explicit failed work")
+    parser.add_argument("--request-batch", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--finalize", action="store_true", help="permanently stop creates and finalize this run")
     parser.add_argument(
         "--budget", type=float, default=180, help="owner-lock wait budget; caller must bound total process lifetime"
     )
     parser.add_argument("--training-outcome", choices=["succeeded", "failed", "interrupted"])
+    parser.add_argument("--record-fit", choices=["confirmed", "unconfirmed"], help=argparse.SUPPRESS)
     parser.add_argument("--stop-only", action="store_true", help="close admission without loading the provider")
     parser.add_argument("--watch-ray-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--watch-timeout", type=float, default=30, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.record_fit is not None:
+        if not args.training_outcome or args.finalize or args.stop_only or args.recover_queued or args.watch_ray_fd:
+            parser.error("--record-fit requires only --directory and --training-outcome")
+        confirmed = args.record_fit == "confirmed"
+        run_control.request_stop(args.directory, "training_exit")
+        run_control.record_result(
+            args.directory,
+            cleanup_confirmed=confirmed,
+            training_outcome=args.training_outcome,
+            finalization_failed=not confirmed,
+            fit_acknowledged=confirmed,
+        )
+        return 0
+    if args.request_batch is not None and not args.recover_queued:
+        parser.error("--request-batch requires --recover-queued")
     if args.watch_ray_fd is not None:
         if not args.finalize or not args.factory or args.recover_queued or args.stop_only:
             parser.error("--watch-ray-fd requires --finalize and --factory")
@@ -733,7 +971,11 @@ def main() -> int:
         module, name = args.factory.split(":", 1)
         resolver = getattr(importlib.import_module(module), name)
         if args.recover_queued:
-            report = asyncio.run(recover_queued(args.directory, resolver, args.timeout, args.budget, args.concurrency))
+            report = asyncio.run(
+                recover_queued(
+                    args.directory, resolver, args.timeout, args.budget, args.concurrency, args.request_batch
+                )
+            )
             print(json.dumps(report))
             return 0 if report["ok"] else 1
         if args.finalize:
@@ -743,8 +985,9 @@ def main() -> int:
                 )
             )
             print(json.dumps(report))
-            confirmed = report["success"] if args.training_outcome == "succeeded" else report["cleanup_confirmed"]
-            return 0 if confirmed else 1
+            # Resource confirmation is the child's only acknowledgement. The
+            # driver records fit acknowledgement after observing this exit.
+            return 0 if report["cleanup_confirmed"] else 1
     except BaseException:
         if args.finalize:
             run_control.record_result(

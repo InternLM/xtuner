@@ -166,36 +166,10 @@ def register_cleanup() -> None:
             # handlers: repeated TERM must not interrupt Ray shutdown/reaping.
             signal.signal(signal.SIGINT, signal_handler)
             signal.signal(signal.SIGTERM, signal_handler)
-            try:
-                try:
-                    if os.environ.get("XTUNER_SANDBOX_CLEANUP_DIR"):
-                        from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import request_stop_from_environment
+            from xtuner.v1.rl.agent_loop.sandbox_agent_loop.run_control import ray_shutdown_scope
 
-                        if not request_stop_from_environment():
-                            logger.error("Sandbox stop barrier unconfirmed; final recovery must retry it")
-                finally:
-                    if os.environ.get("XTUNER_SANDBOX_CLEANUP_DIR"):
-                        from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import guard_ray_shutdown
-
-                        # Keep Ray shutdown on its original thread. An independent
-                        # guard recovers abandoned ledgers if it never returns.
-                        with guard_ray_shutdown(training_outcome=outcome):
-                            close_ray()
-                    else:
-                        close_ray()
-            finally:
-                # Ray workers may die before their Trial finally completes.
-                # Recover only journaled IDs whose owner locks are now free.
-                try:
-                    if os.environ.get("XTUNER_SANDBOX_CLEANUP_FACTORY") or os.environ.get(
-                        "XTUNER_SANDBOX_CLEANUP_DIR"
-                    ):
-                        from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import cleanup_from_environment
-
-                        if not cleanup_from_environment(finalize=True, training_outcome=outcome):
-                            logger.error("Sandbox cleanup incomplete; inspect the run's cleanup-report.json")
-                except Exception as exc:
-                    logger.error(f"Sandbox cleanup failed ({type(exc).__name__}); retain the run journal")
+            with ray_shutdown_scope(outcome, logger):
+                close_ray()
 
     def signal_handler(signum: int, frame: FrameType | None) -> None:
         if os.getpid() != owner_pid:

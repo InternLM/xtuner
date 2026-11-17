@@ -70,6 +70,7 @@ allow-direct-references = true
 
 [project.optional-dependencies]
 rl = [
+  "cloudpickle",
   "ray[default]",
   "httpx",
   "fastapi",

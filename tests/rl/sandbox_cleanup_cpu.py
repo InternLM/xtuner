@@ -11,12 +11,12 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextvars
-import fcntl
 import importlib
 import importlib.util
 import json
 import logging
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -95,6 +95,8 @@ class Client:
 
 
 class Provider:
+    supports_deletion_confirmation = True
+
     def __init__(self, port, *, healthy=True):
         self.port, self.healthy = port, healthy
         self.owned_env_ids = set()
@@ -160,8 +162,8 @@ class TestSandboxCleanup(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         for pool in self.pools:
-            if pool._journal and not pool._journal.lock.closed:
-                pool._journal.lock.close()
+            if pool._lifecycle._journal and not pool._lifecycle._journal.lock.closed:
+                pool._lifecycle._journal.lock.close()
         await cleanup.drain_cleanup_tasks(2)
         self.server.close()
         await self.server.wait_closed()
@@ -235,18 +237,344 @@ class TestSandboxCleanup(unittest.IsolatedAsyncioTestCase):
         self.pools.append(pool)
         return pool
 
+    async def _abandoned_registration(self, *, cancel):
+        pool = self.pool()
+        pool._lifecycle._cleanup_timeout_sec = 0.08
+        entered, release = threading.Event(), threading.Event()
+        flush = cleanup.CleanupJournal.flush
+
+        def stalled_flush(journal):
+            if not entered.is_set():
+                entered.set()
+                release.wait(2)
+            flush(journal)
+
+        with patch.object(cleanup.CleanupJournal, "flush", stalled_flush):
+            started = time.monotonic()
+            task = asyncio.create_task(pool.get("main"))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                await asyncio.sleep(0.01)  # Other tasks must run while registration is blocked.
+                self.assertLess(time.monotonic() - started, 0.5)
+                self.assertEqual(self.calls, [])
+                if cancel:
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    task.cancel()
+                with self.assertRaises(asyncio.CancelledError if cancel else CleanupError):
+                    await asyncio.wait_for(task, 1)
+                self.assertIsNone(pool._lifecycle._journal)
+                self.assertEqual(self.calls, [], "Abandoned registration must not issue POST")
+            finally:
+                release.set()
+                await asyncio.gather(task, return_exceptions=True)
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                paths = list(self.directory.glob("*.json"))
+                if paths and json.loads(paths[0].read_text())["state"] == "complete":
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(len(paths), 1)
+            data = json.loads(paths[0].read_text())
+            self.assertEqual(data["state"], "complete")
+            self.assertEqual(data["resources"], {})
+            # The initializer thread must release its late owner even though
+            # the caller never received that journal.
+            with cleanup.locking.open_lock(paths[0].with_suffix(".lock")) as lock:
+                cleanup.locking.acquire(lock)
+            self.assertEqual(self.calls, [])
+        await pool.aclose()
+
+    async def test_cancelled_initial_registration_detaches_late_journal_without_post(self):
+        await self._abandoned_registration(cancel=True)
+
+    async def test_initial_registration_timeout_detaches_late_journal_without_post(self):
+        await self._abandoned_registration(cancel=False)
+
+    async def test_pool_observation_never_allocates_or_reopens_a_phase(self):
+        pool = self.pool()
+        self.assertIsNone(pool.peek("main"))
+        self.assertEqual(self.calls, [])
+        client = await pool.get("main")
+        self.assertIs(pool.peek("main"), client)
+        owned = pool.pending_resource_ids
+        self.assertIsInstance(owned, frozenset)
+        self.assertEqual(owned, frozenset(self.live))
+        await pool.release_all()
+        calls = list(self.calls)
+        self.assertIsNone(pool.peek("main"))
+        self.assertFalse(pool.pending_resource_ids)
+        self.assertTrue(owned, "An earlier observation must remain an immutable snapshot")
+        self.assertEqual(self.calls, calls)
+        await pool.aclose()
+
+    async def test_task_scope_preserves_primary_error_and_finalizes(self):
+        for error in (ValueError("business failure"), asyncio.CancelledError("cancelled")):
+            with self.subTest(error=type(error).__name__):
+                pool = self.pool()
+                with self.assertRaises(type(error)) as observed:
+                    async with pool.task_scope("public-contract"):
+                        await pool.get("main")
+                        raise error
+                self.assertIs(observed.exception, error)
+                self.assertFalse(self.live)
+                self.assertTrue(pool.cleanup["provider_closed"])
+                data = json.loads(Path(pool.cleanup["journal"]).read_text())
+                self.assertEqual(data["state"], "complete")
+                self.assertEqual(data["trial_id"], "public-contract")
+
+    async def test_task_scope_honors_specialized_public_final_close(self):
+        closed = []
+
+        class SpecializedPool(sandbox.SandboxPool):
+            async def aclose(self):
+                closed.append("close")
+                await super().aclose()
+
+        provider = self.provider()
+        pool = SpecializedPool(
+            provider=provider,
+            close_provider=True,
+            specs={"main": schemas.SandboxSpec(image="main")},
+            creates_per_sec=None,
+        )
+        self.pools.append(pool)
+        async with pool.task_scope("specialized"):
+            await pool.get("main")
+        self.assertEqual(closed, ["close"])
+        self.assertTrue(provider.closed)
+        self.assertFalse(self.live)
+
+    async def test_task_scope_preserves_primary_when_cleanup_also_fails(self):
+        for error in (ValueError("business failure"), asyncio.CancelledError("cancelled")):
+            with self.subTest(error=type(error).__name__):
+                pool = self.pool()
+                self.fail_delete = True
+                with self.assertRaises(type(error)) as observed:
+                    async with pool.task_scope("failed-cleanup"):
+                        await pool.get("main")
+                        raise error
+                self.assertIs(observed.exception, error)
+                self.assertFalse(pool.cleanup["ok"])
+                self.fail_delete = False
+                await pool._lifecycle._deferred_cleanup
+                self.assertFalse(self.live)
+
+    async def test_public_release_reports_failure_inside_handled_exception(self):
+        pool = self.pool()
+        await pool.get("main")
+        self.fail_delete = True
+        try:
+            raise ValueError("unrelated caller fallback")
+        except ValueError:
+            with self.assertRaises(CleanupError):
+                await pool.release_all()
+        self.assertFalse(pool.cleanup["ok"])
+        self.assertEqual(pool.pending_resource_ids, frozenset(self.live))
+        self.fail_delete = False
+        await pool.aclose()
+        self.assertFalse(self.live)
+
+    async def test_public_final_close_reports_failure_inside_handled_exception(self):
+        pool = self.pool()
+        await pool.get("main")
+        self.fail_delete = True
+        try:
+            raise ValueError("unrelated caller fallback")
+        except ValueError:
+            with self.assertRaises(CleanupError):
+                await pool.aclose()
+        self.assertFalse(pool.cleanup["ok"])
+        self.fail_delete = False
+        await pool._lifecycle._deferred_cleanup
+        self.assertFalse(self.live)
+
+    async def test_concurrent_registration_uses_one_journal(self):
+        pool = self.pool()
+        entered, proceed = asyncio.Event(), asyncio.Event()
+        original = cleanup.CleanupJournal.open
+
+        async def delayed(*args, **kwargs):
+            entered.set()
+            await proceed.wait()
+            return await original(*args, **kwargs)
+
+        with patch.object(cleanup.CleanupJournal, "open", side_effect=delayed) as opened:
+            first = asyncio.create_task(pool._lifecycle._ensure_journal())
+            await asyncio.wait_for(entered.wait(), 1)
+            second = asyncio.create_task(pool._lifecycle._ensure_journal())
+            await asyncio.sleep(0)
+            proceed.set()
+            await asyncio.wait_for(asyncio.gather(first, second), 2)
+            self.assertEqual(opened.call_count, 1)
+        self.assertEqual(len(list(self.directory.glob("*.json"))), 1)
+        await pool.aclose()
+        self.assertTrue(pool._lifecycle._journal.lock.closed)
+
+    async def test_close_during_registration_prevents_allocation_and_detaches(self):
+        pool = self.pool()
+        entered, proceed = asyncio.Event(), asyncio.Event()
+        original = cleanup.CleanupJournal.open
+
+        async def delayed(*args, **kwargs):
+            entered.set()
+            await proceed.wait()
+            return await original(*args, **kwargs)
+
+        with patch.object(cleanup.CleanupJournal, "open", side_effect=delayed):
+            creation = asyncio.create_task(pool.get("main"))
+            await asyncio.wait_for(entered.wait(), 1)
+            closing = asyncio.create_task(pool.aclose())
+            await asyncio.sleep(0)
+            self.assertTrue(pool._lifecycle._closing)
+            proceed.set()
+            with self.assertRaisesRegex(RuntimeError, "closed"):
+                await asyncio.wait_for(creation, 2)
+            await asyncio.wait_for(closing, 2)
+        self.assertEqual(self.calls, [])
+        self.assertTrue(pool._lifecycle._journal.lock.closed)
+        self.assertEqual(json.loads(pool._lifecycle._journal.path.read_text())["state"], "complete")
+
+    async def test_get_method_alone_does_not_enable_deletion_confirmation(self):
+        class UnnormalizedProvider(Provider):
+            supports_deletion_confirmation = False
+
+            async def get(self, env_id):
+                raise AssertionError("An arbitrary status interface is not a confirmation contract")
+
+        pool = sandbox.SandboxPool(
+            provider={"type": UnnormalizedProvider, "port": self.port},
+            specs={"main": schemas.SandboxSpec(image="main")},
+            creates_per_sec=None,
+        )
+        self.pools.append(pool)
+        await pool.get("main")
+        await pool.aclose()
+        self.assertTrue(pool.cleanup["ok"])
+        self.assertFalse(self.live)
+        self.assertFalse(any(method == "GET" for method, _ in self.calls))
+
+    async def test_persistent_cleanup_requires_explicit_confirmation_contract(self):
+        class LegacyProvider(Provider):
+            supports_deletion_confirmation = False
+
+        for verify in (None, False):
+            with self.subTest(verify=verify), self.assertRaisesRegex(ValueError, "persistent cleanup"):
+                sandbox.SandboxPool(
+                    provider={"type": LegacyProvider, "port": self.port},
+                    specs={},
+                    cleanup_dir=str(self.directory),
+                    cleanup_provider_key="gateway-test",
+                    verify_deletion=verify,
+                )
+        self.assertEqual(self.calls, [])
+        self.assertFalse(list(self.directory.glob("*.json")))
+
+        # Explicit opt-in is allowed for a provider whose get interface already
+        # returns the documented normalized result but has no capability flag.
+        pool = sandbox.SandboxPool(
+            provider={"type": LegacyProvider, "port": self.port},
+            specs={"main": schemas.SandboxSpec(image="main")},
+            creates_per_sec=None,
+            cleanup_dir=str(self.directory),
+            cleanup_provider_key="gateway-test",
+            verify_deletion=True,
+        )
+        self.pools.append(pool)
+        await pool.get("main")
+        await pool.aclose()
+        self.assertEqual(json.loads(pool._lifecycle._journal.path.read_text())["state"], "complete")
+        self.assertTrue(any(method == "GET" for method, _ in self.calls))
+
+    async def test_memory_recovery_preserves_foreground_delete_acceptance_policy(self):
+        class NoQueryProvider(Provider):
+            supports_deletion_confirmation = False
+            get = None
+
+        class QueryDisabledProvider(Provider):
+            async def get(self, env_id):
+                raise AssertionError("Explicit verify_deletion=False also applies to recovery")
+
+        for provider_type, verify in ((NoQueryProvider, None), (QueryDisabledProvider, False)):
+            with self.subTest(provider=provider_type.__name__):
+                pool = sandbox.SandboxPool(
+                    provider={"type": provider_type, "port": self.port},
+                    specs={"main": schemas.SandboxSpec(image="main")},
+                    creates_per_sec=None,
+                    cleanup_timeout_sec=0.2,
+                    cleanup_retry_timeout_sec=0.3,
+                    verify_deletion=verify,
+                )
+                self.pools.append(pool)
+                await pool.get("main")
+                self.fail_delete = True
+                with self.assertRaises(CleanupError):
+                    await pool.aclose()
+                self.fail_delete = False
+                result = await pool._lifecycle._deferred_cleanup
+                self.assertTrue(result["ok"])
+                self.assertFalse(result["deletion_confirmed"])
+                self.assertFalse(self.live)
+        self.assertFalse(any(method == "GET" for method, _ in self.calls))
+
+    async def test_delete_retry_preserves_reverse_acquisition_order(self):
+        pool = self.pool()
+        await pool.get("main")
+        delete = pool._lifecycle._provider.delete
+        attempts = []
+
+        async def fail_first(env_id):
+            attempts.append(env_id)
+            if attempts.count(env_id) == 1:
+                raise HTTPError(503)
+            await delete(env_id)
+
+        pool._lifecycle._provider.delete = fail_first
+        await pool.aclose()
+        self.assertEqual(attempts, ["main-2", "dep-1", "main-2", "dep-1"])
+        self.assertFalse(self.live)
+
+    async def test_cleanup_snapshot_cannot_change_release_or_final_close(self):
+        pool = self.pool(persistent=False, recovery=False)
+        await pool.get("main")
+        early = pool.cleanup
+        early.update(ok=True, provider_closed=True)
+        await pool.release_all()
+        self.assertFalse(self.live)
+        snapshot = pool.cleanup
+        snapshot["delete_attempts"][0]["env_id"] = "foreign-id"
+        snapshot["closed_client_count"] = -1
+        self.assertNotEqual(pool.cleanup["delete_attempts"][0]["env_id"], "foreign-id")
+        self.assertGreater(pool.cleanup["closed_client_count"], 0)
+        self.assertNotIn("delete_attempts", early)
+        deletes = [call for call in self.calls if call[0] == "DELETE"]
+        await pool.release_all()
+        self.assertEqual([call for call in self.calls if call[0] == "DELETE"], deletes)
+        close = pool._lifecycle._provider.aclose
+        closes = []
+
+        async def counted_close():
+            closes.append(True)
+            await close()
+
+        pool._lifecycle._provider.aclose = counted_close
+        await pool.aclose()
+        pool.cleanup.update(ok=False, provider_closed=False)
+        await pool.aclose()
+        self.assertEqual(closes, [True])
+
     async def test_phase_release_then_verifier_then_final_close(self):
         pool = self.pool()
         await pool.get("main")
         await pool.release_all()
-        self.assertFalse(pool._provider.closed)
+        self.assertFalse(pool._lifecycle._provider.closed)
         await pool.get("verifier")
         await pool.aclose()
-        self.assertTrue(pool._provider.closed)
+        self.assertTrue(pool._lifecycle._provider.closed)
         self.assertFalse(self.live)
         deletes = [key for method, key in self.calls if method == "DELETE"]
         self.assertEqual(deletes, ["main-2", "dep-1", "verifier-3"])
-        self.assertEqual(json.loads(pool._journal.path.read_text())["state"], "complete")
+        self.assertEqual(json.loads(pool._lifecycle._journal.path.read_text())["state"], "complete")
         with self.assertRaises(RuntimeError):
             await pool.get("main")
 
@@ -257,7 +585,7 @@ class TestSandboxCleanup(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(CleanupError):
             await pool.release_all()
         self.assertFalse(pool.cleanup["ok"])
-        self.assertEqual(len(pool._pending_delete_ids), 2)
+        self.assertEqual(len(pool._lifecycle._pending_delete_ids), 2)
         self.accept_only = False
         await pool.release_all()
         self.assertTrue(pool.cleanup["ok"])
@@ -269,10 +597,10 @@ class TestSandboxCleanup(unittest.IsolatedAsyncioTestCase):
         await pool.get("main")
         with self.assertRaises(CleanupError):
             await pool.aclose()
-        self.assertTrue(pool._provider.closed)
+        self.assertTrue(pool._lifecycle._provider.closed)
         self.assertTrue(pool.cleanup["deferred"])
         self.fail_delete = False
-        result = await pool._deferred_cleanup
+        result = await pool._lifecycle._deferred_cleanup
         self.assertTrue(result["ok"])
         self.assertFalse(self.live)
         self.assertGreater(len(self.providers), 1)
@@ -284,9 +612,9 @@ class TestSandboxCleanup(unittest.IsolatedAsyncioTestCase):
         await pool.get("main")
         with self.assertRaises(CleanupError):
             await pool.aclose()
-        result = await pool._deferred_cleanup
+        result = await pool._lifecycle._deferred_cleanup
         self.assertFalse(result["ok"])
-        data = json.loads(pool._journal.path.read_text())
+        data = json.loads(pool._lifecycle._journal.path.read_text())
         self.assertEqual(len(data["pending_ids"]), 2)
         self.assertEqual(data["state"], "pending")
         self.fail_delete = False
@@ -300,12 +628,12 @@ class TestSandboxCleanup(unittest.IsolatedAsyncioTestCase):
         await pool.get("main")
         with self.assertRaises(CleanupError):
             await pool.aclose()
-        self.assertFalse(pool._provider.closed)
+        self.assertFalse(pool._lifecycle._provider.closed)
         self.fail_delete = False
         await pool.release_all()
         self.assertFalse(self.live)
         await pool.aclose()
-        self.assertTrue(pool._provider.closed)
+        self.assertTrue(pool._lifecycle._provider.closed)
 
     async def test_query_error_does_not_forget_accepted_id(self):
         pool = self.pool(recovery=False)
@@ -313,7 +641,7 @@ class TestSandboxCleanup(unittest.IsolatedAsyncioTestCase):
         self.accept_only = self.get_error = True
         with self.assertRaises(CleanupError):
             await pool.release_all()
-        self.assertEqual(len(pool._pending_verification_ids), 2)
+        self.assertEqual(len(pool._lifecycle._pending_verification_ids), 2)
         self.accept_only = self.get_error = False
         await pool.aclose()
         self.assertFalse(self.live)
@@ -328,7 +656,7 @@ class TestSandboxCleanup(unittest.IsolatedAsyncioTestCase):
         self.assertLess(time.monotonic() - started, 1)
         self.assertNotIn("dep-1", self.live)
         self.slow_delete = None
-        await pool._deferred_cleanup
+        await pool._lifecycle._deferred_cleanup
         self.assertFalse(self.live)
 
     async def test_partial_create_failure_records_unknown_and_releases_dependency(self):
@@ -339,20 +667,20 @@ class TestSandboxCleanup(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(CleanupError):
             await pool.aclose()
         self.assertFalse(self.live)
-        data = json.loads(pool._journal.path.read_text())
+        data = json.loads(pool._lifecycle._journal.path.read_text())
         self.assertTrue(data["resources"]["dep-1"]["confirmed"])
         self.assertEqual(data["ambiguous_creates"], 1)
         self.assertEqual(sum(method == "POST" for method, _ in self.calls), 2)
 
     async def test_shared_provider_keeps_foreign_resource_and_transport(self):
         pool = self.pool()
-        pool._close_provider = False
-        pool._provider.owned_env_ids.add("foreign")
+        pool._lifecycle._close_provider = False
+        pool._lifecycle._provider.owned_env_ids.add("foreign")
         self.live.add("foreign")
         await pool.get("main")
         await pool.aclose()
         self.assertEqual(self.live, {"foreign"})
-        self.assertFalse(pool._provider.closed)
+        self.assertFalse(pool._lifecycle._provider.closed)
 
     async def test_cancelled_journal_write_finishes_before_unlock(self):
         journal = cleanup.CleanupJournal(self.directory, "gateway-test")
@@ -365,7 +693,7 @@ class TestSandboxCleanup(unittest.IsolatedAsyncioTestCase):
             original(env_id)
 
         journal.created = slow
-        task = asyncio.create_task(journal.write("created", "owned"))
+        task = asyncio.create_task(journal.persist(journal.created, "owned"))
         await asyncio.to_thread(entered.wait, 1)
         task.cancel()
         result = await cleanup.reconcile(self.directory, self.provider, 0.2)
@@ -373,7 +701,7 @@ class TestSandboxCleanup(unittest.IsolatedAsyncioTestCase):
         release.set()
         with self.assertRaises(asyncio.CancelledError):
             await task
-        await journal.write("detach")
+        await journal.persist(journal.detach)
         self.assertIn("owned", json.loads(journal.path.read_text())["resources"])
 
     async def test_independent_recovery_cli_and_exit_fallback(self):
@@ -457,9 +785,9 @@ class TestSandboxCleanup(unittest.IsolatedAsyncioTestCase):
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await task
-        self.assertTrue(pool._journal.lock.closed)
+        self.assertTrue(pool._lifecycle._journal.lock.closed)
         self.fail_delete = False
-        await pool._deferred_cleanup
+        await pool._lifecycle._deferred_cleanup
         self.assertFalse(self.live)
 
     async def test_invalid_journal_does_not_block_other_ids(self):
@@ -526,8 +854,8 @@ sys.stdin.read()
         await pool.aclose()
         self.assertFalse(self.live)
         self.assertEqual(self.calls, [])
-        self.assertEqual(pool._journal.data["ambiguous_creates"], 0)
-        self.assertFalse(pool._journal.data["creating"])
+        self.assertEqual(pool._lifecycle._journal.data["ambiguous_creates"], 0)
+        self.assertFalse(pool._lifecycle._journal.data["creating"])
         self.assertTrue((await cleanup.reconcile(self.directory, self.provider, 0.2))["ok"])
 
     async def test_stop_during_create_limit_prevents_post_without_unknown_allocation(self):
@@ -548,7 +876,7 @@ sys.stdin.read()
             await task
         await pool.aclose()
         self.assertEqual(self.calls, [])
-        self.assertEqual(pool._journal.data["ambiguous_creates"], 0)
+        self.assertEqual(pool._lifecycle._journal.data["ambiguous_creates"], 0)
         self.assertTrue((await cleanup.reconcile(self.directory, self.provider, 0.2))["ok"])
 
     async def test_invalid_create_parameters_do_not_open_intent(self):
@@ -559,26 +887,26 @@ sys.stdin.read()
         self.assertEqual(error.exception.allocation_state, "not_allocated")
         await pool.aclose()
         self.assertEqual(self.calls, [])
-        self.assertEqual(pool._journal.data["ambiguous_creates"], 0)
+        self.assertEqual(pool._lifecycle._journal.data["ambiguous_creates"], 0)
 
     async def test_allocation_callback_failure_retains_id_for_final_delete(self):
         pool = self.pool()
-        original = pool._provider.create
-        pool._provider.supports_allocation_callback = True
+        original = pool._lifecycle._provider.create
+        pool._lifecycle._provider.supports_allocation_callback = True
 
         async def create(*, on_allocated, **kwargs):
             client, env_id = await original(**kwargs)
             await on_allocated(env_id)
             raise AssertionError("readiness must not run after callback failure")
 
-        pool._provider.create = create
+        pool._lifecycle._provider.create = create
         with patch.object(cleanup.CleanupJournal, "allocated", side_effect=OSError("disk unavailable")):
             with self.assertRaises(CleanupError):
                 await pool.get("main")
         self.assertEqual(len(self.live), 1)
         await pool.aclose()
         self.assertFalse(self.live)
-        self.assertEqual(pool._journal.data["ambiguous_creates"], 0)
+        self.assertEqual(pool._lifecycle._journal.data["ambiguous_creates"], 0)
         self.assertTrue((await cleanup.reconcile(self.directory, self.provider, 0.2))["ok"])
 
     async def test_crash_during_provider_readiness_recovers_callback_id(self):
@@ -601,8 +929,14 @@ async def main():
 asyncio.run(main())
 """
         child = await asyncio.create_subprocess_exec(
-            sys.executable, "-c", code, str(Path(__file__).parent), str(self.directory), str(self.port),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            sys.executable,
+            "-c",
+            code,
+            str(Path(__file__).parent),
+            str(self.directory),
+            str(self.port),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
         try:
             env_id = (await asyncio.wait_for(child.stdout.readline(), 5)).decode().strip()
@@ -628,8 +962,9 @@ asyncio.run(main())
         journal.detach()
         self.live.add("retained")
         env = self._recovery_environment()
-        env.update(XTUNER_SANDBOX_CLEANUP_FACTORY="missing_test_factory:resolve",
-                   XTUNER_SANDBOX_CLEANUP_EXIT_TIMEOUT="0.6")
+        env.update(
+            XTUNER_SANDBOX_CLEANUP_FACTORY="missing_test_factory:resolve", XTUNER_SANDBOX_CLEANUP_EXIT_TIMEOUT="0.6"
+        )
         with cleanup.recycler.queue_gate(self.directory), patch.dict(os.environ, env):
             started = time.monotonic()
             confirmed = await asyncio.to_thread(cleanup.cleanup_from_environment, finalize=True)
@@ -658,7 +993,10 @@ asyncio.run(main())
         with patch.dict(os.environ, env):
             started = time.monotonic()
             confirmed = await asyncio.to_thread(
-                cleanup.recycler.handoff_recovery, self.directory, "recovery_fixture:resolve", journal.path,
+                cleanup.recycler.handoff_recovery,
+                self.directory,
+                "recovery_fixture:resolve",
+                journal.path,
                 timeout=0.7,
             )
         self.assertTrue(marker.exists())
@@ -667,10 +1005,15 @@ asyncio.run(main())
         self.assertTrue(journal.path.exists())
         site.unlink()
         with patch.dict(os.environ, env):
-            self.assertTrue(await asyncio.to_thread(
-                cleanup.recycler.handoff_recovery, self.directory, "recovery_fixture:resolve", journal.path,
-                timeout=3,
-            ))
+            self.assertTrue(
+                await asyncio.to_thread(
+                    cleanup.recycler.handoff_recovery,
+                    self.directory,
+                    "recovery_fixture:resolve",
+                    journal.path,
+                    timeout=3,
+                )
+            )
         await self._wait_deleted("retained")
         await self._wait_recycler_idle()
 
@@ -689,21 +1032,135 @@ asyncio.run(main())
         )
         env = self._recovery_environment()
         with patch.dict(os.environ, env):
-            self.assertFalse(await asyncio.to_thread(
-                cleanup.recycler.handoff_recovery, self.directory, "recovery_fixture:resolve", journal.path,
-                timeout=3,
-            ))
+            self.assertFalse(
+                await asyncio.to_thread(
+                    cleanup.recycler.handoff_recovery,
+                    self.directory,
+                    "recovery_fixture:resolve",
+                    journal.path,
+                    timeout=3,
+                )
+            )
         self.assertEqual(len(cleanup.recycler.requests(self.directory)), 1)
         self.assertTrue(journal.path.exists())
         site.unlink()
         with patch.dict(os.environ, env):
-            self.assertTrue(await asyncio.to_thread(
-                cleanup.recycler.handoff_recovery, self.directory, "recovery_fixture:resolve", journal.path,
-                timeout=3,
-            ))
+            self.assertTrue(
+                await asyncio.to_thread(
+                    cleanup.recycler.handoff_recovery,
+                    self.directory,
+                    "recovery_fixture:resolve",
+                    journal.path,
+                    timeout=3,
+                )
+            )
         await self._wait_deleted("retained")
         await self._wait_recycler_idle()
         self.assertEqual(cleanup.recycler.requests(self.directory), [])
+
+    async def test_persistent_concurrent_create_keeps_unknown_intent_after_other_success(self):
+        pool = self.pool(recovery=False)
+        entered, fail = asyncio.Event(), asyncio.Event()
+        original = pool._lifecycle._provider.create
+
+        async def create(*, image_tag, **kwargs):
+            if image_tag == "dep":
+                entered.set()
+                await fail.wait()
+                raise OSError("POST result unknown")
+            return await original(image_tag=image_tag, **kwargs)
+
+        pool._lifecycle._provider.create = create
+        unknown = asyncio.create_task(pool.get("main"))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            await pool.get("verifier")
+            journal = pool._lifecycle._journal
+            self.assertTrue(json.loads(journal.path.read_text())["creating"])
+            self.assertEqual(journal.data["ambiguous_creates"], 0)
+        finally:
+            fail.set()
+            with self.assertRaisesRegex(OSError, "POST result unknown"):
+                await asyncio.wait_for(unknown, 1)
+            with self.assertRaises(CleanupError):
+                await pool.aclose()
+        self.assertFalse(self.live)
+        self.assertFalse(json.loads(journal.path.read_text())["creating"])
+        result = await cleanup.reconcile(self.directory, self.provider, 0.3)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["results"][0]["ambiguous_creates"], 1)
+        self.assertEqual(json.loads(journal.path.read_text())["state"], "pending")
+
+    async def test_persistent_early_allocation_resolves_only_its_own_intent(self):
+        pool = self.pool(recovery=False)
+        provider = pool._lifecycle._provider
+        provider.supports_allocation_callback = True
+        entered, report_allocation = asyncio.Event(), asyncio.Event()
+        unknown_entered, fail_unknown = asyncio.Event(), asyncio.Event()
+        original = provider.create
+
+        async def create(*, image_tag, on_allocated, **kwargs):
+            if image_tag == "verifier":
+                unknown_entered.set()
+                await fail_unknown.wait()
+                raise OSError("other POST result unknown")
+            client, env_id = await original(image_tag=image_tag, **kwargs)
+            if image_tag == "dep":
+                entered.set()
+                await report_allocation.wait()
+                await on_allocated(env_id)
+                self.assertTrue(json.loads(pool._lifecycle._journal.path.read_text())["creating"])
+            return client, env_id
+
+        provider.create = create
+        known = asyncio.create_task(pool.get("main"))
+        unknown = None
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            unknown = asyncio.create_task(pool.get("verifier"))
+            await asyncio.wait_for(unknown_entered.wait(), 1)
+            report_allocation.set()
+            await asyncio.wait_for(known, 1)
+            journal = pool._lifecycle._journal
+            self.assertTrue(json.loads(journal.path.read_text())["creating"])
+            self.assertEqual(journal.data["ambiguous_creates"], 0)
+        finally:
+            report_allocation.set()
+            fail_unknown.set()
+            await asyncio.gather(known, return_exceptions=True)
+            if unknown is not None:
+                with self.assertRaisesRegex(OSError, "other POST result unknown"):
+                    await asyncio.wait_for(unknown, 1)
+            with self.assertRaises(CleanupError):
+                await pool.aclose()
+        result = await cleanup.reconcile(self.directory, self.provider, 0.3)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["results"][0]["ambiguous_creates"], 1)
+        self.assertFalse(self.live)
+
+    async def test_journal_legacy_mutations_cannot_clear_named_create_intents(self):
+        journal = cleanup.CleanupJournal(self.directory, "gateway-test")
+        journal.begin_create(create_id="first")
+        journal.begin_create(create_id="second")
+        journal.allocated("known-first", create_id="first")
+        self.assertTrue(json.loads(journal.path.read_text())["creating"])
+        journal.end_create(create_id="first", ambiguous=True)
+        self.assertEqual(journal.data["ambiguous_creates"], 0)
+        journal.begin_create()
+        journal.end_create(ambiguous=True)
+        self.assertTrue(json.loads(journal.path.read_text())["creating"])
+        self.assertEqual(journal.data["ambiguous_creates"], 1)
+        journal.end_create(ambiguous=True)
+        self.assertEqual(journal.data["ambiguous_creates"], 1)
+        journal.allocated("legacy-fixture")
+        self.assertTrue(json.loads(journal.path.read_text())["creating"])
+        journal.end_create(create_id="second", ambiguous=True)
+        self.assertFalse(json.loads(journal.path.read_text())["creating"])
+        self.assertEqual(journal.data["ambiguous_creates"], 2)
+        journal.end_create(create_id="second", ambiguous=True)
+        self.assertEqual(journal.data["ambiguous_creates"], 2)
+        journal.detach()
+        self.assertEqual(json.loads(journal.path.read_text())["state"], "pending")
 
     async def test_unknown_create_never_reports_cleanup_success(self):
         journal = cleanup.CleanupJournal(self.directory, "gateway-test")
@@ -809,12 +1266,285 @@ asyncio.run(main())
                 with self.assertRaisesRegex(RuntimeError, "unhealthy"):
                     await pool.get("main")
                 self.assertEqual(self.next_id - before, 1)
-                self.assertEqual(pool._pending_delete_ids, {f"dep-{before + 1}"})
+                self.assertEqual(pool._lifecycle._pending_delete_ids, {f"dep-{before + 1}"})
                 self.assertIn(f"dep-{before + 1}", self.live)
                 self.fail_delete = False
                 self.accept_only = False
                 await pool.aclose()
                 self.assertFalse(self.live)
+
+    async def test_unclaimed_create_failure_never_retries_transaction(self):
+        pool = self.pool()
+        pool._max_attempts = 2
+        persist = pool._lifecycle._journal
+        self.assertIsNone(persist)
+        await pool._lifecycle._ensure_journal()
+        journal = pool._lifecycle._journal
+        original = journal.persist
+        failed_create_id = None
+
+        async def fail_end_create(action, *args, **kwargs):
+            nonlocal failed_create_id
+            if action == journal.end_create:
+                failed_create_id = kwargs["create_id"]
+                raise OSError("end-create write failed")
+            return await original(action, *args, **kwargs)
+
+        with patch.object(journal, "persist", side_effect=fail_end_create):
+            with self.assertRaisesRegex(OSError, "end-create write failed"):
+                await pool.get("main")
+        self.assertEqual([key for method, key in self.calls if method == "POST"], ["dep"])
+        self.assertEqual(set(pool._lifecycle._unclaimed_creates), {"dep-1"})
+        self.assertFalse(pool._lifecycle._active_acquisitions)
+        # Allocation already resolved this request's intent. Replay the failed
+        # end-create write with its exact token before closing the known resource.
+        await journal.persist(journal.end_create, ambiguous=False, create_id=failed_create_id)
+        await pool.aclose()
+        self.assertFalse(self.live)
+
+    async def test_failed_rollback_client_close_prevents_retry(self):
+        pool = self.pool()
+        pool._max_attempts = 2
+        failed_client = Client()
+        close_failed = True
+
+        async def close():
+            if close_failed:
+                raise RuntimeError("socket close failed")
+            failed_client.closed = True
+
+        failed_client.aclose = close
+        original = pool._lifecycle._provider.create
+
+        async def create(**kwargs):
+            _, env_id = await original(**kwargs)
+            return failed_client, env_id
+
+        async def unhealthy(_):
+            return False
+
+        pool._lifecycle._provider.create = create
+        pool._wait_healthy = unhealthy
+        with self.assertRaisesRegex(RuntimeError, "unhealthy"):
+            await pool.get("main")
+        self.assertEqual([key for method, key in self.calls if method == "POST"], ["dep"])
+        self.assertIn(failed_client, pool._lifecycle._cleanup_clients)
+        close_failed = False
+        await pool.aclose()
+        self.assertTrue(failed_client.closed)
+        self.assertFalse(self.live)
+
+    async def test_named_groups_remain_concurrent(self):
+        pool = self.pool(persistent=False)
+        entered, verifier_entered = asyncio.Event(), asyncio.Event()
+        original = pool._lifecycle._provider.create
+
+        async def create(*, image_tag, **kwargs):
+            if image_tag == "dep":
+                entered.set()
+                await verifier_entered.wait()
+            elif image_tag == "verifier":
+                verifier_entered.set()
+            return await original(image_tag=image_tag, **kwargs)
+
+        pool._lifecycle._provider.create = create
+        first = asyncio.create_task(pool.get("main"))
+        await asyncio.wait_for(entered.wait(), 1)
+        second = asyncio.create_task(pool.get("verifier"))
+        await asyncio.wait_for(asyncio.gather(first, second), 2)
+        self.assertIsNotNone(pool.peek("main"))
+        self.assertIsNotNone(pool.peek("verifier"))
+        self.assertFalse(pool._lifecycle._active_acquisitions)
+        await pool.aclose()
+        self.assertFalse(self.live)
+
+    async def test_failed_create_does_not_claim_concurrent_successful_group(self):
+        for callback in (False, True):
+            for committed in (False, True):
+                for failed_allocated in (False, True):
+                    with self.subTest(callback=callback, committed=committed, failed_allocated=failed_allocated):
+                        pool = self.pool(persistent=False)
+                        pool._max_attempts = 2
+                        provider = pool._lifecycle._provider
+                        provider.supports_allocation_callback = callback
+                        original = provider.create
+                        entered, fail = asyncio.Event(), asyncio.Event()
+                        allocated, resume = asyncio.Event(), asyncio.Event()
+                        failure_attempts = 0
+                        successful_ids = []
+
+                        async def create(*, image_tag, on_allocated=None, **kwargs):
+                            nonlocal failure_attempts
+                            if image_tag == "dep":
+                                failure_attempts += 1
+                                if failed_allocated:
+                                    _, env_id = await original(image_tag=image_tag, **kwargs)
+                                    if on_allocated is not None:
+                                        await on_allocated(env_id)
+                                entered.set()
+                                await fail.wait()
+                                raise OSError("one concurrent create failed")
+                            client, env_id = await original(image_tag=image_tag, **kwargs)
+                            successful_ids.append(env_id)
+                            if on_allocated is not None:
+                                await on_allocated(env_id)
+                            allocated.set()
+                            if not committed:
+                                await resume.wait()
+                            return client, env_id
+
+                        provider.create = create
+                        failing = asyncio.create_task(pool.get("main"))
+                        await asyncio.wait_for(entered.wait(), 1)
+                        successful = asyncio.create_task(pool.get("verifier"))
+                        try:
+                            await asyncio.wait_for(allocated.wait(), 1)
+                            if committed:
+                                await asyncio.wait_for(successful, 1)
+                            fail.set()
+                            with self.assertRaisesRegex(OSError, "one concurrent create failed") as error:
+                                await asyncio.wait_for(failing, 1)
+                            expected = "allocated" if failed_allocated and (callback or committed) else "unknown"
+                            self.assertEqual(error.exception.allocation_state, expected)
+                            self.assertEqual(failure_attempts, 1)
+                            self.assertNotIn(successful_ids[0], pool._lifecycle._pending_delete_ids)
+                            resume.set()
+                            client = await asyncio.wait_for(successful, 1)
+                            self.assertIs(pool.peek("verifier"), client)
+                            self.assertFalse(client.closed)
+                            self.assertIn(successful_ids[0], self.live)
+                            self.assertNotIn(("DELETE", successful_ids[0]), self.calls)
+                        finally:
+                            fail.set()
+                            resume.set()
+                            await asyncio.gather(failing, successful, return_exceptions=True)
+                            await pool.aclose()
+                        self.assertFalse(self.live)
+                        self.assertFalse(pool._lifecycle._active_acquisitions)
+
+    async def test_final_close_drains_provider_await_before_sealing(self):
+        pool = self.pool()
+        entered = asyncio.Event()
+        original = pool._lifecycle._provider.create
+
+        async def create(**kwargs):
+            await original(**kwargs)
+            entered.set()
+            await asyncio.Event().wait()
+
+        pool._lifecycle._provider.create = create
+        acquiring = asyncio.create_task(pool.get("main"))
+        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(pool.aclose(), 2)
+        with self.assertRaises(asyncio.CancelledError):
+            await acquiring
+        self.assertFalse(pool._lifecycle._active_acquisitions)
+        self.assertFalse(self.live)
+        self.assertTrue(pool._lifecycle._journal.lock.closed)
+        self.assertEqual(pool._lifecycle._journal.data["state"], "complete")
+        self.assertTrue(pool._lifecycle._provider.closed)
+
+    async def test_release_drains_health_await_before_reopening_admission(self):
+        for final in (False, True):
+            with self.subTest(final=final):
+                pool = self.pool()
+                entered = asyncio.Event()
+                clients = []
+                original_health = pool._wait_healthy
+
+                async def health(client):
+                    clients.append(client)
+                    entered.set()
+                    await asyncio.Event().wait()
+
+                pool._wait_healthy = health
+                acquiring = asyncio.create_task(pool.get("main"))
+                await asyncio.wait_for(entered.wait(), 1)
+                await asyncio.wait_for(pool.aclose() if final else pool.release_all(), 2)
+                with self.assertRaises(asyncio.CancelledError):
+                    await acquiring
+                self.assertFalse(pool._lifecycle._active_acquisitions)
+                self.assertTrue(all(client.closed for client in clients))
+                self.assertFalse(self.live)
+                if not final:
+                    self.assertFalse(pool._lifecycle._provider.closed)
+                    pool._wait_healthy = original_health
+                    await pool.get("verifier")
+                    await pool.aclose()
+                self.assertTrue(pool._lifecycle._journal.lock.closed)
+
+    async def test_close_waits_for_acquisition_not_its_callers_later_work(self):
+        pool = self.pool()
+        entered, cancelled, unrelated_done = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def health(_):
+            entered.set()
+            await asyncio.Event().wait()
+
+        async def caller():
+            try:
+                await pool.get("main")
+            except asyncio.CancelledError:
+                cancelled.set()
+            await unrelated_done.wait()
+
+        pool._wait_healthy = health
+        acquiring = asyncio.create_task(caller())
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            await asyncio.wait_for(pool.aclose(), 2)
+            self.assertTrue(cancelled.is_set())
+            self.assertFalse(acquiring.done())
+            self.assertFalse(pool._lifecycle._active_acquisitions)
+            self.assertFalse(self.live)
+            self.assertTrue(pool._lifecycle._journal.lock.closed)
+        finally:
+            unrelated_done.set()
+            await asyncio.wait_for(acquiring, 2)
+
+    async def test_close_timeout_retains_active_create_ownership_for_retry(self):
+        pool = self.pool()
+        entered, resume = asyncio.Event(), asyncio.Event()
+        original = pool._lifecycle._provider.create
+        clients = []
+
+        async def create(**kwargs):
+            client, env_id = await original(**kwargs)
+            clients.append(client)
+            entered.set()
+            while not resume.is_set():
+                try:
+                    await resume.wait()
+                except asyncio.CancelledError:
+                    pass
+            return client, env_id
+
+        pool._lifecycle._provider.create = create
+        acquiring = asyncio.create_task(pool.get("main"))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            with self.assertRaises(CleanupError) as error:
+                await asyncio.wait_for(pool.aclose(), 2)
+            self.assertEqual(error.exception.kind, "cleanup_acquisition_pending")
+            self.assertFalse(pool._lifecycle._closed)
+            self.assertFalse(pool._lifecycle._provider.closed)
+            self.assertFalse(pool._lifecycle._journal.lock.closed)
+            self.assertTrue(pool._lifecycle._journal.data["creating"])
+            self.assertNotEqual(pool._lifecycle._journal.data["state"], "complete")
+            self.assertTrue(pool._lifecycle._active_acquisitions)
+            with self.assertRaisesRegex(RuntimeError, "closed"):
+                await pool.get("verifier")
+        finally:
+            resume.set()
+            with self.assertRaisesRegex(RuntimeError, "closed"):
+                await asyncio.wait_for(acquiring, 2)
+            await pool.aclose()
+        self.assertFalse(pool._lifecycle._active_acquisitions)
+        self.assertFalse(self.live)
+        self.assertTrue(all(client.closed for client in clients))
+        self.assertTrue(pool._lifecycle._journal.lock.closed)
+        self.assertEqual(pool._lifecycle._journal.data["state"], "complete")
+        self.assertEqual([key for method, key in self.calls if method == "POST"], ["dep"])
 
     async def test_confirmed_rollback_still_allows_retry(self):
         pool = self.pool()
@@ -831,9 +1561,90 @@ asyncio.run(main())
         posts = [key for method, key in self.calls if method == "POST"]
         self.assertEqual(posts, ["dep", "dep", "main"])
         self.assertNotIn("dep-1", self.live)
-        self.assertFalse(pool._pending_delete_ids)
+        self.assertFalse(pool._lifecycle._pending_delete_ids)
         await pool.aclose()
         self.assertFalse(self.live)
+
+    async def test_later_phase_rollback_has_its_own_delete_budget(self):
+        pool = self.pool()
+        pool._max_attempts = 2
+        lifecycle = importlib.import_module(PACKAGE + ".lifecycle")
+        offset = 0.0
+        clock = types.SimpleNamespace(monotonic=lambda: time.monotonic() + offset)
+        delete = pool._lifecycle._provider.delete
+        attempts = []
+        checks = 0
+
+        async def fail_first_delete(env_id):
+            attempts.append(env_id)
+            if env_id.startswith("verifier-") and attempts.count(env_id) == 1:
+                raise HTTPError(503)
+            await delete(env_id)
+
+        async def first_unhealthy(_):
+            nonlocal checks
+            checks += 1
+            return checks > 1
+
+        with patch.object(lifecycle, "time", clock):
+            await pool.get("main")
+            await pool.release_all()
+            # Move beyond the previous phase's deadline without a timing race.
+            offset += pool._lifecycle._cleanup_timeout_sec * 2
+            pool._wait_healthy = first_unhealthy
+            pool._lifecycle._provider.delete = fail_first_delete
+            client = await pool.get("verifier")
+            self.assertIs(pool.peek("verifier"), client)
+            self.assertEqual([key for method, key in self.calls if method == "POST"].count("verifier"), 2)
+            self.assertEqual(attempts, ["verifier-3", "verifier-3"])
+            self.assertFalse(pool._lifecycle._pending_delete_ids)
+            self.assertNotIn("verifier-3", self.live)
+            await pool.aclose()
+        self.assertTrue(client.closed)
+        self.assertFalse(self.live)
+        self.assertTrue(pool._lifecycle._provider.closed)
+
+    async def test_phase_drain_rollback_and_groups_share_the_original_delete_budget(self):
+        pool = self.pool()
+        lifecycle = importlib.import_module(PACKAGE + ".lifecycle")
+        offset = 0.0
+        clock = types.SimpleNamespace(monotonic=lambda: time.monotonic() + offset)
+        entered = asyncio.Event()
+        clients = []
+
+        async def health_until_cancel(client):
+            nonlocal offset
+            clients.append(client)
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # Drain used the first-pass slice. Neither its rollback nor
+                # another group may start a fresh first-pass budget now.
+                offset += pool._lifecycle._cleanup_timeout_sec * 0.45
+                raise
+
+        with patch.object(lifecycle, "time", clock):
+            await pool.get("main")
+            pool._wait_healthy = health_until_cancel
+            acquiring = asyncio.create_task(pool.get("verifier"))
+            await asyncio.wait_for(entered.wait(), 1)
+            await pool.release_all()
+            with self.assertRaises(asyncio.CancelledError):
+                await acquiring
+            for env_id in ("verifier-3", "main-2", "dep-1"):
+                rows = [row for row in pool.cleanup["delete_attempts"] if row["env_id"] == env_id]
+                self.assertEqual(len(rows), 2)
+                self.assertEqual(rows[0]["error_kind"], "delete_budget_exhausted")
+                self.assertTrue(rows[1]["ok"])
+            self.assertEqual(
+                [key for method, key in self.calls if method == "DELETE"], ["verifier-3", "main-2", "dep-1"]
+            )
+            self.assertFalse(pool._lifecycle._active_acquisitions)
+            self.assertTrue(all(client.closed for client in clients))
+            self.assertFalse(self.live)
+            self.assertFalse(pool._lifecycle._provider.closed)
+            await pool.aclose()
 
     async def test_corrupt_requests_do_not_block_or_get_acknowledged(self):
         queue = self.directory / "recovery-requests"
@@ -849,14 +1660,14 @@ asyncio.run(main())
             self.live.add(kind)
             valid = queue / "valid.json"
             valid.write_text(json.dumps({"kind": kind, "journal": journal.path.name if kind == "journal" else None}))
-            result = await cleanup.recover_queued(self.directory, self.provider, .4, 2, 8)
+            result = await cleanup.recover_queued(self.directory, self.provider, 0.4, 2, 8)
             self.assertFalse(result["ok"])
             self.assertEqual(len(result["invalid_requests"]), 4)
             self.assertEqual(result["acknowledged"], 1)
             self.assertFalse(valid.exists())
             self.assertFalse(self.live)
             self.assertEqual(len(list(queue.glob("*.json"))), 4)
-        result = await cleanup.recover_queued(self.directory, self.provider, .4, 2, 8)
+        result = await cleanup.recover_queued(self.directory, self.provider, 0.4, 2, 8)
         self.assertFalse(result["ok"])
         self.assertEqual(result["acknowledged"], 0)
 
@@ -864,7 +1675,7 @@ asyncio.run(main())
         environment = self._recovery_environment()
         # Test the actual supervisor process, after READY. The second probe
         # checks that the first error never initiated a premature exit sweep.
-        code = '''
+        code = """
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
@@ -882,10 +1693,15 @@ def probe(directory):
     return False
 supervisor.driver_alive = probe
 raise SystemExit(supervisor.main())
-'''
+"""
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-c", code, str(SOURCE), env=environment,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            sys.executable,
+            "-c",
+            code,
+            str(SOURCE),
+            env=environment,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), 10)
         self.assertEqual(proc.returncode, 0, stderr.decode())
@@ -895,7 +1711,7 @@ raise SystemExit(supervisor.main())
         self.assertFalse(cleanup.recycler.requests(self.directory))
 
     async def test_forked_signal_and_atexit_callbacks_do_not_stop_parent(self):
-        code = '''
+        code = """
 import ast, atexit, logging, os, signal, sys, time
 from types import FrameType
 from pathlib import Path
@@ -931,10 +1747,15 @@ for mode in ('signal', 'atexit'):
     assert not Path(sys.argv[1], 'stop.requested.json').exists()
     assert not Path(sys.argv[1], 'run-cleanup.json').exists()
 print('fork callbacks isolated', flush=True)
-'''
+"""
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-c", code, str(self.directory), env=self._recovery_environment(),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            sys.executable,
+            "-c",
+            code,
+            str(self.directory),
+            env=self._recovery_environment(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), 10)
         self.assertEqual(proc.returncode, 0, stderr.decode())
@@ -951,13 +1772,13 @@ print('fork callbacks isolated', flush=True)
         with patch.dict(os.environ, environment):
             with cleanup.guard_ray_shutdown(training_outcome="interrupted"):
                 pass
-        await asyncio.sleep(.5)
+        await asyncio.to_thread(cleanup._SHUTDOWN_GUARD.wait, timeout=10)
         self.assertIn("normal-drain", self.live)
         self.assertFalse(self.calls)
         self.assertFalse(cleanup.recycler.requests(self.directory))
         self.assertFalse((self.directory / "stop.requested.json").exists())
         self.assertEqual(cleanup._SHUTDOWN_GUARD.poll(), 0)
-        await cleanup.reconcile(self.directory, self.provider, .4)
+        await cleanup.reconcile(self.directory, self.provider, 0.4)
 
     async def test_blocked_ray_shutdown_recovers_with_driver_alive_and_protects_live_pool(self):
         journal = cleanup.CleanupJournal(self.directory, "gateway-test")
@@ -969,7 +1790,7 @@ print('fork callbacks isolated', flush=True)
         self.live.add("still-owned")
         environment = self._recovery_environment()
         environment["XTUNER_SANDBOX_RAY_SHUTDOWN_TIMEOUT"] = ".2"
-        code = '''
+        code = """
 import ast, atexit, logging, os, signal, sys, time
 from types import FrameType
 from pathlib import Path
@@ -986,18 +1807,24 @@ lease = runtime.cleanup.run_control.claim_driver(Path(sys.argv[1]))
 scope['register_cleanup']()
 print('READY', flush=True)
 while True: time.sleep(.1)
-'''
+"""
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-c", code, str(self.directory), env=environment,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            sys.executable,
+            "-c",
+            code,
+            str(self.directory),
+            env=environment,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         try:
             import signal
+
             self.assertEqual(await asyncio.wait_for(proc.stdout.readline(), 10), b"READY\n")
             proc.send_signal(signal.SIGTERM)
             async with asyncio.timeout(5):
                 while not (self.directory / "ray-entered").exists():
-                    await asyncio.sleep(.02)
+                    await asyncio.sleep(0.02)
             proc.send_signal(signal.SIGTERM)
             await self._wait_deleted("abandoned-before-ray-drain")
             self.assertIsNone(proc.returncode, "Blocked driver must still be alive at recovery")
@@ -1008,12 +1835,32 @@ while True: time.sleep(.1)
             # queue; later release allows the recycler to finish it.
             async with asyncio.timeout(5):
                 while not cleanup.recycler.requests(self.directory):
-                    await asyncio.sleep(.02)
+                    await asyncio.sleep(0.02)
             active.detach()
             await self._wait_deleted("still-owned")
             await self._wait_recycler_idle()
             result = json.loads((self.directory / "run-cleanup.json").read_text())
-            self.assertTrue(result["cleanup_confirmed"])
+            if not result["cleanup_confirmed"]:
+                details = {
+                    "result": result,
+                    "calls": self.calls,
+                    "live": sorted(self.live),
+                    "files": {},
+                    "file_mtimes_ns": {},
+                }
+                for path in sorted(self.directory.rglob("*")):
+                    if path.is_file() and (path.suffix in {".json", ".tmp"} or path.name == "recovery.log"):
+                        try:
+                            details["files"][str(path.relative_to(self.directory))] = path.read_text()
+                            details["file_mtimes_ns"][str(path.relative_to(self.directory))] = path.stat().st_mtime_ns
+                        except OSError as error:
+                            details["files"][str(path.relative_to(self.directory))] = type(error).__name__
+                diagnostic = json.dumps(details, indent=2)
+                if failure_directory := os.environ.get("XTUNER_TEST_CLEANUP_FAILURE_DIR"):
+                    destination = Path(failure_directory)
+                    destination.mkdir(parents=True, exist_ok=True)
+                    (destination / f"blocked-ray-shutdown-{time.time_ns()}.json").write_text(diagnostic)
+                self.fail(diagnostic)
             self.assertEqual(result["training_outcome"], "interrupted")
         finally:
             if proc.returncode is None:
@@ -1036,8 +1883,12 @@ with cleanup.guard_ray_shutdown(training_outcome='interrupted'):
     time.sleep(60)
 """
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-c", code, env=environment,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            sys.executable,
+            "-c",
+            code,
+            env=environment,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         try:
             self.assertEqual(await asyncio.wait_for(proc.stdout.readline(), 10), b"READY\n")
@@ -1077,7 +1928,7 @@ with cleanup.guard_ray_shutdown(training_outcome='interrupted'):
 
     async def test_raw_create_timeout_is_not_replayed_without_journal(self):
         pool = self.pool()
-        pool._journal_dir = None
+        pool._lifecycle._journal_dir = None
         pool._max_attempts = 3
         calls = 0
 
@@ -1086,7 +1937,7 @@ with cleanup.guard_ray_shutdown(training_outcome='interrupted'):
             calls += 1
             raise TimeoutError("response lost")
 
-        pool._provider.create = timeout
+        pool._lifecycle._provider.create = timeout
         with self.assertRaises(TimeoutError) as error:
             await pool.get("main")
         self.assertEqual(calls, 1)
@@ -1103,7 +1954,7 @@ with cleanup.guard_ray_shutdown(training_outcome='interrupted'):
             calls += 1
             raise ConnectionError("connection closed after allocation")
 
-        pool._provider.create = lost_response
+        pool._lifecycle._provider.create = lost_response
         with self.assertRaises(ConnectionError):
             await pool.get("main")
         self.assertEqual(calls, 1)
@@ -1170,9 +2021,9 @@ sys.stdin.read()
     async def _wait_recycler_idle(self):
         async with asyncio.timeout(25):
             while True:
-                with (self.directory / "recovery-worker.lock").open("a") as lease:
+                with cleanup.locking.open_lock(self.directory / "recovery-worker.lock") as lease:
                     try:
-                        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        cleanup.locking.acquire(lease)
                         return
                     except BlockingIOError:
                         pass
@@ -1246,6 +2097,264 @@ sys.stdin.read()
         self.assertEqual(len([call for call in self.calls if call[0] == "DELETE"]), 6)
         self.assertFalse((self.directory / "stop.requested.json").exists())
 
+    async def test_recycler_final_attempt_transfers_only_fresh_generations(self):
+        recycler = cleanup.recycler
+        queue = self.directory / "recovery-requests"
+        queue.mkdir()
+        batches = self.directory / "recovery-batches"
+        batches.mkdir()
+        old = queue / ("a" * 32 + ".json")
+        cleanup._atomic_json(old, {"kind": "journal", "journal": "1" * 32 + ".json"})
+        manifest = batches / "first.json"
+        cleanup._atomic_json(manifest, {"requests": [old.name], "seen": [old.name]})
+        lease = cleanup.locking.open_lock(self.directory / "recovery-worker.lock")
+        self.addCleanup(lease.close)
+        cleanup.locking.acquire(lease)
+        environment = {
+            "XTUNER_SANDBOX_CLEANUP_DIR": str(self.directory),
+            "XTUNER_SANDBOX_CLEANUP_FACTORY": "fixture:resolve",
+            "XTUNER_SANDBOX_RECOVERY_ATTEMPTS": "1",
+        }
+
+        def final_sweep(command, **kwargs):
+            self.assertEqual(command[command.index("--request-batch") + 1], str(manifest))
+            recycler.request_recovery(self.directory, "fixture:resolve", self.directory / ("2" * 32 + ".json"))
+            return types.SimpleNamespace(returncode=1)
+
+        # The guardian owns another FD for the same lease. The worker must not
+        # unlock it when its last attempt leaves a newly enqueued request.
+        arguments = [
+            "recycler.py",
+            "--lease-fd",
+            str(os.dup(lease.fileno())),
+            "--run-worker",
+            "--batch",
+            str(manifest),
+        ]
+        with (
+            patch.dict(os.environ, environment),
+            patch.object(sys, "argv", arguments),
+            patch.object(recycler.subprocess, "run", final_sweep),
+            patch.object(recycler.subprocess, "Popen") as launch,
+        ):
+            self.assertEqual(recycler.main(), 1)
+            launch.assert_not_called()
+        with cleanup.locking.open_lock(self.directory / "recovery-worker.lock") as probe:
+            with self.assertRaises(BlockingIOError):
+                cleanup.locking.acquire(probe)
+
+        launched = []
+
+        def capture(command, **kwargs):
+            batch = Path(command[command.index("--batch") + 1])
+            launched.append((batch, json.loads(batch.read_text())))
+            self.assertTrue(kwargs["start_new_session"])
+            self.assertEqual(kwargs["pass_fds"], (lease.fileno(),))
+            return types.SimpleNamespace(wait=lambda: 0)
+
+        with patch.object(recycler.subprocess, "Popen", capture):
+            recycler.retire_batch(self.directory, "fixture:resolve", lease, manifest)
+            second_manifest, second = launched[-1]
+            self.assertEqual(len(second["requests"]), 1)
+            self.assertNotIn(old.name, second["requests"])
+            self.assertIn(old.name, second["seen"])
+            recycler.request_recovery(self.directory, "fixture:resolve", self.directory / ("3" * 32 + ".json"))
+            recycler.retire_batch(self.directory, "fixture:resolve", lease, second_manifest)
+            third_manifest, third = launched[-1]
+            self.assertEqual(len(third["requests"]), 1)
+            self.assertTrue(set(third["requests"]).isdisjoint(second["seen"]))
+            self.assertEqual(len(third["seen"]), 3)
+            recycler.retire_batch(self.directory, "fixture:resolve", lease, third_manifest)
+        self.assertEqual(len(launched), 2)
+        self.assertEqual(len(recycler.requests(self.directory)), 3)  # Exhausted work is retained.
+        with cleanup.locking.open_lock(self.directory / "recovery-worker.lock") as probe:
+            cleanup.locking.acquire(probe)
+
+    async def test_recycler_batch_does_not_consume_later_requests(self):
+        queue = self.directory / "recovery-requests"
+        queue.mkdir()
+        batches = self.directory / "recovery-batches"
+        batches.mkdir()
+        names = []
+        for prefix in ("a", "b"):
+            journal = cleanup.CleanupJournal(self.directory, "gateway-test")
+            journal.allocated(prefix)
+            journal.detach()
+            self.live.add(prefix)
+            request = queue / (prefix * 32 + ".json")
+            cleanup._atomic_json(request, {"kind": "journal", "journal": journal.path.name})
+            names.append(request.name)
+        manifest = batches / "batch.json"
+        cleanup._atomic_json(manifest, {"requests": names[:1], "seen": names[:1]})
+        report = await cleanup.recover_queued(self.directory, self.provider, 1, 5, 2, manifest)
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["requests"], 1)
+        self.assertEqual(self.live, {"b"})
+        self.assertEqual([p.name for p in cleanup.recycler.requests(self.directory)], names[1:])
+
+    async def test_successor_exit_does_not_renew_exhausted_journal_budget(self):
+        recycler = cleanup.recycler
+        old = cleanup.CleanupJournal(self.directory, "gateway-test")
+        old.allocated("old-exhausted")
+        old.detach()
+        fresh = cleanup.CleanupJournal(self.directory, "gateway-test")
+        fresh.allocated("fresh-resource")
+        fresh.detach()
+        self.live.update({"old-exhausted", "fresh-resource"})
+        queue = self.directory / "recovery-requests"
+        queue.mkdir()
+        old_request = queue / ("a" * 32 + ".json")
+        exit_request = queue / ("b" * 32 + ".json")
+        cleanup._atomic_json(old_request, {"kind": "journal", "journal": old.path.name})
+        manifests = []
+
+        def capture(command, **kwargs):
+            manifests.append(Path(command[command.index("--batch") + 1]))
+            return types.SimpleNamespace(wait=lambda: 0)
+
+        with cleanup.locking.open_lock(self.directory / "recovery-worker.lock") as lease:
+            cleanup.locking.acquire(lease)
+            with patch.object(recycler.subprocess, "Popen", capture):
+                recycler._launch_batch(self.directory, "fixture:resolve", lease, [old_request], seen=set())
+                cleanup._atomic_json(exit_request, {"kind": "exit", "journal": None})
+                recycler.retire_batch(self.directory, "fixture:resolve", lease, manifests[0])
+        successor = manifests[1]
+        with self.assertRaisesRegex(ValueError, "stop barrier"):
+            recycler.batch_journals(self.directory, successor)
+        result = await cleanup.recover_queued(self.directory, self.provider, 0.3, 1, 2, successor)
+        scope, owned = recycler.batch_journals(self.directory, successor)
+        self.assertEqual(scope, [fresh.path])
+        self.assertEqual(owned, {old.path.name, fresh.path.name})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["requests"], 1)
+        self.assertEqual(self.live, {"old-exhausted"})
+        self.assertFalse(any(call == ("DELETE", "old-exhausted") for call in self.calls))
+        self.assertTrue(old_request.exists())
+        self.assertTrue(exit_request.exists())
+        state = json.loads((self.directory / "run-cleanup.json").read_text())
+        self.assertFalse(state["cleanup_confirmed"])
+
+    async def test_selected_missing_journal_prevents_run_completion(self):
+        missing = self.directory / ("1" * 32 + ".json")
+        result = await cleanup.finalize_run(self.directory, self.provider, 0.1, 0.2, journals=[missing])
+        self.assertFalse(result["cleanup_confirmed"])
+        self.assertFalse(result["success"])
+        self.assertEqual(self.calls, [])
+        state = json.loads((self.directory / "run-cleanup.json").read_text())
+        self.assertFalse(state["cleanup_confirmed"])
+
+    async def test_successor_exit_preserves_missing_ancestor_journal_evidence(self):
+        missing = self.directory / ("1" * 32 + ".json")
+        fresh = cleanup.CleanupJournal(self.directory, "gateway-test")
+        fresh.allocated("fresh-resource")
+        fresh.detach()
+        self.live.add("fresh-resource")
+        queue = self.directory / "recovery-requests"
+        queue.mkdir()
+        old_request = queue / ("a" * 32 + ".json")
+        exit_request = queue / ("b" * 32 + ".json")
+        cleanup._atomic_json(old_request, {"kind": "journal", "journal": missing.name})
+        cleanup._atomic_json(exit_request, {"kind": "exit", "journal": None})
+        batches = self.directory / "recovery-batches"
+        batches.mkdir()
+        manifest = batches / "successor.json"
+        cleanup.run_control.request_stop(self.directory, "test-sealed-scope")
+        cleanup._atomic_json(
+            manifest,
+            {
+                "requests": [exit_request.name],
+                "exit_scope": "sealed",
+                "seen": [old_request.name, exit_request.name],
+                "journals": [fresh.path.name],
+                "seen_journals": [missing.name, fresh.path.name],
+            },
+        )
+        result = await cleanup.recover_queued(self.directory, self.provider, 0.3, 1, 2, manifest)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["acknowledged"], 0)
+        self.assertFalse(self.live)
+        self.assertEqual([call for call in self.calls if call[0] == "DELETE"], [("DELETE", "fresh-resource")])
+        self.assertTrue(old_request.exists())
+        self.assertTrue(exit_request.exists())
+        state = json.loads((self.directory / "run-cleanup.json").read_text())
+        self.assertFalse(state["cleanup_confirmed"])
+
+    async def test_completion_observation_preserves_unknown_or_live_ownership(self):
+        journal = cleanup.CleanupJournal(self.directory, "gateway-test")
+        self.assertFalse(cleanup.observe_journals([journal.path])["ok"])
+        journal.detach()
+        self.assertTrue(cleanup.observe_journals([journal.path])["ok"])
+        original = json.loads(journal.path.read_text())
+        for changes in (
+            {"creating": True},
+            {"ambiguous_creates": 1},
+            {"resources": {"unknown": {"confirmed": False}}},
+            {"resources": {"invalid": True}},
+            {"provider_key": ""},
+        ):
+            with self.subTest(changes=changes):
+                cleanup._atomic_json(journal.path, {**original, **changes})
+                self.assertFalse(cleanup.observe_journals([journal.path])["ok"])
+        journal.path.write_text("invalid json")
+        self.assertFalse(cleanup.observe_journals([journal.path])["ok"])
+        journal.path.unlink()
+        self.assertFalse(cleanup.observe_journals([journal.path])["ok"])
+        self.assertEqual(self.calls, [])
+
+    def test_legacy_batch_does_not_guess_missing_ancestor_work(self):
+        batches = self.directory / "recovery-batches"
+        batches.mkdir()
+        queue = self.directory / "recovery-requests"
+        queue.mkdir()
+        fresh = queue / ("b" * 32 + ".json")
+        cleanup._atomic_json(fresh, {"kind": "journal", "journal": "2" * 32 + ".json"})
+        manifest = batches / "legacy.json"
+        cleanup._atomic_json(manifest, {"requests": [fresh.name], "seen": ["a" * 32 + ".json", fresh.name]})
+        with self.assertRaises(FileNotFoundError):
+            cleanup.recycler.batch_journals(self.directory, manifest)
+        self.assertTrue(fresh.exists())
+
+    async def test_recycler_retirement_release_cannot_unlock_a_later_guardian(self):
+        recycler = cleanup.recycler
+        batches = self.directory / "recovery-batches"
+        batches.mkdir()
+        manifest = batches / "empty.json"
+        cleanup._atomic_json(manifest, {"requests": [], "seen": []})
+        old = cleanup.locking.open_lock(self.directory / "recovery-worker.lock")
+        self.addCleanup(old.close)
+        cleanup.locking.acquire(old)
+        recycler.retire_batch(self.directory, "fixture:resolve", old, manifest)
+        inherited = []
+
+        def inherit(command, **kwargs):
+            inherited.append(os.fdopen(os.dup(kwargs["pass_fds"][0]), "a"))
+            self.addCleanup(inherited[-1].close)
+            return types.SimpleNamespace(wait=lambda: 0)
+
+        with patch.object(recycler.subprocess, "Popen", inherit):
+            recycler.request_recovery(self.directory, "fixture:resolve", self.directory / ("a" * 32 + ".json"))
+        old.close()  # A different open-file description must keep its new lock.
+        with cleanup.locking.open_lock(self.directory / "recovery-worker.lock") as probe:
+            with self.assertRaises(BlockingIOError):
+                cleanup.locking.acquire(probe)
+
+    async def test_recycler_successor_launch_failure_retains_new_requests(self):
+        recycler = cleanup.recycler
+        batches = self.directory / "recovery-batches"
+        batches.mkdir()
+        manifest = batches / "empty.json"
+        cleanup._atomic_json(manifest, {"requests": [], "seen": []})
+        queue = self.directory / "recovery-requests"
+        queue.mkdir()
+        request = queue / ("a" * 32 + ".json")
+        cleanup._atomic_json(request, {"kind": "exit", "journal": None})
+        with cleanup.locking.open_lock(self.directory / "recovery-worker.lock") as lease:
+            cleanup.locking.acquire(lease)
+            with patch.object(recycler.subprocess, "Popen", side_effect=OSError("launch failed")):
+                with self.assertRaises(OSError):
+                    recycler.retire_batch(self.directory, "fixture:resolve", lease, manifest)
+        self.assertEqual(recycler.requests(self.directory), [request])
+
     async def test_failed_exit_retries_with_backoff_and_retains_exhausted_work(self):
         journal = cleanup.CleanupJournal(self.directory, "gateway-test")
         journal.created("exit-failure")
@@ -1299,8 +2408,8 @@ sys.stdin.read()
                 await pool.aclose()
             await cleanup.drain_cleanup_tasks(3)
             self.assertTrue(cleanup.recycler.requests(self.directory))
-            self.assertTrue(pool._journal.lock.closed)
-            self.assertTrue(pool._provider.closed)
+            self.assertTrue(pool._lifecycle._journal.lock.closed)
+            self.assertTrue(pool._lifecycle._provider.closed)
             self.fail_delete = False
             await self._wait_recycler_idle()
         self.assertFalse(self.live)
@@ -1335,18 +2444,24 @@ sys.stdin.read()
         # An unlocked registered lease is exactly the state after driver death.
         (self.directory / "driver.started.json").write_text("{}")
         environment = self._recovery_environment()
-        environment["XTUNER_SANDBOX_CLEANUP_EXIT_TIMEOUT"] = "1.5"
-        with (self.directory / "admission.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_SH)
+        # Leave enough of the 20% handoff reserve to start an interpreter from
+        # shared storage; the injected admission lock, not startup latency, is
+        # the operation whose bounded termination this case verifies.
+        environment["XTUNER_SANDBOX_CLEANUP_EXIT_TIMEOUT"] = "4"
+        with cleanup.locking.open_lock(self.directory / "admission.lock") as lock:
+            cleanup.locking.acquire(lock, shared=True)
             witness = await asyncio.create_subprocess_exec(
-                sys.executable, str(SOURCE / "supervisor.py"), env=environment,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                sys.executable,
+                str(SOURCE / "supervisor.py"),
+                env=environment,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
             )
             try:
                 self.assertEqual(await asyncio.wait_for(witness.stdout.readline(), 10), b"READY\n")
                 started = time.monotonic()
-                await asyncio.wait_for(witness.wait(), 4)
-                self.assertLess(time.monotonic() - started, 3)
+                await asyncio.wait_for(witness.wait(), 6)
+                self.assertLess(time.monotonic() - started, 5)
                 self.assertEqual(witness.returncode, 1)
                 self.assertFalse((self.directory / "stop.requested.json").exists())
                 self.assertTrue(cleanup.recycler.requests(self.directory))
@@ -1380,31 +2495,44 @@ sys.stdin.read()
                     "os.fsync = blocked\n"
                 )
                 environment = self._recovery_environment()
-                environment.update(XTUNER_SANDBOX_RECOVERY_BUDGET="2",
-                                   XTUNER_SANDBOX_RECOVERY_ATTEMPT_TIMEOUT="10")
+                environment.update(XTUNER_SANDBOX_RECOVERY_BUDGET="4", XTUNER_SANDBOX_RECOVERY_ATTEMPT_TIMEOUT="10")
                 with patch.dict(os.environ, environment):
-                    self.assertTrue(await asyncio.to_thread(
-                        cleanup.recycler.handoff_recovery, self.directory, "recovery_fixture:resolve",
-                        first.path, timeout=3,
-                    ))
+                    self.assertTrue(
+                        await asyncio.to_thread(
+                            cleanup.recycler.handoff_recovery,
+                            self.directory,
+                            "recovery_fixture:resolve",
+                            first.path,
+                            timeout=3,
+                        )
+                    )
                     async with asyncio.timeout(5):
                         while not marker.exists():
-                            await asyncio.sleep(.02)
-                    # A second handoff succeeds while the stalled worker owns
-                    # the lease. Its request must survive budget termination.
+                            await asyncio.sleep(0.02)
+                    # A second handoff arrives after the immutable batch was
+                    # claimed. The guardian must transfer it after killing the
+                    # stalled worker, without extending the old batch's budget.
                     second = cleanup.CleanupJournal(self.directory, "gateway-test")
                     second.allocated("second-" + target)
                     second.detach()
                     self.live.add("second-" + target)
-                    self.assertTrue(await asyncio.to_thread(
-                        cleanup.recycler.handoff_recovery, self.directory, "recovery_fixture:resolve",
-                        second.path, timeout=3,
-                    ))
+                    self.assertTrue(
+                        await asyncio.to_thread(
+                            cleanup.recycler.handoff_recovery,
+                            self.directory,
+                            "recovery_fixture:resolve",
+                            second.path,
+                            timeout=3,
+                        )
+                    )
                     started = time.monotonic()
-                    await asyncio.wait_for(self._wait_recycler_idle(), 4)
-                    self.assertLess(time.monotonic() - started, 3)
-                self.assertTrue(cleanup.recycler.requests(self.directory))
-                self.assertIn("second-" + target, self.live)
+                    await asyncio.wait_for(self._wait_recycler_idle(), 10)
+                    self.assertLess(time.monotonic() - started, 9)
+                self.assertNotIn("second-" + target, self.live)
+                # With a status-only stall, the original child already deleted
+                # and acknowledged its batch. A journal fsync stall must retain
+                # the first request until a later explicit retry confirms it.
+                self.assertEqual(bool(cleanup.recycler.requests(self.directory)), target == "journal")
                 # The cleanup child must also be dead; otherwise it could
                 # overwrite a later reconciler's durable confirmation.
                 stat = Path("/proc") / marker.read_text() / "stat"
@@ -1412,10 +2540,15 @@ sys.stdin.read()
                     self.assertEqual(stat.read_text().split(") ", 1)[1][0], "Z")
                 site.unlink()
                 with patch.dict(os.environ, self._recovery_environment()):
-                    self.assertTrue(await asyncio.to_thread(
-                        cleanup.recycler.handoff_recovery, self.directory, "recovery_fixture:resolve",
-                        second.path, timeout=3,
-                    ))
+                    self.assertTrue(
+                        await asyncio.to_thread(
+                            cleanup.recycler.handoff_recovery,
+                            self.directory,
+                            "recovery_fixture:resolve",
+                            second.path,
+                            timeout=3,
+                        )
+                    )
                 await self._wait_deleted("second-" + target)
                 await self._wait_recycler_idle()
                 self.assertFalse(self.live)
@@ -1524,6 +2657,95 @@ sys.stdin.read()
         with self.assertRaises(cleanup.run_control.RunStoppingError):
             cleanup.CleanupJournal(self.directory, "gateway-test")
 
+    async def test_cleanup_child_confirms_resources_without_driver_fit_ack(self):
+        result = await cleanup.finalize_run(self.directory, self.provider, 0.1, 0.2, training_outcome="succeeded")
+        self.assertTrue(result["cleanup_confirmed"])
+        self.assertFalse(result["fit_cleanup_confirmed"])
+        self.assertFalse(result["success"])
+
+    def test_post_publication_cleanup_failure_never_publishes_fit_success(self):
+        for failure in ("timeout", "nonzero"):
+            with self.subTest(failure=failure):
+                directory = self.directory / failure
+
+                def run(command, **kwargs):
+                    if "--record-fit" in command:
+                        # Even failure-report storage being unavailable cannot
+                        # introduce a driver ACK which was never issued.
+                        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+                    cleanup.run_control.request_stop(directory, "training_exit")
+                    cleanup.run_control.record_result(directory, cleanup_confirmed=True, training_outcome="succeeded")
+                    if failure == "timeout":
+                        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+                    return types.SimpleNamespace(returncode=1)
+
+                environment = {
+                    "XTUNER_SANDBOX_CLEANUP_DIR": str(directory),
+                    "XTUNER_SANDBOX_CLEANUP_FACTORY": "fixture:resolve",
+                    "XTUNER_SANDBOX_CLEANUP_EXIT_TIMEOUT": "2",
+                }
+                with (
+                    patch.dict(os.environ, environment),
+                    patch.object(cleanup.subprocess, "run", run),
+                    patch.object(cleanup.recycler, "handoff_recovery", return_value=True),
+                ):
+                    with self.assertRaises(CleanupError):
+                        cleanup.finish_training("succeeded")
+                result = cleanup.run_control.record_result(directory, cleanup_confirmed=True)
+                self.assertTrue(result["cleanup_confirmed"])
+                self.assertFalse(result["fit_cleanup_confirmed"])
+                self.assertFalse(result["success"])
+
+    def test_fit_ack_timeout_reports_observed_success_without_new_fit_failure(self):
+        for after_write in (False, True):
+            with self.subTest(after_write=after_write):
+                directory = self.directory / str(after_write)
+
+                def run(command, **kwargs):
+                    cleanup.run_control.request_stop(directory, "training_exit")
+                    if "--record-fit" in command:
+                        self.assertEqual(command[command.index("--record-fit") + 1], "confirmed")
+                        if after_write:
+                            cleanup.run_control.record_result(
+                                directory,
+                                cleanup_confirmed=True,
+                                training_outcome="succeeded",
+                                fit_acknowledged=True,
+                            )
+                        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+                    cleanup.run_control.record_result(directory, cleanup_confirmed=True, training_outcome="succeeded")
+                    return types.SimpleNamespace(returncode=0)
+
+                environment = {
+                    "XTUNER_SANDBOX_CLEANUP_DIR": str(directory),
+                    "XTUNER_SANDBOX_CLEANUP_FACTORY": "fixture:resolve",
+                    "XTUNER_SANDBOX_CLEANUP_EXIT_TIMEOUT": "2",
+                }
+                with patch.dict(os.environ, environment), patch.object(cleanup.subprocess, "run", run):
+                    cleanup.finish_training("succeeded")
+                result = json.loads((directory / "run-cleanup.json").read_text())
+                self.assertTrue(result["cleanup_confirmed"])
+                self.assertEqual(result["success"], after_write)
+
+    def test_driver_failure_report_is_sticky_after_resource_recovery(self):
+        arguments = [
+            "cleanup.py",
+            "--directory",
+            str(self.directory),
+            "--record-fit",
+            "unconfirmed",
+            "--training-outcome",
+            "succeeded",
+        ]
+        with patch.object(sys, "argv", arguments):
+            self.assertEqual(cleanup.main(), 0)
+        result = cleanup.run_control.record_result(
+            self.directory, cleanup_confirmed=True, training_outcome="succeeded", fit_acknowledged=True
+        )
+        self.assertTrue(result["cleanup_confirmed"])
+        self.assertTrue(result["finalization_failed"])
+        self.assertFalse(result["success"])
+
     def test_final_success_requires_stop_barrier(self):
         with self.assertRaises(RuntimeError):
             cleanup.run_control.record_result(self.directory, cleanup_confirmed=True, training_outcome="succeeded")
@@ -1574,19 +2796,20 @@ sys.stdin.read()
         self.assertEqual(self.calls, before)
         await pool.aclose()
         report = await cleanup.finalize_run(self.directory, self.provider, 0.1, 0.2, training_outcome="succeeded")
-        self.assertTrue(report["success"])
+        self.assertTrue(report["cleanup_confirmed"])
+        self.assertFalse(report["success"])
 
     async def test_inflight_create_is_accounted_for_before_final_confirmation(self):
         pool = self.pool()
         entered, resume = asyncio.Event(), asyncio.Event()
-        original = pool._provider.create
+        original = pool._lifecycle._provider.create
 
         async def delayed_create(**kwargs):
             entered.set()
             await resume.wait()
             return await original(**kwargs)
 
-        pool._provider.create = delayed_create
+        pool._lifecycle._provider.create = delayed_create
         acquiring = asyncio.create_task(pool.get("main"))
         await entered.wait()
         report = await cleanup.finalize_run(self.directory, self.provider, 0.05, 0.1)
@@ -1598,8 +2821,9 @@ sys.stdin.read()
         await pool.aclose()
         self.assertFalse(self.live)
         report = await cleanup.finalize_run(self.directory, self.provider, 0.1, 0.2, training_outcome="succeeded")
-        self.assertTrue(report["success"])
-        self.assertEqual(pool._journal.data["ambiguous_creates"], 0)
+        self.assertTrue(report["cleanup_confirmed"])
+        self.assertFalse(report["success"])
+        self.assertEqual(pool._lifecycle._journal.data["ambiguous_creates"], 0)
 
     async def test_stop_and_journal_registration_are_serialized(self):
         for index in range(10):
@@ -1732,8 +2956,9 @@ sys.stdin.read()
     def test_shutdown_guard_rejects_invalid_timeout_before_training(self):
         environment = self._recovery_environment()
         for value in ("0", "-1", "nan", "inf", "bad"):
-            with self.subTest(timeout=value), patch.dict(
-                os.environ, {**environment, "XTUNER_SANDBOX_RAY_SHUTDOWN_TIMEOUT": value}
+            with (
+                self.subTest(timeout=value),
+                patch.dict(os.environ, {**environment, "XTUNER_SANDBOX_RAY_SHUTDOWN_TIMEOUT": value}),
             ):
                 with self.assertRaises(ValueError):
                     cleanup.start_cleanup_supervisor()
@@ -1845,13 +3070,13 @@ sys.stdin.read()
     async def test_create_keeps_user_env_and_extra_params(self):
         pool = self.pool()
         calls = []
-        create = pool._provider.create
+        create = pool._lifecycle._provider.create
 
         async def capture(**kwargs):
             calls.append(kwargs)
             return await create(**kwargs)
 
-        pool._provider.create = capture
+        pool._lifecycle._provider.create = capture
         spec = pool._specs["main"]
         spec.user = "${CLEANUP_TEST_USER}"
         spec.env = "preview-template"
@@ -1895,7 +3120,7 @@ sys.stdin.read()
             with self.assertRaises(asyncio.CancelledError):
                 await asyncio.wait_for(task, 3)
             self.assertEqual(item.status, schemas.RolloutStatus.FAILED)
-            self.assertTrue(pool._journal.lock.closed)
+            self.assertTrue(pool._lifecycle._journal.lock.closed)
             if driver is not None:
                 await self._wait_deleted("active-driver")
             self.assertFalse(self.live)
@@ -1927,7 +3152,7 @@ sys.stdin.read()
     async def test_runner_repeated_cancellation_finishes_cleanup(self):
         pool = self.pool()
         entered, deleting, allow_delete = asyncio.Event(), asyncio.Event(), asyncio.Event()
-        delete = pool._provider.delete
+        delete = pool._lifecycle._provider.delete
 
         async def blocked_delete(env_id):
             deleting.set()
@@ -1938,7 +3163,7 @@ sys.stdin.read()
             entered.set()
             await asyncio.Event().wait()
 
-        pool._provider.delete = blocked_delete
+        pool._lifecycle._provider.delete = blocked_delete
         runner = Runner(
             pool=pool, infer=sandbox.SandboxStage(post=[block]), validate=Judger("score", sandbox.SandboxStage())
         )
@@ -1977,7 +3202,7 @@ sys.stdin.read()
         self.assertIn("business failure", result.error.message)
         self.assertFalse(result.artifacts["sandbox_cleanup"]["ok"])
         self.fail_delete = False
-        await pool._deferred_cleanup
+        await pool._lifecycle._deferred_cleanup
         self.assertFalse(self.live)
 
     async def test_runner_keeps_cleanup_failure_out_of_training(self):
@@ -1997,8 +3222,61 @@ sys.stdin.read()
         self.assertEqual(result.status, schemas.RolloutStatus.FAILED)
         self.assertIsNotNone(result.error)
         self.fail_delete = False
-        await pool._deferred_cleanup
+        await pool._lifecycle._deferred_cleanup
         self.assertEqual(result.status, schemas.RolloutStatus.FAILED)
+
+    async def test_runner_cleanup_failure_ignores_handled_caller_exception(self):
+        pool = self.pool()
+        self.fail_delete = True
+
+        async def score(client, item, record):
+            record.score = 1.0
+
+        runner = Runner(
+            pool=pool, infer=sandbox.SandboxStage(), validate=Judger("score", sandbox.SandboxStage(post=[score]))
+        )
+        item = schemas.AgentRolloutItem(
+            id="fallback", uid=5, data_source="test", instruction="test", task_root=self.directory
+        )
+        try:
+            raise ValueError("unrelated caller fallback")
+        except ValueError:
+            result = await runner.run(item)
+        self.assertEqual(result.status, schemas.RolloutStatus.FAILED)
+        self.assertEqual(result.error.stage, "cleanup")
+        self.assertEqual(result.error.category, "cleanup_failed")
+        self.assertFalse(result.artifacts["sandbox_cleanup"]["ok"])
+        self.fail_delete = False
+        await pool._lifecycle._deferred_cleanup
+        self.assertFalse(self.live)
+        self.assertEqual(result.status, schemas.RolloutStatus.FAILED)
+
+    async def test_runner_cancelled_task_preserves_cancellation_when_cleanup_fails(self):
+        pool = self.pool()
+        self.fail_delete = True
+        entered = asyncio.Event()
+
+        async def block(client, item, record):
+            entered.set()
+            await asyncio.Event().wait()
+
+        runner = Runner(
+            pool=pool, infer=sandbox.SandboxStage(pre=[block]), validate=Judger("unused", sandbox.SandboxStage())
+        )
+        item = schemas.AgentRolloutItem(
+            id="cancel-with-failed-cleanup", uid=6, data_source="test", instruction="test", task_root=self.directory
+        )
+        task = asyncio.create_task(runner.run(item))
+        await asyncio.wait_for(entered.wait(), 2)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 3)
+        self.assertTrue(task.cancelled())
+        self.assertEqual(item.error.category, "rollout_cancelled")
+        self.assertFalse(item.artifacts["sandbox_cleanup"]["ok"])
+        self.fail_delete = False
+        await pool._lifecycle._deferred_cleanup
+        self.assertFalse(self.live)
 
 
 if __name__ == "__main__":

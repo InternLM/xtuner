@@ -15,7 +15,9 @@ from __future__ import annotations
 import asyncio
 import time
 import traceback
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any
 
 from lagent.utils import create_object
@@ -29,9 +31,15 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import (
     RolloutStatus,
     StageRecord,
 )
-from xtuner.v1.rl.agent_loop.sandbox_agent_loop.task_control import watch_task
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.trace import span
 from xtuner.v1.utils import get_logger
+
+
+@dataclass
+class _RunTimings:
+    acquire: float | None = None
+    infer: float | None = None
+    validate: float | None = None
 
 
 class Runner:
@@ -58,20 +66,16 @@ class Runner:
         Returns:
             AgentRolloutItem: The input item with result fields filled.
         """
-        try:
-            return await self._run(item)
-        except asyncio.CancelledError:
-            self._fail(item, RolloutError(stage="runner", category="rollout_cancelled", message="Rollout cancelled"))
-            raise
+        return await self.run_with_pool(item, self.prepare_trial_pool(item))
 
-    async def _run(self, item: AgentRolloutItem) -> AgentRolloutItem:
-        """Run one rollout sample and return the same item with result fields
-        filled.
+    def prepare_trial_pool(self, item: AgentRolloutItem) -> SandboxPool:
+        """Validate input and apply this trial's overrides to a fresh Pool.
 
-        Each worker (SandboxStage / Judger / SandboxPool) writes its
-        own ``record.status`` / ``record.error``.  The runner only orchestrates
-        and promotes the first stage error to ``item.error`` when something
-        fails.
+        Recipes that need the Pool before execution can use this operation and
+        then :meth:`run_with_pool`. They own closing the Pool if their setup
+        fails before execution starts. Neither the template nor the item's
+        overrides are modified. A pre-built Pool remains a one-shot alternative
+        and cannot accept overrides.
         """
         self._validate_input(item)
         if isinstance(self._pool, SandboxPool):
@@ -82,23 +86,30 @@ class Runner:
             pool_cfg = deepcopy(self._pool)
             override = (item.pipeline_overrides or {}).get("pool")
             if override:
-                _deep_merge(pool_cfg, override)
+                _deep_merge(pool_cfg, deepcopy(override))
             pool = create_object(pool_cfg)
-        async with watch_task(pool._journal_dir) as stopped:
-            result = await self._run_with_pool(item, pool)
-            if stopped.is_set():
-                # A hook may swallow cancellation; never train on that result.
-                raise asyncio.CancelledError("sandbox_run_stopping")
-            return result
+        return pool
 
-    async def _run_with_pool(self, item: AgentRolloutItem, pool: SandboxPool) -> AgentRolloutItem:
+    async def run_with_pool(self, item: AgentRolloutItem, pool: SandboxPool) -> AgentRolloutItem:
+        """Run stages with an already prepared trial Pool and finalize it.
+
+        Pool configuration, including overrides, must already be applied via
+        :meth:`prepare_trial_pool`. This operation never rebuilds the Pool or
+        reapplies overrides; it retains the normal result and cancellation
+        rules. The caller must not share the Pool between concurrent trials.
+        """
+        timings = _RunTimings()
+        try:
+            return await _run_sandbox_trial(pool, item, lambda: self._run_stages(item, pool, timings), self._fail)
+        finally:
+            self._log_final(item.id, item, timings.acquire, timings.infer, timings.validate)
+
+    async def _run_stages(self, item: AgentRolloutItem, pool: SandboxPool, timings: _RunTimings) -> AgentRolloutItem:
+        """Acquire, infer and validate under the caller's trial scope."""
+        self._validate_input(item)
         tid = item.id
         uid_obs = str(item.uid) if item.uid is not None else ""
-        t_acquire: float | None = None
-        t_infer: float | None = None
-        t_validate: float | None = None
         try:
-            pool.set_cleanup_context(str(item.uid) if item.uid is not None else item.id)
             infer_sandbox = _stage_sandbox_name(self.infer, pool)
             infer_spec = pool.spec(infer_sandbox)
 
@@ -122,7 +133,7 @@ class Runner:
                         sandbox_url=sandbox_url,
                         sandbox_image=infer_spec.image,
                     )
-                t_acquire = time.monotonic() - t0
+                timings.acquire = time.monotonic() - t0
 
                 # ─── infer ──────────────────────────────────────────────
                 t1 = time.monotonic()
@@ -130,7 +141,7 @@ class Runner:
                     infer_result = await self.infer.run(infer_client, item, item.infer)
                     if not infer_result.ok:
                         infer_span.mark_error(_format_error(item.infer.error))
-                t_infer = time.monotonic() - t1
+                timings.infer = time.monotonic() - t1
                 if not infer_result.ok:
                     total_span.mark_error(_format_error(item.infer.error))
                     return self._fail(item, item.infer.error)
@@ -144,7 +155,7 @@ class Runner:
                         StageRecord(judger_name=validate_name),
                     )
                     score = float(await self.validate.run(item, pool, validate_record))
-                t_validate = time.monotonic() - t2
+                timings.validate = time.monotonic() - t2
                 item.reward = score
 
                 item.status = RolloutStatus.COMPLETED
@@ -162,16 +173,6 @@ class Runner:
             )
             get_logger().error(f"[{tid}] traceback:\n{traceback.format_exc()}")
             return self._fail(item, promoted)
-        finally:
-            try:
-                await pool.aclose()
-            except CleanupError as exc:
-                # A cleanup failure must not make a sample eligible for training.
-                # _fail retains an existing business error for diagnosis.
-                self._fail(item, RolloutError(stage="cleanup", category=exc.kind, message=str(exc)))
-            finally:
-                item.artifacts["sandbox_cleanup"] = pool.cleanup
-                self._log_final(tid, item, t_acquire, t_infer, t_validate)
 
     def _log_final(
         self,
@@ -224,6 +225,31 @@ class Runner:
         if error is not None:
             get_logger().error(f"[{item.id}] failed: {_format_error(error)}")
         return item
+
+
+async def _run_sandbox_trial(
+    pool: SandboxPool,
+    item: AgentRolloutItem,
+    operation: Callable[[], Awaitable[AgentRolloutItem]],
+    fail: Callable[[AgentRolloutItem, RolloutError | None], AgentRolloutItem],
+) -> AgentRolloutItem:
+    """Own trial lifetime and translate cleanup facts into the rollout result.
+
+    Invoke work only after scope entry succeeds. Keep the existing failure
+    callback so Runner subclasses retain their error policy, including when
+    scope entry or final close fails. Always publish the final snapshot before
+    the caller logs the result.
+    """
+    try:
+        async with pool.task_scope(str(item.uid) if item.uid is not None else item.id):
+            return await operation()
+    except asyncio.CancelledError:
+        fail(item, RolloutError(stage="runner", category="rollout_cancelled", message="Rollout cancelled"))
+        raise
+    except CleanupError as exc:
+        return fail(item, item.error or RolloutError(stage="cleanup", category=exc.kind, message=str(exc)))
+    finally:
+        item.artifacts["sandbox_cleanup"] = pool.cleanup
 
 
 def _stage_sandbox_name(stage: SandboxStage, pool: SandboxPool) -> str:

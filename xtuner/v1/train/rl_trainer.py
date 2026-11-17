@@ -466,7 +466,9 @@ class RLColocateTrainerConfig(BaseRLTrainerConfig):
             if self.auto_resume and self.load_checkpoint_cfg.checkpoint_path is not None:
                 raise ValueError("Choose explicit checkpoint_path or auto_resume, not both")
             if self.load_checkpoint_cfg.checkpoint_path is not None or self.auto_resume:
-                if not (self.load_checkpoint_cfg.load_optimizer_states and self.load_checkpoint_cfg.load_optimizer_args):
+                if not (
+                    self.load_checkpoint_cfg.load_optimizer_states and self.load_checkpoint_cfg.load_optimizer_args
+                ):
                     raise ValueError("Full colocate resume requires optimizer states")
         return self
 
@@ -606,11 +608,9 @@ class BaseRLTrainer:
     def _init_common(self, cfg: BaseRLTrainerConfig, *, meta_path: str, logger_tag: str) -> None:
         # Custom recipe entrypoints also receive signal/exit recovery. Register
         # after ray.init(), which replaces SIGTERM handlers.
-        from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import start_cleanup_supervisor
-        from xtuner.v1.rl.utils import register_cleanup
+        from xtuner.v1.rl.agent_loop.sandbox_agent_loop.run_control import register_training_cleanup
 
-        start_cleanup_supervisor()
-        register_cleanup()
+        register_training_cleanup()
 
         distillation_config = cfg.distillation_config
         if distillation_config is not None and distillation_config.rollout_teachers:
@@ -1664,14 +1664,10 @@ class RLColocateTrainer(BaseRLTrainer):
             self.logger.info("Rollout workers updated weights from train workers.")
 
     def fit(self):
-        try:
-            return self._fit_with_cleanup()
-        finally:
-            from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import finish_training
+        from xtuner.v1.rl.agent_loop.sandbox_agent_loop.run_control import training_scope
 
-            error = sys.exc_info()[1]
-            outcome = "succeeded" if error is None else "failed" if isinstance(error, Exception) else "interrupted"
-            finish_training(outcome)
+        with training_scope():
+            return self._fit_with_cleanup()
 
     def _fit_with_cleanup(self) -> None:
         self.rl_health_manager.start()
@@ -1679,10 +1675,9 @@ class RLColocateTrainer(BaseRLTrainer):
             self._fit()
         finally:
             original_error = sys.exc_info()[0] is not None
-            from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import request_stop_from_environment
+            from xtuner.v1.rl.agent_loop.sandbox_agent_loop.run_control import stop_before_drain
 
-            if not request_stop_from_environment():
-                self.logger.error("Sandbox admission stop pending; final recovery will retry")
+            stop_before_drain(self.logger)
             cleanup_error = None
             if self._turn_keepalive and not self._debug_train:
                 try:
@@ -1737,8 +1732,14 @@ class RLColocateTrainer(BaseRLTrainer):
                                 self.train_batch_size,
                                 train_step=train_step,
                                 model_step=model_step,
-                                **({"quiesce": self._checkpoint_due(train_step) or train_step == self._total_train_steps}
-                                   if self._turn_keepalive else {}),
+                                **(
+                                    {
+                                        "quiesce": self._checkpoint_due(train_step)
+                                        or train_step == self._total_train_steps
+                                    }
+                                    if self._turn_keepalive
+                                    else {}
+                                ),
                             )
                         )
                 finally:
@@ -1962,14 +1963,10 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         asyncio_run(self.agent_loop_manager.continue_produce(model_step=saved_model_step))
 
     def fit(self):
-        try:
-            return self._fit_with_cleanup()
-        finally:
-            from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import finish_training
+        from xtuner.v1.rl.agent_loop.sandbox_agent_loop.run_control import training_scope
 
-            error = sys.exc_info()[1]
-            outcome = "succeeded" if error is None else "failed" if isinstance(error, Exception) else "interrupted"
-            finish_training(outcome)
+        with training_scope():
+            return self._fit_with_cleanup()
 
     def _fit_with_cleanup(self) -> None:
         # 对外同步 fit；内部用 async loop 组织 producer/consumer。
@@ -2122,10 +2119,9 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 self._cur_step = train_step
                 train_step = self._cur_step + 1
         finally:
-            from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import request_stop_from_environment
+            from xtuner.v1.rl.agent_loop.sandbox_agent_loop.run_control import stop_before_drain
 
-            if not await asyncio.to_thread(request_stop_from_environment):
-                self.logger.error("Sandbox admission stop pending; final recovery will retry")
+            await asyncio.to_thread(stop_before_drain, self.logger)
             self.agent_loop_manager.shutdown()
             await asyncio.sleep(0)
             if not producer_task.done():

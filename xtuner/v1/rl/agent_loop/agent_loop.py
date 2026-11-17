@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeAlias, cast, overload
@@ -147,32 +146,10 @@ class AgentLoopConfig(ABC, BaseModel):
         is_valid_sample_fn: IsValidSampleFn | None = None,
         rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
     ) -> RayAgentLoopProxy:
+        from xtuner.v1.rl.agent_loop.sandbox_agent_loop.run_control import worker_runtime_env
+
         ray_agent_loop = ray.remote(
-            runtime_env={
-                "env_vars": {
-                    key: os.environ[key]
-                    for key in (
-                        "XTUNER_SANDBOX_CLEANUP_DIR",
-                        "XTUNER_SANDBOX_PROVIDER_KEY",
-                        "XTUNER_SANDBOX_CLEANUP_EXIT_TIMEOUT",
-                        "XTUNER_SANDBOX_CLEANUP_FACTORY",
-                        "XTUNER_SANDBOX_RECOVERY_CONCURRENCY",
-                        "XTUNER_SANDBOX_RECOVERY_ATTEMPTS",
-                        "XTUNER_SANDBOX_RECOVERY_BACKOFF",
-                        "XTUNER_SANDBOX_RECOVERY_MAX_BACKOFF",
-                        "XTUNER_SANDBOX_RECOVERY_ATTEMPT_TIMEOUT",
-                        "XTUNER_SANDBOX_RECOVERY_BUDGET",
-                        *(
-                            [
-                                "XTUNER_SANDBOX_CLEANUP_PEERS",
-                            ]
-                            if os.environ.get("XTUNER_SANDBOX_CLEANUP_PEERS") == "1"
-                            else []
-                        ),
-                    )
-                    if key in os.environ
-                }
-            },
+            runtime_env=worker_runtime_env(),
             concurrency_groups={
                 AGENT_LOOP_CONCURRENCY_GROUP_GENERATE: concurrency,
             },
@@ -206,32 +183,10 @@ class AgentLoopConfig(ABC, BaseModel):
         is_valid_sample_fn: IsValidSampleFn | None = None,
         rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
     ) -> list[RayAgentLoopProxy]:
+        from xtuner.v1.rl.agent_loop.sandbox_agent_loop.run_control import worker_runtime_env
+
         ray_agent_loop = ray.remote(
-            runtime_env={
-                "env_vars": {
-                    key: os.environ[key]
-                    for key in (
-                        "XTUNER_SANDBOX_CLEANUP_DIR",
-                        "XTUNER_SANDBOX_PROVIDER_KEY",
-                        "XTUNER_SANDBOX_CLEANUP_EXIT_TIMEOUT",
-                        "XTUNER_SANDBOX_CLEANUP_FACTORY",
-                        "XTUNER_SANDBOX_RECOVERY_CONCURRENCY",
-                        "XTUNER_SANDBOX_RECOVERY_ATTEMPTS",
-                        "XTUNER_SANDBOX_RECOVERY_BACKOFF",
-                        "XTUNER_SANDBOX_RECOVERY_MAX_BACKOFF",
-                        "XTUNER_SANDBOX_RECOVERY_ATTEMPT_TIMEOUT",
-                        "XTUNER_SANDBOX_RECOVERY_BUDGET",
-                        *(
-                            [
-                                "XTUNER_SANDBOX_CLEANUP_PEERS",
-                            ]
-                            if os.environ.get("XTUNER_SANDBOX_CLEANUP_PEERS") == "1"
-                            else []
-                        ),
-                    )
-                    if key in os.environ
-                }
-            },
+            runtime_env=worker_runtime_env(),
             concurrency_groups={
                 AGENT_LOOP_CONCURRENCY_GROUP_GENERATE: concurrency,
             },
@@ -512,10 +467,9 @@ class AgentLoopActor:
         *,
         rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
     ):
-        if os.environ.get("XTUNER_SANDBOX_CLEANUP_PEERS") == "1":
-            from xtuner.v1.rl.agent_loop.sandbox_agent_loop.cleanup import start_cleanup_supervisor
+        from xtuner.v1.rl.agent_loop.sandbox_agent_loop.run_control import register_peer_if_configured
 
-            start_cleanup_supervisor(peer=True)
+        register_peer_if_configured()
 
         from xtuner.v1.rl.distillation import RolloutTeacherScorer
 

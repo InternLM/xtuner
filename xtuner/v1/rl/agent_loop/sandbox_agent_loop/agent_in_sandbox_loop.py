@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import copy
-import importlib
 import json
 import traceback
 import uuid
 from typing import Any, Literal
 
-from lagent.utils import create_object
 from pydantic import Field
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
@@ -20,33 +17,10 @@ from ...rollout.chat_template import canonicalize_messages_for_chat_template
 from ...rollout.trace_store import get_store
 from ..agent_loop import AgentLoop, AgentLoopConfig, maybe_filter_invalid_sample
 from .schemas import AgentRolloutItem, RolloutStatus
+from .trial_process import run_trial_process
 
 
 _MISSING = object()
-
-
-def _import_from_path(path: str) -> Any:
-    module_name, _, attr = path.rpartition(".")
-    if not module_name or not attr:
-        raise ValueError(f"Invalid import path: {path!r}. Expected 'module.attr'.")
-    module = importlib.import_module(module_name)
-    return getattr(module, attr)
-
-
-def _inject_session_id(runner_cfg: dict[str, Any], session_id: str) -> None:
-    for entry in runner_cfg.get("infer", {}).get("entries", []):
-        if isinstance(entry, dict) and entry.get("name") == "start_agent_daemon":
-            entry.setdefault("env", {})["XTUNER_SESSION_ID"] = session_id
-
-
-def _resolve_runner(pipeline: Any, session_id: str) -> Any:
-    if isinstance(pipeline, str):
-        pipeline = _import_from_path(pipeline)
-    if isinstance(pipeline, dict):
-        runner_cfg = copy.deepcopy(pipeline)
-        _inject_session_id(runner_cfg, session_id)
-        return create_object(runner_cfg)
-    return pipeline
 
 
 def _drop_failed_train_samples(
@@ -329,14 +303,15 @@ class AgentInSandboxLoop(AgentLoop):
             # This loop returns terminal Agent executions, never partial continuations.
             # Retire HTTP ownership after runner completion/cancellation, independently
             # of later filtering or replay consumption; keep trace ownership unchanged.
-            if self.retire_route_on_completion and self.rollout_ctl is not None and rollout_state.session_id is not None:
+            if (
+                self.retire_route_on_completion
+                and self.rollout_ctl is not None
+                and rollout_state.session_id is not None
+            ):
                 await self.rollout_ctl.retire_route_sessions.remote([str(rollout_state.session_id)])
 
     async def _run_item(self, item: AgentRolloutItem) -> AgentRolloutItem:
-        runner = _resolve_runner(item.pipeline, str(item.uid))
-        if runner is None:
-            raise ValueError("AgentRolloutItem.pipeline is required.")
-        return await runner.run(item)
+        return await run_trial_process(item)
 
     async def _build_rollout_states(self, rollout_state: RolloutState, item: AgentRolloutItem) -> list[RolloutState]:
         if self.mode == "eval":

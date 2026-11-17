@@ -1,8 +1,7 @@
-"""Run-scoped sandbox admission and finalization state on a trusted shared filesystem."""
+"""Run-scoped sandbox lifecycle integration, admission and durable finalization state."""
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import time
@@ -11,10 +10,107 @@ import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, TextIO
+from typing import TYPE_CHECKING, Any, TextIO
+
+
+if __package__:
+    from . import locking
+else:
+    import locking
+
+
+if TYPE_CHECKING:
+    from loguru import Logger
 
 
 _OWNER_LOCKS: weakref.WeakSet[TextIO] = weakref.WeakSet()
+_WORKER_ENVIRONMENT = (
+    "XTUNER_SANDBOX_CLEANUP_DIR",
+    "XTUNER_SANDBOX_PROVIDER_KEY",
+    "XTUNER_SANDBOX_CLEANUP_EXIT_TIMEOUT",
+    "XTUNER_SANDBOX_CLEANUP_FACTORY",
+    "XTUNER_SANDBOX_RECOVERY_CONCURRENCY",
+    "XTUNER_SANDBOX_RECOVERY_ATTEMPTS",
+    "XTUNER_SANDBOX_RECOVERY_BACKOFF",
+    "XTUNER_SANDBOX_RECOVERY_MAX_BACKOFF",
+    "XTUNER_SANDBOX_RECOVERY_ATTEMPT_TIMEOUT",
+    "XTUNER_SANDBOX_RECOVERY_BUDGET",
+    "XTUNER_SANDBOX_TRIAL_TIMEOUT",
+    "XTUNER_SANDBOX_TRIAL_STOP_TIMEOUT",
+    "XTUNER_SANDBOX_TRIAL_RECOVERY_TIMEOUT",
+)
+
+
+def worker_runtime_env() -> dict[str, dict[str, str]]:
+    """Project cleanup configuration into Ray actors without forwarding credentials."""
+    environment = {key: os.environ[key] for key in _WORKER_ENVIRONMENT if key in os.environ}
+    if os.environ.get("XTUNER_SANDBOX_CLEANUP_PEERS") == "1":
+        environment["XTUNER_SANDBOX_CLEANUP_PEERS"] = "1"
+    return {"env_vars": environment}
+
+
+def register_peer_if_configured() -> None:
+    """Start a worker exit witness only when this run explicitly enables peers."""
+    if os.environ.get("XTUNER_SANDBOX_CLEANUP_PEERS") == "1":
+        from .cleanup import start_cleanup_supervisor
+
+        start_cleanup_supervisor(peer=True)
+
+
+def register_training_cleanup() -> None:
+    """Validate recovery before training, then restore handlers replaced by Ray."""
+    from xtuner.v1.rl.utils import register_cleanup
+
+    from .cleanup import start_cleanup_supervisor
+
+    start_cleanup_supervisor()
+    register_cleanup()
+
+
+@contextmanager
+def training_scope() -> Iterator[None]:
+    """Finalize every fit outcome without replacing an existing training error."""
+    from .cleanup import finish_training
+
+    outcome = "succeeded"
+    try:
+        yield
+    except BaseException as error:
+        outcome = "failed" if isinstance(error, Exception) else "interrupted"
+        raise
+    finally:
+        finish_training(outcome)
+
+
+def stop_before_drain(logger: Logger) -> None:
+    """Close sandbox admission before an existing task/Ray drain starts."""
+    from .cleanup import request_stop_from_environment
+
+    if not request_stop_from_environment():
+        logger.error("Sandbox admission stop pending; final recovery will retry")
+
+
+@contextmanager
+def ray_shutdown_scope(outcome: str | None, logger: Logger) -> Iterator[None]:
+    """Keep stop, independent shutdown protection and final recovery in one order.
+
+    The caller retains Ray shutdown on its original thread. Cleanup entry points
+    have no-op behavior when the run has no sandbox recovery configuration.
+    """
+    from .cleanup import cleanup_from_environment, guard_ray_shutdown
+
+    try:
+        try:
+            stop_before_drain(logger)
+        finally:
+            with guard_ray_shutdown(training_outcome=outcome):
+                yield
+    finally:
+        try:
+            if not cleanup_from_environment(finalize=True, training_outcome=outcome):
+                logger.error("Sandbox cleanup incomplete; inspect the run's cleanup-report.json")
+        except Exception as error:
+            logger.error(f"Sandbox cleanup failed ({type(error).__name__}); retain the run journal")
 
 
 def track_lock(lock: TextIO) -> TextIO:
@@ -89,9 +185,9 @@ def request_stop(directory: Path, reason: str) -> None:
 def claim_driver(directory: Path) -> TextIO:
     """Hold the driver lease until process death; reject reuse of a stopped run."""
     with admission(directory):
-        lease = track_lock((directory / "driver.lock").open("a"))
+        lease = track_lock(locking.open_lock(directory / "driver.lock"))
         try:
-            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locking.acquire(lease)
             if (directory / "driver.started.json").exists():
                 raise RuntimeError("Use a fresh cleanup directory for each training invocation")
             atomic_json(directory / "driver.started.json", {"pid": os.getpid(), "started_at": time.time()})
@@ -105,9 +201,9 @@ def driver_alive(directory: Path) -> bool:
     """Probe the kernel lease, without PID reuse or heartbeat expiry heuristics."""
     if not (directory / "driver.started.json").is_file():
         raise RuntimeError("Sandbox recovery peer requires a registered driver")
-    with track_lock((directory / "driver.lock").open("a")) as lease:
+    with track_lock(locking.open_lock(directory / "driver.lock")) as lease:
         try:
-            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locking.acquire(lease)
         except BlockingIOError:
             return True
         return False
@@ -119,6 +215,7 @@ def record_result(
     cleanup_confirmed: bool,
     training_outcome: str | None = None,
     finalization_failed: bool = False,
+    fit_acknowledged: bool = False,
 ) -> dict[str, Any]:
     """Publish final status without allowing a stale failed scan to undo confirmation.
 
@@ -144,7 +241,7 @@ def record_result(
             outcome = "interrupted"
         confirmed = previous.get("cleanup_confirmed") is True or cleanup_confirmed
         fit_confirmed = previous.get("fit_cleanup_confirmed") is True or (
-            training_outcome is not None and cleanup_confirmed
+            fit_acknowledged and training_outcome == "succeeded" and cleanup_confirmed
         )
         failed = previous.get("finalization_failed") is True or finalization_failed
         success = confirmed and fit_confirmed and outcome == "succeeded" and not failed
@@ -164,6 +261,6 @@ def record_result(
 @contextmanager
 def _gate(directory: Path, *, shared: bool = False) -> Iterator[None]:
     directory.mkdir(parents=True, exist_ok=True)
-    with track_lock((directory / "admission.lock").open("a")) as lock:
-        fcntl.flock(lock, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+    with track_lock(locking.open_lock(directory / "admission.lock")) as lock:
+        locking.acquire(lock, shared=shared, blocking=True)
         yield

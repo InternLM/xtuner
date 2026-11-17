@@ -288,7 +288,7 @@ async def test_rate_limiter_is_acquired_for_every_physical_create(monkeypatch: p
 
     limiter = Limiter()
     monkeypatch.setattr(
-        "xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox.get_shared_async_token_bucket",
+        "xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox.get_creation_limiter",
         lambda *_args, **_kwargs: limiter,
     )
     sandbox_pool = SandboxPool(
