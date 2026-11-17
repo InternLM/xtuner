@@ -98,7 +98,7 @@ class CriticWorker(RoleWorker):
         )
         # Actor checkpoints have no value_head.weight; the model handles the
         # missing-head exception and initializes it.
-        self.engine.from_hf(worker_cfg.load_from, strict=True)
+        self.engine.from_hf(worker_cfg.load_from)
         self.lr_scheduler = build_lr_scheduler(self.engine.optimizer, worker_cfg.lr_cfg, worker_cfg.scheduler_steps)
         self.loss_cfg = None  # CriticLossConfig has no finalize_metrics
 
