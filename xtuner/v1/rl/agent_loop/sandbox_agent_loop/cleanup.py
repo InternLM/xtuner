@@ -267,7 +267,9 @@ class CleanupJournal:
         self.flush()
 
     def detach(self) -> None:
-        """Publish terminal ownership before allowing another process to act."""
+        """Publish terminal ownership once; failed publication retains the lease."""
+        if self.lock.closed:
+            return
         self.data["state"] = (
             "pending"
             if (
@@ -277,10 +279,8 @@ class CleanupJournal:
             )
             else "complete"
         )
-        try:
-            self.flush()
-        finally:
-            self.lock.close()
+        self.flush()
+        self.lock.close()
 
 
 def _absent(exc: Exception) -> bool:

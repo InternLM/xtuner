@@ -162,7 +162,7 @@ async def serve_channel(sock: socket.socket) -> None:
 class _TrialChannel:
     """Multiplex permit waiters without tying socket framing to their lifetime."""
 
-    def __init__(self, sock: socket.socket):
+    def __init__(self, sock: socket.socket) -> None:
         self.socket = sock
         self.sending = asyncio.Lock()
         self.pending: dict[int, asyncio.Future] = {}

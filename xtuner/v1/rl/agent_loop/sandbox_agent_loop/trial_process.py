@@ -83,7 +83,9 @@ async def run_trial_process(item: AgentRolloutItem, *, limits: TrialProcessLimit
     """
     from .finalization import finalize_bounded
 
-    trial = _start_trial(item, limits or _configured_limits())
+    limits = limits or _configured_limits()
+    validate_trial_budget(item.trial_timeout_sec, limits=limits)
+    trial = _start_trial(item, limits)
     try:
         try:
             await _execute_trial(trial)
@@ -98,6 +100,29 @@ async def run_trial_process(item: AgentRolloutItem, *, limits: TrialProcessLimit
         return _read_result(trial, item)
     finally:
         _dispose_trial(trial)
+
+
+def validate_trial_budget(required_seconds: float | None, *, limits: TrialProcessLimits | None = None) -> None:
+    """Reject a declared business timeout longer than the enclosing process cap.
+
+    Args:
+        required_seconds (float | None): Recipe timeout, or no declared minimum.
+        limits (TrialProcessLimits | None): Explicit process limits or environment defaults.
+
+    Interpreter startup and teardown still consume the outer execution cap;
+    callers needing the full recipe window must configure additional headroom.
+    This check never extends either execution or recovery budgets.
+    """
+    if required_seconds is None:
+        return
+    if not math.isfinite(required_seconds) or required_seconds <= 0:
+        raise ValueError("trial_timeout_sec must be finite and positive")
+    configured = limits or _configured_limits()
+    if configured.execution < required_seconds:
+        raise ValueError(
+            f"XTUNER_SANDBOX_TRIAL_TIMEOUT={configured.execution:g} is shorter than "
+            f"trial_timeout_sec={required_seconds:g}; configure a larger outer cap including startup headroom"
+        )
 
 
 def _configured_limits() -> TrialProcessLimits:

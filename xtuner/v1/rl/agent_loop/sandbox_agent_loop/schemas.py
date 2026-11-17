@@ -198,6 +198,8 @@ class AgentRolloutItem(BaseModel):
     uid: int | None = None  # per-rollout unique id (different across K-rollouts of same query)
     pipeline: PipelineConfig | Any | None = None
     pipeline_overrides: dict[str, Any] = Field(default_factory=dict)
+    # Declared business timeout; the enclosing process cap must cover it.
+    trial_timeout_sec: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     # Output and observation.
     status: RolloutStatus = RolloutStatus.PENDING

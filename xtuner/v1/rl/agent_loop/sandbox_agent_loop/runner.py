@@ -105,7 +105,6 @@ class Runner:
             self._log_final(item.id, item, timings.acquire, timings.infer, timings.validate)
 
     async def _run_stages(self, item: AgentRolloutItem, pool: SandboxPool, timings: _RunTimings) -> AgentRolloutItem:
-        """Acquire, infer and validate under the caller's trial scope."""
         self._validate_input(item)
         tid = item.id
         uid_obs = str(item.uid) if item.uid is not None else ""

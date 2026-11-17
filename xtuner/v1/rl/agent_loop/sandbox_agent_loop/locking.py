@@ -42,8 +42,9 @@ def open_lock(path: Path) -> TextIO:
                 # Never replace a lock inode: its owner may still be alive.
                 os.link(temporary, path)
             except FileExistsError:
+                replacement = os.open(path, os.O_RDWR | os.O_CLOEXEC)
                 os.close(descriptor)
-                descriptor = os.open(path, os.O_RDWR | os.O_CLOEXEC)
+                descriptor = replacement
             directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
             try:
                 os.fsync(directory)

@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from lagent.utils import create_object
 
@@ -27,6 +27,10 @@ from .finalization import CleanupError, finalize_bounded
 from .run_control import RunStoppingError, is_stopping
 from .task_control import watch_task
 from .trial_process import validate_trial_cleanup
+
+
+if TYPE_CHECKING:
+    from lagent.serving.sandbox.providers.base import SandboxProvider
 
 
 @dataclass
@@ -41,6 +45,15 @@ class SandboxLease:
 # A capability for one named member: the Lifecycle registers ownership before
 # the Pool can await health checks or provisioners.
 CreateSandbox = Callable[[str, Callable[[], Awaitable[dict[str, Any]]]], Awaitable[SandboxLease]]
+
+
+@dataclass
+class _Finalization:
+    release_attempted: bool = False
+    sealed: bool = False
+    handed_off: bool = False
+    completed: bool = False
+    release_error: tuple[str, str] | None = None
 
 
 class SandboxLifecycle:
@@ -97,12 +110,13 @@ class SandboxLifecycle:
         self._cleanup: dict[str, Any] = {"ok": False, "error_kind": None}
         self._release_complete = False
         self._provider_closed = False
+        self._finalization = _Finalization()
         self._cleanup_clients: list[Any] = []
         self._pending_delete_ids: set[str] = set()
         self._pending_verification_ids: set[str] = set()
         self._releasing = False
         self._phase_delete_deadline: float | None = None
-        self._provider = create_object(provider)
+        self._provider: SandboxProvider[Any] = create_object(provider)
         query_supported = callable(getattr(self._provider, "get", None))
         self._verify_deletion = (
             getattr(self._provider, "supports_deletion_confirmation", False) is True
@@ -117,6 +131,7 @@ class SandboxLifecycle:
         self._env_ids: dict[str, str] = {}
         self._urls: dict[str, str | None] = {}
         self._groups: dict[str, list[SandboxLease]] = {}
+        self._name_locks: dict[str, asyncio.Lock] = {}
         self._active_acquisitions: dict[asyncio.Future[None], asyncio.Task[Any]] = {}
 
     async def acquire_group(
@@ -131,21 +146,27 @@ class SandboxLifecycle:
         The callback plans/prepares members and checks application readiness.
         Its create capability registers every lease before returning it. The
         lifecycle alone decides whether a failed transaction is safe to replay.
+        Calls for one name share a committed group; different names may acquire
+        concurrently. Waiting calls remain part of the release/close drain.
         """
         self._assert_acquisition_open()
-        if self._pending_delete_ids or self._pending_verification_ids:
-            raise RuntimeError("Previous sandbox cleanup is still pending")
         task = asyncio.current_task()
         assert task is not None
         completed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._active_acquisitions[completed] = task
         try:
-            if self._journal_dir:
-                await self._ensure_journal()
-            self._assert_acquisition_open()
-            if name in self._clients:
-                return self._clients[name]
-            return await self._acquire_group(name, acquire, max_attempts)
+            # Retain locks for the Pool's named plans: replacing a lock while
+            # it still has waiters would allow two owners of the same name.
+            async with self._name_locks.setdefault(name, asyncio.Lock()):
+                self._assert_acquisition_open()
+                if self._pending_delete_ids or self._pending_verification_ids:
+                    raise RuntimeError("Previous sandbox cleanup is still pending")
+                if name in self._clients:
+                    return self._clients[name]
+                if self._journal_dir:
+                    await self._ensure_journal()
+                self._assert_acquisition_open()
+                return await self._acquire_group(name, acquire, max_attempts)
         finally:
             self._active_acquisitions.pop(completed)
             completed.set_result(None)
@@ -375,7 +396,7 @@ class SandboxLifecycle:
     async def _close_phase_clients(self) -> None:
         self._cleanup["phase"] = "close_clients"
         clients = list(self._cleanup_clients)
-        self._cleanup["provider_closed"] = False
+        self._cleanup["provider_closed"] = self._provider_closed
         outcomes = await asyncio.gather(
             *(self._close_phase_client(client) for client in clients), return_exceptions=True
         )
@@ -410,12 +431,13 @@ class SandboxLifecycle:
 
     async def _finish_exclusive(self, release_phase: Callable[[], Awaitable[None]]) -> None:
         async with self._close_lock:
-            if self._closed and (
-                self._journal is not None or self._deferred_cleanup is not None or self._provider_closed
-            ):
+            state = self._finalization
+            if state.completed:
+                if state.release_error is not None:
+                    raise CleanupError(*state.release_error)
                 return
             try:
-                await release_phase()
+                await self._release_for_finalization(release_phase)
             finally:
                 if self._active_acquisitions:
                     # Do not seal a still-writing journal or close a transport
@@ -428,39 +450,72 @@ class SandboxLifecycle:
                 await self._close_management(pending, recoverable)
                 if self._journal is not None and self._journal.has_unresolved_creation:
                     raise CleanupError("cleanup_ambiguous_create", "create")
+                state.completed = (not pending or recoverable) and not self._cleanup_clients
+                if pending and not recoverable and self._journal is None:
+                    # An untransferred in-memory owner can explicitly retry
+                    # release on its original transport, with no new worker.
+                    state.sealed = False
+                    state.release_attempted = False
+            if state.release_error is not None:
+                raise CleanupError(*state.release_error)
+            self._cleanup.update(ok=True, error_kind=None)
+
+    async def _release_for_finalization(self, release_phase: Callable[[], Awaitable[None]]) -> None:
+        state = self._finalization
+        if state.release_attempted:
+            if self._cleanup_clients:
+                await self._close_phase_clients()
+            return
+        state.release_error = None
+        try:
+            await release_phase()
+        except CleanupError as error:
+            state.release_error = (error.kind, error.phase)
+            raise
+        except Exception:
+            state.release_error = ("cleanup_failed", "release")
+            raise
+        finally:
+            state.release_attempted = not self._active_acquisitions
 
     async def _seal_resources(self) -> frozenset[str]:
         pending = self.pending_resource_ids
+        if self._finalization.sealed:
+            return pending
         for env_id in pending:
             await self._remember_created(env_id)
         self._closed = True
         if self._journal is not None:
             await self._journal.persist(self._journal.detach)
+        self._finalization.sealed = True
         return pending
 
     async def _handoff(self, pending: frozenset[str]) -> bool:
         durable = self._journal is not None and bool(os.environ.get("XTUNER_SANDBOX_CLEANUP_FACTORY"))
         recoverable = self._recovery_config is not None or durable
         ambiguous = self._journal is not None and self._journal.has_unresolved_creation
-        if (pending or ambiguous) and recoverable:
-            self._deferred_cleanup = defer_cleanup(
-                [key for key in self._known_ids if key in pending],
-                self._fresh_provider,
-                journal=self._journal,
-                timeout=self._cleanup_retry_timeout_sec,
-                verify_deletion=self._verify_deletion,
-            )
-            self._cleanup["deferred"] = True
-            self._deferred_cleanup.add_done_callback(self._record_recovery_result)
+        if (pending or ambiguous) and recoverable and not self._finalization.handed_off:
+            task = self._deferred_cleanup
+            if task is None or task.cancelled() or (task.done() and task.exception() is not None):
+                task = self._deferred_cleanup = defer_cleanup(
+                    [key for key in self._known_ids if key in pending],
+                    self._fresh_provider,
+                    journal=self._journal,
+                    timeout=self._cleanup_retry_timeout_sec,
+                    verify_deletion=self._verify_deletion,
+                )
+                self._cleanup["deferred"] = True
+                task.add_done_callback(self._record_recovery_result)
             if durable:
                 # Ownership is not handed off until the durable enqueue finishes.
-                await self._deferred_cleanup
+                await asyncio.shield(task)
+            self._finalization.handed_off = True
         return recoverable
 
-    def _fresh_provider(self) -> Any:
+    def _fresh_provider(self) -> SandboxProvider[Any]:
         if self._recovery_config is None:
             raise RuntimeError("Recovery requires the configured durable factory")
-        provider = create_object(deepcopy(self._recovery_config))
+        provider: SandboxProvider[Any] = create_object(deepcopy(self._recovery_config))
         if provider is self._provider:
             raise RuntimeError("Cleanup factory must return a fresh provider")
         return provider
@@ -477,7 +532,7 @@ class SandboxLifecycle:
     async def _close_management(self, pending: frozenset[str], recoverable: bool) -> None:
         # Keep unrecoverable failed ownership on the original transport for an
         # explicit retry; a shared provider is never closed by this lifecycle.
-        if self._close_provider and (not pending or recoverable):
+        if self._close_provider and not self._provider_closed and (not pending or recoverable):
             close = getattr(self._provider, "aclose", None)
             if close is not None:
                 await finalize_bounded(close(), timeout_seconds=5, diagnostic={})
