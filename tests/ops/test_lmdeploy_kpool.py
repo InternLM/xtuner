@@ -326,6 +326,8 @@ class TestLMDeployKPoolAvailability:
         self, monkeypatch: pytest.MonkeyPatch, heads: int, pools: int, local_columns: bool
     ) -> None:
         envs = pytest.importorskip("lmdeploy.pytorch.envs")
+        if not hasattr(envs, "dsa_indexer_max_logits_mb"):
+            pytest.skip("requires LMDeploy KPool logits-budget API")
         monkeypatch.setattr(envs, "dsa_indexer_max_logits_mb", 32)
         for requested in (None, 7, 16384):
             rows = _score_chunk_size(pools, heads, requested, local_columns=local_columns)
@@ -340,6 +342,8 @@ class TestLMDeployKPoolAvailability:
         self, monkeypatch: pytest.MonkeyPatch, local_columns: bool
     ) -> None:
         envs = pytest.importorskip("lmdeploy.pytorch.envs")
+        if not hasattr(envs, "dsa_indexer_max_logits_mb"):
+            pytest.skip("requires LMDeploy KPool logits-budget API")
         monkeypatch.setattr(envs, "dsa_indexer_max_logits_mb", 1)
         with pytest.raises(ValueError, match="minimum aligned allocation"):
             _score_chunk_size(262145, 32, None, local_columns=local_columns)
