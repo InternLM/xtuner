@@ -443,6 +443,25 @@ class RolloutTraceStore:
         trie = self.get_or_create(session_id)
         return trie.search(text, filter_none)
 
+    def empty_sessions(self, session_ids: list[str]) -> list[str]:
+        """Empty existing sessions while retaining their session entries.
+
+        Args:
+            session_ids (list[str]): Session identifiers to empty.
+
+        Returns:
+            list[str]: Session identifiers that existed and were emptied.
+        """
+        emptied_session_ids = []
+        for session_id in dict.fromkeys(session_ids):
+            if session_id not in self.sessions:
+                continue
+            # Drop only the store's holder. Exported rollout states may still
+            # borrow legacy or shared refs, so this path must not force-free.
+            self.sessions[session_id] = Trie()
+            emptied_session_ids.append(session_id)
+        return emptied_session_ids
+
     def release(self, session_id: str, key: str | None = None):
         """Release Trie nodes and free associated resources for a session.
 
@@ -693,6 +712,26 @@ def get_existing_store():
     except ValueError:
         return None
     return _handle_cache
+
+
+async def empty_existing_sessions(session_ids: list[str]) -> set[str]:
+    """Empty trace sessions without creating the singleton store.
+
+    Args:
+        session_ids (list[str]): Candidate trace session identifiers.
+
+    Returns:
+        set[str]: Session identifiers that existed and were emptied.
+    """
+    session_ids = list(dict.fromkeys(str(session_id) for session_id in session_ids))
+    if not session_ids:
+        return set()
+
+    store = get_existing_store()
+    if store is None:
+        return set()
+
+    return set(await store.empty_sessions.remote(session_ids))
 
 
 async def release_existing_sessions(session_ids: list[str]) -> set[str]:

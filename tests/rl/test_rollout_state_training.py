@@ -8,6 +8,7 @@
 """
 
 import unittest
+from unittest.mock import patch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, TrainMeta
 
@@ -172,6 +173,21 @@ class TestResetResponse(unittest.TestCase):
         self.assertEqual(state.response_model_steps, [])
         self.assertEqual(state.tokens, [10, 11])
         self.assertIsNotNone(state.mm_info)
+
+    def test_reset_drops_route_holder_without_force_free(self):
+        state = make_state(
+            routed_experts=[object()],
+            routed_experts_shared=True,
+            extra_fields={"request_ids": ["old-request"]},
+        )
+
+        with patch("xtuner.v1.rl.utils.ray_utils.free_object_refs") as free_refs:
+            state.reset_response()
+
+        free_refs.assert_not_called()
+        self.assertIsNone(state.routed_experts)
+        self.assertFalse(state.routed_experts_shared)
+        self.assertNotIn("request_ids", state.extra_fields)
 
     def test_regenerated_fields_can_be_published_again(self):
         state = make_state()

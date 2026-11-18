@@ -84,7 +84,10 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
             }
             for index in range(segment_count)
         ]
-        return SimpleNamespace(export_training_trace=SimpleNamespace(remote=AsyncMock(side_effect=traces)))
+        return SimpleNamespace(
+            export_training_trace=SimpleNamespace(remote=AsyncMock(side_effect=traces)),
+            empty_sessions=SimpleNamespace(remote=AsyncMock()),
+        )
 
     async def test_completed_session_assigns_artifacts_only_to_first_segment(self):
         loop = self._make_loop()
@@ -116,6 +119,7 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([segment.prompt_ids for segment in segments], [[1], [1]])
         self.assertEqual([segment.response_ids for segment in segments], [[10, 20], [11, 21]])
         self.assertEqual(item.artifacts, original_artifacts)
+        trace_store.empty_sessions.remote.assert_awaited_once_with([str(state.session_id)])
 
     async def test_parallel_tool_calls_counted_individually(self):
         # 行为:一个 assistant turn 并行发起 2 个 tool call 时,agent_tool_calls 记 2(调用个数口径)

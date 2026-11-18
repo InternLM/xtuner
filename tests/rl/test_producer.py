@@ -390,6 +390,32 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         ctx.progress.add_produced.assert_called_once_with(task_name, samples=1, tokens=2)
         self.assertEqual(group[0].response_model_steps, [0, 1, 1])
 
+    async def test_sample_group_normalizes_expired_sessions_before_generation(self):
+        retried = make_rollout_state(1, status=Status.EXPIRED)
+        retried.session_id = 10
+        completed_sibling = make_rollout_state(2, status=Status.COMPLETED)
+        completed_sibling.session_id = 10
+        untouched = make_rollout_state(3, status=Status.COMPLETED)
+        untouched.session_id = 20
+        sampled = [retried, completed_sibling, untouched]
+        sampler = self._build_sampler()
+        sampler.sample = AsyncMock(return_value=sampled)
+        ctx = self._build_context(
+            SyncProduceStrategyConfig().build(),
+            "normalized_retry_inputs",
+            self._build_agent_loop(),
+            sampler,
+            batch_size=1,
+        )
+
+        result = await ctx.sample_group(from_expired_pool=True)
+
+        self.assertEqual(result, [retried, untouched])
+        sampler.sample.assert_awaited_once_with(
+            task_name="normalized_retry_inputs",
+            group_status=[Status.EXPIRED, Status.ABORTED],
+        )
+
     async def test_generation_filters_only_completed_group(self):
         # 过滤由 AgentLoop generation 执行；Producer 只处理返回状态和数据所有权。
         task_name = "test_valid_completed_only"

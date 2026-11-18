@@ -32,6 +32,7 @@ from xtuner.v1.rl.rollout.trace_store import (
     RolloutTraceStore,
     TokenizedSegment,
     _free_ray_refs,
+    empty_existing_sessions,
     get_existing_store,
     release_and_discard_rollout_groups,
     release_existing_sessions,
@@ -116,6 +117,45 @@ class TestRolloutTraceStore(unittest.TestCase):
 
         self.assertEqual(released, {"one"})
         release_remote.assert_awaited_once_with(["one", "missing"])
+
+    def test_empty_existing_sessions_stably_deduplicates_before_rpc(self):
+        empty_remote = AsyncMock(return_value=["one"])
+        store = SimpleNamespace(empty_sessions=SimpleNamespace(remote=empty_remote))
+        with patch(
+            "xtuner.v1.rl.rollout.trace_store.get_existing_store",
+            return_value=store,
+        ):
+            emptied = asyncio.run(empty_existing_sessions(["one", "one", "missing"]))
+
+        self.assertEqual(emptied, {"one"})
+        empty_remote.assert_awaited_once_with(["one", "missing"])
+
+    def test_empty_session_preserves_exported_ref_and_accepts_new_trace(self):
+        store = RolloutTraceStore.remote()
+        exported_ref = ray.put({"routes": [1, 2, 3]})
+        try:
+            ray.get(
+                store.insert.remote(
+                    "a",
+                    "old",
+                    TokenizedSegment(
+                        text="old",
+                        token_ids=[1],
+                        expert_key=exported_ref,
+                    ),
+                )
+            )
+
+            emptied = ray.get(store.empty_sessions.remote(["a", "missing", "a"]))
+
+            self.assertEqual(emptied, ["a"])
+            self.assertEqual(ray.get(store.list_sessions.remote()), ["a"])
+            self.assertEqual(ray.get(store.keys.remote("a")), [])
+            self.assertEqual(ray.get(exported_ref), {"routes": [1, 2, 3]})
+            ray.get(store.insert.remote("a", "new", {"value": 2}))
+            self.assertEqual(ray.get(store.keys.remote("a")), ["new"])
+        finally:
+            ray.kill(store)
 
     def test_release_existing_sessions_handles_empty_input_and_missing_store(self):
         with patch("xtuner.v1.rl.rollout.trace_store.get_existing_store") as get_store:

@@ -279,6 +279,8 @@ class RolloutState(BaseModel):
         self.teacher_targets = None
         self.finish_reason = None
         self.response_model_steps = []
+        # request_ids describe the retired response and must not survive a retry.
+        self.extra_fields.pop("request_ids", None)
         self.reward = None
         self.error_msg = None
         # input_ids/labels 是上一轮 canonicalize 的产物，必须一并清掉，否则重生成后

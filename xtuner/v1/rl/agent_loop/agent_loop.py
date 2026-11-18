@@ -269,12 +269,20 @@ class AgentLoop(ABC):
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         """Generate one rollout group.
 
+        Completed inputs are reused and excluded from re-scoring. Group validity
+        filtering still applies to the full group.
+
         Warning:
             Subclasses overriding this method must preserve the Teacher/Judger/filter
             ordering described here. Without a validity check, Teacher scoring should
-            start as soon as each sample finishes generation. With a validity check,
+            start as soon as each newly generated sample finishes. With a validity check,
             only a completed group that passes filtering should be sent to the Teacher.
+            Group-level judging receives the full group; deferred Teacher scoring only
+            receives newly generated samples.
         """
+
+        reused_states = [state for state in rollout_state if state.status == Status.COMPLETED]
+        retry_states = [state for state in rollout_state if state.status != Status.COMPLETED]
 
         async def generate_one(state: RolloutState) -> RolloutState:
             state.sample_params = self.sample_params
@@ -282,13 +290,23 @@ class AgentLoop(ABC):
             state = await self._teacher_scorer.on_sample_ready(state)
             return state
 
-        group = list(await asyncio.gather(*(create_task(generate_one(state)) for state in rollout_state)))
-        if self.judger is not None and self.enable_batch_judge:
-            if all(sample.status == Status.COMPLETED for sample in group):
-                group = await self.run_judger(group)
+        generated_group = list(await asyncio.gather(*(create_task(generate_one(state)) for state in retry_states)))
+        group = reused_states + generated_group
+        fresh_group = generated_group
+        fresh_start = len(reused_states)
+        if (
+            fresh_group
+            and self.judger is not None
+            and self.enable_batch_judge
+            and all(sample.status == Status.COMPLETED for sample in group)
+        ):
+            group = await self.run_judger(group)
 
         group = maybe_filter_invalid_sample(group, self.is_valid_sample_fn, self.logger)
-        group = await self._teacher_scorer.on_group_ready(group)
+        # 仅对本轮新生成的样本进行 Teacher 评分，避免重复评分已复用的 COMPLETED 样本。
+        generated_group = group[fresh_start:]
+        if generated_group:
+            await self._teacher_scorer.on_group_ready(generated_group)
         return self.canonicalize_train_fields(group)
 
     def canonicalize_train_fields(self, group: list[RolloutState]) -> list[RolloutState]:

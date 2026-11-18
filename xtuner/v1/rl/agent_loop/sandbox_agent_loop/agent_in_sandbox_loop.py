@@ -304,6 +304,10 @@ class AgentInSandboxLoop(AgentLoop):
         self.min_valid_attempts = min_valid_attempts
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
+        reused_states = [state for state in rollout_state if state.status == Status.COMPLETED]
+        retry_states = [state for state in rollout_state if state.status != Status.COMPLETED]
+        reused_ids = {id(state) for state in reused_states}
+
         async def generate_one(state: RolloutState) -> list[RolloutState]:
             if self._sample_semaphore is None:
                 samples = await self.generate_sample(state)
@@ -312,14 +316,18 @@ class AgentInSandboxLoop(AgentLoop):
                     samples = await self.generate_sample(state)
             return [await self._teacher_scorer.on_sample_ready(sample) for sample in samples]
 
-        for state in rollout_state:
+        for state in retry_states:
             state.sample_params = self.sample_params
         # Cancellation must reach every sample and wait for all Runner.finally cleanups before this group ends.
-        sample_groups = await await_cancellable_tasks(generate_one(state) for state in rollout_state)
-        samples = [sample for sample_group in sample_groups for sample in sample_group]
+        sample_groups = await await_cancellable_tasks(generate_one(state) for state in retry_states)
+        samples = reused_states + [sample for sample_group in sample_groups for sample in sample_group]
         samples = _drop_failed_train_samples(samples, self.mode, self.min_valid_attempts)
         samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
-        samples = await self._teacher_scorer.on_group_ready(samples)
+        fresh_samples = [
+            state for state in samples if id(state) not in reused_ids and state.status == Status.COMPLETED
+        ]
+        if fresh_samples:
+            await self._teacher_scorer.on_group_ready(fresh_samples)
         return self.canonicalize_train_fields(samples)
 
     def canonicalize_train_fields(self, group: list[RolloutState]) -> list[RolloutState]:
@@ -336,6 +344,8 @@ class AgentInSandboxLoop(AgentLoop):
     async def generate_sample(  # type: ignore[override]
         self, rollout_state: RolloutState, **kwargs
     ) -> list[RolloutState]:
+        if rollout_state.status == Status.COMPLETED:
+            return [rollout_state]
         try:
             rollout_item = rollout_state.extra_fields["rollout_item"].model_copy(deep=True)
             if rollout_state.session_id is None:
@@ -467,6 +477,8 @@ class AgentInSandboxLoop(AgentLoop):
             rollout_states.append(segment_state)
 
         rollout_states[0].extra_fields["agent_artifacts"] = _to_json_safe(item.artifacts)
+        if rollout_state.session_id is not None:
+            await trace_store.empty_sessions.remote([str(rollout_state.session_id)])
         return rollout_states
 
     async def _fill_timeout_rollout_state(self, rollout_state: RolloutState) -> RolloutState:
