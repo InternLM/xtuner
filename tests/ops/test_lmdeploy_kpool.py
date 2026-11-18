@@ -3,7 +3,6 @@
 
 import importlib
 import math
-from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -12,7 +11,7 @@ import torch
 from torch import Tensor
 
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.ops.sparse_mla import get_kpool_plan, get_kpool_topk_indices
+from xtuner.v1.ops.sparse_mla import get_kpool_topk_indices
 from xtuner.v1.ops.sparse_mla.kpool import (
     build_pool_index,
     build_pools,
@@ -383,6 +382,21 @@ class TestLMDeployKPoolIndexer:
 
         if device == "cuda" and not torch.cuda.is_available():
             pytest.skip("CUDA required")
+        if backend.startswith("lmdeploy_") and not fp32_prep:
+            with pytest.raises(ValueError, match="requires indexer_kpool_fp32_prep=True"):
+                KPoolIndexer(
+                    hidden_size=16,
+                    q_lora_rank=8,
+                    index_head_dim=128,
+                    index_n_heads=32,
+                    index_topk=2048,
+                    index_kpool=4,
+                    index_kpool_always_select_tail=True,
+                    indexer_backend=backend,
+                    alignment=512,
+                    indexer_kpool_fp32_prep=False,
+                )
+            return
         adapter = importlib.import_module("xtuner.v1.ops.sparse_mla.lmdeploy_kpool")
         monkeypatch.setattr(adapter, "require_lmdeploy_kpool_device", lambda *args: None)
         torch.manual_seed(85)
@@ -409,7 +423,7 @@ class TestLMDeployKPoolIndexer:
             captured.update(keys=k, weights=weights)
             return torch.zeros(9, 1, 2560, dtype=torch.int32, device=device)
 
-        module._plan = replace(module._plan, topk_indices=capture)
+        module._topk_indices_fn = capture
         ctx = SequenceContext.from_input_ids((torch.zeros(1, 9, dtype=torch.long),), device=device)
         with torch.autocast(device, dtype=torch.bfloat16, enabled=autocast):
             projected = module.wk(hidden)
@@ -444,13 +458,15 @@ class TestLMDeployKPoolIndexer:
             index_kpool_always_select_tail=True,
             indexer_backend=backend,
             alignment=512,
+            indexer_kpool_fp32_prep=True,
         )
         ctx = SequenceContext.from_input_ids((torch.zeros(1, 1, dtype=torch.long),), device="cpu")
         with pytest.raises(RuntimeError, match="SM90"):
             indexer(torch.randn(1, 1, 16), torch.randn(1, 1, 8), ctx)
 
-    def test_native_plan_does_not_import_lmdeploy(self, monkeypatch):
+    def test_native_selector_does_not_import_lmdeploy(self, monkeypatch):
         import builtins
+        from xtuner.v1.model.moe.glm53.nope_dsa_mla import _prepare_fp32, _prepare_native
 
         original = builtins.__import__
 
@@ -460,9 +476,9 @@ class TestLMDeployKPoolIndexer:
             return original(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", without_lmdeploy)
+        assert callable(_prepare_native) and callable(_prepare_fp32)
         for backend in ("torch", "tilelang", "tilelang_deepselect", "tilelang_cooperative"):
-            plan = get_kpool_plan(backend, index_head_dim=8, index_n_heads=2, index_kpool=2, index_topk=4)
-            assert callable(plan.prepare) and callable(plan.topk_indices)
+            assert callable(get_kpool_topk_indices(backend))
 
     @pytest.mark.gpu
     @pytest.mark.parametrize("query_chunk_size", [7, 257])

@@ -241,9 +241,7 @@ class TestNoPEDSAMLAConfigIndexerChunking:
             captured.update(kwargs)
             return torch.full((4, 1, 8), -1, dtype=torch.int32)
 
-        from dataclasses import replace
-
-        indexer._plan = replace(indexer._plan, topk_indices=selector)
+        indexer._topk_indices_fn = selector
         ctx = SequenceContext.from_input_ids((torch.zeros(1, 4, dtype=torch.long),), device="cpu")
         indexer(torch.randn(1, 4, HIDDEN), torch.randn(1, 4, Q_LORA_RANK), ctx)
         assert captured["balance_sp"] is True

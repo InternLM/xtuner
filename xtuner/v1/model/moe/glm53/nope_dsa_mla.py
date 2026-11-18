@@ -28,13 +28,14 @@ from xtuner.v1.module.linear import build_linear
 from xtuner.v1.module.rms_norm import LayerNorm
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm import gather_for_sequence_parallel
+from xtuner.v1.ops.fp32_linear import fp32_linear
 from xtuner.v1.ops.sparse_mla import (
     KPoolIndexerBackend,
     SparseMLABackend,
     SparseMLAProtocol,
     ensure_deep_select_runtime_available,
     ensure_lmdeploy_kpool_runtime_available,
-    get_kpool_plan,
+    get_kpool_topk_indices,
     get_sparse_mla,
 )
 from xtuner.v1.ops.sparse_mla.flash_mla import _FLASH_MLA_HEAD_ALIGNMENT
@@ -49,6 +50,26 @@ _SPARSE_MLA_ALIGNMENT: dict[str, int] = {
     "flash_mla_cudnn": 512,
     "tilelang": 64,
 }
+
+
+def _prepare_native(indexer: "KPoolIndexer", hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    return indexer.k_norm(indexer.wk(hidden_states)), indexer.weights_proj(hidden_states).float()
+
+
+def _prepare_fp32(indexer: "KPoolIndexer", hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    projected_k = indexer.wk(hidden_states)
+    norm_weight = materialize_full(indexer.k_norm.weight, name="indexer.k_norm.weight")
+    norm_bias = materialize_full(indexer.k_norm.bias, name="indexer.k_norm.bias")
+    with torch.autocast(device_type=hidden_states.device.type, enabled=False):
+        keys = F.layer_norm(
+            projected_k.float(),
+            indexer.k_norm.normalized_shape,
+            norm_weight.float(),
+            norm_bias.float(),
+            indexer.k_norm.eps,
+        ).to(projected_k.dtype)
+    head_weight = materialize_full(cast(torch.Tensor, indexer.weights_proj.weight), name="indexer.weights_proj.weight")
+    return keys, fp32_linear(hidden_states, head_weight)
 
 
 class KPoolIndexer(nn.Module):
@@ -87,15 +108,12 @@ class KPoolIndexer(nn.Module):
         self.topk_query_chunk_size = topk_query_chunk_size
         self.balance_sp = balance_sp
         self.sp_full_pool_work_ratio = sp_full_pool_work_ratio
-        self._plan = get_kpool_plan(
-            indexer_backend,
-            index_head_dim=index_head_dim,
-            index_n_heads=index_n_heads,
-            index_kpool=index_kpool,
-            index_topk=index_topk,
-            balance_sp=balance_sp,
-            fp32_prep=indexer_kpool_fp32_prep,
-        )
+        # Direct construction bypasses NoPEDSAMLAConfig.build(), so preserve the serving
+        # precision contract before resolving the backend callables.
+        if indexer_backend in ("lmdeploy_fp8", "lmdeploy_bf16") and not indexer_kpool_fp32_prep:
+            raise ValueError(f"{indexer_backend} requires indexer_kpool_fp32_prep=True")
+        self._topk_indices_fn = get_kpool_topk_indices(indexer_backend)
+        self._prepare_fn = _prepare_fp32 if indexer_kpool_fp32_prep else _prepare_native
 
         self.wq_b = build_linear(q_lora_rank, index_n_heads * index_head_dim, bias=False)
         self.wk = build_linear(hidden_size, index_head_dim, bias=False)
@@ -121,10 +139,10 @@ class KPoolIndexer(nn.Module):
         kpool_ape = materialize_full(self.index_kpool_compress_ape, name="indexer.index_kpool_compress_ape")
 
         q = self.wq_b(q_resid).view(bsz, seq_len, self.index_n_heads, self.index_head_dim)
-        k, weights = self._plan.prepare(self, hidden_states)
+        k, weights = self._prepare_fn(self, hidden_states)
         gate_scores = F.linear(hidden_states, gate_weight)
 
-        topk_ids = self._plan.topk_indices(
+        topk_ids = self._topk_indices_fn(
             q,
             k,
             gate_scores,
