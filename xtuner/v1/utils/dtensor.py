@@ -1,4 +1,4 @@
-from typing import cast
+from typing import TypeGuard
 
 import torch
 import torch.distributed as dist
@@ -11,6 +11,21 @@ from torch.utils._foreach_utils import (
 )
 
 
+def is_sharded_placement(placement: Placement) -> TypeGuard[Shard | _StridedShard]:
+    """Check whether a placement splits a tensor dimension across ranks.
+
+    ``_StridedShard`` subclasses ``Shard`` in older PyTorch releases but not in newer ones, so both
+    types are named explicitly instead of relying on the class hierarchy.
+
+    Args:
+        placement (Placement): Placement to classify.
+
+    Returns:
+        TypeGuard[Shard | _StridedShard]: Whether the placement owns a disjoint slice.
+    """
+    return isinstance(placement, (Shard, _StridedShard))
+
+
 def materialize_full(param: torch.Tensor, *, name: str = "") -> torch.Tensor:
     """Unwrap a parameter into a plain, whole :class:`torch.Tensor` for a
     kernel that does not understand :class:`DTensor` (Triton, FLA, an absorbed-
@@ -18,7 +33,7 @@ def materialize_full(param: torch.Tensor, *, name: str = "") -> torch.Tensor:
 
     Accepts only parameters that are already whole -- a plain tensor, or a ``Replicate``
     :class:`DTensor` such as FSDP2 hands back after unsharding a module whose parameters were
-    replicated on the expert-parallel mesh. A ``Shard`` placement raises instead of returning
+    replicated on the expert-parallel mesh. A sharded placement raises instead of returning
     the local slice: every call site reshapes by head or channel immediately afterwards, so a
     slice would be silently mis-grouped rather than caught as a shape error.
 
@@ -37,7 +52,7 @@ def materialize_full(param: torch.Tensor, *, name: str = "") -> torch.Tensor:
     """
     if not isinstance(param, DTensor):
         return param
-    if any(isinstance(placement, Shard) for placement in param.placements):
+    if any(is_sharded_placement(placement) for placement in param.placements):
         raise RuntimeError(
             f"{name or 'parameter'} is still sharded ({param.placements}) where a whole tensor is "
             "required; the local shard would be silently mis-grouped by the reshape that follows."
@@ -112,9 +127,8 @@ def cal_total_norm(
     if norm_type == 2:
         local_norm_squared = local_norm**2
         for i, placement in enumerate(placements):
-            if isinstance(placement, (Shard, _StridedShard)):
-                # Both placements own disjoint shards along this mesh dimension.
-                # _StridedShard is not a Shard subclass in PyTorch 2.10.
+            if is_sharded_placement(placement):
+                # Sharded placements own disjoint slices, so their squared norms add up.
                 dist.all_reduce(local_norm_squared, group=device_mesh.get_group(i))
             elif isinstance(placement, Replicate):
                 pass
@@ -136,8 +150,8 @@ def is_evenly_distributed(dtensor: DTensor) -> bool:
     tensor_dim_to_mesh_dims: dict[int, list[int]] = {}
 
     for dim_idx, placement in enumerate(placements):
-        if hasattr(placement, "is_shard") and placement.is_shard():
-            mesh_dim = cast(Shard, placement).dim
+        if is_sharded_placement(placement):
+            mesh_dim = placement.dim
             if dim_idx not in tensor_dim_to_mesh_dims:
                 tensor_dim_to_mesh_dims[dim_idx] = []
             tensor_dim_to_mesh_dims[dim_idx].append(mesh_dim)
