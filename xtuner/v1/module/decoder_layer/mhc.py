@@ -28,7 +28,7 @@ FFN sub-blocks with this ``hc_pre`` / sub_block / ``hc_post`` pattern.
 import os
 
 import torch
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from torch import Tensor
 
 from xtuner.v1.ops.fp32_linear import fp32_linear
@@ -59,6 +59,13 @@ class MHCConfig(BaseModel):
         hc_sinkhorn_iters (int): Number of Sinkhorn iterations.
         fused_pre (bool): Use the FP32 Triton norm/projection path that follows
             DeepSeek's kernel decomposition without materializing FP32 flattened activations.
+            Requires bf16 CUDA inputs, ``hc_mult * hidden_size`` divisible by 128, and
+            ``(2 + hc_mult) * hc_mult <= 32`` (i.e. ``hc_mult <= 4``). Off by default;
+            enable it through the ``mhc`` field of the XTuner training config -- the
+            ``from_hf`` conversion path does not carry this flag and keeps it off.
+        projection_block_size (int): Eager-path GEMM row geometry forwarded to
+            ``fp32_linear``. The fused path fixes its GEMM geometry in the kernel
+            constants instead, so this must stay ``0`` when ``fused_pre`` is on.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -68,6 +75,12 @@ class MHCConfig(BaseModel):
     hc_sinkhorn_iters: int = 20
     projection_block_size: int = Field(default=0, ge=0)
     fused_pre: bool = False
+
+    @model_validator(mode="after")
+    def _reject_block_size_with_fused_pre(self) -> "MHCConfig":
+        if self.fused_pre and self.projection_block_size != 0:
+            raise ValueError("projection_block_size must be 0 when fused_pre=True")
+        return self
 
 
 def hc_split_sinkhorn(
@@ -166,6 +179,9 @@ def hc_pre(
         iters (int): Sinkhorn iterations.
         eps (float): Sinkhorn stabilizer.
         norm_eps (float): RMS-norm stabilizer applied before projecting to ``mixes``.
+        projection_block_size (int): Eager-path GEMM row geometry forwarded to
+            ``fp32_linear``; the fused path fixes its GEMM geometry in the kernel
+            constants instead, so this must stay ``0`` when ``fused_pre`` is on.
         fused_pre (bool): Fuse RMSNorm and projection with the FP32 Triton backend.
 
     Returns:
@@ -175,6 +191,8 @@ def hc_pre(
             - ``comb`` (``[B, S, hc_mult, hc_mult]``): combination weights used by :func:`hc_post`.
     """
     shape, dtype = x.size(), x.dtype
+    if fused_pre and projection_block_size != 0:
+        raise ValueError("projection_block_size must be 0 when fused_pre=True")
     x_flat = x.flatten(2)
     # HF keeps both the unweighted norm and mixing projection in fp32. A BF16
     # projection can round differently when SP changes the number of token rows,

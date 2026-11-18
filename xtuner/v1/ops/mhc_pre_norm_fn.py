@@ -11,7 +11,7 @@ import triton.language as tl
 
 
 @triton.jit
-def _fwd_mul(x_ptr, fn_ptr, out_ptr, sqrsum_ptr, seq_len: tl.constexpr, hidden: tl.constexpr, mix_size: tl.constexpr):
+def _fwd_mul(x_ptr, fn_ptr, out_ptr, sqrsum_ptr, seq_len, hidden: tl.constexpr, mix_size: tl.constexpr):
     token_block: tl.constexpr = 32
     hidden_block: tl.constexpr = 128
     mix: tl.constexpr = 32
@@ -45,7 +45,7 @@ def _bwd_x(
     x_ptr,
     fn_ptr,
     x_grad_ptr,
-    seq_len: tl.constexpr,
+    seq_len,
     hidden: tl.constexpr,
     mix_size: tl.constexpr,
 ):
@@ -71,7 +71,7 @@ def _bwd_x(
 
 
 @triton.jit
-def _bwd_fn(out_grad_ptr, x_ptr, fn_grad_ptr, seq_len: tl.constexpr, hidden: tl.constexpr, mix_size: tl.constexpr):
+def _bwd_fn(out_grad_ptr, x_ptr, fn_grad_ptr, seq_len, hidden: tl.constexpr, mix_size: tl.constexpr):
     token_block: tl.constexpr = 32
     hidden_block: tl.constexpr = 128
     mix: tl.constexpr = 32
@@ -102,8 +102,7 @@ class MHCPreNormFn(torch.autograd.Function):
         assert fn.ndim == 2 and x.shape[-2] * x.shape[-1] == fn.shape[1]
         assert fn.shape[0] <= 32 and fn.shape[1] % 128 == 0
         assert fn.is_contiguous()
-        x_flat = x.flatten(2).reshape(-1, fn.shape[1])
-        assert x_flat.is_contiguous()
+        x_flat = x.flatten(2).reshape(-1, fn.shape[1]).contiguous()
         seq_len, hidden = x_flat.shape
         mix_size = fn.shape[0]
         out_mul = torch.empty(seq_len, mix_size, device=x.device, dtype=torch.float32)
@@ -117,7 +116,7 @@ class MHCPreNormFn(torch.autograd.Function):
     @staticmethod
     def backward(ctx, out_grad: torch.Tensor):
         x, fn, out_mul, sqrsum = ctx.saved_tensors
-        x_flat = x.flatten(2).reshape(-1, fn.shape[1])
+        x_flat = x.flatten(2).reshape(-1, fn.shape[1]).contiguous()
         seq_len, hidden = x_flat.shape
         mix_size = fn.shape[0]
         out_grad = out_grad.reshape(-1, mix_size)
@@ -127,9 +126,9 @@ class MHCPreNormFn(torch.autograd.Function):
         x_grad = torch.empty_like(x_flat)
         fn_grad = torch.empty_like(fn)
         _bwd_x[(triton.cdiv(seq_len, 32), hidden // 128)](
-            out_mul_grad.contiguous(), sqrsum_grad.contiguous(), x_flat, fn, x_grad, seq_len, hidden, mix_size
+            out_mul_grad, sqrsum_grad, x_flat, fn, x_grad, seq_len, hidden, mix_size
         )
-        _bwd_fn[(hidden // 128,)](out_mul_grad.contiguous(), x_flat, fn_grad, seq_len, hidden, mix_size)
+        _bwd_fn[(hidden // 128,)](out_mul_grad, x_flat, fn_grad, seq_len, hidden, mix_size)
         return x_grad.view_as(x), fn_grad, None
 
 

@@ -1,6 +1,7 @@
 import pytest
 import torch
 import torch.nn.functional as F
+from pydantic import ValidationError
 from torch.testing._internal.common_distributed import DistributedTestBase
 from torch.utils.checkpoint import checkpoint
 
@@ -101,6 +102,32 @@ def test_mhc_pre_norm_fn_compile_matches_eager_forward_and_backward():
 
 
 @pytest.mark.gpu
+def test_hc_pre_compile_fullgraph_matches_eager_fused_path():
+    # Production composition: hc_pre sits in glm53's default compile table with
+    # fullgraph=True, so the fused branch must trace through dynamo (lazy import,
+    # custom autograd.Function, Triton kernels) without a graph break.
+    torch.manual_seed(7)
+    x = torch.randn(1, 7, 4, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    fn = torch.randn(24, 512, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    scale = torch.randn(3, device="cuda", dtype=torch.float32, requires_grad=True)
+    base = torch.randn(24, device="cuda", dtype=torch.float32, requires_grad=True)
+    tensors = (x, fn, scale, base)
+    refs = tuple(tensor.detach().clone().requires_grad_() for tensor in tensors)
+
+    compiled = torch.compile(lambda *args: hc_pre(*args, 4, 20, 1e-6, norm_eps=1e-5, fused_pre=True), fullgraph=True)
+    actual = compiled(*tensors)
+    expected = hc_pre(*refs, 4, 20, 1e-6, norm_eps=1e-5, fused_pre=True)
+    for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
+        assert actual_tensor.shape == expected_tensor.shape
+        assert _relative_l2(actual_tensor, expected_tensor) < 2e-4
+
+    sum(tensor.square().sum() for tensor in actual).backward()
+    sum(tensor.square().sum() for tensor in expected).backward()
+    for tensor, ref in zip(tensors, refs, strict=True):
+        assert _relative_l2(tensor.grad, ref.grad) < 5e-3
+
+
+@pytest.mark.gpu
 def test_mhc_pre_norm_fn_checkpoint_matches_direct():
     torch.manual_seed(31)
     x = torch.randn(1, 7, 4, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
@@ -143,6 +170,18 @@ def test_fused_pre_defaults_off():
     assert MHCConfig(hc_mult=4).fused_pre is False
 
 
+def test_fused_pre_rejects_projection_block_size():
+    with pytest.raises(ValidationError):
+        MHCConfig(hc_mult=4, fused_pre=True, projection_block_size=8192)
+
+    x = torch.randn(1, 2, 4, 8, dtype=torch.bfloat16)
+    fn = torch.randn(24, 32, dtype=torch.bfloat16)
+    scale = torch.randn(3, dtype=torch.float32)
+    base = torch.randn(24, dtype=torch.float32)
+    with pytest.raises(ValueError, match="projection_block_size"):
+        hc_pre(x, fn, scale, base, 4, 20, 1e-6, projection_block_size=8192, fused_pre=True)
+
+
 @pytest.mark.gpu
 @pytest.mark.parametrize("invalid_kind", ["cpu", "dtype", "mix_size", "hidden_alignment"])
 def test_mhc_pre_norm_fn_rejects_unsupported_inputs(invalid_kind):
@@ -171,6 +210,67 @@ def test_mhc_pre_norm_fn_accepts_noncontiguous_fn():
     actual = mhc_pre_norm_fn(x, fn, 1e-5)
     flat = ref_x.flatten(2).float()
     expected = F.linear(F.rms_norm(flat, (flat.shape[-1],), weight=None, eps=1e-5), ref_fn)
+    assert _relative_l2(actual, expected) < 2e-4
+    actual.square().sum().backward()
+    expected.square().sum().backward()
+    assert _relative_l2(x.grad, ref_x.grad) < 2e-4
+    assert _relative_l2(fn.grad, ref_fn.grad) < 5e-3
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("mix_size", [3, 32])
+def test_mhc_pre_norm_fn_mix_size_boundaries(mix_size):
+    # mix_size=3 corresponds to hc_mult=1 ((2+1)*1), the MHCConfig structural
+    # parity anchor; mix_size=32 fills the kernel's feature block exactly.
+    torch.manual_seed(9)
+    x = torch.randn(1, 7, 4, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    fn = torch.randn(mix_size, 512, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    ref_x = x.detach().clone().requires_grad_()
+    ref_fn = fn.detach().clone().float().requires_grad_()
+
+    actual = mhc_pre_norm_fn(x, fn, 1e-5)
+    flat = ref_x.flatten(2).float()
+    expected = F.linear(F.rms_norm(flat, (flat.shape[-1],), weight=None, eps=1e-5), ref_fn)
+    assert actual.shape == expected.shape
+    assert _relative_l2(actual, expected) < 2e-4
+    actual.square().sum().backward()
+    expected.square().sum().backward()
+    assert _relative_l2(x.grad, ref_x.grad) < 2e-4
+    assert _relative_l2(fn.grad, ref_fn.grad) < 5e-3
+
+
+@pytest.mark.gpu
+def test_mhc_pre_norm_fn_single_hidden_block():
+    # hidden=128 exercises the _bwd_x grid with a single program on dim 1.
+    torch.manual_seed(10)
+    x = torch.randn(1, 7, 4, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    fn = torch.randn(24, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    ref_x = x.detach().clone().requires_grad_()
+    ref_fn = fn.detach().clone().float().requires_grad_()
+
+    actual = mhc_pre_norm_fn(x, fn, 1e-5)
+    flat = ref_x.flatten(2).float()
+    expected = F.linear(F.rms_norm(flat, (flat.shape[-1],), weight=None, eps=1e-5), ref_fn)
+    assert actual.shape == expected.shape
+    assert _relative_l2(actual, expected) < 2e-4
+    actual.square().sum().backward()
+    expected.square().sum().backward()
+    assert _relative_l2(x.grad, ref_x.grad) < 2e-4
+    assert _relative_l2(fn.grad, ref_fn.grad) < 5e-3
+
+
+@pytest.mark.gpu
+def test_mhc_pre_norm_fn_accepts_noncontiguous_x():
+    torch.manual_seed(11)
+    x = torch.randn(1, 14, 4, 128, device="cuda", dtype=torch.bfloat16)[:, ::2].requires_grad_()
+    fn = torch.randn(24, 512, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    ref_x = x.detach().clone().requires_grad_()
+    ref_fn = fn.detach().clone().float().requires_grad_()
+
+    actual = mhc_pre_norm_fn(x, fn, 1e-5)
+    flat = ref_x.flatten(2).float()
+    expected = F.linear(F.rms_norm(flat, (flat.shape[-1],), weight=None, eps=1e-5), ref_fn)
+    assert actual.shape == expected.shape
     assert _relative_l2(actual, expected) < 2e-4
     actual.square().sum().backward()
     expected.square().sum().backward()
