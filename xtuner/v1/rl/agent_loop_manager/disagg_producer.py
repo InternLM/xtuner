@@ -331,7 +331,8 @@ class DisaggProduceStrategy(ABC):
         return 0
 
     def configure_turn_resume(self, pending_cleanup) -> None:
-        """Opt in only when the strategy owns and can quiesce retained tasks."""
+        """Opt in only when the strategy owns and can quiesce retained
+        tasks."""
         raise ValueError(f"{type(self).__name__} does not support complete-turn resume")
 
     async def quiesce(self, ctx: DisaggProduceContext) -> None:

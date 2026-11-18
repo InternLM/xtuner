@@ -5,10 +5,12 @@ from unittest.mock import AsyncMock, patch
 
 import ray
 
+from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.rl.rollout import trace_store as trace_store_module
 from xtuner.v1.rl.rollout.trace_store import (
     RolloutTraceStore,
-    _free_ray_refs,
+    TokenizedSegment,
+    empty_existing_sessions,
     get_existing_store,
     release_and_discard_rollout_groups,
     release_existing_sessions,
@@ -16,32 +18,16 @@ from xtuner.v1.rl.rollout.trace_store import (
 
 
 class TestRolloutTraceCleanup(unittest.TestCase):
-    def test_release_and_discard_detaches_only_trace_owned_refs(self):
-        trace_owned_ref = object()
-        rollout_owned_ref = object()
-        trace_owned = SimpleNamespace(session_id="trace-owned", routed_experts=trace_owned_ref)
-        rollout_owned = SimpleNamespace(session_id="rollout-owned", routed_experts=rollout_owned_ref)
-        routed_experts_seen_by_discard = {}
+    def test_release_and_discard_clears_all_rollout_holders(self):
+        states = [RolloutState(message=[], session_id=index) for index in (1, 2)]
+        with patch(
+            "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
+            new=AsyncMock(return_value={"1"}),
+        ) as release_sessions:
+            asyncio.run(release_and_discard_rollout_groups([states]))
 
-        def record_discard(item):
-            routed_experts_seen_by_discard[item.session_id] = item.routed_experts
-
-        with (
-            patch(
-                "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
-                new=AsyncMock(return_value={"trace-owned"}),
-            ) as release_sessions,
-            patch(
-                "xtuner.v1.rl.rollout.trace_store.discard_rollout_state",
-                side_effect=record_discard,
-            ) as discard,
-        ):
-            asyncio.run(release_and_discard_rollout_groups([[trace_owned, rollout_owned]]))
-
-        release_sessions.assert_awaited_once_with(["trace-owned", "rollout-owned"])
-        self.assertIsNone(routed_experts_seen_by_discard["trace-owned"])
-        self.assertIs(routed_experts_seen_by_discard["rollout-owned"], rollout_owned_ref)
-        self.assertEqual(discard.call_count, 2)
+        release_sessions.assert_awaited_once_with(["1", "2"])
+        self.assertTrue(all(state.session_id is None and state.routed_experts is None for state in states))
 
     def test_get_existing_store_returns_none_when_ray_is_uninitialized(self):
         cached_store = object()
@@ -105,9 +91,94 @@ class TestRolloutTraceStore(unittest.TestCase):
         ):
             self.assertEqual(asyncio.run(release_existing_sessions(["missing"])), set())
 
-    def test_free_ray_refs_recurses_into_nested_containers(self):
-        object_ref = ray.put({"payload": [1, 2, 3]})
-        with patch.object(ray.internal, "free") as free:
-            _free_ray_refs({"outer": [({"inner": object_ref},)]})
+    def test_empty_existing_sessions_stably_deduplicates_before_rpc(self):
+        empty_remote = AsyncMock(return_value=["one"])
+        store = SimpleNamespace(empty_sessions=SimpleNamespace(remote=empty_remote))
+        with patch(
+            "xtuner.v1.rl.rollout.trace_store.get_existing_store",
+            return_value=store,
+        ):
+            emptied = asyncio.run(empty_existing_sessions(["one", "one", "missing"]))
 
-        free.assert_called_once_with([object_ref], local_only=False)
+        self.assertEqual(emptied, {"one"})
+        empty_remote.assert_awaited_once_with(["one", "missing"])
+
+    def test_empty_sessions_retries_with_fresh_prompt_and_routes(self):
+        store = RolloutTraceStore.remote()
+        old_prompt_routes = ray.put("old-prompt-routes")
+        new_prompt_routes = ray.put("new-prompt-routes")
+        new_response_routes = ray.put("new-response-routes")
+        try:
+            ray.get(
+                store.insert.remote(
+                    "a",
+                    "prompt",
+                    TokenizedSegment(
+                        text="prompt",
+                        token_ids=[1],
+                        expert_key=old_prompt_routes,
+                        request_id="old",
+                        model_step=1,
+                    ),
+                )
+            )
+            ray.get(
+                store.insert.remote(
+                    "a",
+                    "prompt old",
+                    TokenizedSegment(text=" old", token_ids=[2], labels=[2], request_id="old", model_step=1),
+                )
+            )
+
+            emptied = ray.get(store.empty_sessions.remote(["a", "missing", "a"]))
+
+            self.assertEqual(emptied, ["a"])
+            self.assertEqual(ray.get(store.list_sessions.remote()), ["a"])
+            self.assertEqual(ray.get(store.keys.remote("a")), [])
+            ray.get(
+                store.insert.remote(
+                    "a",
+                    "prompt",
+                    TokenizedSegment(
+                        text="prompt",
+                        token_ids=[1],
+                        expert_key=new_prompt_routes,
+                        request_id="new",
+                        model_step=2,
+                    ),
+                )
+            )
+            ray.get(
+                store.insert.remote(
+                    "a",
+                    "prompt new",
+                    TokenizedSegment(
+                        text=" new",
+                        token_ids=[3],
+                        labels=[3],
+                        expert_key=new_response_routes,
+                        request_id="new",
+                        model_step=2,
+                    ),
+                )
+            )
+            trace = ray.get(store.export_training_trace.remote("a", "prompt new"))
+            self.assertEqual(trace["input_ids"], [1, 3])
+            self.assertEqual(trace["request_ids"], ["new"])
+            self.assertEqual(trace["token_model_steps"], [2, 2])
+            self.assertEqual(ray.get(trace["routed_experts"]), ["new-prompt-routes", "new-response-routes"])
+        finally:
+            ray.kill(store)
+
+    def test_release_preserves_exported_refs(self):
+        store = RolloutTraceStore.remote()
+        ref = ray.put({"payload": [1, 2, 3]})
+        try:
+            ray.get(store.insert.remote("a", "prompt", {"routed_experts": ref}))
+            _, nodes = ray.get(store.search.remote("a", "prompt"))
+            borrowed = nodes[-1].value["routed_experts"]
+            ray.get(store.release.remote("a"))
+            self.assertEqual(ray.get(borrowed, timeout=5), {"payload": [1, 2, 3]})
+            self.assertEqual(ray.get(store.list_sessions.remote()), [])
+        finally:
+            ray.kill(store)

@@ -4,7 +4,7 @@
 - SGLangWorker pause/continue 对 abort flag 和 server request 的控制。
 - RolloutWorker abort、abort request timeout 和 in-flight request 取消语义。
 - RolloutHealthManager 对 inactive/unhealthy worker 的生命周期标记逻辑。
-- PartialRolloutHandler 拼接 routed_experts 后释放旧 Ray ObjectRef 的逻辑。
+- PartialRolloutHandler 续写时保留 response prefix、共享 routed_experts 与生成长度限制。
 
 旧 test_rollout_utils.py 中的 TestRolloutControllerRecover 需要真实 Ray controller / lmdeploy backend，
 不属于 PR-fast，后续应放到 PR-real smoke 或 nightly。
@@ -1744,8 +1744,8 @@ class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rollout_state.response_ids, [101, 102, 201, 202, 301])
         self.assertLessEqual(len(rollout_state.response_ids), max_tokens)
 
-    async def test_postprocess_frees_old_routed_expert_refs_after_concat(self):
-        # partial rollout 拼接 routed_experts 后，应释放历史和当前 ObjectRef，避免长期占用对象存储。
+    async def test_postprocess_concat_preserves_borrowed_routed_expert_inputs(self):
+        # partial rollout 只替换当前 state 的句柄，历史和当前 ref 的其他持有者可继续使用。
         class FakeObjectRef:
             def __init__(self, value):
                 self.value = value
@@ -1771,7 +1771,6 @@ class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
         with (
             patch("xtuner.v1.rl.rollout.utils.RayObjectRef", FakeObjectRef),
             patch("xtuner.v1.rl.rollout.utils.ray.put", return_value=concat_ref) as ray_put,
-            patch("xtuner.v1.rl.rollout.utils.free_object_refs") as free_object_refs,
         ):
             out = await PartialRolloutHandler().postprocess(
                 rollout_state,
@@ -1787,6 +1786,5 @@ class TestPartialRolloutHandler(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(out.routed_experts, concat_ref)
         self.assertEqual(ray_put.call_args.args[0].tolist(), [[1], [2], [3]])
-        free_object_refs.assert_any_call([history_ref])
-        free_object_refs.assert_any_call([cur_ref])
-        self.assertEqual(free_object_refs.call_count, 2)
+        self.assertEqual(history_ref.value, [[1], [2]])
+        self.assertEqual(cur_ref.value, [[1], [2], [3]])

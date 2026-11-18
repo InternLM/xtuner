@@ -330,7 +330,7 @@ class TestBatchLifecycle(unittest.TestCase):
 
         self.assertEqual(released, [True])
 
-    def test_release_train_batch_resources_skips_trace_owned_routed_refs(self):
+    def test_release_train_batch_resources_drops_routes_and_frees_only_pixels(self):
         from unittest.mock import patch as mock_patch
 
         import ray
@@ -355,10 +355,9 @@ class TestBatchLifecycle(unittest.TestCase):
         ):
             trainer._release_train_batch_resources([[traced], [plain]])
 
-        freed = free_refs.call_args.args[0]
-        self.assertIn(plain_ref, freed)
-        self.assertIn(pixel_ref, freed)
-        self.assertNotIn(trace_ref, freed)
+        free_refs.assert_called_once_with([pixel_ref])
+        self.assertIsNone(traced.routed_experts)
+        self.assertIsNone(plain.routed_experts)
 
 
 class TestPackPlanDispatch(unittest.TestCase):

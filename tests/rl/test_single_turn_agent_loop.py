@@ -98,6 +98,22 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
             extra_fields={},
         )
 
+    def _completed_state(self, uid: int) -> RolloutState:
+        state = self._state(uid)
+        state.status = Status.COMPLETED
+        state.response = f"response {uid}"
+        state.response_ids = [uid + 10]
+        state.logprobs = [0.0, -0.5]
+        state.reward = {"score": 0.75}
+        state.finish_reason = "stop"
+        state.sample_params = SampleParams(max_tokens=4, temperature=0.2)
+        state.set_training_fields(
+            input_ids=[uid, uid + 10],
+            labels=[-100, uid + 10],
+            logprobs=state.logprobs,
+        )
+        return state
+
     def _build_loop(
         self,
         statuses_by_uid: dict[int, Status],
@@ -180,6 +196,69 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
         actor = AgentLoopActor(config, MagicMock(), is_valid_sample_fn=is_valid_sample_fn)
 
         self.assertIs(actor.agent_loop.is_valid_sample_fn, is_valid_sample_fn)
+
+    async def test_completed_input_passes_through_without_generation_or_scoring(self):
+        loop = self._build_loop({}, enable_batch_judge=False)
+        events: list[str] = []
+        teacher = self._bind_teacher(loop, events)
+        state = self._completed_state(1)
+        before = state.model_copy(deep=True)
+
+        result = await loop.generate_group([state])
+
+        self.assertIs(result[0], state)
+        self.assertEqual(loop.rollout_ctl.generate.calls, [])
+        self.assertEqual(events, [])
+        teacher.compute_logprobs.assert_not_awaited()
+        self.assertEqual(state.response, before.response)
+        self.assertEqual(state.response_ids, before.response_ids)
+        self.assertEqual(state.input_ids, before.input_ids)
+        self.assertEqual(state.labels, before.labels)
+        self.assertEqual(state.logprobs, before.logprobs)
+        self.assertEqual(state.reward, before.reward)
+        self.assertEqual(state.sample_params, before.sample_params)
+
+    async def test_mixed_group_generates_new_input_and_reuses_completed_state(self):
+        loop = self._build_loop({2: Status.COMPLETED}, enable_batch_judge=False)
+        events: list[str] = []
+        teacher = self._bind_teacher(loop, events)
+        completed = self._completed_state(1)
+        before = completed.model_copy(deep=True)
+        pending = self._state(2)
+        pending.extra_fields["origin_data_source"] = "math"
+
+        result = await loop.generate_group([completed, pending])
+
+        self.assertEqual([state.rollout_id for state in result], [1, 2])
+        self.assertIs(result[0], completed)
+        self.assertEqual([state.rollout_id for state in loop.rollout_ctl.generate.calls], [2])
+        self.assertEqual(events, ["teacher"])
+        teacher.compute_logprobs.assert_awaited_once()
+        self.assertEqual(completed.response_ids, before.response_ids)
+        self.assertEqual(completed.input_ids, before.input_ids)
+        self.assertEqual(completed.labels, before.labels)
+        self.assertEqual(completed.logprobs, before.logprobs)
+        self.assertEqual(completed.reward, before.reward)
+
+    async def test_mixed_group_judges_full_group_but_teaches_only_fresh_samples(self):
+        events: list[str] = []
+        judger = _BatchJudger(events)
+        loop = self._build_loop(
+            {2: Status.COMPLETED},
+            judger=judger,
+            is_valid_sample_fn=lambda _samples: True,
+        )
+        teacher = self._bind_teacher(loop, events)
+        completed = self._completed_state(1)
+        pending = self._state(2)
+        pending.extra_fields["origin_data_source"] = "math"
+
+        result = await loop.generate_group([completed, pending])
+
+        self.assertEqual([state.rollout_id for state in judger.calls[0]], [1, 2])
+        self.assertEqual(events, ["judge", "filter", "teacher"])
+        teacher.compute_logprobs.assert_awaited_once_with(result[1])
+        self.assertEqual([state.rollout_id for state in result], [1, 2])
 
     async def test_generate_filters_completed_group_after_batch_judge_and_logs(self):
         filtered_rewards = []

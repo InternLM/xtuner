@@ -302,7 +302,8 @@ class DisaggAgentLoopManager:
         await self._pause_policy.before_sync(self, checkpoint_due)
 
     async def quiesce(self, timeout: float):
-        """Stop new groups, join producer claims, finish episodes with gates open."""
+        """Stop new groups, join producer claims, finish episodes with gates
+        open."""
         self._group_admission.clear()
         for task in self.task_runners:
             task.produce_strategy.scheduling_paused = True

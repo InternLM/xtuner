@@ -134,6 +134,10 @@ class AgentInLocalhostLoop(AgentLoop):
         self.mode = mode
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
+        reused_states = [state for state in rollout_state if state.status == Status.COMPLETED]
+        retry_states = [state for state in rollout_state if state.status != Status.COMPLETED]
+        reused_ids = {id(state) for state in reused_states}
+
         async def generate_one(state: RolloutState) -> RolloutState:
             if self._sample_semaphore is None:
                 state = await self.generate_sample(state, **kwargs)
@@ -144,15 +148,21 @@ class AgentInLocalhostLoop(AgentLoop):
             return state
 
         tasks: list[asyncio.Task[RolloutState]] = []
-        for state in rollout_state:
+        for state in retry_states:
             state.sample_params = self.sample_params
             task = create_task(generate_one(state))
             tasks.append(task)
 
-        samples = await asyncio.gather(*tasks)
+        samples = reused_states + list(await asyncio.gather(*tasks))
         samples = _drop_failed_train_samples(samples, self.mode)
         samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
-        samples = await self._teacher_scorer.on_group_ready(samples)
+        fresh_indices = [
+            index
+            for index, state in enumerate(samples)
+            if id(state) not in reused_ids and state.status == Status.COMPLETED
+        ]
+        if fresh_indices:
+            await self._teacher_scorer.on_group_ready([samples[index] for index in fresh_indices])
         return self.canonicalize_train_fields(samples)
 
     def canonicalize_train_fields(self, group: list[RolloutState]) -> list[RolloutState]:
@@ -164,6 +174,10 @@ class AgentInLocalhostLoop(AgentLoop):
         return group
 
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
+        # 组内混合过期重试时，保留的 COMPLETED 兄弟不再执行：它的训练数据仍有效，
+        # 重跑只会和正在重试的兄弟并发写同一个 session。
+        if rollout_state.status == Status.COMPLETED and rollout_state.input_ids is not None:
+            return rollout_state
         try:
             if self.sample_timeout_s is not None and self.sample_timeout_s > 0:
                 return await asyncio.wait_for(
@@ -270,7 +284,8 @@ class AgentInLocalhostLoop(AgentLoop):
             add_generation_prompt=False,
         )
         prompt_text = text[:-1] if text.endswith("\n") else text
-        data = await get_store().export_training_trace.remote(str(rollout_state.session_id), prompt_text)
+        trace_store = get_store()
+        data = await trace_store.export_training_trace.remote(str(rollout_state.session_id), prompt_text)
 
         rollout_state.input_ids = data["input_ids"]
         rollout_state.labels = data["labels"]
@@ -283,6 +298,8 @@ class AgentInLocalhostLoop(AgentLoop):
         rollout_state.routed_experts = data["routed_experts"]
         content = response_message.get("content")
         rollout_state.response = content if isinstance(content, str) else (str(content) if content is not None else "")
+        if rollout_state.status == Status.COMPLETED and rollout_state.session_id is not None:
+            await trace_store.empty_sessions.remote([str(rollout_state.session_id)])
 
     def _fill_eval_rollout_state(self, rollout_state: RolloutState, item: AgentRolloutItem) -> None:
         is_success = item.status == RolloutStatus.COMPLETED

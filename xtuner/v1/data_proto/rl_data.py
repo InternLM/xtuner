@@ -249,14 +249,6 @@ class RolloutState(BaseModel):
         Returns:
             None
         """
-        routed_experts = self.routed_experts
-        if routed_experts is not None and not self.extra_fields.get("request_ids"):
-            from ray import ObjectRef
-
-            from xtuner.v1.rl.utils.ray_utils import free_object_refs
-
-            if isinstance(routed_experts, (ObjectRef, list)):
-                free_object_refs(routed_experts)
         self.routed_experts = None
         prompt_ids = self.prompt_ids
         self.tokens = list(prompt_ids) if prompt_ids is not None else None
@@ -266,6 +258,8 @@ class RolloutState(BaseModel):
         self.teacher_targets = None
         self.finish_reason = None
         self.response_model_steps = []
+        # request_ids 是旧 response 的 provenance，重试时必须随旧 response 一起失效。
+        self.extra_fields.pop("request_ids", None)
         self.reward = None
         self.error_msg = None
         # input_ids/labels 是上一轮 canonicalize 的产物，必须一并清掉，否则重生成后
@@ -342,10 +336,8 @@ def free_rollout_state_refs(rollout_state: RolloutState) -> None:
 
     from xtuner.v1.rl.utils.ray_utils import free_object_refs
 
-    # Request-aware trace routes are shared with sibling segments and workers.
-    # Keep the ordinary rollout's explicit free contract when provenance is off.
-    if rollout_state.extra_fields.get("request_ids"):
-        rollout_state.routed_experts = None
+    # Routes can be shared with siblings, workers, and the trace store.
+    rollout_state.routed_experts = None
     refs: list[ObjectRef] = []
 
     def clear_object_refs(value: Any) -> Any:

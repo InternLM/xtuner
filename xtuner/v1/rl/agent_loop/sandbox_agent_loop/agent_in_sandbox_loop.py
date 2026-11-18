@@ -6,7 +6,7 @@ import importlib
 import json
 import traceback
 import uuid
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from lagent.utils import create_object
 
@@ -237,6 +237,10 @@ class AgentInSandboxLoop(AgentLoop):
         self.retire_route_on_completion = retire_route_on_completion
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
+        reused_states = [state for state in rollout_state if state.status == Status.COMPLETED]
+        retry_states = [state for state in rollout_state if state.status != Status.COMPLETED]
+        reused_ids = {id(state) for state in reused_states}
+
         async def generate_one(state: RolloutState) -> list[RolloutState]:
             if self._sample_semaphore is None:
                 samples = await self.generate_sample(state)
@@ -247,16 +251,22 @@ class AgentInSandboxLoop(AgentLoop):
             return samples
 
         pending_tasks = []
-        for state in rollout_state:
+        for state in retry_states:
             state.sample_params = self.sample_params
             task = create_task(generate_one(state))
             pending_tasks.append(task)
         generated_samples = asyncio.gather(*pending_tasks)
         sample_groups = await generated_samples
-        samples = [sample for sample_group in sample_groups for sample in sample_group]
+        samples = reused_states + [sample for sample_group in sample_groups for sample in sample_group]
         samples = _drop_failed_train_samples(samples, self.mode)
         samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
-        samples = await self._teacher_scorer.on_group_ready(samples)
+        fresh_indices = [
+            index
+            for index, state in enumerate(samples)
+            if id(state) not in reused_ids and state.status == Status.COMPLETED
+        ]
+        if fresh_indices:
+            await self._teacher_scorer.on_group_ready([samples[index] for index in fresh_indices])
         return self.canonicalize_train_fields(samples)
 
     def canonicalize_train_fields(self, group: list[RolloutState]) -> list[RolloutState]:
@@ -273,6 +283,9 @@ class AgentInSandboxLoop(AgentLoop):
     async def generate_sample(  # type: ignore[override]
         self, rollout_state: RolloutState, **kwargs
     ) -> list[RolloutState]:
+        # 未过期 session 的完成样本由 producer 直接保留，不会传到这里重跑。
+        if rollout_state.status == Status.COMPLETED:
+            return [rollout_state]
         try:
             rollout_item = rollout_state.extra_fields["rollout_item"].model_copy(deep=True)
             if rollout_state.session_id is None:
@@ -295,8 +308,12 @@ class AgentInSandboxLoop(AgentLoop):
             # This loop returns terminal Agent executions, never partial continuations.
             # Retire HTTP ownership after runner completion/cancellation, independently
             # of later filtering or replay consumption; keep trace ownership unchanged.
-            if self.retire_route_on_completion and self.rollout_ctl is not None and rollout_state.session_id is not None:
-                await self.rollout_ctl.retire_route_sessions.remote([str(rollout_state.session_id)])
+            if (
+                self.retire_route_on_completion
+                and self.rollout_ctl is not None
+                and rollout_state.session_id is not None
+            ):
+                await cast(Any, self.rollout_ctl).retire_route_sessions.remote([str(rollout_state.session_id)])
 
     async def _run_item(self, item: AgentRolloutItem) -> AgentRolloutItem:
         runner = _resolve_runner(item.pipeline, str(item.uid))
@@ -389,6 +406,7 @@ class AgentInSandboxLoop(AgentLoop):
                 if not data["routed_experts"]:
                     raise ValueError("turn-resume MoE training requires routed experts on every node")
                 records = _load_messages_artifact(item.artifacts)
+                assert records is not None
                 matching = [
                     record for record in records if record.get("messages") == messages and record.get("tools") == tools
                 ]
@@ -411,6 +429,8 @@ class AgentInSandboxLoop(AgentLoop):
             rollout_states.append(segment_state)
 
         rollout_states[0].extra_fields["agent_artifacts"] = _to_json_safe(item.artifacts)
+        if rollout_state.status == Status.COMPLETED and rollout_state.session_id is not None:
+            await trace_store.empty_sessions.remote([str(rollout_state.session_id)])
         return rollout_states
 
     def _fill_eval_rollout_state(self, rollout_state: RolloutState, item: AgentRolloutItem) -> None:

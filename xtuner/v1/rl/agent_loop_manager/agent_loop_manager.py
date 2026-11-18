@@ -145,8 +145,11 @@ class AgentLoopManagerConfig(BaseModel):
             from .colocate_keepalive import build_keepalive_manager
 
             return build_keepalive_manager(
-                self, rollout_controller=rollout_controller, tokenizer=tokenizer,
-                replay_buffer=replay_buffer, logger=logger,
+                self,
+                rollout_controller=rollout_controller,
+                tokenizer=tokenizer,
+                replay_buffer=replay_buffer,
+                logger=logger,
                 sync_weights_interval=sync_weights_interval,
                 rollout_teacher_scorer_config=rollout_teacher_scorer_config,
             )
@@ -249,7 +252,7 @@ class AgentLoopManager:
 
         keepalive = getattr(self, "_keepalive", None)
         if keepalive is None:
-            await self._rollout_controller.continue_generation.remote()
+            await cast(Any, self._rollout_controller).continue_generation.remote()
         else:
             await keepalive.resume(self._rollout_controller, model_step)
             await keepalive.check_requests(self._rollout_controller)
@@ -294,13 +297,18 @@ class AgentLoopManager:
         # an entire episode behind a sealed request gate.
         if keepalive is not None:
             if quiesce:
+
                 async def finish_live_tasks():
                     for task in self.task_runners:
                         ctx = ProduceContext(
-                            agent_loop=task.agent_loop, sampler=task.sampler,
-                            replay_buffer=self.replay_buffer, task_batch_size=0,
-                            task_name=task.task_name, train_step=train_step,
-                            model_step=model_step, progress=local_progress,
+                            agent_loop=task.agent_loop,
+                            sampler=task.sampler,
+                            replay_buffer=self.replay_buffer,
+                            task_batch_size=0,
+                            task_name=task.task_name,
+                            train_step=train_step,
+                            model_step=model_step,
+                            progress=local_progress,
                             stale_threshold=task.stale_threshold,
                             token_stale_threshold=task.token_stale_threshold,
                             expired_groups_retryable=task.expired_groups_retryable,
@@ -309,10 +317,11 @@ class AgentLoopManager:
                         while owner.count():
                             for ready in await owner.wait_and_claim(timeout_s=1):
                                 await ctx.put_generated_group(ready.result())
+
                 await asyncio.wait_for(finish_live_tasks(), keepalive.quiesce_timeout)
             await keepalive.pause(self._rollout_controller)
         else:
-            await self._rollout_controller.pause_generation.remote()
+            await cast(Any, self._rollout_controller).pause_generation.remote()
 
         pause_time_s = 0.0
         for task in active_tasks:

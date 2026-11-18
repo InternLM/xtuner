@@ -14,34 +14,6 @@ _STORE_NAMESPACE = "xtuner_rollout"
 _handle_cache: Any = None
 
 
-def _free_ray_refs(obj: Any):
-    """Recursively free ray.ObjectRef instances trapped inside an object.
-
-    Args:
-        obj (Any): The object that may contain ray.ObjectRef references (e.g., dict, list, tuple).
-    """
-    if isinstance(obj, ray.ObjectRef):
-        try:
-            ray.internal.free([obj], local_only=False)
-        except Exception as e:
-            get_logger().error(f"Failed to free Ray ObjectRef {obj}: {e}")
-    elif isinstance(obj, dict):
-        for v in obj.values():
-            _free_ray_refs(v)
-    elif isinstance(obj, (list, tuple)):
-        for v in obj:
-            _free_ray_refs(v)
-    elif hasattr(obj, "model_dump"):  # Pydantic v2
-        for v in obj.model_dump().values() if hasattr(obj.model_dump, "__call__") else {}.values():
-            _free_ray_refs(v)
-    elif hasattr(obj, "dict") and callable(getattr(obj, "dict")):  # Pydantic v1
-        for v in obj.dict().values():
-            _free_ray_refs(v)
-    elif hasattr(obj, "__dict__"):
-        for v in vars(obj).values():
-            _free_ray_refs(v)
-
-
 def _common_prefix_len(left: str, right: str) -> int:
     for idx, (left_ch, right_ch) in enumerate(zip(left, right)):
         if left_ch != right_ch:
@@ -218,7 +190,8 @@ class Trie:
         return "".join(key_path), matched_nodes
 
     def release(self, key: str | None = None):
-        """Drop trace ownership; exported and sibling route references remain valid.
+        """Drop trace ownership; exported and sibling route references remain
+        valid.
 
         If the key is None, the entire Trie is released. Prunes empty branches bottom-up.
 
@@ -228,13 +201,10 @@ class Trie:
         """
 
         if key is None:
-            # Drop only this store's ownership. Borrowers retain live R3 refs.
             stack = [self.root]
             while stack:
                 node = stack.pop()
                 stack.extend(node.children.values())
-                if node.value is not None and getattr(node.value, "request_id", None) is None:
-                    _free_ray_refs(node.value)
                 node.value = None
                 node.children.clear()
                 node.parent = None
@@ -255,10 +225,7 @@ class Trie:
             else:
                 return
 
-        if node.value is not None:
-            if getattr(node.value, "request_id", None) is None:
-                _free_ray_refs(node.value)
-            node.value = None
+        node.value = None
 
         for parent, token in reversed(path):
             child_node = parent.children[token]
@@ -333,8 +300,18 @@ class RolloutTraceStore:
         trie = self.get_or_create(session_id)
         return trie.search(text, filter_none)
 
+    def empty_sessions(self, session_ids: list[str]) -> list[str]:
+        """Empty existing sessions in one actor call, skipping missing ids."""
+        emptied_session_ids = []
+        for session_id in dict.fromkeys(session_ids):
+            if session_id not in self.sessions:
+                continue
+            self.sessions[session_id] = Trie()
+            emptied_session_ids.append(session_id)
+        return emptied_session_ids
+
     def release(self, session_id: str, key: str | None = None):
-        """Release Trie nodes and free associated resources for a session.
+        """Drop Trie nodes and their references for a session.
 
         Args:
             session_id (str): The session identifier.
@@ -363,7 +340,7 @@ class RolloutTraceStore:
         return released_session_ids
 
     def release_all(self):
-        """Release all sessions and free associated resources."""
+        """Drop all sessions and their references."""
         self.release_sessions(list(self.sessions))
         self.objects.clear()
         self.updated_at.clear()
@@ -411,9 +388,9 @@ class RolloutTraceStore:
             )
         trace: dict[str, Any] = {"input_ids": [], "labels": [], "logprobs": []}
         expert_keys: list[Any] = []
-        response_model_steps = []
-        token_model_steps = []
-        request_ids = []
+        response_model_steps: list[int | None] = []
+        token_model_steps: list[int | None] = []
+        request_ids: list[str] = []
         for node in nodes:
             node_val = node.value
             if not isinstance(node_val, TokenizedSegment):
@@ -436,7 +413,8 @@ class RolloutTraceStore:
         return trace
 
     def contains_request_ids(self, session_id: str, request_ids: list[str]) -> bool:
-        """Validate transcript provenance across committed branches of one session."""
+        """Validate transcript provenance across committed branches of one
+        session."""
         trie = self.sessions.get(session_id)
         if trie is None:
             return False
@@ -444,7 +422,9 @@ class RolloutTraceStore:
         stack = [trie.root]
         while stack and missing:
             node = stack.pop()
-            missing.discard(getattr(node.value, "request_id", None))
+            request_id = getattr(node.value, "request_id", None)
+            if isinstance(request_id, str):
+                missing.discard(request_id)
             stack.extend(node.children.values())
         return not missing
 
@@ -522,6 +502,19 @@ def get_existing_store():
     return _handle_cache
 
 
+async def empty_existing_sessions(session_ids: list[str]) -> set[str]:
+    """Empty existing trace sessions without creating the singleton store."""
+    session_ids = list(dict.fromkeys(str(session_id) for session_id in session_ids))
+    if not session_ids:
+        return set()
+
+    store = get_existing_store()
+    if store is None:
+        return set()
+
+    return set(await store.empty_sessions.remote(session_ids))
+
+
 async def release_existing_sessions(session_ids: list[str]) -> set[str]:
     """Release trace sessions that exist without creating the singleton store.
 
@@ -543,19 +536,15 @@ async def release_existing_sessions(session_ids: list[str]) -> set[str]:
 
 
 async def release_and_discard_rollout_groups(groups: list[list[RolloutState]]) -> None:
-    """Release trace-owned resources before discarding terminal rollouts.
+    """Release terminal trace sessions and discard rollout states.
 
-    Sessions released by the trace store have already freed their routed-expert references. Detach those references
-    before the generic rollout-state cleanup so it does not explicitly free them a second time. Rollouts whose sessions
-    are absent from the store retain their references for the generic cleanup path.
+    Clearing TraceStore's references does not invalidate ObjectRefs still held by rollout states or the trainer.
     """
-    released_session_ids = await release_existing_sessions(
+    await release_existing_sessions(
         [str(item.session_id) for group in groups for item in group if item.session_id is not None]
     )
     for group in groups:
         for item in group:
-            if item.session_id is not None and str(item.session_id) in released_session_ids:
-                item.routed_experts = None
             discard_rollout_state(item)
 
 

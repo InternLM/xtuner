@@ -43,6 +43,31 @@ GROUP_GENERATE_TIME_KEY = "group_generate_time_s"
 PERIODIC_ABORT_INTERVAL_S = 5.0
 
 
+def normalize_retry_group_inputs(states: list[RolloutState]) -> list[RolloutState]:
+    """Normalize expired sessions before handing a sampled group to an agent
+    loop.
+
+    Keep one expired state as the retry entry for each session being retried. Discard the other old states from those
+    sessions, and retain all states from sessions that are not being retried.
+    """
+    retry_sessions = {
+        state.session_id for state in states if state.status == Status.EXPIRED and state.session_id is not None
+    }
+    if not retry_sessions:
+        return states
+
+    selected: list[RolloutState] = []
+    retried_sessions: set[int] = set()
+    for state in states:
+        session_id = state.session_id
+        if session_id in retry_sessions:
+            if state.status != Status.EXPIRED or session_id in retried_sessions:
+                continue
+            retried_sessions.add(session_id)
+        selected.append(state)
+    return selected
+
+
 class _ProgressDisplayer:
     def __init__(self, progress_bar: Any | None) -> None:
         self._tqdm = progress_bar
@@ -126,7 +151,8 @@ class BaseProduceContext:
 
     async def sample_group(self, *, from_expired_pool: bool) -> list[RolloutState]:
         group_status = [Status.EXPIRED, Status.ABORTED] if from_expired_pool else [Status.ABORTED]
-        return await self.sampler.sample(task_name=self.task_name, group_status=group_status)
+        states = await self.sampler.sample(task_name=self.task_name, group_status=group_status)
+        return normalize_retry_group_inputs(states) if from_expired_pool else states
 
     async def generate_group(
         self,
@@ -786,7 +812,8 @@ async def request_agent_loop_pause(ctx: BaseProduceContext, *, pending_count: in
 
 
 async def retain_pending_tasks(*, pending_tasks, ctx, put_claimed_task) -> float:
-    """Claim completed groups once; live Agent tasks keep their original owner."""
+    """Claim completed groups once; live Agent tasks keep their original
+    owner."""
     start = time.perf_counter()
     for task in await pending_tasks.claim_ready():
         await put_claimed_task(task)

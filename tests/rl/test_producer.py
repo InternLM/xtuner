@@ -406,6 +406,92 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await ctx.put_generated_group(result))
         self.assertEqual(len(self.replay_buffer), 0)
 
+    async def test_sample_group_normalizes_expired_sessions_before_generation(self):
+        task_name = "normalized_retry_inputs"
+        strategy = SyncProduceStrategyConfig().build()
+        agent_loop = self._build_agent_loop()
+
+        retried = make_rollout_state(1, status=Status.EXPIRED)
+        retried.session_id = 10
+        sibling = make_rollout_state(2, status=Status.COMPLETED)
+        sibling.session_id = 10
+        sibling.response_ids = [10, 11, 12]
+        untouched = make_rollout_state(3, status=Status.COMPLETED)
+        untouched.session_id = 20
+        untouched.response_ids = [20, 21]
+        regenerated = make_rollout_state(4, status=Status.COMPLETED)
+        regenerated.session_id = 10
+        regenerated.response_ids = [30, 31, 32, 33]
+        seen_inputs = []
+
+        async def generate_group(states, **kwargs):
+            seen_inputs.extend(states)
+            return [regenerated, untouched]
+
+        agent_loop.generate_group = generate_group
+        sampler = self._build_sampler()
+        sampler.sample = AsyncMock(return_value=[retried, sibling, untouched])
+        ctx = self._build_context(strategy, task_name, agent_loop, sampler, batch_size=1)
+
+        sampled = await ctx.sample_group(from_expired_pool=True)
+        self.assertEqual(sampled, [retried, untouched])
+        result = await ctx.generate_group(sampled)
+
+        self.assertEqual(seen_inputs, [retried, untouched])
+        self.assertEqual(result[0].extra_fields["new_response_tokens"], 4)
+        self.assertEqual(result[1].extra_fields["new_response_tokens"], 0)
+        await ctx.put_generated_group(result)
+        self.assertEqual(ctx.progress.consume_produced(task_name), (2, 4))
+
+    async def test_sample_group_keeps_aborted_sessions_unchanged(self):
+        task_name = "aborted_retry_inputs"
+        strategy = SyncProduceStrategyConfig().build()
+        agent_loop = self._build_agent_loop()
+        completed = make_rollout_state(1, status=Status.COMPLETED)
+        completed.session_id = 10
+        aborted = make_rollout_state(2, status=Status.ABORTED)
+        aborted.session_id = 10
+        sampled = [completed, aborted]
+        sampler = self._build_sampler()
+        sampler.sample = AsyncMock(return_value=sampled)
+        ctx = self._build_context(strategy, task_name, agent_loop, sampler, batch_size=1)
+
+        result = await ctx.sample_group(from_expired_pool=False)
+
+        self.assertIs(result, sampled)
+
+    async def test_generate_group_keeps_existing_completed_segments_for_non_retried_sessions(self):
+        task_name = "completed_session_passthrough"
+        strategy = SyncProduceStrategyConfig().build()
+        agent_loop = self._build_agent_loop()
+        completed = make_rollout_state(1, status=Status.COMPLETED)
+        completed.session_id = 20
+        completed.input_ids = [1, 2]
+        untouched_sibling = make_rollout_state(2, status=Status.COMPLETED)
+        untouched_sibling.session_id = 20
+        untouched_sibling.input_ids = [1, 3]
+        retried = make_rollout_state(3, status=Status.EXPIRED)
+        retried.session_id = 10
+        seen_inputs = []
+
+        async def generate_group(states, **kwargs):
+            seen_inputs.extend(states)
+            return [completed, untouched_sibling]
+
+        agent_loop.generate_group = generate_group
+        ctx = self._build_context(strategy, task_name, agent_loop, self._build_sampler(), batch_size=1)
+
+        result = await ctx.generate_group([completed, untouched_sibling, retried])
+
+        self.assertEqual(seen_inputs, [completed, untouched_sibling, retried])
+        self.assertEqual(result[0].extra_fields["new_response_tokens"], 0)
+        self.assertEqual(result[1].extra_fields["new_response_tokens"], 0)
+        await ctx.put_generated_group(result)
+        self.assertEqual(ctx.progress.consume_produced(task_name), (2, 0))
+        stored = await self.replay_buffer.get(1, task_name, Status.COMPLETED)
+        self.assertEqual(stored[0], [completed, untouched_sibling])
+        self.assertEqual(len(stored[0]), 2)
+
     async def test_put_generated_group_releases_non_retryable_trace_sessions(self):
         # FAILED / FILTERED 不进入 replay buffer，必须在丢弃 RolloutState 前释放对应 trace session。
         cases = (

@@ -1,4 +1,5 @@
-"""Disaggregated pause policy; PendingTasks remains the sole live-task owner."""
+"""Disaggregated pause policy; PendingTasks remains the sole live-task
+owner."""
 
 from .produce_utils import pause_pending_tasks, retain_pending_tasks
 

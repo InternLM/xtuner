@@ -1,8 +1,7 @@
 """Opt-in persistent asyncio owner for alternating colocated RL.
 
-The native asyncio_run loop is stable but stops during synchronous training.
-This adapter keeps tool/client tasks progressing without enabling GPU inference.
-Only the strategy's existing _PendingTasks owns live generation tasks.
+The native asyncio_run loop is stable but stops during synchronous training. This adapter keeps tool/client tasks
+progressing without enabling GPU inference. Only the strategy's existing _PendingTasks owns live generation tasks.
 """
 
 import asyncio

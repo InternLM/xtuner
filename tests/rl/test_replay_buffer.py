@@ -7,7 +7,7 @@
 # 3. 写入生成结果时会补齐训练版本信息：put(..., model_step, current_train_step)
 #    会补齐 response_model_steps，并刷新 seq_staleness。
 # 4. tail batch disabled 时将 EXPIRED 当作终态，释放重字段且不写入 buffer；enabled 时保留
-#    prompt/mm_info，只重置 response 和 routed experts 以便重新 rollout。
+#    prompt/mm_info，重置 response/routed experts，并全量清空 trace Trie 以便重新 rollout。
 # 5. 写入过期结果时会触发 rerollout：超过 stale_threshold 的 group 会被重置 response 相关字段，
 #    并保留 prompt/message 等重新 rollout 所需的输入字段。
 # 6. refresh_staleness 的公共契约：可以刷新 completed/aborted 记录，也要尊重显式传入的
@@ -253,9 +253,9 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 )
 
                 with patch(
-                    "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
-                    new=AsyncMock(),
-                ) as release_sessions:
+                    "xtuner.v1.rl.replay_buffer.empty_existing_sessions",
+                    new=AsyncMock(return_value={"102"}),
+                ) as empty_sessions:
                     await replay_buffer.put(
                         [stale],
                         "task",
@@ -263,7 +263,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                         stale_threshold=3,
                     )
 
-                release_sessions.assert_not_awaited()
+                empty_sessions.assert_awaited_once_with(["102"])
                 expired = await replay_buffer.get(1, "task", Status.EXPIRED)
                 reusable = expired[0][0]
                 assert reusable.status == Status.EXPIRED
@@ -493,10 +493,16 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 await replay_buffer.put([retryable_stale], "retryable_task")
                 assert len(replay_buffer) == 2
 
-                with patch(
-                    "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
-                    new=AsyncMock(return_value={"201"}),
-                ) as release_sessions:
+                with (
+                    patch(
+                        "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
+                        new=AsyncMock(return_value={"201"}),
+                    ) as release_sessions,
+                    patch(
+                        "xtuner.v1.rl.replay_buffer.empty_existing_sessions",
+                        new=AsyncMock(return_value={"202"}),
+                    ) as empty_sessions,
+                ):
                     expired_counts = await replay_buffer.refresh_staleness(
                         task_stale_thresholds={"non_retryable_task": 2, "retryable_task": 2},
                         expired_groups_retryable_by_task={
@@ -507,6 +513,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                     )
 
                 release_sessions.assert_awaited_once_with(["201"])
+                empty_sessions.assert_awaited_once_with(["202"])
                 assert expired_counts == {"non_retryable_task": 1, "retryable_task": 1}
                 assert non_retryable_stale.status == Status.EXPIRED
                 assert non_retryable_stale.prompt_ids is None
@@ -519,6 +526,109 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 assert await replay_buffer.count("retryable_task", Status.EXPIRED) == 1
                 assert len(replay_buffer) == 1
                 assert await replay_buffer.get(1, "non_retryable_task", Status.EXPIRED) == []
+
+    async def test_refresh_staleness_discards_deleted_groups_when_retry_empty_fails(self):
+        replay_buffer = AsyncReplayBufferConfig().build()
+        non_retryable_stale = make_rollout_state(
+            1,
+            session_id=201,
+            response_model_steps=[1],
+            mm_info={"pixel_values": np.ones((2, 3), dtype=np.float32)},
+        )
+        retryable_stale = make_rollout_state(2, session_id=202, response_model_steps=[1])
+        await replay_buffer.put([non_retryable_stale], "non_retryable_task")
+        await replay_buffer.put([retryable_stale], "retryable_task")
+
+        with (
+            patch(
+                "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
+                new=AsyncMock(return_value={"201"}),
+            ) as release_sessions,
+            patch(
+                "xtuner.v1.rl.replay_buffer.empty_existing_sessions",
+                new=AsyncMock(side_effect=RuntimeError("trace store unavailable")),
+            ) as empty_sessions,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "trace store unavailable"):
+                await replay_buffer.refresh_staleness(
+                    task_stale_thresholds={"non_retryable_task": 2, "retryable_task": 2},
+                    expired_groups_retryable_by_task={
+                        "non_retryable_task": False,
+                        "retryable_task": True,
+                    },
+                    current_train_step=4,
+                )
+
+            release_sessions.assert_awaited_once_with(["201"])
+            assert non_retryable_stale.prompt_ids is None
+            assert non_retryable_stale.mm_info is None
+            assert len(replay_buffer) == 1
+
+            empty_sessions.side_effect = None
+            empty_sessions.return_value = {"202"}
+            await replay_buffer.refresh_staleness(
+                task_stale_thresholds={"non_retryable_task": 2, "retryable_task": 2},
+                expired_groups_retryable_by_task={
+                    "non_retryable_task": False,
+                    "retryable_task": True,
+                },
+                current_train_step=4,
+            )
+
+        self.assertEqual(empty_sessions.await_count, 2)
+        empty_sessions.assert_awaited_with(["202"])
+        release_sessions.assert_awaited_once_with(["201"])
+        assert len(replay_buffer) == 1
+
+    async def test_refresh_staleness_does_not_discard_groups_when_storage_delete_fails(self):
+        replay_buffer = AsyncReplayBufferConfig().build()
+        stale = make_rollout_state(1, session_id=201, response_model_steps=[1])
+        await replay_buffer.put([stale], "non_retryable_task")
+
+        with (
+            patch.object(
+                replay_buffer._storage,
+                "delete",
+                new=AsyncMock(side_effect=RuntimeError("storage unavailable")),
+            ),
+            patch(
+                "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
+                new=AsyncMock(return_value={"201"}),
+            ) as release_sessions,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "storage unavailable"):
+                await replay_buffer.refresh_staleness(
+                    task_stale_thresholds={"non_retryable_task": 2},
+                    expired_groups_retryable_by_task={"non_retryable_task": False},
+                    current_train_step=4,
+                )
+
+        release_sessions.assert_not_awaited()
+        assert stale.prompt_ids == [1, 1001]
+        assert len(replay_buffer) == 1
+
+    async def test_refresh_empty_is_idempotent_and_retryable(self):
+        replay_buffer = AsyncReplayBufferConfig().build()
+        stale = make_rollout_state(1, session_id=401, response_model_steps=[1])
+        await replay_buffer.put([stale], "task")
+
+        with patch(
+            "xtuner.v1.rl.replay_buffer.empty_existing_sessions",
+            new=AsyncMock(return_value={"401"}),
+        ) as empty_sessions:
+            await replay_buffer.refresh_staleness(
+                task_stale_thresholds={"task": 2},
+                expired_groups_retryable_by_task={"task": True},
+                current_train_step=4,
+            )
+            await replay_buffer.refresh_staleness(
+                task_stale_thresholds={"task": 2},
+                expired_groups_retryable_by_task={"task": True},
+                current_train_step=4,
+            )
+
+        self.assertEqual(empty_sessions.await_count, 2)
+        empty_sessions.assert_awaited_with(["401"])
 
     async def test_refresh_staleness_batches_non_retryable_release_outside_lock(self):
         replay_buffer = AsyncReplayBufferConfig().build()

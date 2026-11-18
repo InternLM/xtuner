@@ -19,6 +19,8 @@ with patch.dict(
         "lagent.utils.rate_limiter": MagicMock(),
     },
 ):
+    from xtuner.v1.rl.agent_loop.localhost_agent_loop import agent_in_localhost_loop as localhost_impl
+    from xtuner.v1.rl.agent_loop.localhost_agent_loop.agent_in_localhost_loop import AgentInLocalhostLoop
     from xtuner.v1.rl.agent_loop.sandbox_agent_loop import agent_in_sandbox_loop as sandbox_impl
     from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import AgentInSandboxLoop
     from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import AgentRolloutItem, RolloutStatus
@@ -70,6 +72,7 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
     def _make_loop(mode: str = "train") -> AgentInSandboxLoop:
         loop = AgentInSandboxLoop.__new__(AgentInSandboxLoop)
         loop.mode = mode
+        loop.require_turn_provenance = False
         loop.tokenizer = MagicMock()
         loop.tokenizer.apply_chat_template.side_effect = lambda messages, **_: f"rendered-{messages[-1]['content']}\n"
         loop.tokenizer.decode.side_effect = lambda token_ids: f"decoded-{token_ids[-1]}"
@@ -86,7 +89,10 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
             }
             for index in range(segment_count)
         ]
-        return SimpleNamespace(export_training_trace=SimpleNamespace(remote=AsyncMock(side_effect=traces)))
+        return SimpleNamespace(
+            export_training_trace=SimpleNamespace(remote=AsyncMock(side_effect=traces)),
+            empty_sessions=SimpleNamespace(remote=AsyncMock()),
+        )
 
     async def test_completed_session_assigns_artifacts_only_to_first_segment(self):
         loop = self._make_loop()
@@ -117,6 +123,40 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([segment.response_ids for segment in segments], [[10, 20], [11, 21]])
         self.assertEqual(item.artifacts, original_artifacts)
+        self.assertEqual(trace_store.export_training_trace.remote.await_count, 2)
+        trace_store.empty_sessions.remote.assert_awaited_once_with([str(state.session_id)])
+
+    async def test_completed_provenance_checks_run_before_trace_cleanup(self):
+        loop = self._make_loop()
+        loop.require_turn_provenance = True
+        state = self._make_state()
+        item = self._make_item(RolloutStatus.COMPLETED)
+        traces = []
+        for index, segment in enumerate(item.artifacts["messages"]):
+            request_id = f"request-{index}"
+            segment["request_ids"] = [request_id]
+            traces.append(
+                {
+                    "input_ids": [1, 10 + index],
+                    "labels": [-100, 10 + index],
+                    "logprobs": [0.0, -0.1],
+                    "routed_experts": [object()],
+                    "token_model_steps": [0, 1],
+                    "request_ids": [request_id],
+                }
+            )
+        trace_store = SimpleNamespace(
+            export_training_trace=SimpleNamespace(remote=AsyncMock(side_effect=traces)),
+            contains_request_ids=SimpleNamespace(remote=AsyncMock(return_value=True)),
+            empty_sessions=SimpleNamespace(remote=AsyncMock()),
+        )
+
+        with patch.object(sandbox_impl, "get_store", return_value=trace_store):
+            segments = await loop._build_rollout_states(state, item)
+
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(trace_store.contains_request_ids.remote.await_count, 2)
+        trace_store.empty_sessions.remote.assert_awaited_once_with([str(state.session_id)])
 
     async def test_single_segment_keeps_artifacts(self):
         loop = self._make_loop()
@@ -133,12 +173,16 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
         loop = self._make_loop()
         state = self._make_state()
         item = self._make_item(RolloutStatus.FAILED)
+        trace_store = self._trace_store(segment_count=1)
 
-        segments = await loop._build_rollout_states(state, item)
+        with patch.object(sandbox_impl, "get_store", return_value=trace_store):
+            segments = await loop._build_rollout_states(state, item)
 
         self.assertEqual(segments, [state])
         self.assertEqual(state.status, Status.FAILED)
         self.assertEqual(state.extra_fields["agent_artifacts"], item.artifacts)
+        trace_store.export_training_trace.remote.assert_not_awaited()
+        trace_store.empty_sessions.remote.assert_not_awaited()
 
     async def test_eval_session_keeps_artifacts(self):
         loop = self._make_loop(mode="eval")
@@ -150,6 +194,42 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(segments, [state])
         self.assertEqual(state.extra_fields["agent_artifacts"], item.artifacts)
         self.assertEqual(state.extra_fields["agent_messages"][-1]["content"], "segment-1")
+
+
+class TestLocalhostTraceCleanup(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _make_loop() -> AgentInLocalhostLoop:
+        loop = AgentInLocalhostLoop.__new__(AgentInLocalhostLoop)
+        loop.mode = "train"
+        loop.tokenizer = MagicMock()
+        loop.tokenizer.apply_chat_template.side_effect = lambda messages, **_: f"rendered-{messages[-1]['content']}\n"
+        return loop
+
+    async def test_completed_export_empties_trace(self):
+        loop = self._make_loop()
+        state = TestSandboxArtifactOwnership._make_state()
+        item = TestSandboxArtifactOwnership._make_item(RolloutStatus.COMPLETED, segment_count=1)
+        trace_store = TestSandboxArtifactOwnership._trace_store(segment_count=1)
+
+        with patch.object(localhost_impl, "get_store", return_value=trace_store):
+            await loop._fill_rollout_state(state, item)
+
+        self.assertEqual(state.status, Status.COMPLETED)
+        trace_store.export_training_trace.remote.assert_awaited_once()
+        trace_store.empty_sessions.remote.assert_awaited_once_with([str(state.session_id)])
+
+    async def test_non_completed_rollout_preserves_trace(self):
+        loop = self._make_loop()
+        state = TestSandboxArtifactOwnership._make_state()
+        item = TestSandboxArtifactOwnership._make_item(RolloutStatus.FAILED, segment_count=1)
+        trace_store = TestSandboxArtifactOwnership._trace_store(segment_count=1)
+
+        with patch.object(localhost_impl, "get_store", return_value=trace_store):
+            await loop._fill_rollout_state(state, item)
+
+        self.assertEqual(state.status, Status.FAILED)
+        trace_store.export_training_trace.remote.assert_not_awaited()
+        trace_store.empty_sessions.remote.assert_not_awaited()
 
 
 class TestTrajectoryLogging(unittest.TestCase):

@@ -51,10 +51,9 @@ def _is_error_payload(payload: dict) -> bool:
 def _is_lmdeploy_context_rejection(status: int, body: bytes) -> bool:
     """Recognize the pinned LMDeploy's input check before engine generation.
 
-    A finished HTTP error alone does not prove that backend execution ended.
-    LMDeploy bc2c8da's AsyncEngine rejects input_len >= session_len before
-    submitting generation. Its OpenAI response has no stable machine error code,
-    so match that specific payload conservatively; unknown errors stay unsafe.
+    A finished HTTP error alone does not prove that backend execution ended. LMDeploy bc2c8da's AsyncEngine rejects
+    input_len >= session_len before submitting generation. Its OpenAI response has no stable machine error code, so
+    match that specific payload conservatively; unknown errors stay unsafe.
     """
     if status != HTTPStatus.BAD_REQUEST:
         return False
@@ -324,7 +323,8 @@ class SessionServer:
         self.turn_resume_initially_closed = turn_resume_initially_closed
         self.request_gate = (
             RequestGate(wait_timeout=turn_resume_wait_timeout, initially_open=not turn_resume_initially_closed)
-            if turn_resume_wait_timeout is not None else None
+            if turn_resume_wait_timeout is not None
+            else None
         )
         self.store = get_store()
         self.stop_word = self.tokenizer.eos_token or ""
@@ -911,7 +911,9 @@ class SessionServer:
                 upstream_status, raw_response
             )
             backend_ended = complete or rejected_before_generation
-            get_logger().info(f"request_terminal id={lease.request_id} outcome={terminal} backend_ended={backend_ended}")
+            get_logger().info(
+                f"request_terminal id={lease.request_id} outcome={terminal} backend_ended={backend_ended}"
+            )
             if rejected_before_generation:
                 get_logger().info(
                     f"request_rejected_before_generation id={lease.request_id} reason=context_length_exceeded"

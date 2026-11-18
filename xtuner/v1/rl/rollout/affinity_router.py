@@ -1,7 +1,7 @@
 """Job-owned HTTP session affinity in front of the original SessionServers.
 
-The mapping names a concrete DP entrypoint, not an EP group. This module never
-generates tokens, retries a POST, or changes cache/trace/version state.
+The mapping names a concrete DP entrypoint, not an EP group. This module never generates tokens, retries a POST, or
+changes cache/trace/version state.
 """
 
 from __future__ import annotations
