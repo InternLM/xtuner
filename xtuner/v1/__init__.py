@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-from typing import Any, cast
 
 
 # Set cache paths before importing Triton, TileLang, or CuTe DSL: each may read
@@ -22,27 +21,33 @@ if compile_cache_dir := os.getenv("XTUNER_COMPILE_CACHE_DIR"):
 
 
 def _patch_triton_autotune_for_determinism() -> None:
-    # 必须放在 xtuner.v1 初始化最前面：FLA kernel 在导入时就会读取 triton.autotune 装饰器。
-    # 如果等到 GatedDeltaNet 模块导入后再 patch，单独使用 xtuner 包的场景可能已经错过时机。
-    import triton
+    # 必须放在 xtuner.v1 初始化最前面：第三方 kernel 在导入时就会用 autotune 装饰器完成装饰。
+    # hook 点选 Autotuner 基类而不是 triton.autotune 符号：fla>=0.5 的 kernel 改用自带的
+    # fla_cache_autotune（CachedAutotuner 子类）装饰，不经过 triton.autotune，符号级替换覆盖不到；
+    # 基类 __init__ 裁剪 configs 对所有下游 autotuner 生效，且不受装饰时机/导入顺序影响。
+    import inspect
 
-    original_autotune = triton.autotune
-    if getattr(original_autotune, "_xtuner_deterministic_patched", False):
+    from triton.runtime.autotuner import Autotuner
+
+    original_init = Autotuner.__init__
+    if getattr(original_init, "_xtuner_deterministic_patched", False):
         return
 
-    def deterministic_autotune(configs, *args, **kwargs):
-        # Triton autotune 会按 benchmark/cache 在多个 kernel config 中选一个实现；
-        # 不同 cache 目录或计时抖动可能选到不同 tiling/num_warps/reduction 路径，
+    accepts_cache_results = "cache_results" in inspect.signature(original_init).parameters
+
+    def deterministic_init(self, fn, arg_names, configs, *args, **kwargs):
+        # Triton autotune 会按 benchmark 在多个 kernel config 中选一个实现；
+        # 不同进程/rank 的计时抖动可能选到不同 tiling/num_warps/reduction 路径，
         # 从而改变浮点累加顺序。确定性模式固定第一个 config，并禁用 cache 结果。
         if configs:
             configs = configs[:1]
-        kwargs["cache_results"] = False
-        return original_autotune(configs, *args, **kwargs)
+        if accepts_cache_results:
+            kwargs["cache_results"] = False
+        original_init(self, fn, arg_names, configs, *args, **kwargs)
 
-    patched = cast(Any, deterministic_autotune)
-    patched._xtuner_deterministic_patched = True
-    patched._xtuner_original_autotune = original_autotune
-    triton.autotune = deterministic_autotune
+    setattr(deterministic_init, "_xtuner_deterministic_patched", True)
+    setattr(deterministic_init, "_xtuner_original_init", original_init)
+    Autotuner.__init__ = deterministic_init
 
 
 if os.getenv("XTUNER_DETERMINISTIC") == "true":

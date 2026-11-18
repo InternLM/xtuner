@@ -7,7 +7,7 @@ TestHCSplitSinkhorn
     test_deterministic                           同输入两次调用逐位一致
 TestHCPreHCPostMatchesHF
     test_hc_pre_hc_post_matches_hf_hyper_connection  fp32 下与 HF 实现逐值一致
-    test_hc_pre_hc_post_matches_hf_bf16              bf16 下与 HF 实现一致
+    test_hc_pre_hc_post_matches_hf_bf16              bf16 下与 HF 容差内一致，不要求逐位相同
     test_zero_init_produces_uniform_stream_collapse  零初始化时四流等权塌缩
     test_grad_flows_through_hc_pre_and_hc_post       梯度能穿过 hc_pre/hc_post
 """
@@ -121,7 +121,7 @@ class TestHCPreHCPostMatchesHF:
 
         The final residual check allows rounding differences in hc_post.
         """
-        # bf16 下同样要与 HF 一致，覆盖训练实际使用的精度。
+        # 覆盖训练使用的 BF16 精度；hc_post 仅要求与 HF 容差内一致，不保留其中间舍入。
         torch.manual_seed(1)
         hf_hc = _hf_glm53_hyper_connection(HIDDEN, HC_MULT, hc_eps=1e-6, hc_sinkhorn_iters=20)
 
