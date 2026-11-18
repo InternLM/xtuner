@@ -14,7 +14,9 @@ DSAIndexerBackend = Literal[
 ]
 
 # Both DeepSelect variants keep KPool's TileLang-compatible output contract.
-KPoolIndexerBackend = Literal["torch", "tilelang", "tilelang_deepselect", "tilelang_cooperative"]
+KPoolIndexerBackend = Literal[
+    "torch", "tilelang", "tilelang_deepselect", "tilelang_cooperative", "lmdeploy_fp8", "lmdeploy_bf16"
+]
 
 
 class SparseMLAOutputs(NamedTuple):
