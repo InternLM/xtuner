@@ -246,7 +246,8 @@ def _merge_one(
 
 
 class RubricJudger(Judger):
-    """Score rollout responses against per-sample rubrics through a multimodal judge."""
+    """Score rollout responses against per-sample rubrics through a multimodal
+    judge."""
 
     def __init__(
         self,
@@ -397,7 +398,8 @@ class RubricJudger(Judger):
 
 
 class RubricJudgerConfig(JudgerConfig):
-    """Build a rubric judger while retaining the existing CPU replica options."""
+    """Build a rubric judger while retaining the existing CPU replica
+    options."""
 
     endpoint: str
     model: str
