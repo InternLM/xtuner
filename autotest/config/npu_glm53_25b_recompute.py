@@ -46,7 +46,7 @@ dataset_config = [
 ]
 
 dataloader_config = DataloaderConfig(
-    pack_max_length=8192,
+    pack_max_length=4096,
     group_by_length=True,
 )
 

@@ -44,7 +44,7 @@ dataset_config = [
         ),
         "tokenize_fn": Glm53VLTokenizeFnConfig(
             processor_path=MODEL_PATH,
-            max_length=8192,
+            max_length=4096,
             max_pixels=1048576,
         ),
     },
@@ -52,7 +52,7 @@ dataset_config = [
 
 dataloader_config = DataloaderConfig(
     dataset_config_list=dataset_config,
-    pack_max_length=8192,
+    pack_max_length=4096,
     collator="glm53_vl_sft_collator",
     collator_kwargs={
         "image_token_id": model_cfg.image_token_id,

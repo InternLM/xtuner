@@ -33,7 +33,7 @@ case:
                 config: autotest/config/npu_glm53_25b.py
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
-                image: ccr-deeplink/a3_cann921_xtuner:torch291_0.0.5-20261116T050010Z
+                image: ccr-deeplink/a3_cann921_xtuner:torch291_py312_0.0.7-20261118T084432Z
                 num_nodes: 1
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/GLM-5.3-Flash-25B
@@ -70,7 +70,7 @@ case:
                 config: autotest/config/npu_glm53_25b_recompute.py
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
-                image: ccr-deeplink/a3_cann921_xtuner:torch291_0.0.5-20261116T050010Z
+                image: ccr-deeplink/a3_cann921_xtuner:torch291_py312_0.0.7-20261118T084432Z
                 num_nodes: 1
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/GLM-5.3-Flash-25B
@@ -106,7 +106,7 @@ case:
                 config: autotest/config/npu_glm53_25b_sp2.py
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
-                image: ccr-deeplink/a3_cann921_xtuner:torch291_0.0.5-20261116T050010Z
+                image: ccr-deeplink/a3_cann921_xtuner:torch291_py312_0.0.7-20261118T084432Z
                 num_nodes: 1
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/GLM-5.3-Flash-25B
@@ -142,7 +142,7 @@ case:
                 config: autotest/config/npu_glm53_25b_compile.py
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
-                image: ccr-deeplink/a3_cann921_xtuner:torch291_0.0.5-20261116T050010Z
+                image: ccr-deeplink/a3_cann921_xtuner:torch291_py312_0.0.7-20261118T084432Z
                 num_nodes: 1
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/GLM-5.3-Flash-25B
@@ -178,7 +178,7 @@ case:
                 config: autotest/config/npu_glm53_25b_ep8_sp2.py
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
-                image: ccr-deeplink/a3_cann921_xtuner:torch291_0.0.5-20261116T050010Z
+                image: ccr-deeplink/a3_cann921_xtuner:torch291_py312_0.0.7-20261118T084432Z
                 num_nodes: 1
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/GLM-5.3-Flash-25B
@@ -214,7 +214,7 @@ case:
                 config: autotest/config/npu_glm53_25b_vl.py
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
-                image: ccr-deeplink/a3_cann921_xtuner:torch291_0.0.5-20261116T050010Z
+                image: ccr-deeplink/a3_cann921_xtuner:torch291_py312_0.0.7-20261118T084432Z
                 num_nodes: 1
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/GLM-5.3-Flash-25B
@@ -251,7 +251,7 @@ case:
                 config: autotest/config/npu_glm53_25b_sp2_vl.py
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
-                image: ccr-deeplink/a3_cann921_xtuner:torch291_0.0.5-20261116T050010Z
+                image: ccr-deeplink/a3_cann921_xtuner:torch291_py312_0.0.7-20261118T084432Z
                 num_nodes: 1
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/GLM-5.3-Flash-25B
@@ -288,7 +288,7 @@ case:
                 config: autotest/config/npu_glm53_25b_ep8_vl.py
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
-                image: ccr-deeplink/a3_cann921_xtuner:torch291_0.0.5-20261116T050010Z
+                image: ccr-deeplink/a3_cann921_xtuner:torch291_py312_0.0.7-20261118T084432Z
                 num_nodes: 1
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/GLM-5.3-Flash-25B
@@ -326,7 +326,7 @@ case:
                 config: autotest/config/npu_glm53_25b_ep4_resume_vl.py
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
-                image: ccr-deeplink/a3_cann921_xtuner:torch291_0.0.5-20261116T050010Z
+                image: ccr-deeplink/a3_cann921_xtuner:torch291_py312_0.0.7-20261118T084432Z
                 num_nodes: 1
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/GLM-5.3-Flash-25B
@@ -360,7 +360,7 @@ case:
                 config: autotest/config/npu_glm53_25b_ep4_resume_vl.py
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
-                image: ccr-deeplink/a3_cann921_xtuner:torch291_0.0.5-20261116T050010Z
+                image: ccr-deeplink/a3_cann921_xtuner:torch291_py312_0.0.7-20261118T084432Z
                 num_nodes: 1
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/GLM-5.3-Flash-25B
