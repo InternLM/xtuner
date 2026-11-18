@@ -140,6 +140,25 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
         )
         return teacher
 
+    def test_canonicalize_supervises_all_model_eos_ids(self):
+        loop = SingleTurnAgentLoop.__new__(SingleTurnAgentLoop)
+        loop.logger = MagicMock()
+        state = RolloutState(
+            rollout_id=1,
+            group_id=1,
+            message=[{"role": "user", "content": "prompt"}],
+            prompt_ids=[10],
+            response="response",
+            response_ids=[154820, 154827, 154829],
+            logprobs=[-0.1, -0.2, -0.3],
+            status=Status.COMPLETED,
+        )
+
+        result = loop.canonicalize_train_fields([state])
+
+        self.assertEqual(result[0].labels, [-100, 154820, 154827, 154829])
+        self.assertEqual(result[0].train_meta.supervised_tokens, 3)
+
     def test_config_binds_validity_check_to_local_agent_loop_once(self):
         is_valid_sample_fn = MagicMock()
         local_loop = MagicMock()
