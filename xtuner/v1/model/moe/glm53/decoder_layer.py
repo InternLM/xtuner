@@ -147,6 +147,7 @@ class Glm53DenseDecoderLayer(DenseDecoderLayer):
             self.mhc_cfg.hc_eps,
             norm_eps=self.input_layernorm.variance_epsilon,
             projection_block_size=self.mhc_cfg.projection_block_size,
+            fused_pre=self.mhc_cfg.fused_pre,
         )
         attn_outputs: AttnOutputs = self.self_attn(
             hidden_states=self.input_layernorm(x), position_embeddings=position_embeddings, seq_ctx=seq_ctx
@@ -166,6 +167,7 @@ class Glm53DenseDecoderLayer(DenseDecoderLayer):
             self.mhc_cfg.hc_eps,
             norm_eps=self.post_attention_layernorm.variance_epsilon,
             projection_block_size=self.mhc_cfg.projection_block_size,
+            fused_pre=self.mhc_cfg.fused_pre,
         )
         ffn_out = self.mlp(self.post_attention_layernorm(x))
         hidden_states = hc_post(ffn_out, residual, post, comb)
@@ -234,6 +236,7 @@ class Glm53MoEDecoderLayer(MoEDecoderLayer):
             self.mhc_cfg.hc_eps,
             norm_eps=self.input_layernorm.variance_epsilon,
             projection_block_size=self.mhc_cfg.projection_block_size,
+            fused_pre=self.mhc_cfg.fused_pre,
         )
         attention_forward = cast(Callable[..., AttnOutputs], self.self_attn)
         attn_outputs = attention_forward(
@@ -257,6 +260,7 @@ class Glm53MoEDecoderLayer(MoEDecoderLayer):
             self.mhc_cfg.hc_eps,
             norm_eps=self.post_attention_layernorm.variance_epsilon,
             projection_block_size=self.mhc_cfg.projection_block_size,
+            fused_pre=self.mhc_cfg.fused_pre,
         )
         hidden_states = self.post_attention_layernorm(x)
 

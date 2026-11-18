@@ -57,6 +57,8 @@ class MHCConfig(BaseModel):
             anchor in tests).
         hc_eps (float): Stabilizer used inside the Sinkhorn normalization.
         hc_sinkhorn_iters (int): Number of Sinkhorn iterations.
+        fused_pre (bool): Use the FP32 Triton norm/projection path that follows
+            DeepSeek's kernel decomposition without materializing FP32 flattened activations.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -65,6 +67,7 @@ class MHCConfig(BaseModel):
     hc_eps: float = 1e-6
     hc_sinkhorn_iters: int = 20
     projection_block_size: int = Field(default=0, ge=0)
+    fused_pre: bool = False
 
 
 def hc_split_sinkhorn(
@@ -138,6 +141,7 @@ def hc_pre(
     eps: float,
     norm_eps: float = 1e-6,
     projection_block_size: int = 0,
+    fused_pre: bool = False,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Reduce ``hc_mult`` streams down to one, returning the reduced state and
     the ``post``/``comb`` weights that the matching :func:`hc_post` call will
@@ -162,6 +166,7 @@ def hc_pre(
         iters (int): Sinkhorn iterations.
         eps (float): Sinkhorn stabilizer.
         norm_eps (float): RMS-norm stabilizer applied before projecting to ``mixes``.
+        fused_pre (bool): Fuse RMSNorm and projection with the FP32 Triton backend.
 
     Returns:
         tuple[Tensor, Tensor, Tensor]:
@@ -174,8 +179,13 @@ def hc_pre(
     # HF keeps both the unweighted norm and mixing projection in fp32. A BF16
     # projection can round differently when SP changes the number of token rows,
     # perturbing the residual streams before attention even runs.
-    flat_normed = torch.nn.functional.rms_norm(x_flat.float(), (x_flat.size(-1),), weight=None, eps=norm_eps)
-    mixes = fp32_linear(flat_normed, hc_fn, block_size=projection_block_size)
+    if fused_pre:
+        from xtuner.v1.ops.mhc_pre_norm_fn import mhc_pre_norm_fn
+
+        mixes = mhc_pre_norm_fn(x, hc_fn, norm_eps)
+    else:
+        flat_normed = torch.nn.functional.rms_norm(x_flat.float(), (x_flat.size(-1),), weight=None, eps=norm_eps)
+        mixes = fp32_linear(flat_normed, hc_fn, block_size=projection_block_size)
 
     pre, post, comb = hc_split_sinkhorn(mixes, hc_scale, hc_base, hc_mult, iters, eps)
 
