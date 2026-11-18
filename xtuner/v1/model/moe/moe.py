@@ -17,7 +17,7 @@ from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
 )
-from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
+from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
 from tqdm import tqdm
 from typing_extensions import overload, override
 
@@ -81,6 +81,7 @@ from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer
 from xtuner.v1.utils import (
     get_device,
     get_logger,
+    is_sharded_placement,
     log_rank0,
 )
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
@@ -1590,7 +1591,7 @@ class MoE(BaseModel):
             local_norm_squared = torch.linalg.vector_norm(local_grad, ord=2.0, dtype=dtype) ** 2
             if isinstance(grad, DTensor):
                 for i, placement in enumerate(grad.placements):
-                    if isinstance(placement, Shard):
+                    if is_sharded_placement(placement):
                         dist.all_reduce(local_norm_squared, group=grad.device_mesh.get_group(i))
                     elif isinstance(placement, Replicate):
                         pass
