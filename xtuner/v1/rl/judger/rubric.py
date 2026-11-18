@@ -28,6 +28,8 @@ Return only one JSON object with this schema:
 {"results":[{"local_id":"a1","verdict":"met","evidence":"an exact contiguous quote from the response"}]}
 The verdict must be either "met" or "unmet". Include every rubric exactly once.
 For "met", evidence must be a verbatim substring of the assistant response proving the criterion.
+For example, if the response says "The grid has two shaded squares.", evidence can be exactly "The grid has two shaded squares.".
+Never copy the criterion into evidence, and never use phrases such as "The response identifies" as evidence.
 For "unmet", give a short explanation of what is missing or incorrect.
 Do not invent criteria, omit criteria, or reveal hidden reference answers.
 """
@@ -131,7 +133,7 @@ def _response_content(body: dict[str, Any]) -> str:
     raise ValueError("Judge response content must be a string or text-part list.")
 
 
-def _parse_results(content: str, rubrics: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _parse_results(content: str, rubrics: list[dict[str, Any]], response: str) -> list[dict[str, Any]]:
     decoder = json.JSONDecoder()
     parsed: dict[str, Any] | None = None
     for index, char in enumerate(content):
@@ -165,12 +167,20 @@ def _parse_results(content: str, rubrics: list[dict[str, Any]]) -> list[dict[str
             raise ValueError(f"Rubric {local_id!r} verdict must be met or unmet.")
         if not isinstance(evidence, str):
             raise ValueError(f"Rubric {local_id!r} evidence must be a string.")
-        results_by_id[local_id] = {
+        result = {
             **expected[local_id],
             "verdict": verdict,
             "score": 1.0 if verdict == "met" else 0.0,
             "evidence": evidence,
         }
+        if verdict == "met" and (not evidence or evidence not in response):
+            result.update(
+                judge_verdict="met",
+                verdict="unmet",
+                score=0.0,
+                validation_error="met evidence is not a verbatim substring of the response",
+            )
+        results_by_id[local_id] = result
     missing = set(expected) - set(results_by_id)
     if missing:
         raise ValueError(f"Judge omitted rubric local_ids: {sorted(missing)}.")
@@ -185,6 +195,18 @@ def merge_outcome_and_process(
     outcome_key: str = "outcome",
     process_key: str = "process",
 ) -> RolloutState | list[RolloutState]:
+    """Merge outcome and process branches into the standard RL reward.
+
+    Args:
+        rollout_states (RolloutState | list[RolloutState]): States being judged.
+        judged (dict[str, Any]): Raw outputs keyed by outcome and process branch.
+        process_weight (float): Process-score weight in ``[0, 1]``. Defaults to 0.3.
+        outcome_key (str): Outcome branch key. Defaults to ``outcome``.
+        process_key (str): Process branch key. Defaults to ``process``.
+
+    Returns:
+        RolloutState | list[RolloutState]: States with fused ``reward["score"]`` and branch details.
+    """
     if not 0.0 <= process_weight <= 1.0:
         raise ValueError("process_weight must be in [0, 1].")
     if isinstance(rollout_states, list):
@@ -224,6 +246,8 @@ def _merge_one(
 
 
 class RubricJudger(Judger):
+    """Score rollout responses against per-sample rubrics through a multimodal judge."""
+
     def __init__(
         self,
         endpoint: str,
@@ -275,14 +299,16 @@ class RubricJudger(Judger):
         for attempt in range(self.max_retries + 1):
             try:
                 body = await self._request(request)
-                results = _parse_results(_response_content(body), rubrics)
+                results = _parse_results(_response_content(body), rubrics, cast(str, payload["response"]))
                 weight_sum = sum(result["weight"] for result in results)
                 score = sum(result["weight"] * result["score"] for result in results) / weight_sum
+                invalid_evidence_count = sum("validation_error" in result for result in results)
                 return {
                     "score": score,
                     "process_score": score,
                     "rubric_results": results,
-                    "judge_status": "ok",
+                    "judge_status": "ok_with_invalid_evidence" if invalid_evidence_count else "ok",
+                    "invalid_evidence_count": invalid_evidence_count,
                     "judge_model": self.model,
                     "judge_attempts": attempt + 1,
                 }
@@ -371,6 +397,8 @@ class RubricJudger(Judger):
 
 
 class RubricJudgerConfig(JudgerConfig):
+    """Build a rubric judger while retaining the existing CPU replica options."""
+
     endpoint: str
     model: str
     max_retries: int = Field(default=2, ge=0)
