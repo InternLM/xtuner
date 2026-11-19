@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from torch import Tensor
 
 from xtuner.v1.ops.fp32_linear import fp32_linear
+from xtuner.v1.ops.lmdeploy_alignment import ALIGN_FORWARD
 from xtuner.v1.utils.compile import maybe_compile
 
 
@@ -66,6 +67,27 @@ class MHCConfig(BaseModel):
     hc_eps: float = 1e-6
     hc_sinkhorn_iters: int = 20
     projection_block_size: int = Field(default=0, ge=0)
+
+
+def hc_pre_norm(x: Tensor, fn: Tensor, scale: Tensor, base: Tensor, cfg: MHCConfig, norm):
+    """Collapse streams and normalize through the selected forward path."""
+    if ALIGN_FORWARD and x.is_cuda:
+        from xtuner.v1.ops.lmdeploy_alignment import hc_pre as serving_pre
+
+        weight = norm.weight.to_local() if hasattr(norm.weight, "to_local") else norm.weight
+        return serving_pre(x, fn, scale, base, weight, cfg.hc_sinkhorn_iters, cfg.hc_eps, norm.variance_epsilon)
+    y, post, comb = hc_pre(
+        x,
+        fn,
+        scale,
+        base,
+        cfg.hc_mult,
+        cfg.hc_sinkhorn_iters,
+        cfg.hc_eps,
+        norm_eps=norm.variance_epsilon,
+        projection_block_size=cfg.projection_block_size,
+    )
+    return norm(y), post, comb
 
 
 def hc_split_sinkhorn(
@@ -211,7 +233,7 @@ def hc_post(x: Tensor, residual: Tensor, post: Tensor, comb: Tensor) -> Tensor:
 
     Returns:
         Tensor: Updated HC-expanded streams, shape ``[B, S, hc_mult, hidden_size]``, cast
-            back to ``residual.dtype``.
+            back to ``x.dtype``.
     """
     if _USE_MHC_KERNELS:
         raise NotImplementedError(

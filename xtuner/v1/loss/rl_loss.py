@@ -1,10 +1,10 @@
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 from pydantic import Field
 from torch.distributed.device_mesh import DeviceMesh
 
+from xtuner.v1.ops.lmdeploy_alignment import head_linear
 from xtuner.v1.rl.utils.misc import gather_logprobs
 from xtuner.v1.utils.device import get_device
 
@@ -80,7 +80,7 @@ class LogProbContext(BaseLossContext):
         head_bias: torch.Tensor | None,
         loss_kwargs: LogProbKwargs,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
-        logits = F.linear(hidden_states, head_weight, head_bias).float()
+        logits = head_linear(hidden_states, head_weight, head_bias).float()
         logprobs = gather_logprobs(logits, loss_kwargs.shifted_labels)
         return logprobs, (None, {})
 
@@ -97,7 +97,7 @@ class LogProbContext(BaseLossContext):
         logprobs = torch.zeros((bs, seq_len), device=loss_kwargs.shifted_labels.device)
         for i in range(0, seq_len, self.loss_cfg.chunk_size):
             hidden_states_chunk = hidden_states[:, i : i + self.loss_cfg.chunk_size, :]
-            logits = F.linear(hidden_states_chunk, head_weight, head_bias).float()
+            logits = head_linear(hidden_states_chunk, head_weight, head_bias).float()
             chunked_labels = loss_kwargs.shifted_labels[:, i : i + self.loss_cfg.chunk_size]
             chunked_logprobs = gather_logprobs(logits, chunked_labels)
             logprobs[:, i : i + self.loss_cfg.chunk_size] = chunked_logprobs
@@ -161,7 +161,7 @@ class TopKLogProbContext(BaseLossContext):
         loss_kwargs: BaseLossKwargs,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, dict[str, Any]]]:
         del loss_kwargs
-        logits = F.linear(hidden_states, head_weight, head_bias).float()
+        logits = head_linear(hidden_states, head_weight, head_bias).float()
         selected_logits, token_ids = torch.topk(logits, k=self.loss_cfg.top_k, dim=-1)
         selected_logprobs = selected_logits - torch.logsumexp(logits, dim=-1, keepdim=True)
         return selected_logprobs, (token_ids, {})

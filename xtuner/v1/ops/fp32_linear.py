@@ -4,6 +4,8 @@
 import torch
 from torch.nn import functional as F
 
+from xtuner.v1.ops.lmdeploy_alignment import ALIGN_FORWARD
+
 
 def fp32_linear(
     inputs: torch.Tensor,
@@ -29,6 +31,20 @@ def fp32_linear(
     """
     if block_size < 0:
         raise ValueError("block_size must be nonnegative")
+    if ALIGN_FORWARD:
+        from lmdeploy.pytorch.nn.glm53_alignment import (
+            ALIGN_ROUTER_PROJECTION,
+            aligned_linear,
+            aligned_router_linear,
+        )
+
+        if (ALIGN_ROUTER_PROJECTION and bias is None and inputs.is_cuda
+                and inputs.dtype == torch.bfloat16
+                and weight.dtype in (torch.bfloat16, torch.float32)
+                and weight.shape == (288, 4096)):
+            return aligned_router_linear(inputs, weight)
+
+        return aligned_linear(inputs.float(), weight.float(), None if bias is None else bias.float())
     with torch.autocast(device_type=inputs.device.type, enabled=False):
         x = inputs.float()
         w = weight.float()
