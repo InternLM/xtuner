@@ -21,6 +21,7 @@ Bad Tests:
 import asyncio
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -156,26 +157,29 @@ class TestRLColocateTrainer(unittest.TestCase):
             onload_kvcache=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),
             validate_registered_workers_to_proxy=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),
         )
+        train_fit = MagicMock(
+            return_value=(
+                [
+                    {
+                        "rollout_is_metrics": {},
+                        "mismatch_metrics": {},
+                        "rollout_entropy": 0.0,
+                        "train_entropy": 0.0,
+                        "train_metrics": [],
+                        "sft_train_metrics": {},
+                    }
+                ],
+                {"batch_size": 1, "rewards/mean": 1.0},
+            )
+        )
         trainer.train_controller = SimpleNamespace(
             onload=MagicMock(return_value="train_onloaded"),
             offload=MagicMock(return_value="train_offloaded"),
             weight_update=MagicMock(return_value="weights_updated"),
-            fit=MagicMock(
-                return_value=(
-                    [
-                        {
-                            "rollout_is_metrics": {},
-                            "mismatch_metrics": {},
-                            "rollout_entropy": 0.0,
-                            "train_entropy": 0.0,
-                            "train_metrics": [],
-                            "sft_train_metrics": {},
-                        }
-                    ],
-                    {"batch_size": 1, "rewards/mean": 1.0},
-                )
-            ),
+            fit=train_fit,
+            prepare_fit=MagicMock(return_value=SimpleNamespace(fit=train_fit)),
         )
+        trainer._trajectory_save_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-traj-save")
         trainer.rl_health_manager = RLHealthManager(
             train_controller=trainer.train_controller,
             rollout_controller=trainer.rollout_controller,
