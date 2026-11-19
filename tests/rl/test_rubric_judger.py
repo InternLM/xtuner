@@ -190,8 +190,8 @@ class TestRubricScoring(RubricTestCase):
             asyncio.run(self._judger(transport, max_retries=0).judge(self.state))
 
     def test_schema_fragment_without_outer_brace(self):
-        # 验证服务缺少最外层左括号或左括号与起始引号时仍可解析。
-        for prefix_length in (1, 2):
+        # 验证 results 标记在开头丢失任意数量字符时均可按已知结构修复。
+        for prefix_length in range(1, len('{"results"')):
             with self.subTest(prefix_length=prefix_length):
 
                 async def transport(request):

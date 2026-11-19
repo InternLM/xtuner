@@ -147,15 +147,19 @@ def _parse_results(content: str, rubrics: list[dict[str, Any]], response: str) -
             parsed = candidate
             break
     stripped = content.lstrip()
-    if parsed is None and stripped.startswith(('"results"', 'results"')):
-        repaired = "{" + (stripped if stripped.startswith('"') else '"' + stripped)
-        try:
-            candidate, _ = decoder.raw_decode(repaired)
-        except json.JSONDecodeError:
-            pass
-        else:
-            if isinstance(candidate, dict) and isinstance(candidate.get("results"), list):
-                parsed = candidate
+    marker = '{"results"'
+    if parsed is None:
+        for offset in range(1, len(marker)):
+            if not stripped.startswith(marker[offset:]):
+                continue
+            try:
+                candidate, _ = decoder.raw_decode(marker[:offset] + stripped)
+            except json.JSONDecodeError:
+                pass
+            else:
+                if isinstance(candidate, dict) and isinstance(candidate.get("results"), list):
+                    parsed = candidate
+            break
     if parsed is None or not isinstance(parsed.get("results"), list):
         raise ValueError(
             f"Judge output must contain a JSON object with a results list; content prefix: {content[:200]!r}"
