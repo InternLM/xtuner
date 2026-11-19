@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Literal, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1._writer import get_writer
+from xtuner.v1._writer import SwanLabConfig, get_writer
 from xtuner.v1.data_proto.rl_data import MM_PIXEL_FIELDS, RolloutState, validate_train_group
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
@@ -203,6 +203,7 @@ def _parse_debug_rollout_step(path: Path) -> int:
 class TrainInfo(TypedDict, total=False):
     data_info: dict[str, float]
     workers_log_item: list[WorkerLogItem]
+    mini_batch_start_step: int
 
 
 @dataclass(frozen=True)
@@ -333,7 +334,8 @@ class BaseRLTrainerConfig(BaseModel):
     debug_rollout_dir: Path | str | None = None
     debug_train: bool = False
     skip_checkpoint_validation: bool = False
-    exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard"
+    exp_tracker: Literal["tensorboard", "jsonl", "swanlab"] = "tensorboard"
+    swanlab_config: SwanLabConfig | None = None
     trace_config: TraceConfig = Field(default_factory=TraceConfig)
 
     @model_validator(mode="after")
@@ -422,8 +424,9 @@ class RLColocateTrainerConfig(BaseRLTrainerConfig):
             False.
         skip_checkpoint_validation (bool): Whether to skip checkpoint
             validation. Defaults to False.
-        exp_tracker (Literal["tensorboard", "jsonl"]): Experiment tracker type.
+        exp_tracker (Literal["tensorboard", "jsonl", "swanlab"]): Experiment tracker type.
             Defaults to "tensorboard".
+        swanlab_config (SwanLabConfig | None): Optional SwanLab settings. Defaults to None.
         resources (AcceleratorResourcesConfig): Shared accelerator resources
             used by both training and rollout workers.
 
@@ -510,8 +513,9 @@ class RLDisaggregatedTrainerConfig(BaseRLTrainerConfig):
             False.
         skip_checkpoint_validation (bool): Whether to skip checkpoint
             validation. Defaults to False.
-        exp_tracker (Literal["tensorboard", "jsonl"]): Experiment tracker type.
+        exp_tracker (Literal["tensorboard", "jsonl", "swanlab"]): Experiment tracker type.
             Defaults to "tensorboard".
+        swanlab_config (SwanLabConfig | None): Optional SwanLab settings. Defaults to None.
         train_resources (AcceleratorResourcesConfig): Accelerator resources for
             training workers.
         rollout_resources (AcceleratorResourcesConfig): Accelerator resources
@@ -586,8 +590,22 @@ class BaseRLTrainer:
         self._benchmark_training_samples: int = 0
         self._benchmark_training_tokens: int = 0
 
-        self._exp_tracker = get_writer(writer_type=cfg.exp_tracker, log_dir=log_dir / self._EXP_TRACKING_PATH)
+        self._init_exp_tracker(cfg, log_dir)
         self._display_all_workers_log = False
+
+    def _init_exp_tracker(self, cfg: BaseRLTrainerConfig, log_dir: Path) -> None:
+        self._exp_tracker = get_writer(
+            writer_type=cfg.exp_tracker,
+            log_dir=log_dir / self._EXP_TRACKING_PATH,
+            swanlab_config=cfg.swanlab_config,
+            checkpoint_path=self._load_checkpoint_cfg.checkpoint_path,
+        )
+
+    def _close_exp_tracker(self) -> None:
+        try:
+            self._exp_tracker.close()
+        except Exception:
+            self.logger.exception("Failed to close the experiment tracker.")
 
     def _init_work_dir_and_meta(self, cfg: BaseRLTrainerConfig, meta_path: str) -> None:
         work_dir = Path(cfg.work_dir) if cfg.work_dir else Path.cwd() / "work_dirs"
@@ -762,6 +780,11 @@ class BaseRLTrainer:
         with train_state_path.open("r") as f:
             train_state = json.load(f)
         self._cur_step = train_state["cur_step"]
+        self._global_train_step = train_state.get("global_train_step", 0)
+        if "global_train_step" not in train_state:
+            self.logger.warning(
+                "Checkpoint has no optimizer logging counter; detailed optimizer-step metrics restart at 1."
+            )
         return checkpoint_path
 
     async def _resume_agent_loop_manager(self, checkpoint_path: Path | str) -> int:
@@ -798,8 +821,13 @@ class BaseRLTrainer:
 
         # 3. Save train state JSON
         train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
+        train_state: dict[str, Any] = {"cur_step": cur_step, "global_train_step": self._global_train_step}
+        self._exp_tracker.persist_state(checkpoint_path)
+        tracker_state = self._exp_tracker.get_state()
+        if isinstance(tracker_state, dict):
+            train_state["swanlab_run"] = tracker_state
         with train_state_path.open("w") as f:
-            json.dump({"cur_step": cur_step}, f)
+            json.dump(train_state, f)
 
         # 4. Update meta
         current_exp = self._meta.latest_exp
@@ -1025,9 +1053,15 @@ class BaseRLTrainer:
         data_info["invalid_train_samples"] = dropped_samples
         self._release_train_batch_resources(train_batch)
 
+        # Advance the optimizer logging counter before checkpointing. The
+        # actual writer calls stay in _log_step, after checkpointing and the
+        # outer-step timer, so logging cannot change checkpoint or timing
+        # semantics.
+        mini_batch_start_step = self._advance_mini_batch_step(workers_log_item)
         return {
             "data_info": data_info,
             "workers_log_item": workers_log_item,
+            "mini_batch_start_step": mini_batch_start_step,
         }
 
     async def _run_evaluation(self, train_step: int) -> dict[str, float]:
@@ -1226,8 +1260,6 @@ class BaseRLTrainer:
 
             all_scalars.update(self._distillation.metric_scalars(rank0_log_item["train_metrics"]))
 
-            self._log_mini_batch_metrics(train_info["workers_log_item"])
-
         if eval_info:
             all_scalars.update({f"eval/{k}": v for k, v in eval_info.items()})
             eval_str = " ".join([f"{k}: {v:.4f}" for k, v in eval_info.items()])
@@ -1237,6 +1269,10 @@ class BaseRLTrainer:
         )
         if eval_str:
             self.logger.info(f"Eval: {eval_str}")
+        self._flush_mini_batch_metrics(
+            train_info.get("workers_log_item", []),
+            train_info.get("mini_batch_start_step"),
+        )
         self._exp_tracker.add_scalars(tag_scalar_dict=all_scalars, global_step=train_step)
 
     def _save_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
@@ -1410,21 +1446,38 @@ class BaseRLTrainer:
             return self.tokenizer.encode(data.response, add_special_tokens=False)
         return []
 
-    def _log_mini_batch_metrics(self, workers_log_item: List[WorkerLogItem]):
+    def _advance_mini_batch_step(self, workers_log_item: List[WorkerLogItem]) -> int:
         train_start_step = self._global_train_step + 1
+        if workers_log_item:
+            self._global_train_step += len(workers_log_item[0]["train_metrics"])
+        return train_start_step
+
+    def _flush_mini_batch_metrics(
+        self,
+        workers_log_item: List[WorkerLogItem],
+        train_start_step: int | None,
+    ) -> None:
+        if train_start_step is None:
+            return
         for worker_idx, log_item in enumerate(workers_log_item):
             for step_idx, mini_batch_log in enumerate(log_item["train_metrics"]):
                 if not self._display_all_workers_log and worker_idx > 0:
                     break
-                current_global_step = train_start_step + step_idx
-
-                metrics: dict[str, Any] = dict(mini_batch_log)
-
-                self._exp_tracker.add_scalars(
-                    tag_scalar_dict={f"train_metrics/worker_{worker_idx}/{k}": float(v) for k, v in metrics.items()},
-                    global_step=current_global_step,
-                )
-        self._global_train_step += len(workers_log_item[0]["train_metrics"])
+                global_step = train_start_step + step_idx
+                metrics = {
+                    f"train_metrics/worker_{worker_idx}/{key}": value for key, value in mini_batch_log.items()
+                }
+                try:
+                    self._exp_tracker.add_scalars(
+                        tag_scalar_dict={key: float(value) for key, value in metrics.items()},
+                        global_step=global_step,
+                    )
+                except Exception:
+                    self.logger.warning(
+                        "Failed to write detailed optimizer-step metrics at step %s.",
+                        global_step,
+                        exc_info=True,
+                    )
 
 
 class RLColocateTrainer(BaseRLTrainer):
@@ -1537,7 +1590,7 @@ class RLColocateTrainer(BaseRLTrainer):
             self._fit()
         finally:
             self.rl_health_manager.stop()
-            self._exp_tracker.close()
+            self._close_exp_tracker()
             close_trace()
 
     def _fit(self):
@@ -1806,7 +1859,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         try:
             return asyncio_run(self._fit())
         finally:
-            self._exp_tracker.close()
+            self._close_exp_tracker()
             close_trace()
 
     async def _get_batch_or_raise_producer_failure(

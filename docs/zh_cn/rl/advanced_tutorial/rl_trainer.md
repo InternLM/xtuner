@@ -331,6 +331,85 @@ trainer = RLDisaggregatedTrainerConfig(
 - 评估会在恢复后台 producer 前执行，避免评估和后台 rollout 抢同一组 rollout 资源。
 - 当前非共卡权重同步入口由 trainer 封装；用户通常只需要配置 `sync_weights_interval`。
 
+## 实验日志
+
+两种 RL Trainer 配置都支持 `exp_tracker="tensorboard"`（默认值）、`"jsonl"` 和
+`"swanlab"`。writer 由 Trainer 控制进程创建，在 `fit()` 退出时关闭。选择 SwanLab 后，
+现有指标名称和值会交给该后端记录，rollout 和训练 worker 不会分别创建 SwanLab 实验。
+
+在训练环境中安装可选 SDK：
+
+```bash
+pip install 'swanlab>=0.10.1'
+```
+
+也可以通过 `xtuner[swanlab]` 安装扩展依赖。构建任意一种 RL Trainer 配置后，选择日志后端：
+
+```python
+from xtuner.v1.train import SwanLabConfig
+
+trainer.exp_tracker = "swanlab"
+trainer.swanlab_config = SwanLabConfig(
+    project="agentic-rl",
+    experiment_name="qwen-cybergym",
+    mode="online",
+    config={"batch_size": 48, "optimizer_steps": 1},
+)
+```
+
+在线模式使用 `swanlab login` 或 SDK 的 `SWANLAB_API_KEY` 环境变量完成认证。
+设置 `mode="offline"` 则只写入本地日志。实验配置只包含显式传入的
+`swanlab_config.config` 字典，XTuner 不会上传完整 Trainer 配置。
+
+### 指标横轴
+
+原有 TensorBoard 调用已经使用两种横轴：reward、吞吐、阶段耗时和
+`train_metrics/worker_0/step_avg_*` 使用外层 RL `train_step`。
+一个外层 step 消费一批 rollout 数据，可以执行多次 optimizer 更新。
+详细的 `train_metrics/worker_0/*` 曲线使用累计 optimizer step。
+
+例如，两个外层 step 各执行三次 optimizer 更新，汇总曲线的横轴为 `1, 2`，
+详细 loss 曲线的横轴为 `1, 2, 3, 4, 5, 6`。Gradient accumulation 把多个 microbatch
+的 forward/backward 合并成一次 optimizer 更新，不会每个 microbatch 都推进这两种计数。
+实际 optimizer step 数由 packing 结果决定；pack 不足时，可以少于
+`train_worker_cfg.optimizer_steps`。
+
+optimizer 横轴统计更新尝试，也包括因梯度范数检查而跳过的更新，不代表参数成功更新次数。
+SwanLab 使用各指标原本的 step，因此汇总曲线和详细 loss 曲线保留各自的横轴。
+
+### 恢复 optimizer 日志计数
+
+原生 RL checkpoint 在 `train_state.json` 中保存详细 optimizer 日志计数
+`global_train_step`，三种后端均适用。恢复 checkpoint 时，外层训练 step 和详细日志计数
+都会恢复。旧 checkpoint 如果缺少该字段，仍会恢复外层 step，但详细 optimizer 横轴从
+`1` 重新开始，并输出警告。
+
+每批训练结束后、保存 checkpoint 之前先推进 optimizer 日志计数，使保存的计数包含当前
+批次。详细指标会在 checkpoint 保存完成、外层 step 计时结束后再 flush，因此 writer 开销
+不会计入 `time/step`。
+
+### SwanLab 续跑
+
+writer 将 run ID、project、workspace 和可选的 group 写入
+`<exp_dir>/logs/exp_tracking/swanlab_run.json`。原生 checkpoint 的 `train_state.json`
+还会保存 `swanlab_run` 实验标识。
+
+设置 `exp_tracker="swanlab"` 后，无论使用 `auto_resume=True` 还是显式指定
+`load_checkpoint_cfg.checkpoint_path`，都会按 SwanLab 的 `resume="allow"` 语义复用
+checkpoint 中的 run ID。恢复到新的实验目录时也可以关联同一个实验。复用实验标识不会
+改变 XTuner 各指标的横轴。
+
+手动选择实验时，设置 `SwanLabConfig(run_id="...", resume="must", ...)`。多卡首次启动并
+使用基础 `run_id` 时，rank 0 保留用户指定的恢复策略；如果还没有 checkpoint identity，
+非 0 rank 派生的 run ID 使用 `resume="allow"`。包含各 rank identity 的 checkpoint 续跑时
+仍保持严格恢复语义。
+如果希望从同一训练 checkpoint 开始一个独立实验，设置 `resume="never"`，并省略 `run_id`。
+复用 run ID 不会回退已上传的历史数据；比较旧 checkpoint 的重跑结果时，建议创建新实验。
+
+旧 checkpoint 如果没有 SwanLab 标识，则创建新实验，除非显式指定 run ID 或本地已有
+run-info 文件。
+
+
 ## 如何选择
 
 

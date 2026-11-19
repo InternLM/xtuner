@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 from torch.utils.tensorboard import SummaryWriter
 
@@ -36,3 +37,9 @@ class TensorboardWriter:
 
     def close(self):
         self._writer.close()
+
+    def get_state(self) -> dict[str, Any] | None:
+        return None
+
+    def persist_state(self, checkpoint_dir: str | Path) -> None:
+        return

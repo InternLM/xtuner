@@ -69,6 +69,7 @@ path = "xtuner/version.py"
 allow-direct-references = true
 
 [project.optional-dependencies]
+swanlab = ["swanlab>=0.10.1"]
 rl = [
   "ray[default]",
   "httpx",
@@ -94,7 +95,8 @@ all = [
   "parametrize",
   "mathruler",
   "pylatexenc",
-  "flash-linear-attention==0.5.2"
+  "flash-linear-attention==0.5.2",
+  "swanlab>=0.10.1"
 ]
 
 [tool.mypy]

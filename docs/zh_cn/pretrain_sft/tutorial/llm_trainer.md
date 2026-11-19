@@ -92,6 +92,43 @@ trainer = Trainer(
 ```
 
 
+## 实验日志
+
+`Trainer` 和 `TrainerConfig` 支持 `exp_tracker="jsonl"`（默认）、
+`"tensorboard"` 和 `"swanlab"`。已有配置可以这样启用 SwanLab：
+
+```python
+from xtuner.v1.train import SwanLabConfig
+from xtuner.v1.train import Trainer
+
+trainer_cfg.exp_tracker = "swanlab"
+trainer_cfg.swanlab_config = SwanLabConfig(
+    project="xtuner",
+    experiment_name="sft",
+    mode="online",
+)
+trainer = Trainer.from_config(trainer_cfg)
+trainer.fit()
+```
+
+通过 `pip install 'xtuner[swanlab]'` 安装可选 SDK，并用 `swanlab login` 登录。
+`mode="offline"` 仅记录本地日志。每个 rank 创建独立的 SwanLab run，透传该 rank
+原本交给 TensorBoard 或 JSONL 的指标名称、数值和 `cur_step`。本地指标和训练代码
+已经归约的指标都会按原有调用记录。
+
+各 run 默认使用共同的 group：`<工作目录名>-<实验目录名>`，也可以通过
+`swanlab_config.group` 显式指定。run 名称为 `experiment_name` 加 `-rank<N>`；
+未指定名称时使用 group 加该后缀。显式设置 `run_id` 时，rank 0 使用该 ID，
+其他 rank 使用 `<run_id>-rank<N>`。
+
+每个 rank 的实验标识和 group 分别保存在
+`logs/exp_tracking/rank<N>/swanlab_run.json` 和原生 checkpoint 的
+`swanlab/rank<N>.json` 中。自动续训和显式指定 checkpoint 都会恢复各 rank 自己的
+标识和原 group，也支持更换日志目录。旧 checkpoint 如果只有 rank 0 的实验标识，
+则由 rank 0 复用该标识，其他 rank 创建各自的 run。`fit()` 正常结束或抛出异常时，
+各 rank 都会关闭自己的 writer。
+SDK 配置和续训选项见 [RL 实验日志](../../rl/advanced_tutorial/rl_trainer.md#实验日志)。
+
 ## 启动训练
 
 完整代码如下：

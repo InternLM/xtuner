@@ -381,6 +381,97 @@ When using disaggregated training, note that:
 - The current disaggregated weight synchronization entry point is encapsulated by the trainer. Users usually only
   need to configure `sync_weights_interval`.
 
+## Experiment Tracking
+
+Both RL trainer configurations accept `exp_tracker="tensorboard"` (the default),
+`"jsonl"`, or `"swanlab"`. The Trainer driver owns the writer and closes it when
+`fit()` exits. Selecting SwanLab forwards the existing metric names and values;
+rollout and training workers do not create separate SwanLab runs.
+
+Install the optional SDK in the training environment:
+
+```bash
+pip install 'swanlab>=0.10.1'
+```
+
+It is also available through the `xtuner[swanlab]` installation extra. After
+constructing either RL trainer configuration, select the backend:
+
+```python
+from xtuner.v1.train import SwanLabConfig
+
+trainer.exp_tracker = "swanlab"
+trainer.swanlab_config = SwanLabConfig(
+    project="agentic-rl",
+    experiment_name="qwen-cybergym",
+    mode="online",
+    config={"batch_size": 48, "optimizer_steps": 1},
+)
+```
+
+For online mode, authenticate with `swanlab login` or the SDK's `SWANLAB_API_KEY`
+environment variable. Use `mode="offline"` to write local logs without uploading.
+Only the explicit `swanlab_config.config` dictionary is passed as experiment
+configuration; XTuner does not upload its full trainer configuration.
+
+### Metric Steps
+
+The original TensorBoard calls already use two step axes. Reward, throughput,
+phase timings, and `train_metrics/worker_0/step_avg_*` use the outer RL
+`train_step`. A step consumes one rollout batch and can
+perform several optimizer updates. Detailed `train_metrics/worker_0/*` series use
+the cumulative optimizer-step axis.
+
+For example, two outer steps with three optimizer updates each produce summary
+points at steps `1, 2`, and detailed loss points at `1, 2, 3, 4, 5, 6`. Gradient
+accumulation combines multiple microbatch forward/backward passes into one
+optimizer update; it does not advance either counter for every microbatch.
+Packing determines the actual number of optimizer steps, which can be less than
+`train_worker_cfg.optimizer_steps` when there are too few packs.
+
+The optimizer-step axis counts attempted updates, including updates skipped by
+the gradient-norm guard. It is not a count of successful parameter changes.
+SwanLab receives each series' original step, so the summary and detailed loss
+series retain their distinct axes.
+
+### Resuming Optimizer-Step Logs
+
+Native RL checkpoints save the detailed optimizer logging counter as
+`global_train_step` in `train_state.json` for all three backends. Restoring a
+checkpoint resumes both the outer training step and the detailed logging counter.
+Older checkpoints without this field still restore the outer step, but restart
+the detailed optimizer-step axis at `1` with a warning.
+
+The optimizer logging counter advances after each training batch and before
+checkpointing, so the saved counter includes the current batch. The detailed
+metrics themselves are flushed after checkpointing and outside the outer-step
+timer; their writer overhead is not included in `time/step`.
+
+### Resuming a SwanLab Run
+
+The writer saves the run ID, project, workspace, and optional group to
+`<exp_dir>/logs/exp_tracking/swanlab_run.json`. Native checkpoints also save this
+identity as `swanlab_run` in `train_state.json`.
+
+With `exp_tracker="swanlab"`, both `auto_resume=True` and an explicit
+`load_checkpoint_cfg.checkpoint_path` reuse the checkpoint's run ID with SwanLab's
+`resume="allow"` behavior. This also works when resuming into a new experiment
+directory. Reusing the run identity does not change XTuner's metric step axes.
+
+To select a run explicitly, set `SwanLabConfig(run_id="...", resume="must", ...)`.
+For a first multi-rank launch with a base `run_id`, rank 0 keeps the requested
+resume policy while derived non-zero-rank IDs use `resume="allow"` when no
+checkpoint identity exists. A checkpoint containing per-rank identities keeps
+strict resume behavior.
+To start a separate experiment from the same training checkpoint, set
+`resume="never"` and omit `run_id`. Reusing a run ID does not rewind already
+uploaded history; prefer a new run when comparing a replay from an older
+checkpoint.
+
+Older checkpoints without a SwanLab identity start a new SwanLab run unless a
+run ID or an existing local run-info file supplies one.
+
+
 ## How to Choose
 
 | Scenario | Recommendation |

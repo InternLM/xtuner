@@ -1,7 +1,8 @@
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from .jsonl_writer import JsonlWriter
+from .swanlab_writer import SwanLabConfig, SwanLabWriter
 from .tb_writer import TensorboardWriter
 
 
@@ -26,6 +27,10 @@ class Writer(Protocol):
         global_step: int,
     ): ...
 
+    def get_state(self) -> dict[str, Any] | None: ...
+
+    def persist_state(self, checkpoint_dir: str | Path) -> None: ...
+
     def close(self) -> None: ...
 
 
@@ -33,13 +38,27 @@ def get_writer(
     *,
     writer_type: str,
     log_dir: str | Path | None = None,
+    swanlab_config: SwanLabConfig | None = None,
+    resume_run: dict[str, Any] | None = None,
+    checkpoint_path: str | Path | None = None,
+    rank: int | None = None,
+    default_group: str | None = None,
 ) -> Writer:
     if writer_type == "jsonl":
         return JsonlWriter(log_dir=log_dir)
     elif writer_type == "tensorboard":
         return TensorboardWriter(log_dir=log_dir)
+    elif writer_type == "swanlab":
+        return SwanLabWriter(
+            log_dir=log_dir,
+            config=swanlab_config,
+            resume_run=resume_run,
+            checkpoint_path=checkpoint_path,
+            rank=rank,
+            default_group=default_group,
+        )
     else:
         raise ValueError(f"Unknown writer type: {writer_type}")
 
 
-__all__ = ["JsonlWriter", "TensorboardWriter"]
+__all__ = ["JsonlWriter", "SwanLabConfig", "SwanLabWriter", "TensorboardWriter"]

@@ -92,6 +92,46 @@ trainer = Trainer(
 ```
 
 
+## Experiment Tracking
+
+`Trainer` and `TrainerConfig` accept `exp_tracker="jsonl"` (the default),
+`"tensorboard"`, or `"swanlab"`. To enable SwanLab on an existing configuration:
+
+```python
+from xtuner.v1.train import SwanLabConfig
+from xtuner.v1.train import Trainer
+
+trainer_cfg.exp_tracker = "swanlab"
+trainer_cfg.swanlab_config = SwanLabConfig(
+    project="xtuner",
+    experiment_name="sft",
+    mode="online",
+)
+trainer = Trainer.from_config(trainer_cfg)
+trainer.fit()
+```
+
+Install the optional SDK with `pip install 'xtuner[swanlab]'` and authenticate
+with `swanlab login`. Use `mode="offline"` for local logging without an upload.
+Each rank creates an independent SwanLab run and forwards the same metric names,
+values, and `cur_step` used by its TensorBoard or JSONL writer. This includes
+rank-local metrics and metrics already reduced by training.
+
+The runs share a group named `<work-dir-name>-<experiment-dir-name>` by default.
+Set `swanlab_config.group` to choose a group explicitly. Run names append
+`-rank<N>` to `experiment_name`, or to the group when no name is specified.
+If `run_id` is set, rank 0 uses that ID and other ranks use `<run_id>-rank<N>`.
+
+Each rank saves its identity and group in
+`logs/exp_tracking/rank<N>/swanlab_run.json` and in native checkpoints at
+`swanlab/rank<N>.json`. Automatic and explicit checkpoint resume restore each
+rank's own identity and the original group, including when the log directory
+changes. Older checkpoints with only a rank 0 identity reuse that identity on
+rank 0; other ranks create their own runs. `fit()` closes each writer on
+completion or an exception.
+See [RL experiment tracking](../../rl/advanced_tutorial/rl_trainer.md#experiment-tracking)
+for SDK options and resume behavior.
+
 ## Launch Training
 
 Complete code is as follows:

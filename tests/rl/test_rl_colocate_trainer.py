@@ -19,6 +19,8 @@ Bad Tests:
 """
 
 import asyncio
+import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,14 +29,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import ray
 import torch
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
+from xtuner.v1._writer import SwanLabConfig
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.agent_loop_manager import AsyncProduceStrategyConfig, ProduceBatchResult
 from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import AgentLoopManager
 from xtuner.v1.rl.agent_loop_manager.produce_utils import _TaskRunner
+from xtuner.v1.rl.distillation import DistillationTrainerAdapter
 from xtuner.v1.rl.health_manager import RLHealthManager
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SerializedRayObjectRef
-from xtuner.v1.train.rl_trainer import RLColocateTrainer, RLThroughputBenchmark
+from xtuner.v1.train.rl_trainer import BaseRLTrainerConfig, RLColocateTrainer, RLThroughputBenchmark
 
 
 class _FakeRolloutState(RolloutState):
@@ -183,6 +188,41 @@ class TestRLColocateTrainer(unittest.TestCase):
         )
         return trainer
 
+    def _make_logging_trainer(self, exp_name, total_steps, config, checkpoint_path=None):
+        group = asyncio.run(_build_fake_agent_loop().generate_group([_FakeRolloutState(1)]))
+        manager = SimpleNamespace(
+            produce_batch=AsyncMock(return_value=ProduceBatchResult(rollout_states=[group])),
+            save=AsyncMock(),
+            checkpoint_resumable=True,
+        )
+        trainer = self._make_trainer(manager, total_train_steps=total_steps)
+        trainer._meta.latest_exp.exp_dir = str(Path(self.temp_dir.name) / exp_name)
+        trainer.exp_dir.mkdir()
+        trainer._meta.latest_exp.checkpoint_list = []
+        trainer._meta.model_dump_json = MagicMock(return_value="{}")
+        trainer._meta_path = trainer._META_PATH
+        trainer._checkpoint_interval = 1
+        trainer._checkpoint_maxkeep = None
+        trainer._checkpoint_no_save_optimizer = False
+        trainer._checkpoint_no_save_replay_buffer = True
+        trainer._load_checkpoint_cfg = SimpleNamespace(checkpoint_path=checkpoint_path)
+        trainer._distillation = DistillationTrainerAdapter(None)
+        trainer.train_controller.save = MagicMock()
+        trainer.train_controller.resume = MagicMock()
+        trainer.train_controller.fit.return_value[0][0]["train_metrics"] = [
+            {"policy_loss": 0.8},
+            {"policy_loss": 0.4},
+        ]
+        trainer._init_exp_tracker(config, trainer.exp_dir / "logs")
+        trainer._log_step = RLColocateTrainer._log_step.__get__(trainer)
+
+        def save_checkpoint(train_step, timers):
+            asyncio.run(trainer._maybe_save_checkpoint(train_step))
+            return False
+
+        trainer._sync_weights_and_save.side_effect = save_checkpoint
+        return trainer
+
     def test_fit_accepts_async_strategy_manager_on_colocate_path(self):
         # 验证 colocate fit 可以通过公开入口消费 async manager 产出的 batch。
         replay_buffer = AsyncReplayBufferConfig().build()
@@ -212,6 +252,116 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer.train_controller.fit.assert_called_once()
         trainer._release_trace_sessions.assert_called_once()
         self.assertEqual(trainer._cur_step, 1)
+
+    def test_swanlab_checkpoint_resume_preserves_run_identity(self):
+        run = SimpleNamespace(id="rl-run", mode="offline", log=MagicMock(), finish=MagicMock())
+        sdk = SimpleNamespace(init=MagicMock(return_value=run))
+        config = BaseRLTrainerConfig.model_construct(
+            exp_tracker="swanlab",
+            swanlab_config=SwanLabConfig(project="rl", mode="offline"),
+        )
+        self.assertEqual(BaseRLTrainerConfig.model_fields["exp_tracker"].default, "tensorboard")
+
+        with (
+            patch.dict(sys.modules, {"swanlab": sdk}),
+            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
+        ):
+            original = self._make_logging_trainer("original", 1, config)
+            original.fit()
+            checkpoint = original.exp_dir / "checkpoints/ckpt-step-1"
+            state = json.loads((checkpoint / "train_state.json").read_text())
+            self.assertEqual(state["cur_step"], 1)
+            self.assertEqual(state["global_train_step"], 2)
+            self.assertEqual(state["swanlab_run"]["id"], "rl-run")
+            detail_steps = [
+                call.kwargs["step"]
+                for call in run.log.call_args_list
+                if "train_metrics/worker_0/policy_loss" in call.args[0]
+            ]
+            self.assertEqual(detail_steps, [1, 2])
+
+            resumed = self._make_logging_trainer("resumed", 2, config, checkpoint)
+            self.assertEqual(sdk.init.call_args.kwargs["id"], "rl-run")
+            self.assertEqual(sdk.init.call_args.kwargs["resume"], "allow")
+            resumed._resume_train_controller_and_state(checkpoint)
+            resumed.fit()
+            state = json.loads((resumed.exp_dir / "checkpoints/ckpt-step-2/train_state.json").read_text())
+            self.assertEqual(state["global_train_step"], 4)
+
+        logged = run.log.call_args_list
+        detail_steps = [call.kwargs["step"] for call in logged if "train_metrics/worker_0/policy_loss" in call.args[0]]
+        self.assertEqual(detail_steps, [1, 2, 3, 4])
+        summaries = [call for call in logged if "train_metrics/worker_0/step_avg_policy_loss" in call.args[0]]
+        self.assertEqual([call.kwargs["step"] for call in summaries], [1, 2])
+        for call in summaries:
+            self.assertAlmostEqual(call.args[0]["train_metrics/worker_0/step_avg_policy_loss"], 0.6)
+        self.assertEqual(run.finish.call_count, 2)
+
+    def test_checkpoint_resume_preserves_tensorboard_and_jsonl_step_axes(self):
+        detail_tag = "train_metrics/worker_0/policy_loss"
+        summary_tag = "train_metrics/worker_0/step_avg_policy_loss"
+        for backend in ("tensorboard", "jsonl"):
+            with (
+                self.subTest(backend=backend),
+                patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
+                patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
+            ):
+                config = BaseRLTrainerConfig.model_construct(exp_tracker=backend)
+                original = self._make_logging_trainer(f"{backend}-original", 1, config)
+                original.fit()
+                checkpoint = original.exp_dir / "checkpoints/ckpt-step-1"
+                state = json.loads((checkpoint / "train_state.json").read_text())
+                self.assertEqual(state, {"cur_step": 1, "global_train_step": 2})
+
+                resumed = self._make_logging_trainer(f"{backend}-resumed", 2, config, checkpoint)
+                resumed._resume_train_controller_and_state(checkpoint)
+                resumed.fit()
+                state = json.loads((resumed.exp_dir / "checkpoints/ckpt-step-2/train_state.json").read_text())
+                self.assertEqual(state, {"cur_step": 2, "global_train_step": 4})
+
+                details, summaries = [], []
+                for trainer in (original, resumed):
+                    log_dir = trainer.exp_dir / "logs" / trainer._EXP_TRACKING_PATH
+                    if backend == "tensorboard":
+                        events = EventAccumulator(str(log_dir)).Reload()
+                        details.extend(event.step for event in events.Scalars(detail_tag))
+                        summaries.extend(event.step for event in events.Scalars(summary_tag))
+                    else:
+                        records = [json.loads(line) for line in (log_dir / "tracker.jsonl").read_text().splitlines()]
+                        details.extend(record["step"] for record in records if detail_tag in record)
+                        summaries.extend(record["step"] for record in records if summary_tag in record)
+                self.assertEqual(details, [1, 2, 3, 4])
+                self.assertEqual(summaries, [1, 2])
+
+    def test_detailed_metric_write_failure_does_not_escape_training(self):
+        trainer = self._make_trainer(MagicMock())
+        trainer._exp_tracker.add_scalars.side_effect = RuntimeError("tracker unavailable")
+        workers_log_item = [{"train_metrics": [{"policy_loss": 0.5}]}]
+
+        start_step = trainer._advance_mini_batch_step(workers_log_item)
+        trainer._flush_mini_batch_metrics(workers_log_item, start_step)
+
+        self.assertEqual(start_step, 1)
+        self.assertEqual(trainer._global_train_step, 1)
+        trainer.logger.warning.assert_called_once()
+
+    def test_legacy_checkpoint_resets_only_optimizer_logging_counter(self):
+        checkpoint = Path(self.temp_dir.name) / "legacy"
+        checkpoint.mkdir()
+        (checkpoint / "train_state.json").write_text(json.dumps({"cur_step": 5}))
+        trainer = self._make_trainer(SimpleNamespace())
+        trainer._load_checkpoint_cfg = SimpleNamespace(checkpoint_path=checkpoint)
+        trainer.train_controller.resume = MagicMock()
+        trainer._global_train_step = 10
+
+        trainer._resume_train_controller_and_state(checkpoint)
+
+        self.assertEqual(trainer._cur_step, 5)
+        self.assertEqual(trainer._global_train_step, 0)
+        trainer.logger.warning.assert_called_once_with(
+            "Checkpoint has no optimizer logging counter; detailed optimizer-step metrics restart at 1."
+        )
 
     def test_fit_requires_non_empty_batch_from_manager(self):
         # 验证空 rollout batch 会 fail fast，并且不会推进训练 step。
