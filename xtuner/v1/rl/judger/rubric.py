@@ -146,9 +146,11 @@ def _parse_results(content: str, rubrics: list[dict[str, Any]], response: str) -
         if isinstance(candidate, dict) and "results" in candidate:
             parsed = candidate
             break
-    if parsed is None and content.lstrip().startswith('"results"'):
+    stripped = content.lstrip()
+    if parsed is None and stripped.startswith(('"results"', 'results"')):
+        repaired = "{" + (stripped if stripped.startswith('"') else '"' + stripped)
         try:
-            candidate, _ = decoder.raw_decode("{" + content.lstrip())
+            candidate, _ = decoder.raw_decode(repaired)
         except json.JSONDecodeError:
             pass
         else:

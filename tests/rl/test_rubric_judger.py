@@ -190,13 +190,16 @@ class TestRubricScoring(RubricTestCase):
             asyncio.run(self._judger(transport, max_retries=0).judge(self.state))
 
     def test_schema_fragment_without_outer_brace(self):
-        # 验证服务返回合法 results 片段但缺少最外层左括号时仍可解析。
-        async def transport(request):
-            content = json.dumps({"results": _results()})[1:]
-            return {"choices": [{"message": {"content": content}}]}
+        # 验证服务缺少最外层左括号或左括号与起始引号时仍可解析。
+        for prefix_length in (1, 2):
+            with self.subTest(prefix_length=prefix_length):
 
-        judged = asyncio.run(self._judger(transport, max_retries=0).judge(self.state))
-        self.assertEqual(judged.reward["score"], 0.25)
+                async def transport(request):
+                    content = json.dumps({"results": _results()})[prefix_length:]
+                    return {"choices": [{"message": {"content": content}}]}
+
+                judged = asyncio.run(self._judger(transport, max_retries=0).judge(self.state))
+                self.assertEqual(judged.reward["score"], 0.25)
 
     def test_invalid_met_evidence_fails_closed(self):
         # 验证 met 的证据不是回复原文时降级为 unmet，并保留可观测告警。
