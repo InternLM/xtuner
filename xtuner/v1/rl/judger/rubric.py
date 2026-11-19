@@ -197,6 +197,8 @@ def merge_outcome_and_process(
 ) -> RolloutState | list[RolloutState]:
     """Merge outcome and process branches into the standard RL reward.
 
+    Process scores are mapped from [0, 1] to [-1, 1] before fusion.
+
     Args:
         rollout_states (RolloutState | list[RolloutState]): States being judged.
         judged (dict[str, Any]): Raw outputs keyed by outcome and process branch.
@@ -231,7 +233,7 @@ def _merge_one(
     process_weight: float,
 ) -> RolloutState:
     outcome_score = float(outcome["score"])
-    process_score = float(process["score"])
+    process_score = 2.0 * float(process["score"]) - 1.0
     if not math.isfinite(outcome_score) or not math.isfinite(process_score):
         raise ValueError("Outcome and process scores must be finite.")
     rollout_state.reward = {
