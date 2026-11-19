@@ -1315,6 +1315,7 @@ class BaseRLTrainer:
                             ),
                             "segment_count": data.extra_fields.get("agent_trace_segment_count"),
                             "artifacts": data.extra_fields.get("agent_artifacts"),
+                            "trace_selection": data.extra_fields.get("agent_trace_selection"),
                             "messages": data.extra_fields.get("agent_messages"),
                             "tools": data.extra_fields.get("agent_tools"),
                         },
