@@ -215,8 +215,8 @@ class TestRubricScoring(RubricTestCase):
         judged = asyncio.run(judge.judge(state))
 
         self.assertEqual(judged.reward["outcome_score"], 1.0)
-        self.assertEqual(judged.reward["process_score"], 0.25)
-        self.assertAlmostEqual(judged.reward["score"], 0.775)
+        self.assertEqual(judged.reward["process_score"], -0.5)
+        self.assertAlmostEqual(judged.reward["score"], 0.55)
 
     def test_remote_contract_preserves_sample_rubrics(self):
         # 验证远程代理仍使用 RubricJudger 的预处理和样本级 rubric。
@@ -288,9 +288,9 @@ class TestRubricRewardMerge(unittest.TestCase):
         state = RolloutState(message=[], response="answer")
         process = {"score": 0.25, "rubric_results": [{"local_id": "a1"}]}
         merged = merge_outcome_and_process(state, {"outcome": {"score": -1}, "process": process})
-        self.assertAlmostEqual(merged.reward["score"], -0.625)
+        self.assertAlmostEqual(merged.reward["score"], -0.85)
         self.assertEqual(merged.reward["outcome_score"], -1)
-        self.assertEqual(merged.reward["process_score"], 0.25)
+        self.assertEqual(merged.reward["process_score"], -0.5)
 
         state = RolloutState(message=[], response="answer")
         merged = merge_outcome_and_process(
@@ -315,7 +315,7 @@ class TestRubricRewardMerge(unittest.TestCase):
             "process": [{"score": 1}, {"score": 0}],
         }
         merged = merge_outcome_and_process(states, judged, process_weight=0.3)
-        self.assertEqual([state.reward["score"] for state in merged], [1.0, -0.7])
+        self.assertEqual([state.reward["score"] for state in merged], [1.0, -1.0])
         with self.assertRaisesRegex(ValueError, "output lengths"):
             merge_outcome_and_process(states, {"outcome": [{"score": 1}], "process": [{"score": 1}]})
 
