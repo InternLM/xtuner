@@ -50,7 +50,7 @@ class Train:
 
             if train_type == "sft":
                 command = (
-                    f"cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/glm53_fork/xtuner; pwd; {pip_package}; {image_version_check}"
+                    f"cd /mnt/hwfile/llmrazor/qa-llm-cicd/wmk/glm53_fork/xtuner; pip install ../flash_linear_attention_npu_a3-26.10.0+main.dev.dev1781145-py3-none-manylinux_2_34_aarch64.whl; pwd; {pip_package}; {image_version_check}"
                     f"export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
                     + cudnn_patch
                     + debug_keepalive
