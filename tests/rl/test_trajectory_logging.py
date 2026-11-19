@@ -8,7 +8,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop import agent_in_sandbox_loop as sandbox_impl
-from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import AgentInSandboxLoop
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import (
+    AgentInSandboxLoop,
+    AgentInSandboxLoopConfig,
+    _select_train_trace_segments,
+)
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import AgentRolloutItem, RolloutStatus
 from xtuner.v1.train.rl_trainer import BaseRLTrainer
 
@@ -59,6 +63,7 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
     def _make_loop(mode: str = "train") -> AgentInSandboxLoop:
         loop = AgentInSandboxLoop.__new__(AgentInSandboxLoop)
         loop.mode = mode
+        loop.enable_last_assistant_rollback = False
         # __new__ bypasses __init__; provide the attributes _build_rollout_states touches.
         loop.train_on_timeout = False
         loop.timeout_reward = -1.0
@@ -148,6 +153,29 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(segments), 1)
         self.assertEqual(segments[0].extra_fields["agent_artifacts"], item.artifacts)
+
+    async def test_rollback_exports_only_the_retained_branch(self):
+        loop = self._make_loop()
+        loop.enable_last_assistant_rollback = True
+        state = self._make_state()
+        item = self._make_item(RolloutStatus.COMPLETED)
+        history = [{"role": "user", "content": "task"}]
+        old = history + [{"role": "assistant", "content": "bad"}]
+        fixed = history + [{"role": "user", "content": "correction"}, {"role": "assistant", "content": "fixed"}]
+        item.artifacts["messages"] = [{"messages": messages, "tools": []} for messages in [old, fixed]]
+        original = copy.deepcopy(item.artifacts)
+        store = self._trace_store(segment_count=1)
+        with patch.object(sandbox_impl, "get_store", return_value=store):
+            result = await loop._build_rollout_states(state, item)
+        store.export_training_trace.remote.assert_awaited_once_with(str(state.session_id), "rendered-fixed")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].labels, [-100, 10, 20])
+        self.assertEqual(result[0].logprobs, [0.0, -0.1, -0.2])
+        self.assertEqual(result[0].reward, {"score": 1.0})
+        self.assertEqual(result[0].session_id, state.session_id)
+        self.assertEqual(result[0].extra_fields["agent_trace_selection"]["retained_segment_indices"], [1])
+        self.assertEqual(result[0].extra_fields["agent_artifacts"], original)
+        self.assertEqual(item.artifacts, original)
 
     async def test_failed_train_session_keeps_artifacts(self):
         loop = self._make_loop()
@@ -397,6 +425,42 @@ class TestTrajectoryLogging(unittest.TestCase):
         self.assertEqual(dropped_samples, 1)
         self.assertEqual(len(batch), 1)
         self.assertEqual(batch[0][0].rollout_id, 21)
+
+
+class TestAssistantTraceRollback(unittest.TestCase):
+    def test_branch_selection(self):
+        history = [{"role": "user", "content": "task"}]
+        bad = history + [{"role": "assistant", "content": "bad", "finish_reason": "length"}]
+        retry = history + [{"role": "user", "content": "correction"}]
+        fixed = retry + [{"role": "assistant", "content": "fixed"}]
+        final = retry + [{"role": "user", "content": "retry"}, {"role": "assistant", "content": "final"}]
+        sibling = history + [{"role": "assistant", "content": "other"}]
+        continued = bad + [{"role": "tool", "content": "failed"}, {"role": "assistant", "content": "next"}]
+        cases = [
+            ("replaced", [(bad, []), (fixed, [])], [1]),
+            ("repeated", [(bad, []), (fixed, []), (final, [])], [2]),
+            ("ordinary continuation", [(bad, []), (continued, [])], [0, 1]),
+            ("ambiguous", [(bad, []), (sibling, []), (fixed, [])], [0, 1, 2]),
+            ("no later generation", [(bad, []), (sibling, [])], [0, 1]),
+            ("different tools", [(bad, []), (fixed, [{"type": "function"}])], [0, 1]),
+            ("earlier context changed", [(bad, []), (fixed[1:], [])], [0, 1]),
+            ("reverse order", [(fixed, []), (bad, [])], [0, 1]),
+        ]
+        for name, segments, indices in cases:
+            with self.subTest(name=name):
+                original = copy.deepcopy(segments)
+                kept, summary = _select_train_trace_segments(segments, enabled=True)
+                self.assertEqual(kept, [segments[i] for i in indices])
+                self.assertEqual(summary["retained_segment_indices"], indices)
+                self.assertEqual(_select_train_trace_segments(segments)[0], original)
+                self.assertEqual(segments, original)
+
+    def test_config_opt_in_is_forwarded(self):
+        self.assertFalse(AgentInSandboxLoopConfig(hf_checkpoint="unused").enable_last_assistant_rollback)
+        config = AgentInSandboxLoopConfig(hf_checkpoint="unused", enable_last_assistant_rollback=True)
+        with patch.object(sandbox_impl, "AgentInSandboxLoop") as constructor:
+            config.build_local()
+        self.assertTrue(constructor.call_args.kwargs["enable_last_assistant_rollback"])
 
 
 if __name__ == "__main__":
