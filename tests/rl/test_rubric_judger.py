@@ -6,6 +6,8 @@ TestRubricScoring
     test_batch_judge
     test_retry_recovers_from_invalid_output
     test_invalid_output_is_not_silent_zero
+    test_non_json_error_includes_content_prefix
+    test_schema_fragment_without_outer_brace
     test_invalid_met_evidence_fails_closed
     test_composed_real_outcome_and_fake_process
     test_remote_contract_preserves_sample_rubrics
@@ -178,6 +180,23 @@ class TestRubricScoring(RubricTestCase):
 
         with self.assertRaisesRegex(RuntimeError, "Judge omitted rubric local_ids"):
             asyncio.run(self._judger(transport, max_retries=0).judge(self.state))
+
+    def test_non_json_error_includes_content_prefix(self):
+        # 验证结构化解析失败时保留有长度限制的原始响应摘要。
+        async def transport(request):
+            return _body("judge returned no JSON")
+
+        with self.assertRaisesRegex(RuntimeError, "judge returned no JSON"):
+            asyncio.run(self._judger(transport, max_retries=0).judge(self.state))
+
+    def test_schema_fragment_without_outer_brace(self):
+        # 验证服务返回合法 results 片段但缺少最外层左括号时仍可解析。
+        async def transport(request):
+            content = json.dumps({"results": _results()})[1:]
+            return {"choices": [{"message": {"content": content}}]}
+
+        judged = asyncio.run(self._judger(transport, max_retries=0).judge(self.state))
+        self.assertEqual(judged.reward["score"], 0.25)
 
     def test_invalid_met_evidence_fails_closed(self):
         # 验证 met 的证据不是回复原文时降级为 unmet，并保留可观测告警。

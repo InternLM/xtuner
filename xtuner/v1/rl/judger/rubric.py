@@ -146,8 +146,18 @@ def _parse_results(content: str, rubrics: list[dict[str, Any]], response: str) -
         if isinstance(candidate, dict) and "results" in candidate:
             parsed = candidate
             break
+    if parsed is None and content.lstrip().startswith('"results"'):
+        try:
+            candidate, _ = decoder.raw_decode("{" + content.lstrip())
+        except json.JSONDecodeError:
+            pass
+        else:
+            if isinstance(candidate, dict) and isinstance(candidate.get("results"), list):
+                parsed = candidate
     if parsed is None or not isinstance(parsed.get("results"), list):
-        raise ValueError("Judge output must contain a JSON object with a results list.")
+        raise ValueError(
+            f"Judge output must contain a JSON object with a results list; content prefix: {content[:200]!r}"
+        )
 
     expected = {rubric["local_id"]: rubric for rubric in rubrics}
     results_by_id: dict[str, dict[str, Any]] = {}
