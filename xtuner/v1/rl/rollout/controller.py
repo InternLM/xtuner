@@ -4,6 +4,7 @@ from uuid import uuid4
 
 import ray
 from ray.actor import ActorProxy
+from ray.exceptions import RayActorError
 from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
@@ -23,6 +24,9 @@ from .worker import (
     get_rollout_worker_base_cls,
 )
 from .worker_registry import RolloutWorkerRegistry, WorkerLifecycleState
+
+
+ROLLOUT_PAUSE_GENERATION_TIMEOUT = 60.0
 
 
 # Keep this as a Ray actor because Ray AgentLoop actors need a shared, cross-process handle to the same controller
@@ -137,11 +141,12 @@ class RolloutController:
             rollout_state.sample_params = sample_params
 
         session_id = rollout_state.session_id if rollout_state.session_id is not None else uuid4().int
-        worker = await self.router.get_worker(session_id)
-        if worker is None:
+        worker_entry = await self.router.get_worker(session_id)
+        if worker_entry is None:
             rollout_state.status = Status.FAILED
             rollout_state.error_msg = "No active rollout worker available."
             return rollout_state
+        worker_rank, worker = worker_entry
 
         response_ref = trace_rollout_remote(
             worker.generate,  # type: ignore[attr-defined]
@@ -163,6 +168,15 @@ class RolloutController:
                 f"Rollout request timed out after {self.config.rollout_timeout * self.timeout_multiplier} seconds."
             )
             return rollout_state
+        except RayActorError as e:
+            # Actor 已确认故障，立即交由 HealthManager 处理，避免异常传播导致训练退出。
+            self.logger.error(
+                f"RolloutController.generate lost worker actor: rank={worker_rank}, session_id={session_id}, error={e}"
+            )
+            await asyncio.to_thread(self.health_manager.handle_worker_failure, worker_rank)
+            rollout_state.status = Status.FAILED
+            rollout_state.error_msg = f"Rollout worker actor {worker_rank} became unavailable: {e}"
+            return rollout_state
 
     def set_enable_partial_rollout(self, enable: bool) -> None:
         """Propagate enable_partial_rollout flag to all active workers."""
@@ -174,7 +188,7 @@ class RolloutController:
             ]
         )
 
-    def pause_generation(self):
+    async def pause_generation(self):
         self.health_manager.pause()
         # Wait for the health manager to finish recovery before pausing generation.
         if not self.health_manager.wait_recovery_done(timeout=600.0):
@@ -185,12 +199,28 @@ class RolloutController:
             for worker in active_workers
         ]
         try:
-            results = ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
+            results = await asyncio.wait_for(
+                asyncio.gather(*futures, return_exceptions=True),
+                timeout=ROLLOUT_PAUSE_GENERATION_TIMEOUT,
+            )
+            for index, (worker, result) in enumerate(zip(active_workers, results)):
+                if isinstance(result, RayActorError):
+                    # 单个 Actor 死亡不应中断 pause，标记故障后继续处理其他 worker。
+                    self.logger.error(
+                        f"RolloutController.pause_generation lost worker actor: rank={worker.rank}, "
+                        f"url={worker.url}, error={result}"
+                    )
+                    self.health_manager.handle_worker_failure(worker.rank)
+                    results[index] = False
+                elif isinstance(result, Exception):
+                    raise result
         except Exception:
             self.logger.exception(
                 f"RolloutController pause_generation failed for {len(active_workers)} active workers."
             )
             raise
+        if not self.health_manager.wait_recovery_done(timeout=600.0):
+            raise TimeoutError("Timed out waiting for rollout worker recovery before training.")
         succeeded_worker_urls = [worker.url for worker, result in zip(active_workers, results) if result is not False]
         failed_worker_urls = [worker.url for worker, result in zip(active_workers, results) if result is False]
         if succeeded_worker_urls:

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import httpx
+from ray.exceptions import RayActorError
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.agent_loop import AgentLoopConfig
@@ -92,7 +93,7 @@ class _FakeRolloutRouter:
 
     async def get_worker(self, session_id):
         self.session_ids.append(session_id)
-        return self.worker
+        return None if self.worker is None else (0, self.worker)
 
 
 class _FakeRolloutWorkerGenerate:
@@ -419,6 +420,23 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(worker.generate.calls, [request_state])
         self.assertEqual(result.status, Status.COMPLETED)
 
+    async def test_generate_recovers_dead_worker_actor(self):
+        state = self._state(uid=1, session_id=123)
+        worker = _FakeRolloutWorker(state)
+        response_ref = asyncio.get_running_loop().create_future()
+        response_ref.set_exception(RayActorError())
+        worker.generate.remote = MagicMock(return_value=response_ref)
+        controller = self._build_controller(_FakeRolloutRouter(worker=worker))
+        controller.health_manager = MagicMock()
+
+        with patch("xtuner.v1.rl.rollout.controller.XTUNER_DETERMINISTIC", False):
+            result = await controller.generate(state)
+
+        self.assertIs(result, state)
+        self.assertEqual(result.status, Status.FAILED)
+        self.assertIn("worker actor 0 became unavailable", result.error_msg)
+        controller.health_manager.handle_worker_failure.assert_called_once_with(0)
+
     def test_register_active_workers_to_proxy_delegates_active_session_urls(self):
         controller = RolloutController.__new__(RolloutController)
         controller.registry = self._build_registry((0, 1))
@@ -451,7 +469,7 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
 
         controller.proxy_manager.validate_registered_session_urls.assert_called_once_with()
 
-    def test_pause_generation_waits_for_worker_recovery(self):
+    async def test_pause_generation_waits_for_worker_recovery(self):
         controller = RolloutController.__new__(RolloutController)
         controller.health_manager = MagicMock()
         controller.health_manager.wait_recovery_done.return_value = True
@@ -459,20 +477,53 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
         controller.registry.active_workers.return_value = ()
         controller.logger = MagicMock()
 
-        with patch("xtuner.v1.rl.rollout.controller.ray.get", return_value=[]):
-            controller.pause_generation()
+        await controller.pause_generation()
 
         controller.health_manager.pause.assert_called_once_with()
-        controller.health_manager.wait_recovery_done.assert_called_once_with(timeout=600.0)
+        self.assertEqual(
+            controller.health_manager.wait_recovery_done.call_args_list,
+            [call(timeout=600.0), call(timeout=600.0)],
+        )
         controller.health_manager.shutdown_inactive_workers.assert_not_called()
 
-    def test_pause_generation_fails_when_worker_recovery_times_out(self):
+    async def test_pause_generation_recovers_dead_worker_actor(self):
+        actor = SimpleNamespace(pause_generation=_FakeAsyncRemoteMethod(RayActorError()))
+        worker = WorkerSnapshot(rank=0, actor=actor, url="http://worker-0")
+        controller = RolloutController.__new__(RolloutController)
+        controller.health_manager = MagicMock()
+        controller.health_manager.wait_recovery_done.return_value = True
+        controller.registry = MagicMock()
+        controller.registry.active_workers.return_value = (worker,)
+        controller.logger = MagicMock()
+
+        await controller.pause_generation()
+
+        controller.health_manager.handle_worker_failure.assert_called_once_with(0)
+        controller.logger.warning.assert_called_once_with("Abort request failed: worker_urls=['http://worker-0']")
+
+    async def test_pause_generation_times_out_as_batch(self):
+        actor = SimpleNamespace(pause_generation=SimpleNamespace(remote=MagicMock(return_value=asyncio.Future())))
+        worker = WorkerSnapshot(rank=0, actor=actor, url="http://worker-0")
+        controller = RolloutController.__new__(RolloutController)
+        controller.health_manager = MagicMock()
+        controller.health_manager.wait_recovery_done.return_value = True
+        controller.registry = MagicMock()
+        controller.registry.active_workers.return_value = (worker,)
+        controller.logger = MagicMock()
+
+        with (
+            patch("xtuner.v1.rl.rollout.controller.ROLLOUT_PAUSE_GENERATION_TIMEOUT", 0),
+            self.assertRaises(asyncio.TimeoutError),
+        ):
+            await controller.pause_generation()
+
+    async def test_pause_generation_fails_when_worker_recovery_times_out(self):
         controller = RolloutController.__new__(RolloutController)
         controller.health_manager = MagicMock()
         controller.health_manager.wait_recovery_done.return_value = False
 
         with self.assertRaisesRegex(TimeoutError, "rollout worker recovery"):
-            controller.pause_generation()
+            await controller.pause_generation()
 
     def test_mark_worker_groups_lifecycle_state_defaults_to_all_source_groups(self):
         controller = RolloutController.__new__(RolloutController)
@@ -803,12 +854,12 @@ class TestSessionRouter(unittest.IsolatedAsyncioTestCase):
         )
         router = SessionRouter(registry, max_idle_seconds=None)
 
-        self.assertIs(await router.get_worker(7), actor_0)
-        self.assertIs(await router.get_worker(7), actor_0)
+        self.assertIs((await router.get_worker(7))[1], actor_0)
+        self.assertIs((await router.get_worker(7))[1], actor_0)
 
         registry.mark_unhealthy_ranks({0})
 
-        self.assertIs(await router.get_worker(7), actor_1)
+        self.assertIs((await router.get_worker(7))[1], actor_1)
 
 
 class TestSGLangWorker(unittest.TestCase):
@@ -1198,6 +1249,45 @@ class TestRolloutHealthManager(unittest.TestCase):
             ),
             registry,
         )
+
+    def test_handle_worker_failure_recovers_immediately(self):
+        listener = MagicMock()
+        worker_info = WorkerSnapshot(rank=0, actor=object(), url="http://worker-0")
+        manager, registry = self._build_manager(
+            {0: worker_info},
+            failure_threshold=3,
+            worker_lifecycle_listeners=[listener],
+        )
+
+        with patch.object(manager, "_restart_inactive_workers") as restart:
+            manager.handle_worker_failure(0)
+
+        self.assertEqual(
+            self._worker_by_rank(registry, 0).lifecycle_state,
+            WorkerLifecycleState.INACTIVE,
+        )
+        restart.assert_called_once_with()
+        listener.on_worker_group_inactive.assert_called_once()
+        self.assertTrue(manager._recovery_done.is_set())
+
+    def test_handle_worker_failure_is_recovered_once(self):
+        # 并发上报同一故障时只有第一次认领者执行恢复，重复上报不再通知、不再重启。
+        listener = MagicMock()
+        worker_info = WorkerSnapshot(rank=0, actor=object(), url="http://worker-0")
+        manager, _ = self._build_manager(
+            {0: worker_info},
+            worker_lifecycle_listeners=[listener],
+        )
+
+        with patch.object(manager, "_restart_inactive_workers") as restart:
+            manager.handle_worker_failure(0)
+            with patch.object(manager._recovery_done, "wait") as wait:
+                manager.handle_worker_failure(0)
+
+        wait.assert_not_called()
+        restart.assert_called_once_with()
+        listener.on_worker_group_inactive.assert_called_once()
+        self.assertTrue(manager._recovery_done.is_set())
 
     def test_pending_weight_recovery_is_disabled_for_ipc_and_nccl(self):
         for transport_type in ("ipc", "nccl"):
