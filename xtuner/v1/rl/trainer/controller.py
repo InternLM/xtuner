@@ -502,8 +502,10 @@ class TrainingController:
         batch_attr: TrainBatchAttr,
         data_replicate_size: int,
     ) -> Iterator[None]:
-        """Load one local batch per worker and release it on every exit path.
+        """Load one local batch per worker and attempt release on every exit.
 
+        Cleanup is awaited on success and best-effort on failure: a synchronous
+        peer stuck in a collective cannot execute its queued release RPC.
         Remote pixel/routed refs stay owned by the trainer and are only released
         after a successful ``fit``.
 
@@ -538,10 +540,32 @@ class TrainingController:
         finally:
             original_error = sys.exception()
             try:
-                ray.get(
-                    [worker.release_train_batch.remote() for worker in self.workers],  # type: ignore[attr-defined]
-                    timeout=TRAIN_RAY_GET_TIMEOUT,
-                )
+                if original_error is None:
+                    ray.get(
+                        [worker.release_train_batch.remote() for worker in self.workers],  # type: ignore[attr-defined]
+                        timeout=TRAIN_RAY_GET_TIMEOUT,
+                    )
+                else:
+                    release_handles = []
+                    for worker_idx, worker in enumerate(self.workers):
+                        try:
+                            release_handles.append(worker.release_train_batch.remote())  # type: ignore[attr-defined]
+                        except (RuntimeError, ray.exceptions.RayError) as exc:
+                            self.logger.warning(
+                                f"Failed to submit training batch release for worker {worker_idx}: {exc}"
+                            )
+                    if release_handles:
+                        ready, pending = ray.wait(release_handles, num_returns=len(release_handles), timeout=0)
+                        if pending:
+                            self.logger.warning(
+                                f"Training batch release pending for {len(pending)} worker(s); "
+                                "not waiting after a training failure"
+                            )
+                        for handle in ready:
+                            try:
+                                ray.get(handle, timeout=0)
+                            except (RuntimeError, ray.exceptions.RayError) as exc:
+                                self.logger.warning(f"Failed to release cached training batch: {exc}")
             except (RuntimeError, ray.exceptions.RayError) as exc:
                 self.logger.warning(f"Failed to release cached training batch: {exc}")
                 if original_error is None:
