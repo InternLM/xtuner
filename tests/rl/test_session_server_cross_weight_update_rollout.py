@@ -35,7 +35,7 @@ def _chat_response(*, finish_reason: str = "stop", status: int = 200) -> web.Res
     )
 
 
-class TestSessionServerTurnResume(unittest.IsolatedAsyncioTestCase):
+class TestSessionServerCrossWeightUpdateRollout(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.upstream_calls: list[dict] = []
         self.upstream_response = _chat_response()
@@ -141,7 +141,7 @@ class TestSessionServerTurnResume(unittest.IsolatedAsyncioTestCase):
         await gate.seal(2)
         await gate.drain(timeout=1)
 
-    async def test_turn_resume_rejects_untraced_or_streaming_generation(self):
+    async def test_cross_weight_update_rollout_rejects_untraced_or_streaming_generation(self):
         await self._publish()
 
         anthropic = await self.proxy_client.post("/v1/messages", json=self._payload())

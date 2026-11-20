@@ -19,11 +19,14 @@ from .worker_registry import RolloutWorkerRegistry, WorkerLifecycleState
 
 
 @dataclass(frozen=True)
-class TurnResumeConfig:
-    """Timeouts for complete-turn Agent RL across weight updates.
+class CrossWeightUpdateRolloutConfig:
+    """Keep live Agent rollouts running across model weight updates.
+
+    Admitted LLM requests settle before switching weights; later requests may use
+    the new version. Live Agent/tool state is not serialized in checkpoints.
 
     Args:
-        wait_timeout (float): Maximum time an admitted LLM request may wait for the gate to reopen.
+        wait_timeout (float): Maximum time an LLM request may wait for admission to reopen.
         freeze_timeout (float): Budget for freezing topology and for the install/resume/reopen control batch.
         drain_timeout (float): Maximum time to wait for already admitted requests to settle.
         quiesce_timeout (float): Maximum time to finish live Agent tasks at a checkpoint or the final step.
@@ -37,7 +40,7 @@ class TurnResumeConfig:
     def __post_init__(self) -> None:
         for name in ("wait_timeout", "freeze_timeout", "drain_timeout", "quiesce_timeout"):
             if getattr(self, name) <= 0:
-                raise ValueError(f"TurnResumeConfig.{name} must be positive")
+                raise ValueError(f"CrossWeightUpdateRolloutConfig.{name} must be positive")
 
 
 @dataclass(frozen=True)

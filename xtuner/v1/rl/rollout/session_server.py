@@ -16,7 +16,7 @@ from xtuner.v1.utils import get_logger
 
 from .chat_template import canonicalize_messages_for_chat_template
 from .request_gate import RequestGate, RequestLease, SettlementReceipt
-from .request_publication import TurnResumeConfig
+from .request_publication import CrossWeightUpdateRolloutConfig
 from .trace_store import TokenizedSegment, get_store
 
 
@@ -328,7 +328,7 @@ class SessionServer:
         request_timeout: float = 1200.0,
         read_bufsize: int = 2**26,
         enable_return_routed_experts: bool = False,
-        turn_resume: TurnResumeConfig | None = None,
+        cross_weight_update_rollout: CrossWeightUpdateRolloutConfig | None = None,
     ):
         self.worker_base_url = worker_base_url.rstrip("/")
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -337,10 +337,10 @@ class SessionServer:
         self.request_timeout = request_timeout
         self.read_bufsize = read_bufsize
         self.enable_return_routed_experts = enable_return_routed_experts
-        # Turn-resume servers are born closed: no request may observe version zero before the first publish.
+        # Cross-weight-update rollout servers are born closed: no request may observe version zero before the first publish.
         self.request_gate = (
-            RequestGate(wait_timeout=turn_resume.wait_timeout, initially_open=False)
-            if turn_resume is not None
+            RequestGate(wait_timeout=cross_weight_update_rollout.wait_timeout, initially_open=False)
+            if cross_weight_update_rollout is not None
             else None
         )
         self.store = get_store()
@@ -644,7 +644,8 @@ class SessionServer:
         fmt = _detect_format(path)
         if fmt != FMT_OPENAI:
             return web.json_response(
-                _error_payload(fmt, "turn-resume supports OpenAI chat completions only", 400), status=400
+                _error_payload(fmt, "cross-weight-update rollout supports OpenAI chat completions only", 400),
+                status=400,
             )
         try:
             body = await request.json()
@@ -652,7 +653,8 @@ class SessionServer:
             return web.json_response(_error_payload(fmt, "Invalid generation JSON", 400), status=400)
         if not isinstance(body, dict) or body.get("stream") or not _request_uses_trace_store(body):
             return web.json_response(
-                _error_payload(fmt, "turn-resume requires nonstream traced generation", 400), status=400
+                _error_payload(fmt, "cross-weight-update rollout requires nonstream traced generation", 400),
+                status=400,
             )
         async with self.request_gate.request(str(body["session_id"])) as lease:
             return await self._forward_request(request, lease=lease)
@@ -1267,7 +1269,7 @@ class SessionServerActor:
         port: int,
         request_timeout: float,
         enable_return_routed_experts: bool = False,
-        turn_resume: TurnResumeConfig | None = None,
+        cross_weight_update_rollout: CrossWeightUpdateRolloutConfig | None = None,
     ):
         self.worker_base_url = worker_base_url
         self.tokenizer_path = tokenizer_path
@@ -1275,7 +1277,7 @@ class SessionServerActor:
         self.port = port
         self.request_timeout = request_timeout
         self.enable_return_routed_experts = enable_return_routed_experts
-        self.turn_resume = turn_resume
+        self.cross_weight_update_rollout = cross_weight_update_rollout
         self.server: SessionServer | None = None
 
     @property
@@ -1293,14 +1295,14 @@ class SessionServerActor:
             port=self.port,
             request_timeout=self.request_timeout,
             enable_return_routed_experts=self.enable_return_routed_experts,
-            turn_resume=self.turn_resume,
+            cross_weight_update_rollout=self.cross_weight_update_rollout,
         )
         await self.server.start()
         return self.server.url
 
     def _gate(self) -> RequestGate:
         if self.server is None or self.server.request_gate is None:
-            raise RuntimeError("turn-resume gate is not enabled")
+            raise RuntimeError("cross-weight-update rollout gate is not enabled")
         return self.server.request_gate
 
     async def request_status(self) -> dict:

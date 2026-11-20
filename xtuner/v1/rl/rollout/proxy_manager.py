@@ -29,7 +29,7 @@ class RolloutProxyManager(RolloutWorkerLifecycleListener):
     _PROBE_MAX_TOKENS = 1024
 
     def __init__(self, config: "RolloutConfig"):
-        self._turn_resume = config.turn_resume is not None
+        self._cross_weight_update_rollout = config.cross_weight_update_rollout is not None
         self._model_name = config.model_name
         self._routed_proxy_url = config.routed_proxy_url
         self._routed_proxy_admin_url = config.routed_proxy_admin_url
@@ -141,9 +141,9 @@ class RolloutProxyManager(RolloutWorkerLifecycleListener):
         )
         # Turn mode must probe after publication with a session it can retire; an unowned probe would leave a
         # live session that the next barrier has to drain.
-        attempts = 1 if self._turn_resume else self._CHECK_ATTEMPTS
+        attempts = 1 if self._cross_weight_update_rollout else self._CHECK_ATTEMPTS
         for attempt in range(1, attempts + 1):
-            if self._turn_resume:
+            if self._cross_weight_update_rollout:
                 session_id = uuid4().hex
                 try:
                     succeeded = check_chat_completions(

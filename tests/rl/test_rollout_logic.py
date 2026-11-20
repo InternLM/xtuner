@@ -510,7 +510,7 @@ class TestRolloutProxyManager(unittest.TestCase):
             routed_proxy_url=self._ROUTED_PROXY_URL,
             routed_proxy_admin_url=self._ROUTED_PROXY_ADMIN_URL,
             worker_log_dir=None,
-            turn_resume=None,
+            cross_weight_update_rollout=None,
             session_affinity=False,
         )
         return RolloutProxyManager(config)

@@ -145,7 +145,10 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._distillation = DistillationTrainerAdapter(None)
         trainer._train_worker_cfg = SimpleNamespace(pack_max_length=16)
         trainer._rollout_config = SimpleNamespace(
-            weight_update_host=None, weight_update_port=30000, turn_resume=None, skip_load_weights=False
+            weight_update_host=None,
+            weight_update_port=30000,
+            cross_weight_update_rollout=None,
+            skip_load_weights=False,
         )
         trainer._load_checkpoint_cfg = SimpleNamespace(checkpoint_path=None)
         trainer._meta = SimpleNamespace(
@@ -289,7 +292,10 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         manager = _FakeManager([ProduceBatchResult(rollout_states=[[train_sample]])])
         trainer = self._make_trainer(manager)
         trainer._rollout_config = SimpleNamespace(
-            weight_update_host="10.0.0.1", weight_update_port=23456, turn_resume=None, skip_load_weights=False
+            weight_update_host="10.0.0.1",
+            weight_update_port=23456,
+            cross_weight_update_rollout=None,
+            skip_load_weights=False,
         )
 
         with (
@@ -614,7 +620,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             onload_weights=SimpleNamespace(remote=AsyncMock(side_effect=wake_weights)),
             onload_kvcache=SimpleNamespace(remote=AsyncMock(side_effect=wake_kvcache)),
         )
-        trainer._rollout_config = SimpleNamespace(turn_resume=None, skip_load_weights=False)
+        trainer._rollout_config = SimpleNamespace(cross_weight_update_rollout=None, skip_load_weights=False)
         events: list[str] = []
 
         async def manager_resume(checkpoint_path):

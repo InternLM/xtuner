@@ -294,15 +294,15 @@ def _validate_sync_intervals(
             )
 
 
-def _validate_turn_resume_config(cfg: "BaseRLTrainerConfig") -> None:
-    """Validate the cross-trainer half of the turn-resume contract."""
-    settings = cfg.rollout_config.turn_resume
+def _validate_cross_weight_update_rollout_config(cfg: "BaseRLTrainerConfig") -> None:
+    """Validate the cross-trainer half of the cross-weight-update rollout contract."""
+    settings = cfg.rollout_config.cross_weight_update_rollout
     if settings is None:
         return
     if cfg.rollout_config.health_check_failure_threshold != 0:
-        raise ValueError("Turn-resume requires a fixed topology: disable automatic worker recovery")
+        raise ValueError("Cross-weight-update rollout requires a fixed topology: disable automatic worker recovery")
     if cfg.enable_evaluate or cfg.enable_initial_evaluate or cfg.eval_agent_loop_manager_cfg is not None:
-        raise ValueError("Turn-resume rejects every online evaluation entrypoint")
+        raise ValueError("Cross-weight-update rollout rejects every online evaluation entrypoint")
     load = cfg.load_checkpoint_cfg
     has_checkpoint = load.checkpoint_path is not None
     resuming = has_checkpoint or cfg.auto_resume
@@ -312,11 +312,11 @@ def _validate_turn_resume_config(cfg: "BaseRLTrainerConfig") -> None:
         if has_checkpoint and cfg.auto_resume:
             raise ValueError("Choose explicit checkpoint_path or auto_resume, not both")
         if not load.load_optimizer_states or not load.load_optimizer_args:
-            raise ValueError("Turn-resume cold resume requires optimizer states and optimizer args")
+            raise ValueError("Cross-weight-update rollout cold resume requires optimizer states and optimizer args")
     tasks = cfg.agent_loop_manager_cfg.tasks
     for task in tasks if isinstance(tasks, list) else [tasks]:
         if not getattr(task.agent_loop_config, "require_turn_provenance", False):
-            raise ValueError("Turn-resume requires complete request provenance and MoE routes")
+            raise ValueError("Cross-weight-update rollout requires complete request provenance and MoE routes")
         if getattr(task.produce_strategy_config, "enable_partial_rollout", False):
             raise ValueError("Complete-turn pause cannot use token partial rollout")
 
@@ -389,7 +389,7 @@ class BaseRLTrainerConfig(BaseModel):
             evaluate_step=self.evaluate_step,
             enable_evaluate=self.enable_evaluate,
         )
-        _validate_turn_resume_config(self)
+        _validate_cross_weight_update_rollout_config(self)
         return self
 
 
@@ -478,13 +478,13 @@ class RLColocateTrainerConfig(BaseRLTrainerConfig):
     resources: AcceleratorResourcesConfig
 
     @model_validator(mode="after")
-    def _validate_turn_resume_strategy(self):
-        if self.rollout_config.turn_resume is None:
+    def _validate_cross_weight_update_rollout_strategy(self):
+        if self.rollout_config.cross_weight_update_rollout is None:
             return self
         tasks = self.agent_loop_manager_cfg.tasks
         for task in tasks if isinstance(tasks, list) else [tasks]:
             if not isinstance(task.produce_strategy_config, AsyncProduceStrategyConfig):
-                raise ValueError("Colocate turn-resume requires AsyncProduceStrategyConfig")
+                raise ValueError("Colocate cross-weight-update rollout requires AsyncProduceStrategyConfig")
         return self
 
     def build(self) -> "RLColocateTrainer":
@@ -580,13 +580,13 @@ class RLDisaggregatedTrainerConfig(BaseRLTrainerConfig):
     rollout_resources: AcceleratorResourcesConfig
 
     @model_validator(mode="after")
-    def _validate_turn_resume_strategy(self):
-        if self.rollout_config.turn_resume is None:
+    def _validate_cross_weight_update_rollout_strategy(self):
+        if self.rollout_config.cross_weight_update_rollout is None:
             return self
         tasks = self.agent_loop_manager_cfg.tasks
         for task in tasks if isinstance(tasks, list) else [tasks]:
             if not isinstance(task.produce_strategy_config, DisaggAsyncProduceStrategyConfig):
-                raise ValueError("Disaggregated turn-resume requires DisaggAsyncProduceStrategyConfig")
+                raise ValueError("Disaggregated cross-weight-update rollout requires DisaggAsyncProduceStrategyConfig")
         return self
 
     def build(self) -> "RLDisaggregatedTrainer":
@@ -760,7 +760,7 @@ class BaseRLTrainer:
             logger=self.logger,
             sync_weights_interval=cfg.sync_weights_interval,
             rollout_teacher_scorer_config=self._distillation.rollout_teacher_scorer_config,
-            turn_resume=cfg.rollout_config.turn_resume,
+            cross_weight_update_rollout=cfg.rollout_config.cross_weight_update_rollout,
         )
         self.agent_loop_manager = cast(AgentLoopManager | DisaggAgentLoopManager, agent_loop_manager)
 
@@ -1570,7 +1570,7 @@ class RLColocateTrainer(BaseRLTrainer):
         self._cpu_resource_manager.log_registered_summary()
 
     def _init_work_dir_and_meta(self, cfg: BaseRLTrainerConfig, meta_path: str) -> None:
-        if cfg.rollout_config.turn_resume is not None and cfg.auto_resume:
+        if cfg.rollout_config.cross_weight_update_rollout is not None and cfg.auto_resume:
             # Reuse native metadata and native selection, but write the resumed run into a new native exp_dir.
             # Old HF/log/trajectory evidence must not be overwritten when replaying from an earlier saved step.
             work_dir = Path(cfg.work_dir) if cfg.work_dir else Path.cwd() / "work_dirs"
@@ -1764,7 +1764,7 @@ class RLColocateTrainer(BaseRLTrainer):
     async def _initialize_rollout(self, checkpoint_path: Path | str | None) -> int:
         # The first window serves the last fully synced version; a resumed run starts from its restored step.
         model_step = self._get_colocate_rollout_model_step(self._cur_step + 1)
-        if self._rollout_config.turn_resume is None:
+        if self._rollout_config.cross_weight_update_rollout is None:
             if checkpoint_path is not None:
                 await self._resume_agent_loop_manager(checkpoint_path)
             if self._rollout_config.skip_load_weights:
@@ -1926,7 +1926,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             model_step = await self._resume_agent_loop_manager(checkpoint_path)
             if model_step != self._cur_step:
                 raise ValueError("Restored manager model_step disagrees with train state")
-        if self._rollout_config.turn_resume is not None:
+        if self._rollout_config.cross_weight_update_rollout is not None:
             await self.agent_loop_manager.pause_produce()
         if checkpoint_path is not None or self._rollout_config.skip_load_weights:
             # Empty-init engines can retain GPU allocations while marked asleep.
@@ -1937,8 +1937,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             await await_owned_operation(asyncio.to_thread(self.weight_update))
             # Empty-init workers need KV cache allocation and warmup before inference.
             await self.rollout_controller.onload_kvcache.remote()
-        if self._rollout_config.turn_resume is not None or checkpoint_path is not None:
-            # A new turn-resume run must publish version zero before any group is admitted.
+        if self._rollout_config.cross_weight_update_rollout is not None or checkpoint_path is not None:
+            # A new cross-weight-update rollout run must publish version zero before any group is admitted.
             await self.agent_loop_manager.continue_produce(model_step=model_step)
 
     def fit(self):
