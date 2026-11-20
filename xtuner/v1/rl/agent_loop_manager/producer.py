@@ -36,7 +36,7 @@ class ProduceProgress:
     """共卡 manager 持有的稳定生产账本；窗口只更新目标与当前消费步。"""
 
     target_samples: dict[str, int] = field(default_factory=dict)
-    consumer_step: int = 1
+    next_consumer_step: int = 1
     raw_rewards_sum: dict[str, float] = field(default_factory=dict)
     raw_rewards_count: dict[str, int] = field(default_factory=dict)
     produced_samples: dict[str, int] = field(default_factory=dict)
@@ -54,7 +54,7 @@ class ProduceProgress:
     ) -> "ProduceProgress":
         return cls(
             target_samples=dict(target_samples),
-            consumer_step=1,
+            next_consumer_step=1,
             raw_rewards_sum={task_name: 0.0 for task_name in task_names},
             raw_rewards_count={task_name: 0 for task_name in task_names},
             produced_samples={task_name: 0 for task_name in task_names},
@@ -119,7 +119,7 @@ class ProduceContext(BaseProduceContext):
     @property
     def consumer_step(self) -> int:
         # Stable ledger across windows: a group delivered after the window returns uses the next consume step.
-        return self.progress.consumer_step
+        return self.progress.next_consumer_step
 
     @property
     def batch_target(self) -> int:

@@ -259,7 +259,7 @@ class AgentLoopManager:
         progress = self._produce_progress
         progress.target_samples.clear()
         progress.target_samples.update(current_sizes)
-        progress.consumer_step = train_step
+        progress.next_consumer_step = train_step
 
         if self.turn_resume is None:
             await self._rollout_controller.continue_generation.remote()  # type: ignore[attr-defined]
@@ -331,7 +331,7 @@ class AgentLoopManager:
         )
 
         # Later deliveries (training/sync window) are evaluated against the next consume step.
-        progress.consumer_step = train_step + 1
+        progress.next_consumer_step = train_step + 1
         self.logger.info(
             f"[AgentLoopManager][{self.name}] produce_batch done "
             f"elapsed={time.perf_counter() - start:.3f}, completed_groups={len(result.rollout_states)}"
