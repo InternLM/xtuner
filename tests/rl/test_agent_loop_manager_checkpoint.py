@@ -23,12 +23,16 @@ Bad Tests:
 import asyncio
 import inspect
 import json
+import logging
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tokenizers import Tokenizer, models, pre_tokenizers
+
+from transformers import PreTrainedTokenizerFast, Qwen3Config
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
@@ -43,6 +47,7 @@ from xtuner.v1.rl.agent_loop_manager import (
 )
 from xtuner.v1.rl.agent_loop_manager.produce_utils import manager_state_path
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
+from xtuner.v1.rl.rollout.request_publication import CrossWeightUpdateRolloutConfig
 
 
 QWEN3_4B_PATH = os.environ.get("QWEN3_4B_PATH")
@@ -84,6 +89,7 @@ class _FakeRolloutController:
         self.generate = _RemoteMethod(self._generate)
         self.pause_generation = _RemoteMethod()
         self.continue_generation = _RemoteMethod()
+        self.assert_request_gates_healthy = _RemoteMethod()
         self.set_enable_partial_rollout = _SyncRemoteMethod()
 
     def _generate(self, rollout_state: RolloutState) -> RolloutState:
@@ -136,8 +142,12 @@ class TestAgentLoopManagerCheckpoint(unittest.IsolatedAsyncioTestCase):
         rollout_controller=None,
         produce_strategy_config=None,
         mode="colocate",
+        hf_checkpoint=None,
+        cross_weight_update_rollout=None,
+        logger=None,
     ):
-        assert QWEN3_4B_PATH is not None
+        hf_checkpoint = hf_checkpoint or QWEN3_4B_PATH
+        assert hf_checkpoint is not None
         rollout_controller = rollout_controller or _FakeRolloutController()
         produce_strategy_config = produce_strategy_config or (
             DisaggAsyncProduceStrategyConfig() if mode == "disaggregated" else SyncProduceStrategyConfig()
@@ -167,7 +177,7 @@ class TestAgentLoopManagerCheckpoint(unittest.IsolatedAsyncioTestCase):
                 {
                     "task_name": "unit_task",
                     "agent_loop_config": SingleTurnAgentLoopConfig(
-                        hf_checkpoint=QWEN3_4B_PATH,
+                        hf_checkpoint=hf_checkpoint,
                         sample_params=SampleParams(max_tokens=2, temperature=0.0, top_k=1),
                     ),
                     "produce_strategy_config": produce_strategy_config,
@@ -177,9 +187,108 @@ class TestAgentLoopManagerCheckpoint(unittest.IsolatedAsyncioTestCase):
         )
         return manager_cfg.build(
             rollout_controller=rollout_controller,
-            tokenizer=QWEN3_4B_PATH,
+            tokenizer=hf_checkpoint,
             replay_buffer=replay_buffer_config.build(),
+            cross_weight_update_rollout=cross_weight_update_rollout,
+            logger=logger,
         )
+
+    async def test_cross_weight_update_checkpoint_retains_live_groups_only_in_the_running_process(self):
+        # 自带最小 HF 资产，使用真实 AgentLoop/Sampler/Dataloader/Strategy/Buffer，无需模型权重或 GPU。
+        tokenizer_path = Path(self.temp_dir.name) / "tokenizer"
+        backend = Tokenizer(models.WordLevel({"[UNK]": 0, "[PAD]": 1, "[EOS]": 2, "question": 3}, unk_token="[UNK]"))
+        backend.pre_tokenizer = pre_tokenizers.Whitespace()
+        tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=backend,
+            unk_token="[UNK]",
+            pad_token="[PAD]",
+            eos_token="[EOS]",
+            chat_template="{% for message in messages %}{{ message['content'] }} {% endfor %}{{ eos_token }}",
+        )
+        tokenizer.save_pretrained(tokenizer_path)
+        Qwen3Config(
+            vocab_size=4,
+            hidden_size=8,
+            intermediate_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+        ).save_pretrained(tokenizer_path)
+
+        for mode in ("colocate", "disaggregated"):
+            with self.subTest(mode=mode):
+                controller = _BlockingRolloutController()
+
+                async def generate(state):
+                    # group_id 表达采样顺序；真实 dataloader 会 shuffle，JSON 行号不代表产出顺序。
+                    if state.group_id >= 1:
+                        controller.started.set()
+                        await controller.release.wait()
+                    return controller._generate(state)
+
+                controller.generate = _RemoteMethod(generate)
+                logger = logging.getLogger(f"{__name__}.{mode}")
+
+                def build(rollout_controller):
+                    strategy_cls = (
+                        AsyncProduceStrategyConfig if mode == "colocate" else DisaggAsyncProduceStrategyConfig
+                    )
+                    return self._build_manager(
+                        AsyncReplayBufferConfig(),
+                        rollout_controller=rollout_controller,
+                        produce_strategy_config=strategy_cls(over_sample_threshold=1.0, max_staleness=10),
+                        mode=mode,
+                        hf_checkpoint=str(tokenizer_path),
+                        cross_weight_update_rollout=CrossWeightUpdateRolloutConfig(),
+                        logger=logger,
+                    )
+
+                with patch("ray.get", side_effect=lambda ref, *_, **__: ref):
+                    manager = build(controller)
+                    restored = build(_FakeRolloutController())
+                producer = restored_producer = None
+                try:
+                    if mode == "colocate":
+                        first = await asyncio.wait_for(manager.produce_batch(1, 1, model_step=0), timeout=5)
+                    else:
+                        producer = asyncio.create_task(manager.produce_loop(1))
+                        first = await asyncio.wait_for(manager.get_batch(1, 1), timeout=5)
+                        await asyncio.wait_for(manager.pause_produce(), timeout=5)
+                    self.assertEqual(first.rollout_states[0][0].group_id, 0)
+                    await asyncio.wait_for(controller.started.wait(), timeout=5)
+                    checkpoint = Path(self.temp_dir.name) / mode
+                    with self.assertLogs(logger, level="WARNING") as logs:
+                        await asyncio.wait_for(manager.save(checkpoint, model_step=1), timeout=5)
+                    self.assertIn("Live Agent/tool state is not saved", "\n".join(logs.output))
+                    self.assertFalse(controller.release.is_set())
+
+                    # 冷恢复从已保存的游标继续，不能重建正在执行的组 1。
+                    with self.assertLogs(logger, level="WARNING"):
+                        self.assertEqual(await restored.resume(checkpoint), 1)
+                    if mode == "colocate":
+                        cold = await asyncio.wait_for(restored.produce_batch(1, 2, model_step=1), timeout=5)
+                    else:
+                        restored_producer = asyncio.create_task(restored.produce_loop(1))
+                        await restored.continue_produce(model_step=1)
+                        cold = await asyncio.wait_for(restored.get_batch(1, 2), timeout=5)
+                    self.assertGreater(cold.rollout_states[0][0].group_id, 1)
+
+                    # 保存动作不取消同进程中的组 1；恢复生产后它仍能正常交付。
+                    controller.release.set()
+                    if mode == "colocate":
+                        live = await asyncio.wait_for(manager.produce_batch(1, 2, model_step=1), timeout=5)
+                    else:
+                        await manager.continue_produce(model_step=1)
+                        live = await asyncio.wait_for(manager.get_batch(1, 2), timeout=5)
+                    self.assertEqual(live.rollout_states[0][0].group_id, 1)
+                finally:
+                    controller.release.set()
+                    for current, task in ((manager, producer), (restored, restored_producer)):
+                        if task is not None:
+                            current.shutdown()
+                            task.cancel()
+                            await asyncio.gather(task, return_exceptions=True)
+                        await current.close()
 
     def _build_async_manager(self, *, rollout_controller=None):
         with patch("ray.get", side_effect=lambda ref, *_, **__: ref):

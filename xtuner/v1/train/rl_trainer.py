@@ -1667,9 +1667,6 @@ class RLColocateTrainer(BaseRLTrainer):
                                 self.train_batch_size,
                                 train_step=train_step,
                                 model_step=model_step,
-                                quiesce=(self._checkpoint_due(train_step) or train_step == self._total_train_steps)
-                                if self._rollout_config.turn_resume is not None
-                                else False,
                             )
                     finally:
                         await await_owned_operation(
@@ -2058,14 +2055,9 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                     )
 
                     if need_sync and not self._debug_rollout:
-                        # 同步前暂停 producer，避免 pending rollout 继续写 buffer；保存点额外收尾 live Agent。
+                        # 停止补采并安全暂停 LLM；live Agent 可继续工具/评分，checkpoint 不保存其进行中状态。
                         with timer("pause_produce", step_timer_dict):
-                            await manager.pause_produce(
-                                quiesce=self._rollout_config.turn_resume is not None
-                                and (
-                                    self._checkpoint_due(sync_model_step) or sync_model_step == self._total_train_steps
-                                )
-                            )
+                            await manager.pause_produce()
 
                         await self._sync_weights_and_save(sync_model_step, step_timer_dict)
 
@@ -2115,7 +2107,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 raise cleanup_error
 
     async def _sync_weights_and_save(self, model_step: int, step_timer_dict: dict):
-        # producer 已暂停；保持 save -> bind -> update 顺序。
+        # 补采已暂停，live Agent 仍可交付；保存不保证数据严格恢复，保持 save -> bind -> update 顺序。
         with timer("save_ckpt", step_timer_dict):
             await self._maybe_save_checkpoint(model_step)
             await await_owned_operation(asyncio.to_thread(self._maybe_save_hf, model_step))

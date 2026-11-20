@@ -299,9 +299,6 @@ class ProduceStrategy(ABC):
     def pending_task_count(self) -> int:
         return 0
 
-    async def quiesce(self, ctx: ProduceContext) -> None:
-        raise NotImplementedError(f"{type(self).__name__} does not support quiesce")
-
     async def close(self) -> None:
         return
 
@@ -403,10 +400,6 @@ class AsyncProduceStrategy(ProduceStrategy):
         start = time.perf_counter()
         await await_cancellable_tasks(await self._pending_tasks.claim_ready())
         return time.perf_counter() - start
-
-    async def quiesce(self, ctx: ProduceContext) -> None:
-        while self._pending_tasks.count():
-            await await_cancellable_tasks(await self._pending_tasks.wait_and_claim(timeout_s=1))
 
     async def close(self) -> None:
         await self._pending_tasks.close()

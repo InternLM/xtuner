@@ -241,9 +241,8 @@ class AgentLoopManager:
         train_step: int,
         *,
         model_step: int,
-        quiesce: bool = False,
     ) -> ProduceBatchResult:
-        # 共卡同步入口：生产入 buffer -> pause/drain 本轮 pending -> 取非空训练 batch。
+        # 生产入 buffer -> 安全暂停 rollout -> 取非空训练 batch；live Agent 可跨权重更新继续执行。
         if batch_size <= 0:
             raise ValueError(f"produce_batch expects batch_size > 0, got {batch_size}")
         start = time.perf_counter()
@@ -298,15 +297,6 @@ class AgentLoopManager:
         )
         progress.add_produce_time(time.perf_counter() - produce_start)
 
-        if self.turn_resume is not None and quiesce:
-            # Checkpoint/final: gates stay open while every live Agent finishes and enters the buffer.
-            await asyncio.wait_for(
-                await_cancellable_tasks(
-                    cast(ProduceStrategy, task.produce_strategy).quiesce(contexts[task.task_name])
-                    for task in self.task_runners
-                ),
-                timeout=self.turn_resume.quiesce_timeout,
-            )
         await self._rollout_controller.pause_generation.remote()  # type: ignore[attr-defined]
 
         # Delegate the retain/legacy difference to the strategy: legacy drains, turn mode claims the results that
@@ -357,14 +347,24 @@ class AgentLoopManager:
         *,
         no_save_replay_buffer: bool = False,
     ) -> None:
-        """Save all task sampler states and the shared replay buffer."""
+        """Save task samplers and the shared replay buffer after scheduling stops.
+
+        Live Agent/tool state is not saved. Across weight updates, sampler, buffer
+        and metrics are not an atomic snapshot; cold resume is not data-exact.
+        """
         checkpoint_path = Path(checkpoint_path)
         checkpoint_path.mkdir(parents=True, exist_ok=True)
         pending_task_counts = get_pending_task_counts(self.task_runners)
         if pending_task_counts:
-            raise RuntimeError(
-                "Cannot save AgentLoopManager while pending rollout tasks still exist: "
-                f"{pending_task_counts}. Finish the current produce_batch before saving."
+            if self.cross_weight_update_rollout is None:
+                raise RuntimeError(
+                    "Cannot save AgentLoopManager while pending rollout tasks still exist: "
+                    f"{pending_task_counts}. Finish the current produce_batch before saving."
+                )
+            self.logger.warning(
+                f"Non-exact rollout checkpoint: tracked group Tasks={pending_task_counts}. "
+                "Live Agent/tool state is not saved; the sampler may be ahead of the buffer. "
+                "Cold resume can lose unfinished groups and change sample order and metrics."
             )
         for task in self.task_runners:
             checkpoint_dir = task_checkpoint_path(checkpoint_path, task.task_name)
@@ -416,5 +416,10 @@ class AgentLoopManager:
             task_names=self.task_names,
             target_samples={task_name: 0 for task_name in self.task_names},
         )
-        self._produce_progress.consumer_step = saved_model_step + 1
+        self._produce_progress.next_consumer_step = saved_model_step + 1
+        if self.cross_weight_update_rollout is not None:
+            self.logger.warning(
+                "Non-exact rollout resume: live Agent/tool state is not restored. "
+                "Unfinished groups can be lost; sample order and metrics may differ from uninterrupted training."
+            )
         return saved_model_step
