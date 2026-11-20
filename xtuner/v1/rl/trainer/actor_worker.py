@@ -27,6 +27,7 @@ from xtuner.v1.rl.distillation import TrainTeacherManager, TrainTeacherTimings
 from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, kl_penalty
 from xtuner.v1.rl.model_utils import build_frozen_model
 from xtuner.v1.rl.weight_update import WeightUpdater
+from xtuner.v1.rl.weight_update.frozen_mtp import FrozenMTPSource
 from xtuner.v1.utils import get_device, get_torch_device_module
 
 from ..rollout_is import merge_rollout_is_metrics
@@ -37,6 +38,7 @@ from .train_batch import FullPack, TrainBatch, iter_cpu_packs, resolve_pack_refs
 
 if TYPE_CHECKING:
     from xtuner.v1.data_proto.sequence_context import SequenceContext
+    from xtuner.v1.train.trainer import LoadCheckpointConfig
 
     from .worker import WorkerConfig, WorkerLogItem
 
@@ -78,6 +80,10 @@ class ActorWorker(RoleWorker):
 
     def __init__(self, worker_cfg: WorkerConfig, ctx: RoleContext) -> None:
         super().__init__(worker_cfg, ctx)
+        if worker_cfg.frozen_mtp is not None:
+            worker_cfg.frozen_mtp.validate_model(worker_cfg.model_cfg)
+        # Verify and own a CPU snapshot before allocating the actor/optimizer.
+        self.frozen_mtp_source = FrozenMTPSource(worker_cfg.frozen_mtp) if worker_cfg.frozen_mtp is not None else None
         self.engine = self._build_engine(worker_cfg)
         self.lr_scheduler = None
         if worker_cfg.scheduler_steps is not None:
@@ -140,10 +146,28 @@ class ActorWorker(RoleWorker):
             logger=self.logger,
             config=self.config,
             engine=self.engine,
+            frozen_mtp_source=self.frozen_mtp_source,
         )
 
         self._init_sft(worker_cfg)
         self.loss_cfg: BaseRLLossConfig | None = worker_cfg.loss_cfg
+
+    def save(self, path: Path, no_save_optimizer: bool = False) -> None:
+        super().save(path, no_save_optimizer)
+        if self.frozen_mtp_source is not None:
+            self.frozen_mtp_source.save_binding(path, rank=self.rank)
+
+    def resume(self, path: Path, cfg: LoadCheckpointConfig) -> None:
+        # Even an actor with the feature disabled must reject a bound external
+        # source checkpoint instead of silently restoring a different layout.
+        FrozenMTPSource.check_binding(path, self.frozen_mtp_source)
+        super().resume(path, cfg)
+
+    def save_hf(self, hf_dir: Path, save_dtype: torch.dtype) -> None:
+        if self.frozen_mtp_source is None:
+            return super().save_hf(hf_dir, save_dtype)
+        native_export = super().save_hf
+        self.frozen_mtp_source.export_hf(hf_dir, lambda: native_export(hf_dir, save_dtype), rank=self.rank)
 
     def teacher_loss_keys(self) -> list[str]:
         """Return loss fields required from configured teachers.

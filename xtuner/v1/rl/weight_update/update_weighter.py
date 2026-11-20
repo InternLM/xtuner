@@ -8,16 +8,20 @@ from .data import (
     RolloutWeightUpdateInfo,
     RolloutWeightUpdateTarget,
 )
+from .frozen_mtp import FrozenMTPSource
 from .transport import CheckpointEngineWeightTransport, IPCWeightTransport, NCCLWeightTransport
 from .weight_iterator import WeightIterator
 
 
 class WeightUpdater:
-    def __init__(self, *, rank: int, logger: Any, config: Any, engine: Any):
+    def __init__(
+        self, *, rank: int, logger: Any, config: Any, engine: Any, frozen_mtp_source: FrozenMTPSource | None = None
+    ):
         self.rank = rank
         self.logger = logger
         self.config = config
         self._engine = engine
+        self._frozen_mtp_source = frozen_mtp_source
         # Bound rollout weight-update metadata, available after bind_rollout_weight_update().
         self.rollout_info: RolloutWeightUpdateInfo | None = None
         # Lazily constructed iterator bound to the current rollout_info.
@@ -41,6 +45,8 @@ class WeightUpdater:
             weight_update_targets=targets,
             train_rank=self.rank,
         )
+        if self._frozen_mtp_source is not None:
+            self._frozen_mtp_source.config.validate_rollout(rollout_config)
 
         if self.rollout_info.transport_type == "checkpoint_engine" and self._transport is not None:
             # When using Checkpoint Engine, the ParameterServer must not be reinitialized
@@ -60,6 +66,7 @@ class WeightUpdater:
             engine=self._engine,
             rollout_info=self.rollout_info,
             global_hf_keys_mapping_cache=self._global_hf_keys_mapping_cache,
+            frozen_mtp_source=self._frozen_mtp_source,
         )
         if self._transport is None:
             self._set_transport()

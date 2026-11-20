@@ -338,6 +338,8 @@ class BaseRLTrainerConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_sync_intervals(self):
+        if self.train_worker_cfg.frozen_mtp is not None:
+            self.train_worker_cfg.frozen_mtp.validate_rollout(self.rollout_config)
         if self.debug_rollout and self.debug_train:
             raise ValueError("debug_rollout and debug_train cannot be enabled at the same time.")
         if self.debug_rollout and self.debug_rollout_dir is None:
