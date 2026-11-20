@@ -1208,7 +1208,8 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             await producer
 
         release.set()
-        await strategy.quiesce(ctx)
+        await asyncio.wait_for(strategy.produce_batch(ctx), timeout=5)
+        await strategy.pause_produce(ctx)
         self.assertEqual(strategy.pending_task_count(), 0)
         self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 1)
 

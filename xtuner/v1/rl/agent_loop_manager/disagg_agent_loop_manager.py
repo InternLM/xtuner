@@ -300,24 +300,13 @@ class DisaggAgentLoopManager:
             expired_groups_retryable=task.expired_groups_retryable,
         )
 
-    async def pause_produce(self, *, quiesce: bool = False) -> float:
-        # Set the pause state first: the status stops the next round and _update_event tells the running strategy
-        # to stop scheduling new groups. Then wait for the actual scheduling round (including result delivery).
+    async def pause_produce(self) -> float:
+        # 先停止补采并等待本轮调度退出，避免恢复时清除 event，让尚未退出的旧轮次继续调度。
+        # 此处不等全部 live Agent 自然结束；它们仍可继续工具/评分并交付。
         self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
         self._update_event.set()
         if self._produce_pass is not None:
             await await_owned_operation(self._produce_pass)
-        if self.turn_resume is not None and quiesce:
-
-            async def finish_live_tasks() -> None:
-                await asyncio.gather(
-                    *[
-                        cast(DisaggProduceStrategy, task.produce_strategy).quiesce(self._pending_context(task))
-                        for task in self.task_runners
-                    ]
-                )
-
-            await asyncio.wait_for(finish_live_tasks(), timeout=self.turn_resume.quiesce_timeout)
         await self._rollout_controller.pause_generation.remote()  # type: ignore[attr-defined]
 
         pause_time_s = 0.0
@@ -496,14 +485,23 @@ class DisaggAgentLoopManager:
         *,
         no_save_replay_buffer: bool = False,
     ) -> None:
-        """保存非共卡 sampler、replay buffer 和后台生产进度。"""
+        """保存暂停补采后的 sampler、buffer 和生产进度。
+
+        不保存 live Agent/工具状态，三者也不是原子快照；冷恢复不保证样本序列和统计严格一致。
+        """
         checkpoint_path = Path(checkpoint_path)
         checkpoint_path.mkdir(parents=True, exist_ok=True)
         pending_task_counts = get_pending_task_counts(self.task_runners)
         if pending_task_counts:
-            raise RuntimeError(
-                "Cannot save AgentLoopManager while pending rollout tasks still exist: "
-                f"{pending_task_counts}. Call pause_produce() first."
+            if self.cross_weight_update_rollout is None:
+                raise RuntimeError(
+                    "Cannot save AgentLoopManager while pending rollout tasks still exist: "
+                    f"{pending_task_counts}. Call pause_produce() first."
+                )
+            self.logger.warning(
+                f"Non-exact rollout checkpoint: tracked group Tasks={pending_task_counts}. "
+                "Live Agent/tool state is not saved; the sampler may be ahead of the buffer. "
+                "Cold resume can lose unfinished groups and change sample order and metrics."
             )
         self._model_step = model_step
         for task in self.task_runners:
@@ -557,6 +555,11 @@ class DisaggAgentLoopManager:
         self._finish_event = asyncio.Event()
         self._update_event.set()
         self._produce_pass = None
+        if self.cross_weight_update_rollout is not None:
+            self.logger.warning(
+                "Non-exact rollout resume: live Agent/tool state is not restored. "
+                "Unfinished groups can be lost; sample order and metrics may differ from uninterrupted training."
+            )
         self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
         self._pause_time_s = 0.0
         self._model_step = saved_model_step

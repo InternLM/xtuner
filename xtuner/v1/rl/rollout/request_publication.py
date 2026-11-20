@@ -29,16 +29,14 @@ class CrossWeightUpdateRolloutConfig:
         wait_timeout (float): Maximum time an LLM request may wait for admission to reopen.
         freeze_timeout (float): Budget for freezing topology and for the install/resume/reopen control batch.
         drain_timeout (float): Maximum time to wait for already admitted requests to settle.
-        quiesce_timeout (float): Maximum time to finish live Agent tasks at a checkpoint or the final step.
     """
 
     wait_timeout: float = 7200
     freeze_timeout: float = 30
     drain_timeout: float = 3900
-    quiesce_timeout: float = 28800
 
     def __post_init__(self) -> None:
-        for name in ("wait_timeout", "freeze_timeout", "drain_timeout", "quiesce_timeout"):
+        for name in ("wait_timeout", "freeze_timeout", "drain_timeout"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"CrossWeightUpdateRolloutConfig.{name} must be positive")
 

@@ -73,7 +73,7 @@ class _FakeManager:
         self.calls.append(("get_batch", batch_size, train_step))
         return self._results.pop(0)
 
-    async def pause_produce(self, *, quiesce: bool = False):
+    async def pause_produce(self):
         self.calls.append("pause_produce")
         return 0.25
 
