@@ -43,7 +43,7 @@ from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
 from .constants import ROLLOUT_HTTP_MAX_CONNECTIONS, ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY
 from .health_manager import ROLLOUT_RAY_GET_TIMEOUT
-from .request_publication import TurnResumeConfig
+from .request_publication import CrossWeightUpdateRolloutConfig
 from .rollout_topology import RolloutTopology, ServerLaunchSpec
 from .session_server import SessionServerActor
 from .utils import PartialRolloutHandler
@@ -340,11 +340,11 @@ class RolloutConfig(BaseModel):
             help="Timeout duration (in seconds) for SessionServer requests forwarded to rollout workers.",
         ),
     ] = 1200.0
-    turn_resume: Annotated[
-        TurnResumeConfig | None,
+    cross_weight_update_rollout: Annotated[
+        CrossWeightUpdateRolloutConfig | None,
         Parameter(
             group=infer_group,
-            help="Enable complete-turn Agent RL: admission gates, version publication and cross-window Agents.",
+            help="Allow live Agent rollouts to continue across model weight updates; checkpoints do not save live Agent state.",
         ),
     ] = None
     context_length: Annotated[
@@ -813,7 +813,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 port=self.session_server_port,
                 request_timeout=self.config.session_server_timeout,
                 enable_return_routed_experts=self.enable_return_routed_experts,
-                turn_resume=self.config.turn_resume,
+                cross_weight_update_rollout=self.config.cross_weight_update_rollout,
             )
         )
         self.session_server_url = ray.get(

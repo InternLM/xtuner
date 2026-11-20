@@ -1,4 +1,5 @@
 from xtuner._testing.patch_rollout_config import get_rollout_config_dist_port_base_default
+from xtuner.v1.rl.rollout.request_publication import CrossWeightUpdateRolloutConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 
 
@@ -8,6 +9,17 @@ def _build_rollout_config(**kwargs) -> RolloutConfig:
         context_length=1,
         **kwargs,
     )
+
+
+class TestCrossWeightUpdateRolloutConfig:
+    def test_rollout_config_json_round_trip_preserves_cross_update_settings(self):
+        config = _build_rollout_config(
+            cross_weight_update_rollout={"wait_timeout": 7, "freeze_timeout": 2, "drain_timeout": 3}
+        )
+        restored = RolloutConfig.model_validate_json(config.model_dump_json())
+        assert restored.cross_weight_update_rollout == CrossWeightUpdateRolloutConfig(
+            wait_timeout=7, freeze_timeout=2, drain_timeout=3
+        )
 
 
 def test_rollout_config_default_dist_port_base_is_staggered(monkeypatch):

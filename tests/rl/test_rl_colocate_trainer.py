@@ -111,7 +111,7 @@ class TestRLColocateTrainer(unittest.TestCase):
     def _make_trainer(self, agent_loop_manager, *, total_train_steps: int = 1, sync_weights_interval: int = 1):
         trainer = RLColocateTrainer.__new__(RLColocateTrainer)
         trainer._rollout_config = SimpleNamespace(
-            weight_transport_type="ipc", turn_resume=None, skip_load_weights=False
+            weight_transport_type="ipc", cross_weight_update_rollout=None, skip_load_weights=False
         )
         trainer._load_checkpoint_cfg = SimpleNamespace(checkpoint_path=None)
         trainer.logger = MagicMock()

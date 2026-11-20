@@ -263,7 +263,7 @@ class DisaggAsyncProduceStrategyConfig(DisaggProduceStrategyConfig):
             ``N > 0`` waits until the expired pool contains at least ``N``
             groups before entering tail-batch mode.
         retain_live_tasks (bool): Build-time mode. True keeps live Agent tasks
-            across pauses (turn-resume); False drains them at each pause.
+            across pauses (cross-weight-update rollout); False drains them at each pause.
     """
 
     over_sample_threshold: float = 0.0
@@ -366,7 +366,7 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         )
         self.tail_batch_trigger_size = tail_batch_trigger_size
         self._pending_tasks = _PendingTasks()
-        # Turn-resume keeps live Agent tasks with the strategy; legacy mode drains them at each pause.
+        # Cross-weight-update rollout keeps live Agent tasks with the strategy; legacy mode drains them at each pause.
         self._retain_live_tasks = retain_live_tasks
 
     def is_model_expired(self, train_step: int, model_step: int) -> bool:

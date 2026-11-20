@@ -1,4 +1,4 @@
-"""Complete-turn admission barrier for turn-resume rollout.
+"""Complete-turn admission barrier for cross-weight-update rollout rollout.
 
 A request may finish only when the backend really ended and its trace committed. Forwarding an HTTP response
 is not proof of settlement: an aborted or cancelled coroutine may leave the backend generating. The gate keeps

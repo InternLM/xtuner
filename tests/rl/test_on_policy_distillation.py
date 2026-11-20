@@ -225,7 +225,7 @@ distillation_config = DistillationConfig(
             tokenizer_path="student",
             agent_loop_manager_cfg=manager_config,
             sync_weights_interval=1,
-            rollout_config=SimpleNamespace(turn_resume=None),
+            rollout_config=SimpleNamespace(cross_weight_update_rollout=None),
         )
 
         with patch("xtuner.v1.train.rl_trainer.AutoTokenizer.from_pretrained", return_value=MagicMock()):

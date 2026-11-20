@@ -228,7 +228,7 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
             rollout groups in one produce_batch call. Defaults to None, which
             keeps the existing unbounded scheduling behavior.
         retain_live_tasks (bool): Build-time mode. True keeps live Agent tasks
-            and claims completed groups across windows (turn-resume); False
+            and claims completed groups across windows (cross-weight-update rollout); False
             owns and drains them per window. Defaults to False.
 
     **Examples:**
@@ -391,7 +391,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         self.tail_batch_trigger_size = tail_batch_trigger_size
         self.max_pending_tasks = max_pending_tasks
         self._pending_tasks = _PendingTasks()
-        # Turn-resume keeps live Agent tasks across production windows; legacy mode owns them per window.
+        # Cross-weight-update rollout keeps live Agent tasks across production windows; legacy mode owns them per window.
         self._retain_live_tasks = retain_live_tasks
 
     def pending_task_count(self) -> int:

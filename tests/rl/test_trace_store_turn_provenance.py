@@ -1,4 +1,4 @@
-"""Turn-resume trace export 与共享引用所有权测试。
+"""Cross-weight-update rollout trace export 与共享引用所有权测试。
 
 Good Tests:
 - 使用真实 RolloutTraceStore actor、真实 Trie 和真实 Ray ObjectRef 验证导出契约。

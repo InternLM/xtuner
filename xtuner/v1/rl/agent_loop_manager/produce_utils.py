@@ -798,7 +798,7 @@ class _PendingTasks:
         """Cancel every live task once and wait for the original cleanup to
         really finish.
 
-        Unlike ``cancel_all`` this does not bound the wait and reports non-cancellation errors. Turn-resume
+        Unlike ``cancel_all`` this does not bound the wait and reports non-cancellation errors. Cross-weight-update rollout
         needs the real end of ``Runner.finally`` (sandbox pool and route cleanup) before the event loop exits.
         """
         async with self._lock:

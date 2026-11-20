@@ -15,7 +15,7 @@ from xtuner.v1.rl.agent_loop import AgentLoopConfig, IsValidSampleFn
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
-from xtuner.v1.rl.rollout.request_publication import TurnResumeConfig
+from xtuner.v1.rl.rollout.request_publication import CrossWeightUpdateRolloutConfig
 from xtuner.v1.rl.utils import await_cancellable_tasks, await_owned_operation
 from xtuner.v1.utils import get_logger
 
@@ -85,7 +85,7 @@ class DisaggAgentLoopManagerConfig(BaseModel):
         sync_weights_interval: int = 1,
         rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
         *,
-        turn_resume: TurnResumeConfig | None = None,
+        cross_weight_update_rollout: CrossWeightUpdateRolloutConfig | None = None,
     ) -> DisaggAgentLoopManager:
         tasks = self.tasks if isinstance(self.tasks, list) else [self.tasks]
         if not tasks:
@@ -108,7 +108,7 @@ class DisaggAgentLoopManagerConfig(BaseModel):
             produce_strategy = task_cfg.produce_strategy_config.build(
                 sync_weights_interval=sync_weights_interval,
                 rollout_controller=rollout_controller,
-                retain_live_tasks=turn_resume is not None,
+                retain_live_tasks=cross_weight_update_rollout is not None,
             )
             sampler = task_cfg.sampler_config.build(tokenizer=tokenizer, replay_buffer=replay_buffer)
             task_runners.append(
@@ -127,7 +127,7 @@ class DisaggAgentLoopManagerConfig(BaseModel):
             replay_buffer=replay_buffer,
             rollout_controller=rollout_controller,
             logger=logger,
-            turn_resume=turn_resume,
+            cross_weight_update_rollout=cross_weight_update_rollout,
         )
 
 
@@ -186,7 +186,7 @@ class DisaggAgentLoopManager:
         replay_buffer: ReplayBuffer,
         rollout_controller: RolloutController,
         logger=None,
-        turn_resume: TurnResumeConfig | None = None,
+        cross_weight_update_rollout: CrossWeightUpdateRolloutConfig | None = None,
     ):
         if not task_runners:
             raise ValueError("DisaggAgentLoopManager requires at least one task runner.")
@@ -196,7 +196,7 @@ class DisaggAgentLoopManager:
         self.task_runners = task_runners
         self.replay_buffer = replay_buffer
         self._rollout_controller = rollout_controller
-        self.turn_resume = turn_resume
+        self.cross_weight_update_rollout = cross_weight_update_rollout
         self.data_sampler = (
             task_runners[0].sampler
             if len(task_runners) == 1
@@ -417,7 +417,7 @@ class DisaggAgentLoopManager:
         current_model_step = train_step - 1
 
         while not self._finish_event.is_set():
-            if self.turn_resume is not None:
+            if self.cross_weight_update_rollout is not None:
                 await self._rollout_controller.assert_request_gates_healthy.remote()  # type: ignore[attr-defined]
             if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
                 if current_model_step > self._model_step:

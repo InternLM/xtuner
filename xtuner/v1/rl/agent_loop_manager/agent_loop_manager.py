@@ -14,7 +14,7 @@ from xtuner.v1.rl.agent_loop import AgentLoopConfig, IsValidSampleFn
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
-from xtuner.v1.rl.rollout.request_publication import TurnResumeConfig
+from xtuner.v1.rl.rollout.request_publication import CrossWeightUpdateRolloutConfig
 from xtuner.v1.rl.utils import await_cancellable_tasks
 from xtuner.v1.utils import get_logger
 
@@ -145,7 +145,7 @@ class AgentLoopManagerConfig(BaseModel):
         sync_weights_interval: int = 1,
         rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
         *,
-        turn_resume: TurnResumeConfig | None = None,
+        cross_weight_update_rollout: CrossWeightUpdateRolloutConfig | None = None,
     ) -> AgentLoopManager:
         tasks = self.tasks if isinstance(self.tasks, list) else [self.tasks]
         if not tasks:
@@ -168,7 +168,7 @@ class AgentLoopManagerConfig(BaseModel):
             produce_strategy = task_cfg.produce_strategy_config.build(
                 sync_weights_interval=sync_weights_interval,
                 rollout_controller=rollout_controller,
-                retain_live_tasks=turn_resume is not None,
+                retain_live_tasks=cross_weight_update_rollout is not None,
             )
             sampler = task_cfg.sampler_config.build(tokenizer=tokenizer, replay_buffer=replay_buffer)
             task_runners.append(
@@ -187,7 +187,7 @@ class AgentLoopManagerConfig(BaseModel):
             replay_buffer=replay_buffer,
             rollout_controller=rollout_controller,
             logger=logger,
-            turn_resume=turn_resume,
+            cross_weight_update_rollout=cross_weight_update_rollout,
         )
 
 
@@ -209,7 +209,7 @@ class AgentLoopManager:
         replay_buffer: ReplayBuffer,
         rollout_controller: RolloutController,
         logger=None,
-        turn_resume: TurnResumeConfig | None = None,
+        cross_weight_update_rollout: CrossWeightUpdateRolloutConfig | None = None,
     ):
         if not task_runners:
             raise ValueError("AgentLoopManager requires at least one task runner.")
@@ -219,7 +219,7 @@ class AgentLoopManager:
         self.task_runners = task_runners
         self.replay_buffer = replay_buffer
         self._rollout_controller = rollout_controller
-        self.turn_resume = turn_resume
+        self.cross_weight_update_rollout = cross_weight_update_rollout
         self.data_sampler = (
             task_runners[0].sampler
             if len(task_runners) == 1
@@ -399,8 +399,10 @@ class AgentLoopManager:
         for task in self.task_runners:
             task.sampler.resume(task_checkpoint_path(checkpoint_path, task.task_name))
 
-        if self.turn_resume is not None and not manager_state["replay_buffer_saved"]:
-            raise RuntimeError("Turn-resume requires a persisted replay buffer to restore completed groups")
+        if self.cross_weight_update_rollout is not None and not manager_state["replay_buffer_saved"]:
+            raise RuntimeError(
+                "Cross-weight-update rollout requires a persisted replay buffer to restore completed groups"
+            )
         if manager_state["replay_buffer_saved"]:
             # replay buffer 恢复是 async I/O，不能在已有 event loop 中再次嵌套 asyncio_run。
             await self.replay_buffer.resume(checkpoint_path)
