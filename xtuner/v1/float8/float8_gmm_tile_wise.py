@@ -96,7 +96,8 @@ class fp8_gmm_weight_per_block_act_per_tile(torch.autograd.Function):
         if ctx.zero_token_dispatch:
             return x.new_empty((seq, dout))
 
-        x_fp8, x_scale = per_tile_quant(x)
+        # Match serving activation rounding; retain the existing quantized STE backward.
+        x_fp8, x_scale = per_tile_quant(x, use_reciprocal=True)
         (
             x_trans_quant_fp8,
             x_trans_quant_scale,
