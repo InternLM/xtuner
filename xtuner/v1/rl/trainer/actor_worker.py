@@ -119,6 +119,8 @@ class ActorWorker(RoleWorker):
                 self.mtp_config = worker_cfg.model_cfg.text_config.mtp_config
         elif hasattr(worker_cfg.model_cfg, "mtp_config"):
             self.mtp_config = worker_cfg.model_cfg.mtp_config
+        if self.mtp_config is not None and self.mtp_config.frozen:
+            self.mtp_config = None
         self.mtp_cfgs: list[MTPLossConfig] = []
         if self.mtp_config is not None:
             for depth in range(self.mtp_config.num_layers):
