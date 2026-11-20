@@ -171,15 +171,16 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result, ray_agent_loop)
         self.assertIs(build_actor.call_args.kwargs["is_valid_sample_fn"], is_valid_sample_fn)
 
-    def test_actor_binds_validity_check_during_construction(self):
+    async def test_actor_binds_validity_check_on_first_rpc(self) -> None:
         is_valid_sample_fn = MagicMock()
         local_loop = MagicMock()
         config = MagicMock()
         config.build_local.return_value = local_loop
 
         actor = AgentLoopActor(config, MagicMock(), is_valid_sample_fn=is_valid_sample_fn)
+        await actor.get_rollout_ctl()
 
-        self.assertIs(actor.agent_loop.is_valid_sample_fn, is_valid_sample_fn)
+        self.assertIs(local_loop.is_valid_sample_fn, is_valid_sample_fn)
 
     async def test_generate_filters_completed_group_after_batch_judge_and_logs(self):
         filtered_rewards = []

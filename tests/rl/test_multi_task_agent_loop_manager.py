@@ -13,7 +13,7 @@ import asyncio
 import unittest
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import (
@@ -201,6 +201,9 @@ def _fake_agent_loop():
     rollout_ctl.pause_generation.remote = AsyncMock()
     rollout_ctl.get_weight_update_targets.remote = AsyncMock(return_value=())
     agent_loop = MagicMock()
+    agent_loop.prepare_pause = AsyncMock()
+    agent_loop.resume = AsyncMock()
+    agent_loop.close = AsyncMock()
     agent_loop.rollout_ctl = rollout_ctl
     return agent_loop
 
@@ -634,7 +637,17 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             rollout_controller=_fake_rollout_controller(),
         )
 
-        result = await manager.produce_batch(batch_size=2, train_step=7, model_step=6)
+        clock = MagicMock()
+        clock.perf_counter.return_value = 0.0
+        pause_produce = strategy.pause_produce
+
+        async def timed_pause(ctx: Any) -> float:
+            clock.perf_counter.return_value += 1.25
+            return await pause_produce(ctx)
+
+        strategy.pause_produce = timed_pause
+        with patch("xtuner.v1.rl.agent_loop_manager.agent_loop_manager.time", clock):
+            result = await manager.produce_batch(batch_size=2, train_step=7, model_step=6)
 
         self.assertEqual(result.group_gen_count, 2)
         self.assertAlmostEqual(result.group_gen_mean_s, 0.75)
@@ -792,3 +805,118 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(RuntimeError, "original produce failure"):
             await manager.produce_batch(batch_size=1, train_step=3, model_step=2)
+
+
+class TestEnvironmentLifecycleOrder(unittest.IsolatedAsyncioTestCase):
+    async def test_disagg_drains_requests_before_abort_and_resumes_after_controller(self):
+        events = []
+        clock = MagicMock()
+        clock.perf_counter.return_value = 0.0
+
+        def drain() -> None:
+            events.append("drain")
+            clock.perf_counter.return_value += 3.0
+
+        loop = _fake_agent_loop()
+        loop.prepare_pause.side_effect = drain
+        loop.resume.side_effect = lambda: events.append("resume")
+        ctl = _fake_rollout_controller()
+        ctl.pause_generation.remote.side_effect = lambda: events.append("abort")
+        ctl.continue_generation.remote.side_effect = lambda: events.append("continue")
+        strategy = _FakeProduceStrategy()
+        manager = DisaggAgentLoopManager(
+            [
+                _TaskRunner(
+                    task_name="t",
+                    agent_loop=loop,
+                    produce_strategy=strategy,
+                    sampler=_FakeSampler(),
+                    weight=1,
+                    order=0,
+                )
+            ],
+            _FakeReplayBuffer({}, {}),
+            ctl,
+        )
+        with patch("xtuner.v1.rl.agent_loop_manager.disagg_agent_loop_manager.time", clock):
+            pause_time = await manager.pause_produce()
+        assert pause_time == 3.0
+        assert manager._consume_pause_time() == 3.0
+        assert manager._consume_pause_time() == 0.0
+        assert events == ["drain", "abort"]
+        await manager.continue_produce(model_step=2)
+        assert events == ["drain", "abort", "continue", "resume"]
+        assert strategy.cleanup_model_steps == [0]
+
+    async def test_colocated_drains_requests_before_abort(self):
+        events = []
+        clock = MagicMock()
+        clock.perf_counter.return_value = 0.0
+
+        def drain() -> None:
+            events.append("drain")
+            clock.perf_counter.return_value += 3.0
+
+        loop = _fake_agent_loop()
+        loop.prepare_pause.side_effect = drain
+        loop.resume.side_effect = lambda: events.append("resume")
+        ctl = _fake_rollout_controller()
+        ctl.pause_generation.remote.side_effect = lambda: events.append("abort")
+        ctl.continue_generation.remote.side_effect = lambda: events.append("continue")
+        manager = AgentLoopManager(
+            [
+                _TaskRunner(
+                    task_name="t",
+                    agent_loop=loop,
+                    produce_strategy=_FakeProduceStrategy(),
+                    sampler=_FakeSampler(),
+                    weight=1,
+                    order=0,
+                )
+            ],
+            _FakeReplayBuffer(
+                {
+                    "t": [
+                        [
+                            RolloutState(
+                                message=[],
+                                status=Status.COMPLETED,
+                                input_ids=[1, 2],
+                                labels=[-100, 2],
+                                prompt_ids=[1],
+                                response_ids=[2],
+                                response_model_steps=[0],
+                            )
+                        ]
+                    ]
+                },
+                {},
+            ),
+            ctl,
+        )
+        with patch("xtuner.v1.rl.agent_loop_manager.agent_loop_manager.time", clock):
+            result = await manager.produce_batch(batch_size=1, train_step=1, model_step=0)
+        assert result.group_gen_pause_time_s == 3.0
+        assert events == ["continue", "resume", "drain", "abort"]
+
+    async def test_failed_drain_prevents_global_abort(self):
+        loop = _fake_agent_loop()
+        loop.prepare_pause.side_effect = RuntimeError("unacknowledged response")
+        ctl = _fake_rollout_controller()
+        manager = DisaggAgentLoopManager(
+            [
+                _TaskRunner(
+                    task_name="t",
+                    agent_loop=loop,
+                    produce_strategy=_FakeProduceStrategy(),
+                    sampler=_FakeSampler(),
+                    weight=1,
+                    order=0,
+                )
+            ],
+            _FakeReplayBuffer({}, {}),
+            ctl,
+        )
+        with self.assertRaisesRegex(RuntimeError, "unacknowledged"):
+            await manager.pause_produce()
+        ctl.pause_generation.remote.assert_not_awaited()
