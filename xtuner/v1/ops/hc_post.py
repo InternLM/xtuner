@@ -1,15 +1,14 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 """Fused mHC post with FP32 coefficients and a single final activation cast.
 
-For small hc_mult (typically 4), keep the residual tile in registers and reuse it
-across output streams instead of using a tiny GEMM or the eager fallback's repeated reads.
-The precision policy follows LMDeploy's
-`lmdeploy/pytorch/kernels/cuda/dsv4/hc_prepost.py::_hc_post_expand_kernel`;
-the parallel reduction order may differ. Backward also retains coefficient precision.
+Accumulate post*x followed by source streams in index order, matching LMDeploy's post expansion. Backward retains
+coefficient precision for the same contract.
 """
 
 import torch
 from torch import Tensor
+
+from xtuner.v1.ops.lmdeploy_alignment import ALIGN_FORWARD
 
 
 try:
@@ -50,19 +49,17 @@ if _HAS_TRITON:
         db = tl.program_id(1)
         doff = db * BLOCK_D + tl.arange(0, BLOCK_D)
         dm = doff < D
-        hidx = tl.arange(0, H)
         xt = tl.load(x_ptr + t * D + doff, mask=dm, other=0.0).to(tl.float32)
-        res = tl.load(
-            res_ptr + t * H * D + hidx[:, None] * D + doff[None, :],
-            mask=dm[None, :],
-            other=0.0,
-        ).to(tl.float32)
         for ho in range(H):
-            # Reduce over source streams, retaining FP32 coefficients and intermediates.
-            comb_col = tl.load(comb_ptr + t * H * H + hidx * H + ho).to(tl.float32)
-            mixed = tl.sum(comb_col[:, None] * res, axis=0)
+            # Match rollout: retain FP32 coefficients and accumulate post*x first,
+            # followed by source streams in order, with only the final BF16 cast.
             p = tl.load(post_ptr + t * H + ho).to(tl.float32)
-            tl.store(out_ptr + t * H * D + ho * D + doff, p * xt + mixed, mask=dm)
+            acc = p * xt
+            for hi in range(H):
+                c = tl.load(comb_ptr + t * H * H + hi * H + ho).to(tl.float32)
+                r = tl.load(res_ptr + t * H * D + hi * D + doff, mask=dm, other=0.0).to(tl.float32)
+                acc += c * r
+            tl.store(out_ptr + t * H * D + ho * D + doff, acc, mask=dm)
 
     @triton.jit
     def _hc_post_bwd_dpar_kernel(
@@ -74,6 +71,7 @@ if _HAS_TRITON:
         D,
         H: tl.constexpr,
         BLOCK_D: tl.constexpr,
+        PRECISE_GRAD: tl.constexpr,
     ):
         # D-parallel grads: grad_x and grad_residual (reduce over h_out).
         t = tl.program_id(0)
@@ -81,17 +79,19 @@ if _HAS_TRITON:
         doff = db * BLOCK_D + tl.arange(0, BLOCK_D)
         dm = doff < D
         hidx = tl.arange(0, H)
+        work_dtype: tl.constexpr = tl.float64 if PRECISE_GRAD else tl.float32
         g = tl.load(
             g_ptr + t * H * D + hidx[:, None] * D + doff[None, :],
             mask=dm[None, :],
             other=0.0,
-        ).to(tl.float32)  # [H_out, BLOCK_D]
-        post = tl.load(post_ptr + t * H + hidx).to(tl.float32)  # [H_out]
+        ).to(work_dtype)  # [H_out, BLOCK_D]
+        # Four-term FP64 sums avoid a second rounding at BF16 gradient ties.
+        post = tl.load(post_ptr + t * H + hidx).to(work_dtype)  # [H_out]
         gx = tl.sum(post[:, None] * g, axis=0)  # grad_x[d] = sum_ho post[ho] g[ho,d]
         tl.store(gx_ptr + t * D + doff, gx.to(gx_ptr.dtype.element_ty), mask=dm)
         for hi in range(H):
             # grad_residual[hi, d] = sum_ho comb[hi, ho] g[ho, d]
-            comb_row = tl.load(comb_ptr + t * H * H + hi * H + hidx).to(tl.float32)  # comb[hi, :]
+            comb_row = tl.load(comb_ptr + t * H * H + hi * H + hidx).to(work_dtype)  # comb[hi, :]
             gr = tl.sum(comb_row[:, None] * g, axis=0)
             tl.store(gres_ptr + t * H * D + hi * D + doff, gr.to(gres_ptr.dtype.element_ty), mask=dm)
 
@@ -141,6 +141,10 @@ if _HAS_TRITON:
 
     @torch.library.custom_op("xtuner::hc_post_fwd", mutates_args=())
     def _hc_post_fwd_op(x: Tensor, residual: Tensor, post: Tensor, comb: Tensor) -> Tensor:
+        if ALIGN_FORWARD:
+            from lmdeploy.pytorch.kernels.cuda.dsv4.hc_prepost import hc_post_expand
+
+            return hc_post_expand(x, residual, post, comb, residual.size(-2))
         *batch, H, D = residual.shape
         n = 1
         for b in batch:
@@ -175,7 +179,9 @@ if _HAS_TRITON:
 
         gx = torch.empty_like(xf)
         gres = torch.empty_like(rf)
-        _hc_post_bwd_dpar_kernel[(n, triton.cdiv(D, _BLOCK_D))](g, pf, cf, gx, gres, D, H=H, BLOCK_D=_BLOCK_D)
+        _hc_post_bwd_dpar_kernel[(n, triton.cdiv(D, _BLOCK_D))](
+            g, pf, cf, gx, gres, D, H=H, BLOCK_D=_BLOCK_D, PRECISE_GRAD=ALIGN_FORWARD
+        )
 
         # grad_post / grad_comb flow back to the fp32 Sinkhorn outputs, so we
         # accumulate and return them in their original dtype.

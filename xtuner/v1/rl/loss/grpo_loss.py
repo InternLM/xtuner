@@ -3,8 +3,8 @@ from typing import Any, cast
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 
+from xtuner.v1.ops.lmdeploy_alignment import head_linear
 from xtuner.v1.utils import get_logger
 
 from ..utils import gather_logprobs
@@ -148,7 +148,7 @@ class GRPOLossContext(BaseRLLossContext):
         """Step 2.a and 2.b in the loss calculation in
         xtuner/v1/loss/base_loss_ctx.py."""
         # We do linear forward here to simplify the implementation of chunk loss (saving memory).
-        logits = F.linear(hidden_states, head_weight, head_bias)
+        logits = head_linear(hidden_states, head_weight, head_bias)
         logits = logits.float()
 
         shifted_labels = loss_kwargs.shifted_labels
