@@ -649,7 +649,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         second = await manager.produce_batch(batch_size=1, train_step=2, model_step=0)
         self.assertEqual((second.produced_samples, second.produced_tokens), (1, 2))
         self.assertEqual([group[0].extra_fields["test_name"] for group in second.rollout_states], ["ledger-1"])
-        self.assertEqual(strategy.ctx.progress.consumer_step, 3)
+        self.assertEqual(strategy.ctx.progress.next_consumer_step, 3)
 
     async def test_disagg_pause_waits_for_producer_idle_and_resumes_next_round(self):
         # 过渡方案：pause 先置 UPDATE/update_event，等当前生产调用（含结果处理）退出；continue 后才开始下一轮。

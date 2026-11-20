@@ -138,7 +138,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         if progress is None:
             progress = self._build_progress(task_name, target=batch_size)
         # The manager re-targets the shared ledger and moves the consume step at each window start.
-        progress.consumer_step = train_step
+        progress.next_consumer_step = train_step
         return ProduceContext(
             agent_loop=agent_loop,
             sampler=sampler,
