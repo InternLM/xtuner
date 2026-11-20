@@ -135,6 +135,7 @@ class fp8_gmm_weight_per_block_act_per_tile(torch.autograd.Function):
             ),
             tokens_per_expert,
         )
+        del grad_out_fp8, grad_out_scale
 
         (
             grad_out_trans_fp8,
