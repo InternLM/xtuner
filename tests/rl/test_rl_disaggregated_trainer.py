@@ -77,6 +77,9 @@ class _FakeManager:
         self.calls.append("pause_produce")
         return 0.25
 
+    async def close(self):
+        self.calls.append("close")
+
     async def continue_produce(self, model_step: int):
         self.calls.append(("continue_produce", model_step))
 
@@ -141,7 +144,13 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._cpu_resource_manager = None
         trainer._distillation = DistillationTrainerAdapter(None)
         trainer._train_worker_cfg = SimpleNamespace(pack_max_length=16)
-        trainer._rollout_config = SimpleNamespace(weight_update_host=None, weight_update_port=30000)
+        trainer._rollout_config = SimpleNamespace(
+            weight_update_host=None,
+            weight_update_port=30000,
+            cross_weight_update_rollout=None,
+            skip_load_weights=False,
+        )
+        trainer._load_checkpoint_cfg = SimpleNamespace(checkpoint_path=None)
         trainer._meta = SimpleNamespace(
             latest_exp=SimpleNamespace(exp_dir=str(Path(self.temp_dir.name) / "exp")),
         )
@@ -175,16 +184,15 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             restart_inactive_workers=SimpleNamespace(remote=MagicMock(return_value="rollout_restarted")),
             pause_generation=SimpleNamespace(remote=MagicMock(return_value="pause")),
             continue_generation=SimpleNamespace(remote=MagicMock(return_value="continue")),
-            offload=SimpleNamespace(remote=MagicMock(return_value="offload")),
-            onload_weights=SimpleNamespace(remote=MagicMock(return_value="onload_weights")),
-            onload_kvcache=SimpleNamespace(remote=MagicMock(return_value="onload_kvcache")),
+            offload=SimpleNamespace(remote=AsyncMock(return_value="offload")),
+            onload_weights=SimpleNamespace(remote=AsyncMock(return_value="onload_weights")),
+            onload_kvcache=SimpleNamespace(remote=AsyncMock(return_value="onload_kvcache")),
             validate_registered_workers_to_proxy=SimpleNamespace(remote=AsyncMock(return_value=None)),
         )
         return trainer
 
     def _run_fit(self, trainer):
-        with patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run):
-            trainer.fit()
+        trainer.fit()
 
     def _minimal_train_info(self, *, training_samples: int, training_tokens: int, benchmark_end_time_s: float = 108.0):
         return {
@@ -225,7 +233,6 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         )
 
         with (
-            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
             patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
             patch("xtuner.v1.train.rl_trainer.bind_train_rollout"),
         ):
@@ -284,10 +291,14 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         train_sample = make_train_state()
         manager = _FakeManager([ProduceBatchResult(rollout_states=[[train_sample]])])
         trainer = self._make_trainer(manager)
-        trainer._rollout_config = SimpleNamespace(weight_update_host="10.0.0.1", weight_update_port=23456)
+        trainer._rollout_config = SimpleNamespace(
+            weight_update_host="10.0.0.1",
+            weight_update_port=23456,
+            cross_weight_update_rollout=None,
+            skip_load_weights=False,
+        )
 
         with (
-            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
             patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
             patch("xtuner.v1.train.rl_trainer.bind_train_rollout") as bind_train_rollout_mock,
         ):
@@ -300,8 +311,8 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         )
 
     def test_fit_keeps_background_producer_running_while_training_blocks(self):
-        # 验证非共卡训练阻塞在同步训练 batch 时，后台 producer 仍能继续调度。
-        train_sample = SimpleNamespace(group_id=1, rollout_id=1, session_id=None)
+        # 验证真实 _train_one_batch 把阻塞训练放进线程时，后台 producer 仍能在 fit loop 上推进。
+        train_sample = make_train_state()
         training_started = threading.Event()
         producer_ticked = threading.Event()
         manager = _TickingManager(
@@ -312,17 +323,30 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer = self._make_trainer(manager)
         trainer._sync_weights_and_save = AsyncMock()
 
-        def blocking_train_one_batch(*args, **kwargs):
+        def blocking_fit(*args, **kwargs):
+            # 在线程内阻塞，模拟真实训练；只有 fit loop 空闲时 producer 才能 tick。
             training_started.set()
-            if not producer_ticked.wait(timeout=1.0):
+            if not producer_ticked.wait(timeout=2.0):
                 raise AssertionError("background producer did not run while training was blocked")
-            return self._minimal_train_info(training_samples=1, training_tokens=4)
+            return (
+                [
+                    {
+                        "rollout_is_metrics": {},
+                        "mismatch_metrics": {},
+                        "rollout_entropy": 0.0,
+                        "train_entropy": 0.0,
+                        "train_metrics": [],
+                        "sft_train_metrics": {},
+                    }
+                ],
+                {"batch_size": 1, "rewards/mean": 1.0},
+            )
 
-        trainer._train_one_batch = MagicMock(side_effect=blocking_train_one_batch)
+        trainer.train_controller.fit.side_effect = blocking_fit
 
         self._run_fit(trainer)
 
-        trainer._train_one_batch.assert_called_once()
+        trainer.train_controller.fit.assert_called_once()
         self.assertIn("produce_loop_tick_during_training", manager.calls)
         self.assertEqual(trainer._cur_step, 1)
 
@@ -348,10 +372,12 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             patch("xtuner.v1.rl.rollout.trace_store.get_existing_store", return_value=store),
             patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda value: value),
         ):
-            trainer._train_one_batch(
-                [[train_sample]],
-                train_step=1,
-                step_timer_dict={},
+            asyncio.run(
+                trainer._train_one_batch(
+                    [[train_sample]],
+                    train_step=1,
+                    step_timer_dict={},
+                )
             )
 
         store.release_sessions.remote.assert_called_once_with(["101"])
@@ -588,12 +614,13 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             events.append("ready")
 
         trainer.rollout_controller = SimpleNamespace(
-            pause_generation=SimpleNamespace(remote=MagicMock(return_value="pause_generation")),
-            continue_generation=SimpleNamespace(remote=MagicMock(return_value="continue_generation")),
-            offload=SimpleNamespace(remote=MagicMock(side_effect=offload)),
-            onload_weights=SimpleNamespace(remote=MagicMock(side_effect=wake_weights)),
-            onload_kvcache=SimpleNamespace(remote=MagicMock(side_effect=wake_kvcache)),
+            pause_generation=SimpleNamespace(remote=AsyncMock(return_value="pause_generation")),
+            continue_generation=SimpleNamespace(remote=AsyncMock(return_value="continue_generation")),
+            offload=SimpleNamespace(remote=AsyncMock(side_effect=offload)),
+            onload_weights=SimpleNamespace(remote=AsyncMock(side_effect=wake_weights)),
+            onload_kvcache=SimpleNamespace(remote=AsyncMock(side_effect=wake_kvcache)),
         )
+        trainer._rollout_config = SimpleNamespace(cross_weight_update_rollout=None, skip_load_weights=False)
         events: list[str] = []
 
         async def manager_resume(checkpoint_path):
@@ -610,13 +637,10 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         )
         trainer.weight_update = MagicMock(side_effect=receive_weights)
 
-        train_state_path = Path(self.temp_dir.name) / trainer._SAVE_TRAIN_STATE_PATH
-        train_state_path.write_text('{"cur_step": 3}')
+        trainer._cur_step = 3
 
-        with patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
-            trainer._resume_from_checkpoint(self.temp_dir.name)
+        asyncio.run(trainer._initialize_rollout(Path(self.temp_dir.name)))
 
-        self.assertEqual(trainer._cur_step, 3)
         trainer.agent_loop_manager.resume.assert_awaited_once_with(Path(self.temp_dir.name))
         trainer.agent_loop_manager.continue_produce.assert_awaited_once_with(model_step=3)
         self.assertTrue(events[0].startswith("manager_resume:"))
@@ -627,7 +651,6 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             with self.subTest(failure=failure):
                 trainer = self._make_trainer(_FakeManager([]))
                 trainer._cur_step = 3
-                trainer._resume_train_controller_and_state = MagicMock(return_value=Path(self.temp_dir.name))
                 trainer._resume_agent_loop_manager = AsyncMock(return_value=3)
                 trainer.agent_loop_manager.continue_produce = AsyncMock()
                 operation = (
@@ -636,11 +659,8 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
                     else getattr(trainer.rollout_controller, failure).remote
                 )
                 operation.side_effect = RuntimeError(failure)
-                with (
-                    patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
-                    self.assertRaisesRegex(RuntimeError, failure),
-                ):
-                    trainer._resume_from_checkpoint(self.temp_dir.name)
+                with self.assertRaisesRegex(RuntimeError, failure):
+                    asyncio.run(trainer._initialize_rollout(Path(self.temp_dir.name)))
                 trainer.agent_loop_manager.continue_produce.assert_not_awaited()
 
     def test_validate_sync_schedule_accepts_multiples(self):

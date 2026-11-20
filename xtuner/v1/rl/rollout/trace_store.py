@@ -133,6 +133,8 @@ def _assemble_trace(nodes: List["TreeNode"], session_id: str) -> dict:
             # Assistant turn written before the field existed: count unknown.
             tool_call_counts.append(None)
     trace["routed_experts"] = _resolve_routed_experts(expert_keys, session_id)
+    # Ownership marker travels with partial/legacy exports too, so timeout states detach instead of freeing.
+    trace["routed_experts_shared"] = bool(getattr(nodes[0].value, "routed_experts_shared", False)) if nodes else False
     trace["tool_call_count"] = None if None in tool_call_counts else sum(tool_call_counts)
     # The first node holds the session's initial prompt segment (the only segment written
     # before any assistant turn), so everything after it is the contiguous response suffix
@@ -196,6 +198,8 @@ def _latest_chain(trie: "Trie") -> List["TreeNode"]:
 class TokenizedSegment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    request_id: str | None = None
+    model_step: int | None = None
     text: str
     token_ids: List[int]
     labels: List[int] | None = Field(default=None, repr=False)
@@ -206,6 +210,8 @@ class TokenizedSegment(BaseModel):
     # the field existed; export reports ``None`` when any assistant turn is
     # unknown instead of silently undercounting.
     tool_call_count: int | None = Field(default=None, repr=False)
+    # Shared refs survive this store's release through Ray reference counting; legacy refs are freed explicitly.
+    routed_experts_shared: bool = False
     length: int | None = None
 
     def model_post_init(self, _):
@@ -243,14 +249,12 @@ class Trie:
     def keys(self) -> List[str]:
         """Get all keys (i.e., strings) stored in the Trie."""
         result = []
-
-        def _collect(node: TreeNode, path: List[str]):
+        stack = [(self.root, "")]
+        while stack:
+            node, key = stack.pop()
             if node.value is not None:
-                result.append("".join(path))
-            for token, child in node.children.items():
-                _collect(child, path + [token])
-
-        _collect(self.root, [])
+                result.append(key)
+            stack.extend((child, key + token) for token, child in reversed(list(node.children.items())))
         return result
 
     def insert(self, key: str, value: Any) -> None:
@@ -277,6 +281,14 @@ class Trie:
                 break
 
         node.written_at = time.time()
+        if node.value is not None and (
+            getattr(node.value, "request_id", None) is not None or getattr(value, "request_id", None) is not None
+        ):
+            # A committed request owns its path prefix; another request must never overwrite or erase it.
+            raise ValueError(
+                f"Conflicting trace write: old_request_id={getattr(node.value, 'request_id', None)} "
+                f"new_request_id={getattr(value, 'request_id', None)}"
+            )
         node.value = value
 
     def search(self, text: str, filter_none: bool = False) -> Tuple[str, List["TreeNode"]]:
@@ -314,26 +326,28 @@ class Trie:
         return "".join(key_path), matched_nodes
 
     def release(self, key: str | None = None):
-        """Release nodes and free associated resources (e.g. Ray objects) for a
-        given key.
+        """Drop trace ownership; exported and sibling route references remain
+        valid.
 
-        If the key is None, the entire Trie is released. Prunes empty branches bottom-up.
+        If the key is None, the entire Trie is released. Prunes empty branches bottom-up. Request-aware nodes
+        detach their routed-expert refs only: sibling segments and trainers borrow the same refs, so Ray
+        reference counting decides when they die. Legacy nodes keep the explicit free contract.
 
         Args:
             key (Optional[str]): The key string whose associated nodes should be released.
                 If None, releases the entire tree.
         """
-
-        def _free_subtree(node: TreeNode):
-            for child in node.children.values():
-                _free_subtree(child)
-            if node.value is not None:
-                _free_ray_refs(node.value)
-                node.value = None
-            node.children.clear()
-
         if key is None:
-            _free_subtree(self.root)
+            # Drop only this store's ownership. Borrowers retain live refs.
+            stack = [self.root]
+            while stack:
+                node = stack.pop()
+                stack.extend(node.children.values())
+                if node.value is not None and not getattr(node.value, "routed_experts_shared", False):
+                    _free_ray_refs(node.value)
+                node.value = None
+                node.children.clear()
+                node.parent = None
             return
 
         node = self.root
@@ -352,7 +366,8 @@ class Trie:
                 return
 
         if node.value is not None:
-            _free_ray_refs(node.value)
+            if not getattr(node.value, "routed_experts_shared", False):
+                _free_ray_refs(node.value)
             node.value = None
 
         for parent, token in reversed(path):
@@ -490,50 +505,121 @@ class RolloutTraceStore:
             return _assemble_trace([], session_id)
         return _assemble_trace(_latest_chain(trie), session_id)
 
-    def export_training_trace(self, session_id: str, prompt_text: str) -> dict:
+    def export_training_trace(
+        self,
+        session_id: str,
+        prompt_text: str,
+        *,
+        expected_request_ids: list[str] | None = None,
+        require_routed_experts: bool = False,
+    ) -> dict:
         """Export the stored training trace given a complete prompt text.
 
         Args:
             session_id (str): The session identifier.
             prompt_text (str): The complete assembled prompt string to look up.
+            expected_request_ids (list[str] | None): Request ids carried by the Agent transcript. When given,
+                the export validates cross-request provenance and returns the strict suffix fields.
+            require_routed_experts (bool): Require routed experts on every node (MoE training).
 
         Returns:
-            dict: The trace dictionary containing `input_ids`, `labels`, `logprobs`,
-                `routed_experts`, `tool_call_count`, `prompt_ids`, and `response_ids`.
-                `routed_experts` is a per-node list of expert-id refs for a MoE trace, or
-                `None` when the trace carries no routed experts at all (dense model).
-                `prompt_ids`/`response_ids` are the session's initial prompt segment and the
-                contiguous suffix after it, so `input_ids == prompt_ids + response_ids`.
+            dict: The trace dictionary containing `input_ids`, `labels`, `logprobs`, `routed_experts`,
+                `routed_experts_shared` and `tool_call_count`. The strict provenance path additionally returns
+                `prompt_ids`, `response_ids`, `response_model_steps` and `request_ids`.
 
         Raises:
-            ValueError: If the prompt_text does not completely match the trace keys in the session.
+            ValueError: If the prompt_text does not completely match the trace keys in the session, or the
+                requested provenance contract does not hold.
         """
+        nodes = self._match_nodes(session_id, prompt_text)
+        trace = _assemble_trace(nodes, session_id)
+        input_ids: list[int] = trace["input_ids"]
+        versions: list[int | None] = []
+        path_ids: list[str] = []
+        for node in nodes:
+            node_val = node.value
+            if not isinstance(node_val, TokenizedSegment):
+                raise TypeError(f"Unexpected trace node value type: {type(node_val)!r}")
+            versions.extend([node_val.model_step] * len(node_val.token_ids))
+            if node_val.request_id is not None and node_val.request_id not in path_ids:
+                path_ids.append(node_val.request_id)
+        shared = getattr(nodes[0].value, "routed_experts_shared", False) if nodes else False
+
+        if expected_request_ids is None:
+            # Legacy export keeps its original behavior; the strict suffix fields stay out.
+            return trace
+
+        if require_routed_experts and not trace["routed_experts"]:
+            raise ValueError("MoE training requires routed experts on every trace node")
+        if not nodes:
+            raise ValueError("A provenance export requires a non-empty committed trace path")
+        # The real prompt comes from the first prompt-only node, not from the dataset template that started the Agent.
+        first = nodes[0].value
+        assert isinstance(first, TokenizedSegment)
+        if any(label != -100 for label in first.labels or []):
+            raise ValueError("The first trace node must be prompt-only")
+        prompt_ids = list(first.token_ids)
+        response_ids = input_ids[len(prompt_ids) :]
+        response_steps = versions[len(prompt_ids) :]
+        if (
+            not expected_request_ids
+            or not path_ids
+            or expected_request_ids[-1] != path_ids[-1]
+            or not set(path_ids).issubset(expected_request_ids)
+        ):
+            raise ValueError("Transcript request IDs do not match this trace path")
+        # Every transcript request must exist somewhere in this session; branches may diverge, so only subset holds.
+        missing = set(expected_request_ids)
+        stack = [self.get_or_create(session_id).root]
+        while stack and missing:
+            node = stack.pop()
+            if node.value is not None:
+                node_request_id = getattr(node.value, "request_id", None)
+                if node_request_id is not None:
+                    missing.discard(node_request_id)
+            stack.extend(node.children.values())
+        if missing or any(step is None for step in response_steps):
+            raise ValueError("Transcript references uncommitted requests or missing token versions")
+        return {
+            "input_ids": input_ids,
+            "labels": trace["labels"],
+            "logprobs": trace["logprobs"],
+            "tool_call_count": trace["tool_call_count"],
+            "prompt_ids": prompt_ids,
+            "response_ids": response_ids,
+            "response_model_steps": response_steps,
+            "request_ids": path_ids,
+            "routed_experts": trace["routed_experts"],
+            "routed_experts_shared": shared,
+        }
+
+    def _match_nodes(self, session_id: str, prompt_text: str) -> List["TreeNode"]:
         trie = self.get_or_create(session_id)
         key, nodes = trie.search(prompt_text, filter_none=True)
-        if prompt_text != key:
-            session_keys = trie.keys()
-            key_summaries = [
-                {
-                    "idx": idx,
-                    "len": len(session_key),
-                    "text": _compact_text(session_key),
-                    "mismatch": _mismatch_window(prompt_text, session_key),
-                }
-                for idx, session_key in enumerate(session_keys[:8])
-            ]
-            debug_message = (
-                "[TraceStore] prompt mismatch "
-                f"session={session_id!r} prompt_len={len(prompt_text)} "
-                f"matched_len={len(key)} key_count={len(session_keys)} "
-                f"prompt={_compact_text(prompt_text)!r} key_summaries={key_summaries!r}"
-            )
-            get_logger().error(debug_message)
-            raise ValueError(
-                f"Prompt text does not match any trace key in session {session_id!r}: "
-                f"prompt_len={len(prompt_text)} matched_len={len(key)} key_count={len(session_keys)}. "
-                "See the logged '[TraceStore] prompt mismatch' report for the full diff."
-            )
-        return _assemble_trace(nodes, session_id)
+        if prompt_text == key:
+            return nodes
+        session_keys = trie.keys()
+        key_summaries = [
+            {
+                "idx": idx,
+                "len": len(session_key),
+                "text": _compact_text(session_key),
+                "mismatch": _mismatch_window(prompt_text, session_key),
+            }
+            for idx, session_key in enumerate(session_keys[:8])
+        ]
+        debug_message = (
+            "[TraceStore] prompt mismatch "
+            f"session={session_id!r} prompt_len={len(prompt_text)} "
+            f"matched_len={len(key)} key_count={len(session_keys)} "
+            f"prompt={_compact_text(prompt_text)!r} key_summaries={key_summaries!r}"
+        )
+        get_logger().error(debug_message)
+        raise ValueError(
+            f"Prompt text does not match any trace key in session {session_id!r}: "
+            f"prompt_len={len(prompt_text)} matched_len={len(key)} key_count={len(session_keys)}. "
+            "See the logged '[TraceStore] prompt mismatch' report for the full diff."
+        )
 
     def get_objects(self, keys: list[str]) -> list[ray.ObjectRef]:
         """Fetch ray.ObjectRef elements by their keys.

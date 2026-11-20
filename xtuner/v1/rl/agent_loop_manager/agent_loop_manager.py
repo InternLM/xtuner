@@ -14,6 +14,8 @@ from xtuner.v1.rl.agent_loop import AgentLoopConfig, IsValidSampleFn
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.rollout.cross_weight_update_rollout import CrossWeightUpdateRolloutConfig
+from xtuner.v1.rl.utils import await_cancellable_tasks
 from xtuner.v1.utils import get_logger
 
 from .produce_utils import (
@@ -142,6 +144,8 @@ class AgentLoopManagerConfig(BaseModel):
         logger=None,
         sync_weights_interval: int = 1,
         rollout_teacher_scorer_config: RolloutTeacherScorerConfig | None = None,
+        *,
+        cross_weight_update_rollout: CrossWeightUpdateRolloutConfig | None = None,
     ) -> AgentLoopManager:
         tasks = self.tasks if isinstance(self.tasks, list) else [self.tasks]
         if not tasks:
@@ -164,6 +168,7 @@ class AgentLoopManagerConfig(BaseModel):
             produce_strategy = task_cfg.produce_strategy_config.build(
                 sync_weights_interval=sync_weights_interval,
                 rollout_controller=rollout_controller,
+                retain_live_tasks=cross_weight_update_rollout is not None,
             )
             sampler = task_cfg.sampler_config.build(tokenizer=tokenizer, replay_buffer=replay_buffer)
             task_runners.append(
@@ -182,6 +187,7 @@ class AgentLoopManagerConfig(BaseModel):
             replay_buffer=replay_buffer,
             rollout_controller=rollout_controller,
             logger=logger,
+            cross_weight_update_rollout=cross_weight_update_rollout,
         )
 
 
@@ -203,6 +209,7 @@ class AgentLoopManager:
         replay_buffer: ReplayBuffer,
         rollout_controller: RolloutController,
         logger=None,
+        cross_weight_update_rollout: CrossWeightUpdateRolloutConfig | None = None,
     ):
         if not task_runners:
             raise ValueError("AgentLoopManager requires at least one task runner.")
@@ -212,6 +219,7 @@ class AgentLoopManager:
         self.task_runners = task_runners
         self.replay_buffer = replay_buffer
         self._rollout_controller = rollout_controller
+        self.cross_weight_update_rollout = cross_weight_update_rollout
         self.data_sampler = (
             task_runners[0].sampler
             if len(task_runners) == 1
@@ -220,6 +228,12 @@ class AgentLoopManager:
         self.name = task_runners[0].task_name if len(task_runners) == 1 else "multi_task"
         self.logger = get_logger() if logger is None else logger
         self.task_names = [task.task_name for task in task_runners]
+        # One stable production ledger for the manager lifetime. Windows update targets and the consume step;
+        # groups delivered after a window returns add their increments to the next report.
+        self._produce_progress = ProduceProgress.build(
+            task_names=self.task_names,
+            target_samples={task_name: 0 for task_name in self.task_names},
+        )
 
     async def produce_batch(
         self,
@@ -228,7 +242,7 @@ class AgentLoopManager:
         *,
         model_step: int,
     ) -> ProduceBatchResult:
-        # 共卡同步入口：生产入 buffer -> pause/drain 本轮 pending -> 取非空训练 batch。
+        # 生产入 buffer -> 安全暂停 rollout -> 取非空训练 batch；live Agent 可跨权重更新继续执行。
         if batch_size <= 0:
             raise ValueError(f"produce_batch expects batch_size > 0, got {batch_size}")
         start = time.perf_counter()
@@ -239,11 +253,16 @@ class AgentLoopManager:
         active_tasks = [task for task in self.task_runners if current_sizes[task.task_name] > 0]
         assert active_tasks, "No active tasks found"
 
-        await self._rollout_controller.continue_generation.remote()  # type: ignore[attr-defined]
-        local_progress = ProduceProgress.build(
-            task_names=self.task_names,
-            target_samples=current_sizes,
-        )
+        # Re-target the stable ledger without replacing it or clearing increments from earlier windows.
+        # 先更新消费步，训练/切换期间完成交付的旧组按本次消费步判定 staleness。
+        progress = self._produce_progress
+        progress.target_samples.clear()
+        progress.target_samples.update(current_sizes)
+        progress.next_consumer_step = train_step
+
+        await self._rollout_controller.continue_generation.remote(model_step=model_step)  # type: ignore[attr-defined]
+        if self.cross_weight_update_rollout is not None:
+            await self._rollout_controller.assert_request_gates_healthy.remote()  # type: ignore[attr-defined]
         # 生产前刷新可训练/可重试数据的 staleness。
         await refresh_for_all_tasks(
             task_runners=self.task_runners,
@@ -253,58 +272,44 @@ class AgentLoopManager:
             train_step=train_step,
             statuses=[Status.COMPLETED, Status.ABORTED, Status.EXPIRED],
         )
-        produce_start = time.perf_counter()
-        produce_futures = []
-        for task in active_tasks:
-            produce_strategy = cast(ProduceStrategy, task.produce_strategy)
-            produce_futures.append(
-                produce_strategy.produce_batch(
-                    ProduceContext(
-                        agent_loop=task.agent_loop,
-                        sampler=task.sampler,
-                        replay_buffer=self.replay_buffer,
-                        task_batch_size=current_sizes[task.task_name],
-                        task_name=task.task_name,
-                        train_step=train_step,
-                        model_step=model_step,
-                        progress=local_progress,
-                        stale_threshold=task.stale_threshold,
-                        token_stale_threshold=task.token_stale_threshold,
-                        expired_groups_retryable=task.expired_groups_retryable,
-                    )
-                )
+        contexts = {
+            task.task_name: ProduceContext(
+                agent_loop=task.agent_loop,
+                sampler=task.sampler,
+                replay_buffer=self.replay_buffer,
+                task_batch_size=current_sizes[task.task_name],
+                task_name=task.task_name,
+                train_step=train_step,
+                model_step=model_step,
+                progress=progress,
+                stale_threshold=task.stale_threshold,
+                token_stale_threshold=task.token_stale_threshold,
+                expired_groups_retryable=task.expired_groups_retryable,
             )
-        await asyncio.gather(*produce_futures)
-        local_progress.add_produce_time(time.perf_counter() - produce_start)
+            for task in self.task_runners
+        }
+        produce_start = time.perf_counter()
+        await await_cancellable_tasks(
+            cast(ProduceStrategy, task.produce_strategy).produce_batch(contexts[task.task_name])
+            for task in active_tasks
+        )
+        progress.add_produce_time(time.perf_counter() - produce_start)
 
-        # pause 只收尾本轮本地 pending。
         await self._rollout_controller.pause_generation.remote()  # type: ignore[attr-defined]
 
+        # Delegate the retain/legacy difference to the strategy: legacy drains, turn mode claims the results that
+        # completed during gate drain. Turn-mode live futures stay in the original PendingTasks, never ABORTED.
         pause_time_s = 0.0
-        for task in active_tasks:
+        for task in self.task_runners:
             produce_strategy = cast(ProduceStrategy, task.produce_strategy)
-            pause_time_s += await produce_strategy.pause_produce(
-                ProduceContext(
-                    agent_loop=task.agent_loop,
-                    sampler=task.sampler,
-                    replay_buffer=self.replay_buffer,
-                    task_batch_size=0,
-                    task_name=task.task_name,
-                    train_step=train_step,
-                    model_step=model_step,
-                    progress=local_progress,
-                    stale_threshold=task.stale_threshold,
-                    token_stale_threshold=task.token_stale_threshold,
-                    expired_groups_retryable=task.expired_groups_retryable,
-                )
-            )
+            pause_time_s += await produce_strategy.pause_produce(contexts[task.task_name])
         result = await take_train_batch(
             task_runners=self.task_runners,
             replay_buffer=self.replay_buffer,
             logger=self.logger,
             manager_name=self.name,
             task_batch_sizes=current_sizes,
-            progress=local_progress,
+            progress=progress,
             current_train_step=train_step,
             pause_time_s=pause_time_s,
         )
@@ -313,11 +318,25 @@ class AgentLoopManager:
             "Use get_batch() for disaggregated empty/expired reads."
         )
 
+        # Later deliveries (training/sync window) are evaluated against the next consume step.
+        progress.next_consumer_step = train_step + 1
         self.logger.info(
             f"[AgentLoopManager][{self.name}] produce_batch done "
             f"elapsed={time.perf_counter() - start:.3f}, completed_groups={len(result.rollout_states)}"
         )
         return result
+
+    async def close(self) -> None:
+        """Cancel retained Agents and wait for their original Runner cleanup.
+
+        Covers both modes: an exception may end a legacy window before its normal pause/drain ran.
+        """
+        results = await asyncio.gather(
+            *[task.produce_strategy.close() for task in self.task_runners], return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                raise result
 
     async def save(
         self,
@@ -326,14 +345,25 @@ class AgentLoopManager:
         *,
         no_save_replay_buffer: bool = False,
     ) -> None:
-        """Save all task sampler states and the shared replay buffer."""
+        """Save task samplers and the shared replay buffer after scheduling
+        stops.
+
+        Live Agent/tool state is not saved. Across weight updates, sampler, buffer and metrics are not an atomic
+        snapshot; cold resume is not data-exact.
+        """
         checkpoint_path = Path(checkpoint_path)
         checkpoint_path.mkdir(parents=True, exist_ok=True)
         pending_task_counts = get_pending_task_counts(self.task_runners)
         if pending_task_counts:
-            raise RuntimeError(
-                "Cannot save AgentLoopManager while pending rollout tasks still exist: "
-                f"{pending_task_counts}. Finish the current produce_batch before saving."
+            if self.cross_weight_update_rollout is None:
+                raise RuntimeError(
+                    "Cannot save AgentLoopManager while pending rollout tasks still exist: "
+                    f"{pending_task_counts}. Finish the current produce_batch before saving."
+                )
+            self.logger.warning(
+                f"Non-exact rollout checkpoint: tracked group Tasks={pending_task_counts}. "
+                "Live Agent/tool state is not saved; the sampler may be ahead of the buffer. "
+                "Cold resume can lose unfinished groups and change sample order and metrics."
             )
         for task in self.task_runners:
             checkpoint_dir = task_checkpoint_path(checkpoint_path, task.task_name)
@@ -348,6 +378,8 @@ class AgentLoopManager:
         with state_path.open("w") as f:
             json.dump(
                 {
+                    # 完整组 Task 存档格式标识；恢复时先验证，旧格式直接拒绝。
+                    "group_task_lifecycle_version": 1,
                     "model_step": model_step,
                     "replay_buffer_saved": not no_save_replay_buffer,
                 },
@@ -357,17 +389,36 @@ class AgentLoopManager:
     async def resume(self, checkpoint_path: Path | str) -> int:
         """Resume all task sampler states and the shared replay buffer."""
         checkpoint_path = Path(checkpoint_path)
-        for task in self.task_runners:
-            task.sampler.resume(task_checkpoint_path(checkpoint_path, task.task_name))
-
         state_path = manager_state_path(checkpoint_path)
         with state_path.open("r") as f:
             manager_state = json.load(f)
-        if manager_state.get("replay_buffer_saved", True):
+        # 在恢复任何数据前拒绝旧格式，不补字段、不转换。
+        if manager_state.get("group_task_lifecycle_version") != 1:
+            raise ValueError("Only complete-group checkpoint version 1 is supported")
+        for task in self.task_runners:
+            task.sampler.resume(task_checkpoint_path(checkpoint_path, task.task_name))
+
+        if self.cross_weight_update_rollout is not None and not manager_state["replay_buffer_saved"]:
+            raise RuntimeError(
+                "Cross-weight-update rollout requires a persisted replay buffer to restore completed groups"
+            )
+        if manager_state["replay_buffer_saved"]:
             # replay buffer 恢复是 async I/O，不能在已有 event loop 中再次嵌套 asyncio_run。
             await self.replay_buffer.resume(checkpoint_path)
         elif len(self.replay_buffer) > 0:
             raise RuntimeError("Cannot resume without replay buffer checkpoint into a non-empty buffer")
         else:
             self.logger.info(f"Skip replay buffer resume for checkpoint without replay buffer: {checkpoint_path}")
-        return manager_state["model_step"]
+        saved_model_step = manager_state["model_step"]
+        # Cold resume starts a fresh ledger; the next consume step follows the restored training step.
+        self._produce_progress = ProduceProgress.build(
+            task_names=self.task_names,
+            target_samples={task_name: 0 for task_name in self.task_names},
+        )
+        self._produce_progress.next_consumer_step = saved_model_step + 1
+        if self.cross_weight_update_rollout is not None:
+            self.logger.warning(
+                "Non-exact rollout resume: live Agent/tool state is not restored. "
+                "Unfinished groups can be lost; sample order and metrics may differ from uninterrupted training."
+            )
+        return saved_model_step

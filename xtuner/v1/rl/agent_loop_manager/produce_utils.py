@@ -25,6 +25,8 @@ from xtuner.v1.rl.rollout.trace_store import release_and_discard_rollout_groups
 from xtuner.v1.rl.utils import (
     AGENT_LOOP_PAUSE_REQUEST_TIMEOUT_S,
     PRODUCER_PAUSE_PENDING_TASK_TIMEOUT_S,
+    await_cancellable_tasks,
+    await_owned_operation,
     cancel_and_drain,
     create_task,
 )
@@ -145,7 +147,10 @@ class BaseProduceContext:
     async def expired_count(self) -> int:
         return await self.replay_buffer.count(task_name=self.task_name, group_status=Status.EXPIRED)
 
-    async def sample_group(self, *, from_expired_pool: bool) -> list[RolloutState]:
+    async def sample_group(self, *, from_expired_pool: bool | None) -> list[RolloutState]:
+        # None 明确表示 Sync 仅从 dataloader 采新数据，不能与 False（优先 ABORTED）混同。
+        if from_expired_pool is None:
+            return await self.sampler.sample(task_name=self.task_name)
         group_status = [Status.EXPIRED, Status.ABORTED] if from_expired_pool else [Status.ABORTED]
         return await self.sampler.sample(task_name=self.task_name, group_status=group_status)
 
@@ -164,11 +169,17 @@ class BaseProduceContext:
         for item in rollout_state:
             item.extra_fields["producer_future_step"] = self.train_step
 
+        inherited_tokens = sum(len(item.response_ids or []) for item in rollout_state)
         start = time.perf_counter()
         if isinstance(self.agent_loop, ray.actor.ActorHandle):
-            result = await self.agent_loop.generate_group.remote(
-                rollout_state,
-                enable_partial_rollout=enable_partial_rollout,
+            # Keep the original ObjectRef so cancellation reaches the remote Agent, not only the local waiter.
+            (result,) = await await_cancellable_tasks(
+                [
+                    self.agent_loop.generate_group.remote(
+                        rollout_state,
+                        enable_partial_rollout=enable_partial_rollout,
+                    )
+                ]
             )
         else:
             result = await self.agent_loop.generate_group(
@@ -177,14 +188,48 @@ class BaseProduceContext:
             )
         elapsed = time.perf_counter() - start
         if isinstance(result, list):
-            for item in result:
-                if isinstance(item, RolloutState):
-                    item.extra_fields[GROUP_GENERATE_TIME_KEY] = elapsed
+            new_tokens = max(0, sum(len(item.response_ids or []) for item in result) - inherited_tokens)
+            for index, item in enumerate(result):
+                item.extra_fields[GROUP_GENERATE_TIME_KEY] = elapsed
+                # Provenance already versions every new token, so version-array length cannot count generation.
+                # Record the suffix growth once per group without mutating token versions.
+                item.extra_fields["new_response_tokens"] = new_tokens if index == 0 else 0
         return result
+
+    async def produce_group(
+        self,
+        *,
+        sample_expired: bool | None = False,
+        enable_partial_rollout: bool = False,
+    ) -> bool:
+        """Sample, generate and deliver one complete group.
+
+        The returned Task owns the whole group lifetime: after it ends, the group is either in the replay buffer or
+        has been terminally discarded with its statistics. Callers only read its result and never put again.
+
+        Args:
+            sample_expired (bool | None): Sampling mode executed inside the owning Task. None samples fresh data
+                only (Sync); False prefers ABORTED groups; True prefers EXPIRED then ABORTED. Defaults to False.
+            enable_partial_rollout (bool): Forwarded to the Agent loop. Defaults to False.
+
+        Returns:
+            bool: Whether the delivered group finally counts as a trainable COMPLETED group.
+        """
+        states = await self.sample_group(from_expired_pool=sample_expired)
+        try:
+            group = await self.generate_group(states, enable_partial_rollout=enable_partial_rollout)
+        except (Exception, asyncio.CancelledError):
+            # F1/F2 guarantee the real Agent and its children stopped before this group is discarded.
+            await await_owned_operation(release_and_discard_rollout_groups([states]))
+            raise
+        return await await_owned_operation(self.put_generated_group(group))
 
     async def put_generated_group(self, group: list[RolloutState]) -> bool:
         produced_tokens = sum(
-            max(0, len(item.response_ids or []) - len(item.response_model_steps or [])) for item in group
+            item.extra_fields.get(
+                "new_response_tokens", max(0, len(item.response_ids or []) - len(item.response_model_steps or []))
+            )
+            for item in group
         )
         initial_status = get_group_status(group)
 
@@ -698,6 +743,7 @@ class _PendingTasks:
     def __init__(self) -> None:
         self._tasks: set[asyncio.Task] = set()
         self._lock = asyncio.Lock()
+        self._close_waiter: asyncio.Task | None = None
 
     def count(self) -> int:
         return len(self._tasks)
@@ -728,7 +774,7 @@ class _PendingTasks:
         spawn_one: Callable[[], Awaitable[asyncio.Task]],
     ) -> bool:
         async with self._lock:
-            if should_abort() or len(self._tasks) >= max_pending:
+            if self._close_waiter is not None or should_abort() or len(self._tasks) >= max_pending:
                 return False
             self._tasks.add(await spawn_one())
             return True
@@ -744,37 +790,33 @@ class _PendingTasks:
         if not tasks:
             return 0
         logger.warning(f"Cancelling {len(tasks)} pending rollout tasks.")
-        await cancel_and_drain(list(tasks))
+        # Reuse the close protocol: cancel once, wait for every original finally, report cleanup errors.
+        await await_owned_operation(self._finish_close(tasks))
         return len(tasks)
 
+    async def close(self) -> None:
+        """Cancel every live task once and wait for the original cleanup to
+        really finish.
 
-class _LocalPendingTasks:
-    """把共卡本次调用的局部 pending set 适配成统一 drain 协议。
+        Unlike ``cancel_all`` this does not bound the wait and reports non-cancellation errors. Cross-weight-update rollout
+        needs the real end of ``Runner.finally`` (sandbox pool and route cleanup) before the event loop exits.
+        """
+        async with self._lock:
+            if self._close_waiter is None:
+                tasks = set(self._tasks)
+                self._tasks.clear()
+                self._close_waiter = asyncio.create_task(self._finish_close(tasks))
+        await asyncio.shield(self._close_waiter)
 
-    共卡 pending 不跨 produce_batch 调用；这里原地修改传入的 set，让 pending_task_count() 在 pause 过程中仍能反映剩余本地任务数量。
-    """
-
-    def __init__(self, tasks: set[asyncio.Task]) -> None:
-        self._tasks = tasks
-
-    def count(self) -> int:
-        return len(self._tasks)
-
-    async def wait_and_claim(self, *, timeout_s: float) -> set[asyncio.Task]:
-        if not self._tasks:
-            return set()
-        done, _ = await asyncio.wait(set(self._tasks), timeout=timeout_s, return_when=asyncio.FIRST_COMPLETED)
-        self._tasks.difference_update(done)
-        return done
-
-    async def cancel_all(self) -> int:
-        tasks = set(self._tasks)
-        self._tasks.clear()
-        if not tasks:
-            return 0
-        logger.warning(f"Cancelling {len(tasks)} pending rollout tasks.")
-        await cancel_and_drain(list(tasks))
-        return len(tasks)
+    @staticmethod
+    async def _finish_close(tasks: set[asyncio.Task]) -> None:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                raise result
 
 
 async def request_agent_loop_pause(ctx: BaseProduceContext, *, pending_count: int) -> None:
@@ -801,13 +843,15 @@ async def request_agent_loop_pause(ctx: BaseProduceContext, *, pending_count: in
 
 async def pause_pending_tasks(
     *,
-    pending_tasks: set[asyncio.Task] | _PendingTasks,
+    pending_tasks: _PendingTasks,
     ctx: BaseProduceContext,
-    put_claimed_task: Callable[[asyncio.Task], Awaitable[Any]],
 ) -> float:
-    """Pause/drain pending；超时后 cancel 剩余任务。"""
+    """Pause/drain pending；超时后 cancel 剩余任务。
 
-    pending = _LocalPendingTasks(pending_tasks) if isinstance(pending_tasks, set) else pending_tasks
+    Complete-group tasks already delivered results, so claiming only reads terminal states.
+    """
+
+    pending = pending_tasks
     pause_start = time.perf_counter()
     if pending.count() == 0:
         return 0.0
@@ -844,26 +888,10 @@ async def pause_pending_tasks(
             next_periodic_abort_time += PERIODIC_ABORT_INTERVAL_S
 
         claimed_done = await pending.wait_and_claim(timeout_s=1)
-        for task in claimed_done:
-            await put_claimed_task(task)
+        # 交付已结束，只读取全部结果与异常；一次 claim 多个失败组也不能只抛第一个。
+        await await_cancellable_tasks(claimed_done)
 
     await cancel_and_drain(list(pending_pause_tasks))
     pause_time = time.perf_counter() - pause_start
     logger.info(f"pause_produce completed for task {ctx.task_name} within {pause_time}s.")
     return pause_time
-
-
-async def _put_claimed_tasks(
-    claimed_tasks: set[asyncio.Task],
-    ctx: BaseProduceContext,
-    *,
-    available_base: int | None = None,
-    progress_displayer: _ProgressDisplayer | None = None,
-) -> None:
-    completed_count = 0
-    for task in claimed_tasks:
-        is_completed = await ctx.put_generated_group(task.result())
-        if is_completed:
-            completed_count += 1
-        if is_completed and available_base is not None and progress_displayer is not None:
-            progress_displayer.update(available_base + completed_count)

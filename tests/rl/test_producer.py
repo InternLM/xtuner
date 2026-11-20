@@ -137,6 +137,8 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         # 测试只走新的 ProduceContext 入口，不再覆盖旧散装参数兼容逻辑。
         if progress is None:
             progress = self._build_progress(task_name, target=batch_size)
+        # The manager re-targets the shared ledger and moves the consume step at each window start.
+        progress.next_consumer_step = train_step
         return ProduceContext(
             agent_loop=agent_loop,
             sampler=sampler,
@@ -201,6 +203,38 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             token_stale_threshold=getattr(strategy, "token_stale_threshold", None),
             expired_groups_retryable=getattr(strategy, "tail_batch_trigger_size", -1) >= 0,
         )
+
+    async def test_produce_counts_only_new_suffix_tokens_across_windows(self):
+        # provenance 已覆盖全部 response 版本时，generation 计数不能由版本数组长度推导。
+        task_name = "test_new_tokens"
+        strategy = AsyncProduceStrategyConfig().build()
+        state = make_rollout_state(0)
+        state.response_ids = [7, 8]
+        state.response_model_steps = [0, 0]
+
+        async def continue_generation(rollout_states, **kwargs):
+            for item in rollout_states:
+                item.response_ids = list(item.response_ids) + [9, 10]
+                item.response_model_steps = list(item.response_model_steps) + [1, 1]
+                item.status = Status.COMPLETED
+            return rollout_states
+
+        agent_loop = MagicMock()
+        agent_loop.generate_group = continue_generation
+        ctx = self._build_context(
+            strategy,
+            task_name,
+            agent_loop,
+            self._build_sampler(),
+            batch_size=1,
+            model_step=1,
+        )
+
+        await ctx.generate_group([state])
+        await ctx.put_generated_group([state])
+
+        self.assertEqual(ctx.progress.produced_tokens[task_name], 2)
+        self.assertEqual(state.extra_fields["new_response_tokens"], 2)
 
     async def test_contexts_keep_colocate_and_disagg_control_surface_separate(self):
         # 共卡 context 只表达一次本地生产窗口；update_event / abort / 绝对累计进度只属于非共卡 context。
@@ -1039,15 +1073,13 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed[0][0].response_model_steps, [1, 3, 3])
         self.assertEqual(completed[0][0].seq_staleness, 3)
 
-    async def test_async_produce_strategy_does_not_reclaim_previous_call_pending(self):
-        # 共卡 async 的 pending 只属于一次 produce_batch；下一次调用不能回收上一次遗留结果。
-        task_name = "test_task"
+    async def test_legacy_complete_group_tasks_deliver_once_and_pause_owns_them(self):
+        # 完整组 Task 自己交付；legacy 窗口结束后由 pause 收尾，不能再次 put 同一组。
+        task_name = "test_legacy_complete_group"
         mock_agent_loop = self._build_agent_loop({0: 0.01, 1: 0.05, 2: 0.05})
-        produce_strategy_cfg = AsyncProduceStrategyConfig(over_sample_threshold=2.0, enable_partial_rollout=True)
+        strategy = AsyncProduceStrategyConfig(over_sample_threshold=2.0, enable_partial_rollout=True).build()
         sampler = self._build_sampler()
-        strategy = produce_strategy_cfg.build()
         progress = self._build_progress(task_name, target=1)
-
         ctx = self._build_context(
             strategy,
             task_name,
@@ -1057,29 +1089,22 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             model_step=0,
             progress=progress,
         )
+
         await strategy.produce_batch(ctx)
         self.assertGreater(strategy.pending_task_count(), 0)
 
-        await asyncio.sleep(0.08)
-
-        ctx = self._build_context(
-            strategy,
-            task_name,
-            mock_agent_loop,
-            sampler,
-            batch_size=1,
-            model_step=0,
-            progress=progress,
-        )
-        await strategy.produce_batch(ctx)
+        await strategy.pause_produce(ctx)
         self.assertEqual(strategy.pending_task_count(), 0)
 
-        final_data = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
-        self.assertEqual(len(final_data), 1)
-        self.assertEqual(final_data[0][0].group_id, 0)
-        for group in final_data:
-            self.assertIn("group_generate_time_s", group[0].extra_fields)
-            self.assertGreater(group[0].extra_fields["group_generate_time_s"], 0.0)
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 3)
+
+        # 再次 pause 不得重复交付。
+        await strategy.pause_produce(ctx)
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 3)
+
+        completed = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
+        self.assertEqual(sorted(len(group) for group in completed), [1, 1, 1])
+        self.assertEqual(len({group[0].group_id for group in completed}), 3)
 
     async def test_async_produce_strategy_pause_produce_is_explicit(self):
         # 验证显式 pause_produce 会暂停 rollout controller、drain pending，并把结果落到 replay buffer。
@@ -1141,6 +1166,52 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         expired = await self.replay_buffer.count(task_name, Status.EXPIRED)
         self.assertEqual(completed + aborted + expired, 3)
         self.assertEqual(mock_agent_loop.rollout_ctl.pause_generation.remote.await_count, 1)
+
+    async def test_retain_mode_is_fixed_at_build_time_and_keeps_live_tasks(self):
+        # build(retain_live_tasks=True) 让 pause 只 claim 已完成结果，live group 跨窗口保留。
+        task_name = "test_retain_mode"
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocking_generate(rollout_states, **kwargs):
+            started.set()
+            await release.wait()
+            for state in rollout_states:
+                state.status = Status.COMPLETED
+            return rollout_states
+
+        agent_loop = MagicMock()
+        agent_loop.rollout_ctl.continue_generation.remote = AsyncMock(return_value=None)
+        agent_loop.rollout_ctl.pause_generation.remote = AsyncMock(return_value=None)
+        agent_loop.rollout_ctl.get_weight_update_targets.remote = AsyncMock(return_value=())
+        agent_loop.generate_group = blocking_generate
+        agent_loop.pause = AsyncMock(return_value=None)
+        agent_loop.is_valid_sample_fn = None
+
+        strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0).build(retain_live_tasks=True)
+        ctx = self._build_context(
+            strategy,
+            task_name,
+            agent_loop,
+            self._build_sampler(),
+            batch_size=1,
+            progress=self._build_progress(task_name, target=1),
+        )
+
+        producer = asyncio.create_task(strategy.produce_batch(ctx))
+        await started.wait()
+        await strategy.pause_produce(ctx)
+        self.assertEqual(strategy.pending_task_count(), 1)
+
+        producer.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await producer
+
+        release.set()
+        await asyncio.wait_for(strategy.produce_batch(ctx), timeout=5)
+        await strategy.pause_produce(ctx)
+        self.assertEqual(strategy.pending_task_count(), 0)
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 1)
 
     async def test_async_produce_strategy_returns_update_abort_without_sampling(self):
         # 验证 update_event 已设置时策略立即返回 UPDATE_WEIGHT_AND_ABORT，不再采样新 rollout。
