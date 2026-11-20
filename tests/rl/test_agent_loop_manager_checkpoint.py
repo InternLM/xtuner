@@ -47,7 +47,7 @@ from xtuner.v1.rl.agent_loop_manager import (
 )
 from xtuner.v1.rl.agent_loop_manager.produce_utils import manager_state_path
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
-from xtuner.v1.rl.rollout.request_publication import CrossWeightUpdateRolloutConfig
+from xtuner.v1.rl.rollout.cross_weight_update_rollout import CrossWeightUpdateRolloutConfig
 
 
 QWEN3_4B_PATH = os.environ.get("QWEN3_4B_PATH")

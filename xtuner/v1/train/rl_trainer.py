@@ -295,7 +295,8 @@ def _validate_sync_intervals(
 
 
 def _validate_cross_weight_update_rollout_config(cfg: "BaseRLTrainerConfig") -> None:
-    """Validate the cross-trainer half of the cross-weight-update rollout contract."""
+    """Validate the cross-trainer half of the cross-weight-update rollout
+    contract."""
     settings = cfg.rollout_config.cross_weight_update_rollout
     if settings is None:
         return

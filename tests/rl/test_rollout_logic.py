@@ -22,7 +22,7 @@ import httpx
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.agent_loop import AgentLoopConfig
 from xtuner.v1.rl.health_manager import RLHealthManager
-from xtuner.v1.rl.rollout.controller import RolloutController
+from xtuner.v1.rl.rollout.controller import RolloutController, RolloutRequestState
 from xtuner.v1.rl.rollout.health_manager import RolloutHealthManager
 from xtuner.v1.rl.rollout.lmdeploy import LMDeployWorker
 from xtuner.v1.rl.rollout.proxy_manager import RolloutProxyManager
@@ -361,11 +361,11 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
 
     def _build_controller(self, router):
         controller = RolloutController.__new__(RolloutController)
-        controller.config = SimpleNamespace(rollout_timeout=1.0, random_seed=0)
+        controller.config = SimpleNamespace(rollout_timeout=1.0, random_seed=0, cross_weight_update_rollout=None)
         controller.timeout_multiplier = 1.0
         controller.router = router
         controller.logger = MagicMock()
-        controller._publication = None
+        controller._request_state = RolloutRequestState()
         return controller
 
     def _build_registry(self, ranks):
@@ -454,7 +454,8 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
 
     def test_pause_generation_waits_for_worker_recovery(self):
         controller = RolloutController.__new__(RolloutController)
-        controller._publication = None
+        controller.config = SimpleNamespace(cross_weight_update_rollout=None)
+        controller._request_state = RolloutRequestState()
         controller.health_manager = MagicMock()
         controller.health_manager.wait_recovery_done.return_value = True
         controller.registry = MagicMock()
@@ -470,7 +471,8 @@ class TestRolloutController(unittest.IsolatedAsyncioTestCase):
 
     def test_pause_generation_fails_when_worker_recovery_times_out(self):
         controller = RolloutController.__new__(RolloutController)
-        controller._publication = None
+        controller.config = SimpleNamespace(cross_weight_update_rollout=None)
+        controller._request_state = RolloutRequestState()
         controller.health_manager = MagicMock()
         controller.health_manager.wait_recovery_done.return_value = False
 

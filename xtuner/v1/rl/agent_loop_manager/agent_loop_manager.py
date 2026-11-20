@@ -14,7 +14,7 @@ from xtuner.v1.rl.agent_loop import AgentLoopConfig, IsValidSampleFn
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
-from xtuner.v1.rl.rollout.request_publication import CrossWeightUpdateRolloutConfig
+from xtuner.v1.rl.rollout.cross_weight_update_rollout import CrossWeightUpdateRolloutConfig
 from xtuner.v1.rl.utils import await_cancellable_tasks
 from xtuner.v1.utils import get_logger
 
@@ -260,10 +260,8 @@ class AgentLoopManager:
         progress.target_samples.update(current_sizes)
         progress.next_consumer_step = train_step
 
-        if self.turn_resume is None:
-            await self._rollout_controller.continue_generation.remote()  # type: ignore[attr-defined]
-        else:
-            await self._rollout_controller.continue_generation.remote(model_step=model_step)  # type: ignore[attr-defined]
+        await self._rollout_controller.continue_generation.remote(model_step=model_step)  # type: ignore[attr-defined]
+        if self.cross_weight_update_rollout is not None:
             await self._rollout_controller.assert_request_gates_healthy.remote()  # type: ignore[attr-defined]
         # 生产前刷新可训练/可重试数据的 staleness。
         await refresh_for_all_tasks(
@@ -347,10 +345,11 @@ class AgentLoopManager:
         *,
         no_save_replay_buffer: bool = False,
     ) -> None:
-        """Save task samplers and the shared replay buffer after scheduling stops.
+        """Save task samplers and the shared replay buffer after scheduling
+        stops.
 
-        Live Agent/tool state is not saved. Across weight updates, sampler, buffer
-        and metrics are not an atomic snapshot; cold resume is not data-exact.
+        Live Agent/tool state is not saved. Across weight updates, sampler, buffer and metrics are not an atomic
+        snapshot; cold resume is not data-exact.
         """
         checkpoint_path = Path(checkpoint_path)
         checkpoint_path.mkdir(parents=True, exist_ok=True)

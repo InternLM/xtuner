@@ -15,7 +15,7 @@ from xtuner.v1.rl.agent_loop import AgentLoopConfig, IsValidSampleFn
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
-from xtuner.v1.rl.rollout.request_publication import CrossWeightUpdateRolloutConfig
+from xtuner.v1.rl.rollout.cross_weight_update_rollout import CrossWeightUpdateRolloutConfig
 from xtuner.v1.rl.utils import await_cancellable_tasks, await_owned_operation
 from xtuner.v1.utils import get_logger
 
@@ -319,10 +319,7 @@ class DisaggAgentLoopManager:
     async def continue_produce(self, model_step: int) -> None:
         # 与 pause_produce 成对：同步/评测完成后，用新 model_step 恢复后台 producer。
         self._model_step = model_step
-        if self.turn_resume is None:
-            await self._rollout_controller.continue_generation.remote()  # type: ignore[attr-defined]
-        else:
-            await self._rollout_controller.continue_generation.remote(model_step=model_step)  # type: ignore[attr-defined]
+        await self._rollout_controller.continue_generation.remote(model_step=model_step)  # type: ignore[attr-defined]
         self._update_event.clear()
         self._status = AgentLoopManagerStatus.NORMAL
 
@@ -555,12 +552,12 @@ class DisaggAgentLoopManager:
         self._finish_event = asyncio.Event()
         self._update_event.set()
         self._produce_pass = None
+        self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
+        self._pause_time_s = 0.0
+        self._model_step = saved_model_step
         if self.cross_weight_update_rollout is not None:
             self.logger.warning(
                 "Non-exact rollout resume: live Agent/tool state is not restored. "
                 "Unfinished groups can be lost; sample order and metrics may differ from uninterrupted training."
             )
-        self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
-        self._pause_time_s = 0.0
-        self._model_step = saved_model_step
         return saved_model_step

@@ -15,8 +15,8 @@ from transformers import AutoTokenizer
 from xtuner.v1.utils import get_logger
 
 from .chat_template import canonicalize_messages_for_chat_template
+from .cross_weight_update_rollout import CrossWeightUpdateRolloutConfig
 from .request_gate import RequestGate, RequestLease, SettlementReceipt
-from .request_publication import CrossWeightUpdateRolloutConfig
 from .trace_store import TokenizedSegment, get_store
 
 
@@ -642,6 +642,9 @@ class SessionServer:
         if self.request_gate is None or not _is_generation_endpoint(request.method, path):
             return await self._forward_request(request)
         fmt = _detect_format(path)
+        # TODO(anthropic-format): The admission/trace path currently rejects Anthropic /v1/messages and only accepts
+        # OpenAI chat completions. Extend gate admission, request normalization and trace assembly to support the
+        # Anthropic format as well. (Review on PR #2297.)
         if fmt != FMT_OPENAI:
             return web.json_response(
                 _error_payload(fmt, "cross-weight-update rollout supports OpenAI chat completions only", 400),
@@ -651,6 +654,9 @@ class SessionServer:
             body = await request.json()
         except (ValueError, UnicodeDecodeError):
             return web.json_response(_error_payload(fmt, "Invalid generation JSON", 400), status=400)
+        # TODO(stream-support): Stream mode is currently rejected, but a streamed response can still be a complete
+        # turn when it ends normally. Support stream mode end-to-end while still recording a complete-turn settlement
+        # (backend ended + trace committed) before releasing the lease. (Review on PR #2297.)
         if not isinstance(body, dict) or body.get("stream") or not _request_uses_trace_store(body):
             return web.json_response(
                 _error_payload(fmt, "cross-weight-update rollout requires nonstream traced generation", 400),
