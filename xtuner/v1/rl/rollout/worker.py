@@ -42,8 +42,8 @@ from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
 from .constants import ROLLOUT_HTTP_MAX_CONNECTIONS, ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY
+from .cross_weight_update_rollout import CrossWeightUpdateRolloutConfig
 from .health_manager import ROLLOUT_RAY_GET_TIMEOUT
-from .request_publication import CrossWeightUpdateRolloutConfig
 from .rollout_topology import RolloutTopology, ServerLaunchSpec
 from .session_server import SessionServerActor
 from .utils import PartialRolloutHandler

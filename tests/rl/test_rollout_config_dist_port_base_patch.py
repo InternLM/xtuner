@@ -1,5 +1,5 @@
 from xtuner._testing.patch_rollout_config import get_rollout_config_dist_port_base_default
-from xtuner.v1.rl.rollout.request_publication import CrossWeightUpdateRolloutConfig
+from xtuner.v1.rl.rollout.cross_weight_update_rollout import CrossWeightUpdateRolloutConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 
 

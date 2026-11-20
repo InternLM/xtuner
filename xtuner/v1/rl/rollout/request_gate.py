@@ -130,6 +130,11 @@ class RequestGate:
                     timeout=timeout,
                 )
             except asyncio.TimeoutError:
+                # TODO(timeout-reconciliation): A drain wait timeout is not proof of an unsafe request. Today it
+                # writes a permanent "barrier" failure, so install/reopen and the whole run fail even if the admitted
+                # requests settle later. Keep the gate sealed and the topology frozen, keep waiting in the same
+                # barrier, and only fail on confirmed unsettled requests or backend failures. Never replay POST or
+                # clear a real failure. (See the PR #2297 review discussion on drain semantics.)
                 self._failures["barrier"] = "drain_timeout"
                 self._condition.notify_all()
                 raise TimeoutError(f"Request drain timed out after {timeout}s") from None
