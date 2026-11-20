@@ -276,6 +276,7 @@ class SessionServer:
         request_timeout: float = 1200.0,
         read_bufsize: int = 2**26,
         enable_return_routed_experts: bool = False,
+        supports_routed_experts_start_len: bool = False,
     ):
         self.worker_base_url = worker_base_url.rstrip("/")
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -284,6 +285,7 @@ class SessionServer:
         self.request_timeout = request_timeout
         self.read_bufsize = read_bufsize
         self.enable_return_routed_experts = enable_return_routed_experts
+        self.supports_routed_experts_start_len = supports_routed_experts_start_len
         self.store = get_store()
         self.stop_word = self.tokenizer.eos_token or ""
 
@@ -380,6 +382,18 @@ class SessionServer:
             k: v for k, v in req_body.items() if k not in _SESSION_SERVER_ONLY_KEYS | {"logprobs", "top_logprobs"}
         }
         worker_req["input_ids"] = input_ids
+        # Client-provided crops cannot authorize dropping training history.
+        worker_req.pop("routed_experts_start_len", None)
+        if (
+            getattr(self, "supports_routed_experts_start_len", False)
+            and self.enable_return_routed_experts
+            and nodes
+            and all(node.value.expert_key is not None for node in nodes)
+        ):
+            # Full responses are shifted by one dummy row below; start at prefix_len - 1.
+            start_len = sum(len(node.value.token_ids) for node in nodes) - 1
+            if start_len > 0:
+                worker_req["routed_experts_start_len"] = start_len
         worker_req["return_token_ids"] = True
         worker_req["return_routed_experts"] = self.enable_return_routed_experts
         worker_req["return_logprob"] = True
@@ -396,7 +410,9 @@ class SessionServer:
 
         return worker_req
 
-    async def on_response(self, worker_resp: dict, fmt: str, orig_req_body: dict) -> dict:
+    async def on_response(
+        self, worker_resp: dict, fmt: str, orig_req_body: dict, *, routed_experts_start_len: int = 0
+    ) -> dict:
         """Trace the assistant turn into ``trace_store`` (always in OpenAI
         shape).
 
@@ -482,15 +498,26 @@ class SessionServer:
         response_expert: Any = None
         if raw_routed_expert is not None:
             raw_routed_expert = await self._decode_routed_experts(raw_routed_expert)
-            if len(raw_routed_expert) > 0:
+            expected_len = prefix_len + delta_len + len(output_token_ids) - 1 - routed_experts_start_len
+            if len(raw_routed_expert) != expected_len:
+                raise ValueError("R3 response length does not match the requested offset")
+            if routed_experts_start_len:
+                if routed_experts_start_len != prefix_len - 1 or not all(
+                    node.value.expert_key is not None for node in prefix_nodes
+                ):
+                    raise ValueError("Incremental R3 requires an unchanged, complete trace prefix")
+                route_base = 0
+            else:
+                route_base = prefix_len
+            if not routed_experts_start_len and len(raw_routed_expert) > 0:
                 num_layers = raw_routed_expert.shape[1]
                 topk_experts = raw_routed_expert.shape[2]
                 dummy_expert = np.full((1, num_layers, topk_experts), 0, dtype=raw_routed_expert.dtype)
                 raw_routed_expert = np.concatenate([dummy_expert, raw_routed_expert], axis=0)
-            assert prefix_len + delta_len + len(output_token_ids) == len(raw_routed_expert)
+            assert route_base + delta_len + len(output_token_ids) == len(raw_routed_expert)
             if delta_len > 0:
-                delta_expert = ray.put(raw_routed_expert[prefix_len : prefix_len + delta_len])
-            response_expert = ray.put(raw_routed_expert[prefix_len + delta_len :])
+                delta_expert = ray.put(raw_routed_expert[route_base : route_base + delta_len])
+            response_expert = ray.put(raw_routed_expert[route_base + delta_len :])
         elif self.enable_return_routed_experts and _bool_request_value(
             orig_req_body.get("return_routed_experts"), True
         ):
@@ -787,7 +814,16 @@ class SessionServer:
 
             if response_data is not None:
                 try:
-                    await self.on_response(response_data, fmt, orig_req_body)
+                    await self.on_response(
+                        response_data,
+                        fmt,
+                        orig_req_body,
+                        **(
+                            {"routed_experts_start_len": request_data["routed_experts_start_len"]}
+                            if request_data.get("routed_experts_start_len")
+                            else {}
+                        ),
+                    )
                 except Exception as exc:
                     session_error_msg = f"SessionServer response hook failed: {type(exc).__name__}: {exc}"
 
@@ -1126,6 +1162,7 @@ class SessionServerActor:
         port: int,
         request_timeout: float,
         enable_return_routed_experts: bool = False,
+        supports_routed_experts_start_len: bool = False,
     ):
         self.worker_base_url = worker_base_url
         self.tokenizer_path = tokenizer_path
@@ -1133,6 +1170,7 @@ class SessionServerActor:
         self.port = port
         self.request_timeout = request_timeout
         self.enable_return_routed_experts = enable_return_routed_experts
+        self.supports_routed_experts_start_len = supports_routed_experts_start_len
         self.server: SessionServer | None = None
 
     @property
@@ -1150,6 +1188,7 @@ class SessionServerActor:
             port=self.port,
             request_timeout=self.request_timeout,
             enable_return_routed_experts=self.enable_return_routed_experts,
+            supports_routed_experts_start_len=self.supports_routed_experts_start_len,
         )
         await self.server.start()
         return self.server.url

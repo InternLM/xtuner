@@ -359,3 +359,78 @@ class TestSessionServerTraceHandling(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestIncrementalSessionRoutedExperts(unittest.IsolatedAsyncioTestCase):
+    async def test_incremental_trace_nodes_equal_full_transport(self):
+        import numpy as np
+
+        from xtuner.v1.rl.rollout.trace_store import TokenizedSegment
+
+        async def run(incremental):
+            server = SessionServer.__new__(SessionServer)
+            server.enable_return_routed_experts = True
+            server.supports_routed_experts_start_len = incremental
+            server.stop_word = "<eos>"
+            server.tokenizer = Mock()
+            server.tokenizer.apply_chat_template.side_effect = lambda *args, **kw: (
+                "prefixdelta" if kw["add_generation_prompt"] else "prefixdeltaresponse<eos>"
+            )
+            server.tokenizer.encode.return_value = [14, 15]
+            node = SimpleNamespace(value=TokenizedSegment(text="prefix", token_ids=[11, 12, 13], expert_key="old-ref"))
+            inserted = []
+
+            async def insert(*args, **kwargs):
+                inserted.append(kwargs["value"])
+
+            server.store = SimpleNamespace(
+                search=SimpleNamespace(remote=AsyncMock(return_value=("prefix", [node]))),
+                insert=SimpleNamespace(remote=insert),
+            )
+            request = {
+                "session_id": "session",
+                "messages": [{"role": "user", "content": "hello"}],
+                "routed_experts_start_len": 999,
+            }  # Ignore arbitrary client crops.
+            payload = await server.on_request(request, session_server_module.FMT_OPENAI)
+            start = payload.get("routed_experts_start_len", 0)
+            self.assertEqual(start, 2 if incremental else 0)
+            full = np.arange(24, dtype=np.uint16).reshape(6, 2, 2)
+            server._decode_routed_experts = AsyncMock(return_value=full[start:])
+            response = {
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "response"},
+                        "output_ids": [16, 17],
+                        "output_token_logprobs": [[-0.1, 16], [-0.2, 17]],
+                        "routed_experts": "new-ref",
+                    }
+                ]
+            }
+            with patch.object(session_server_module.ray, "put", side_effect=lambda x: x):
+                await server.on_response(
+                    response, session_server_module.FMT_OPENAI, request, routed_experts_start_len=start
+                )
+            return inserted
+
+        legacy, incremental = await run(False), await run(True)
+        self.assertEqual(len(incremental), 2)
+        for left, right in zip(legacy, incremental):
+            self.assertEqual(left.token_ids, right.token_ids)
+            np.testing.assert_array_equal(left.expert_key, right.expert_key)
+
+    async def test_crop_requires_complete_trace_and_verified_backend(self):
+        from xtuner.v1.rl.rollout.trace_store import TokenizedSegment
+
+        for capability, expert in [(False, "ref"), (True, None)]:
+            server = SessionServer.__new__(SessionServer)
+            server.enable_return_routed_experts = True
+            server.supports_routed_experts_start_len = capability
+            server.stop_word = "<eos>"
+            server.tokenizer = Mock()
+            server.tokenizer.apply_chat_template.return_value = "prefixdelta"
+            server.tokenizer.encode.return_value = [14]
+            node = SimpleNamespace(value=TokenizedSegment(text="prefix", token_ids=[11, 12, 13], expert_key=expert))
+            server.store = SimpleNamespace(search=SimpleNamespace(remote=AsyncMock(return_value=("prefix", [node]))))
+            payload = await server.on_request({"session_id": "s", "messages": []}, session_server_module.FMT_OPENAI)
+            self.assertNotIn("routed_experts_start_len", payload)
