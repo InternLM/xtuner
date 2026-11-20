@@ -19,10 +19,11 @@ from .rollout_topology import RolloutTopology
 from .utils import SessionRouter
 from .worker import (
     ROLLOUT_CONCURRENCY_GROUP_GENERATE,
+    SERVING_METRICS_GATHER_TIMEOUT_S,
     RolloutConfig,
     get_rollout_worker_base_cls,
 )
-from .worker_registry import RolloutWorkerRegistry, WorkerLifecycleState
+from .worker_registry import RolloutWorkerRegistry, WorkerLifecycleState, WorkerSnapshot
 
 
 # Keep this as a Ray actor because Ray AgentLoop actors need a shared, cross-process handle to the same controller
@@ -120,6 +121,34 @@ class RolloutController:
             worker.session_url for worker in self.registry.active_entrypoints() if worker.session_url is not None
         )
         self.proxy_manager.replace_registered_session_urls(session_urls)
+
+    async def collect_server_metrics(self) -> dict[str, dict[str, float]]:
+        """Scrape request entrypoints without discarding endpoint identity.
+
+        Returns:
+            dict[str, dict[str, float]]: Cumulative metrics keyed by server URL.
+                Failed or inactive registered endpoints have empty values so
+                consumers retain their baselines. Only removed endpoints are absent.
+        """
+        entrypoints = [worker for worker in self.registry.all_workers() if worker.is_request_entrypoint]
+
+        async def scrape(worker: WorkerSnapshot) -> dict[str, float]:
+            if not worker.is_active():
+                return {}
+            try:
+                return (
+                    await asyncio.wait_for(
+                        worker.actor.scrape_metrics.remote(),  # type: ignore[attr-defined]
+                        timeout=SERVING_METRICS_GATHER_TIMEOUT_S,
+                    )
+                    or {}
+                )
+            except Exception:
+                self.logger.exception("Collecting serving metrics from %s failed.", worker.url)
+                return {}
+
+        per_endpoint = await asyncio.gather(*(scrape(worker) for worker in entrypoints))
+        return {worker.url: metrics for worker, metrics in zip(entrypoints, per_endpoint)}
 
     def validate_registered_workers_to_proxy(self) -> None:
         if self.proxy_manager is None:

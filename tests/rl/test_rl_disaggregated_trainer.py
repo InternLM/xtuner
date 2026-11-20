@@ -206,6 +206,37 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             ],
         }
 
+    def test_serving_scrape_keeps_producer_live_and_records_first_window(self) -> None:
+        scraping = threading.Event()
+        producer_ticked = threading.Event()
+        sample = SimpleNamespace(group_id=1, rollout_id=1, session_id=None)
+        manager = _TickingManager(
+            [ProduceBatchResult(rollout_states=[[sample]])], scraping, producer_ticked
+        )
+        trainer = self._make_trainer(manager)
+        trainer._train_one_batch = MagicMock(return_value={})
+        trainer._sync_weights_and_save = AsyncMock()
+
+        async def scrape() -> dict[str, dict[str, float]]:
+            if not manager.calls:
+                return {"a": {"generation_tokens": 100.0}}
+            scraping.set()
+
+            async def wait_for_producer() -> None:
+                while not producer_ticked.is_set():
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(wait_for_producer(), 1.0)
+            return {"a": {"generation_tokens": 140.0}}
+
+        trainer.rollout_controller.collect_server_metrics = SimpleNamespace(remote=scrape)
+        self._run_fit(trainer)
+        self.assertTrue(producer_ticked.is_set())
+        self.assertEqual(trainer._cur_step, 1)
+        self.assertEqual(trainer._log_step.call_args.kwargs["serving_step_values"], {
+            "generation_tokens": 40.0, "window_steps": 1.0,
+        })
+
     def test_fit_persists_checkpoint_for_completed_model_step(self):
         # 验证 checkpoint 以 fit 完成的 model_step 为准，并通过 async manager.save 落盘。
         train_sample = make_train_state()

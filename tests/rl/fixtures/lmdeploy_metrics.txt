@@ -1,0 +1,392 @@
+# HELP python_gc_objects_collected_total Objects collected during gc
+# TYPE python_gc_objects_collected_total counter
+python_gc_objects_collected_total{generation="0"} 6726.0
+python_gc_objects_collected_total{generation="1"} 794.0
+python_gc_objects_collected_total{generation="2"} 100.0
+# HELP python_gc_objects_uncollectable_total Uncollectable objects found during GC
+# TYPE python_gc_objects_uncollectable_total counter
+python_gc_objects_uncollectable_total{generation="0"} 0.0
+python_gc_objects_uncollectable_total{generation="1"} 0.0
+python_gc_objects_uncollectable_total{generation="2"} 0.0
+# HELP python_gc_collections_total Number of times this generation was collected
+# TYPE python_gc_collections_total counter
+python_gc_collections_total{generation="0"} 559.0
+python_gc_collections_total{generation="1"} 50.0
+python_gc_collections_total{generation="2"} 4.0
+# HELP python_info Python platform information
+# TYPE python_info gauge
+python_info{implementation="CPython",major="3",minor="12",patchlevel="12",version="3.12.12"} 1.0
+# HELP process_virtual_memory_bytes Virtual memory size in bytes.
+# TYPE process_virtual_memory_bytes gauge
+process_virtual_memory_bytes 5.765849088e+09
+# HELP process_resident_memory_bytes Resident memory size in bytes.
+# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes 6.5099776e+08
+# HELP process_start_time_seconds Start time of the process since unix epoch in seconds.
+# TYPE process_start_time_seconds gauge
+process_start_time_seconds 1.79371963211e+09
+# HELP process_cpu_seconds_total Total user and system CPU time spent in seconds.
+# TYPE process_cpu_seconds_total counter
+process_cpu_seconds_total 3.27
+# HELP process_open_fds Number of open file descriptors.
+# TYPE process_open_fds gauge
+process_open_fds 6.0
+# HELP process_max_fds Maximum number of open file descriptors.
+# TYPE process_max_fds gauge
+process_max_fds 1024.0
+# HELP lmdeploy:backend_config_info information of backend_config
+# TYPE lmdeploy:backend_config_info gauge
+lmdeploy:backend_config_info 1.0
+# HELP lmdeploy:num_requests_succeeded Number of current succeeded requests.
+# TYPE lmdeploy:num_requests_succeeded gauge
+lmdeploy:num_requests_succeeded{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:num_requests_failed Number of current failed requests.
+# TYPE lmdeploy:num_requests_failed gauge
+lmdeploy:num_requests_failed{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:num_api_requests_routed Number of requests routed to request handles.
+# TYPE lmdeploy:num_api_requests_routed gauge
+lmdeploy:num_api_requests_routed{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:num_api_requests_waiting Number of requests waiting for free request handles.
+# TYPE lmdeploy:num_api_requests_waiting gauge
+lmdeploy:num_api_requests_waiting{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:num_requests_running Number of requests in model execution batches.
+# TYPE lmdeploy:num_requests_running gauge
+lmdeploy:num_requests_running{engine="0",model_name="qwen3-8b"} 2.0
+# HELP lmdeploy:num_requests_waiting Number of requests waiting to be processed.
+# TYPE lmdeploy:num_requests_waiting gauge
+lmdeploy:num_requests_waiting{engine="0",model_name="qwen3-8b"} 1.0
+# HELP lmdeploy:gpu_cache_usage_perc GPU KV-cache usage. 1 means 100 percent usage.
+# TYPE lmdeploy:gpu_cache_usage_perc gauge
+lmdeploy:gpu_cache_usage_perc{engine="0",model_name="qwen3-8b"} 0.35
+# HELP lmdeploy:prefix_cache_hit_rate Prefix-cache hit rate. 1 means 100 percent of queried prefix tokens hit.
+# TYPE lmdeploy:prefix_cache_hit_rate gauge
+lmdeploy:prefix_cache_hit_rate{engine="0",model_name="qwen3-8b"} 0.5
+# HELP lmdeploy:external_prefix_cache_hit_rate Cumulative external prefix-cache hit rate. Queries exclude locally reused tokens.
+# TYPE lmdeploy:external_prefix_cache_hit_rate gauge
+lmdeploy:external_prefix_cache_hit_rate{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:external_prefix_cache_queries_total External prefix-cache queries, in tokens, excluding locally reused prefixes.
+# TYPE lmdeploy:external_prefix_cache_queries_total counter
+lmdeploy:external_prefix_cache_queries_total{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:external_prefix_cache_hits_total External prefix-cache hits, in tokens, counted at request admission.
+# TYPE lmdeploy:external_prefix_cache_hits_total counter
+lmdeploy:external_prefix_cache_hits_total{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:prompt_tokens_total Number of prefill tokens processed.
+# TYPE lmdeploy:prompt_tokens_total counter
+lmdeploy:prompt_tokens_total{engine="0",model_name="qwen3-8b"} 1024.0
+# HELP lmdeploy:generation_tokens_total Number of generation tokens processed.
+# TYPE lmdeploy:generation_tokens_total counter
+lmdeploy:generation_tokens_total{engine="0",model_name="qwen3-8b"} 2048.0
+# HELP lmdeploy:spec_decode_num_drafts_total Number of speculative decoding drafts.
+# TYPE lmdeploy:spec_decode_num_drafts_total counter
+lmdeploy:spec_decode_num_drafts_total{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:spec_decode_num_draft_tokens_total Number of speculative decoding draft tokens.
+# TYPE lmdeploy:spec_decode_num_draft_tokens_total counter
+lmdeploy:spec_decode_num_draft_tokens_total{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:spec_decode_num_accepted_tokens_total Number of speculative decoding accepted tokens.
+# TYPE lmdeploy:spec_decode_num_accepted_tokens_total counter
+lmdeploy:spec_decode_num_accepted_tokens_total{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:spec_decode_num_accepted_tokens_per_pos_total Number of accepted speculative decoding tokens per draft position.
+# TYPE lmdeploy:spec_decode_num_accepted_tokens_per_pos_total counter
+# HELP lmdeploy:spec_decode_mean_accept_rate Mean speculative decoding acceptance rate. 1 means 100 percent accepted.
+# TYPE lmdeploy:spec_decode_mean_accept_rate gauge
+lmdeploy:spec_decode_mean_accept_rate{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:spec_decode_mean_accept_length Mean speculative decoding acceptance length, including the bonus token.
+# TYPE lmdeploy:spec_decode_mean_accept_length gauge
+lmdeploy:spec_decode_mean_accept_length{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:spec_decode_per_position_accept_rate Speculative decoding acceptance rate per draft position. 1 means 100 percent accepted.
+# TYPE lmdeploy:spec_decode_per_position_accept_rate gauge
+# HELP lmdeploy:request_success_total Count of successfully processed requests.
+# TYPE lmdeploy:request_success_total counter
+lmdeploy:request_success_total{engine="0",finished_reason="ResponseType.SUCCESS",model_name="qwen3-8b"} 0.0
+lmdeploy:request_success_total{engine="0",finished_reason="ResponseType.FINISH",model_name="qwen3-8b"} 9.0
+lmdeploy:request_success_total{engine="0",finished_reason="ResponseType.ENGINE_STOP_ERROR",model_name="qwen3-8b"} 0.0
+lmdeploy:request_success_total{engine="0",finished_reason="ResponseType.SESSION_REPEAT",model_name="qwen3-8b"} 0.0
+lmdeploy:request_success_total{engine="0",finished_reason="ResponseType.SESSION_NOT_EXIST",model_name="qwen3-8b"} 0.0
+lmdeploy:request_success_total{engine="0",finished_reason="ResponseType.HANDLER_NOT_EXIST",model_name="qwen3-8b"} 0.0
+lmdeploy:request_success_total{engine="0",finished_reason="ResponseType.INPUT_LENGTH_ERROR",model_name="qwen3-8b"} 0.0
+lmdeploy:request_success_total{engine="0",finished_reason="ResponseType.INTERNAL_ENGINE_ERROR",model_name="qwen3-8b"} 0.0
+lmdeploy:request_success_total{engine="0",finished_reason="ResponseType.CANCEL",model_name="qwen3-8b"} 1.0
+lmdeploy:request_success_total{engine="0",finished_reason="ResponseType.PREFIX_CACHE_CONFLICT",model_name="qwen3-8b"} 0.0
+lmdeploy:request_success_total{engine="0",finished_reason="ResponseType.NO_QUEUE",model_name="qwen3-8b"} 0.0
+lmdeploy:request_success_total{engine="0",finished_reason="ResponseType.NOT_SUPPORTED",model_name="qwen3-8b"} 0.0
+lmdeploy:request_success_total{engine="0",finished_reason="ResponseType.OUT_OF_MEMORY",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:request_prompt_tokens Number of prefill tokens processed.
+# TYPE lmdeploy:request_prompt_tokens histogram
+lmdeploy:request_prompt_tokens_bucket{engine="0",le="1.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prompt_tokens_bucket{engine="0",le="2.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prompt_tokens_bucket{engine="0",le="5.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prompt_tokens_bucket{engine="0",le="10.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prompt_tokens_bucket{engine="0",le="20.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prompt_tokens_bucket{engine="0",le="50.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prompt_tokens_bucket{engine="0",le="100.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prompt_tokens_bucket{engine="0",le="+Inf",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prompt_tokens_count{engine="0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prompt_tokens_sum{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:request_generation_tokens Number of generation tokens processed.
+# TYPE lmdeploy:request_generation_tokens histogram
+lmdeploy:request_generation_tokens_bucket{engine="0",le="1.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_generation_tokens_bucket{engine="0",le="2.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_generation_tokens_bucket{engine="0",le="5.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_generation_tokens_bucket{engine="0",le="10.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_generation_tokens_bucket{engine="0",le="20.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_generation_tokens_bucket{engine="0",le="50.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_generation_tokens_bucket{engine="0",le="100.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_generation_tokens_bucket{engine="0",le="+Inf",model_name="qwen3-8b"} 0.0
+lmdeploy:request_generation_tokens_count{engine="0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_generation_tokens_sum{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:request_cached_tokens Number of prefix-cached input tokens per request.
+# TYPE lmdeploy:request_cached_tokens histogram
+lmdeploy:request_cached_tokens_bucket{engine="0",le="1.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cached_tokens_bucket{engine="0",le="2.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cached_tokens_bucket{engine="0",le="5.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cached_tokens_bucket{engine="0",le="10.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cached_tokens_bucket{engine="0",le="20.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cached_tokens_bucket{engine="0",le="50.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cached_tokens_bucket{engine="0",le="100.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cached_tokens_bucket{engine="0",le="+Inf",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cached_tokens_count{engine="0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cached_tokens_sum{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:request_cache_hit_ratio Prefix cache hit ratio (cached_tokens / prompt_tokens) per request.
+# TYPE lmdeploy:request_cache_hit_ratio histogram
+lmdeploy:request_cache_hit_ratio_bucket{engine="0",le="0.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cache_hit_ratio_bucket{engine="0",le="0.1",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cache_hit_ratio_bucket{engine="0",le="0.2",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cache_hit_ratio_bucket{engine="0",le="0.3",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cache_hit_ratio_bucket{engine="0",le="0.4",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cache_hit_ratio_bucket{engine="0",le="0.5",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cache_hit_ratio_bucket{engine="0",le="0.6",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cache_hit_ratio_bucket{engine="0",le="0.7",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cache_hit_ratio_bucket{engine="0",le="0.8",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cache_hit_ratio_bucket{engine="0",le="0.9",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cache_hit_ratio_bucket{engine="0",le="1.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cache_hit_ratio_bucket{engine="0",le="+Inf",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cache_hit_ratio_count{engine="0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_cache_hit_ratio_sum{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:cached_tokens_total Total prefix-cached input tokens served.
+# TYPE lmdeploy:cached_tokens_total counter
+lmdeploy:cached_tokens_total{engine="0",model_name="qwen3-8b"} 512.0
+# HELP lmdeploy:iteration_tokens_total Histogram of number of tokens per engine_step.
+# TYPE lmdeploy:iteration_tokens_total histogram
+lmdeploy:iteration_tokens_total_bucket{engine="0",le="1.0",model_name="qwen3-8b"} 0.0
+lmdeploy:iteration_tokens_total_bucket{engine="0",le="8.0",model_name="qwen3-8b"} 0.0
+lmdeploy:iteration_tokens_total_bucket{engine="0",le="16.0",model_name="qwen3-8b"} 0.0
+lmdeploy:iteration_tokens_total_bucket{engine="0",le="32.0",model_name="qwen3-8b"} 0.0
+lmdeploy:iteration_tokens_total_bucket{engine="0",le="64.0",model_name="qwen3-8b"} 0.0
+lmdeploy:iteration_tokens_total_bucket{engine="0",le="128.0",model_name="qwen3-8b"} 0.0
+lmdeploy:iteration_tokens_total_bucket{engine="0",le="256.0",model_name="qwen3-8b"} 0.0
+lmdeploy:iteration_tokens_total_bucket{engine="0",le="512.0",model_name="qwen3-8b"} 0.0
+lmdeploy:iteration_tokens_total_bucket{engine="0",le="1024.0",model_name="qwen3-8b"} 0.0
+lmdeploy:iteration_tokens_total_bucket{engine="0",le="2048.0",model_name="qwen3-8b"} 0.0
+lmdeploy:iteration_tokens_total_bucket{engine="0",le="4096.0",model_name="qwen3-8b"} 0.0
+lmdeploy:iteration_tokens_total_bucket{engine="0",le="8192.0",model_name="qwen3-8b"} 0.0
+lmdeploy:iteration_tokens_total_bucket{engine="0",le="16384.0",model_name="qwen3-8b"} 0.0
+lmdeploy:iteration_tokens_total_bucket{engine="0",le="+Inf",model_name="qwen3-8b"} 0.0
+lmdeploy:iteration_tokens_total_count{engine="0",model_name="qwen3-8b"} 0.0
+lmdeploy:iteration_tokens_total_sum{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:time_to_first_token_seconds Histogram of time to first token in seconds.
+# TYPE lmdeploy:time_to_first_token_seconds histogram
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="0.001",model_name="qwen3-8b"} 0.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="0.005",model_name="qwen3-8b"} 0.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="0.01",model_name="qwen3-8b"} 0.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="0.02",model_name="qwen3-8b"} 0.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="0.04",model_name="qwen3-8b"} 0.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="0.06",model_name="qwen3-8b"} 0.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="0.08",model_name="qwen3-8b"} 0.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="0.1",model_name="qwen3-8b"} 0.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="0.25",model_name="qwen3-8b"} 1.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="0.5",model_name="qwen3-8b"} 1.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="0.75",model_name="qwen3-8b"} 1.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="1.0",model_name="qwen3-8b"} 1.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="2.5",model_name="qwen3-8b"} 1.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="5.0",model_name="qwen3-8b"} 1.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="7.5",model_name="qwen3-8b"} 1.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="10.0",model_name="qwen3-8b"} 1.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="20.0",model_name="qwen3-8b"} 1.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="40.0",model_name="qwen3-8b"} 1.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="80.0",model_name="qwen3-8b"} 1.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="160.0",model_name="qwen3-8b"} 1.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="640.0",model_name="qwen3-8b"} 1.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="2560.0",model_name="qwen3-8b"} 1.0
+lmdeploy:time_to_first_token_seconds_bucket{engine="0",le="+Inf",model_name="qwen3-8b"} 1.0
+lmdeploy:time_to_first_token_seconds_count{engine="0",model_name="qwen3-8b"} 1.0
+lmdeploy:time_to_first_token_seconds_sum{engine="0",model_name="qwen3-8b"} 0.25
+# HELP lmdeploy:time_per_output_token_seconds Histogram of time per output token in seconds.
+# TYPE lmdeploy:time_per_output_token_seconds histogram
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="0.005",model_name="qwen3-8b"} 0.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="0.01",model_name="qwen3-8b"} 0.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="0.025",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="0.05",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="0.075",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="0.1",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="0.15",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="0.2",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="0.3",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="0.4",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="0.5",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="0.75",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="1.0",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="2.5",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="5.0",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="7.5",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="10.0",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="20.0",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="40.0",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="80.0",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_bucket{engine="0",le="+Inf",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_count{engine="0",model_name="qwen3-8b"} 1.0
+lmdeploy:time_per_output_token_seconds_sum{engine="0",model_name="qwen3-8b"} 0.02
+# HELP lmdeploy:iter_token_latency Histogram of inter-token latency
+# TYPE lmdeploy:iter_token_latency histogram
+lmdeploy:iter_token_latency_bucket{engine="0",le="0.005",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="0.01",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="0.025",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="0.05",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="0.075",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="0.1",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="0.15",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="0.2",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="0.3",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="0.4",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="0.5",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="0.75",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="1.0",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="2.5",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="5.0",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="7.5",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="10.0",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="20.0",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="40.0",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="80.0",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_bucket{engine="0",le="+Inf",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_count{engine="0",model_name="qwen3-8b"} 0.0
+lmdeploy:iter_token_latency_sum{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:e2e_request_latency_seconds Histogram of e2e request latency in seconds.
+# TYPE lmdeploy:e2e_request_latency_seconds histogram
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="0.3",model_name="qwen3-8b"} 0.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="0.5",model_name="qwen3-8b"} 0.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="0.8",model_name="qwen3-8b"} 0.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="1.0",model_name="qwen3-8b"} 0.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="1.5",model_name="qwen3-8b"} 0.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="2.0",model_name="qwen3-8b"} 0.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="2.5",model_name="qwen3-8b"} 0.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="5.0",model_name="qwen3-8b"} 1.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="10.0",model_name="qwen3-8b"} 1.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="15.0",model_name="qwen3-8b"} 1.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="20.0",model_name="qwen3-8b"} 1.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="30.0",model_name="qwen3-8b"} 1.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="40.0",model_name="qwen3-8b"} 1.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="50.0",model_name="qwen3-8b"} 1.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="60.0",model_name="qwen3-8b"} 1.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="120.0",model_name="qwen3-8b"} 1.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="240.0",model_name="qwen3-8b"} 1.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="480.0",model_name="qwen3-8b"} 1.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="960.0",model_name="qwen3-8b"} 1.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="1920.0",model_name="qwen3-8b"} 1.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="7680.0",model_name="qwen3-8b"} 1.0
+lmdeploy:e2e_request_latency_seconds_bucket{engine="0",le="+Inf",model_name="qwen3-8b"} 1.0
+lmdeploy:e2e_request_latency_seconds_count{engine="0",model_name="qwen3-8b"} 1.0
+lmdeploy:e2e_request_latency_seconds_sum{engine="0",model_name="qwen3-8b"} 3.5
+# HELP lmdeploy:request_queue_time_seconds Histogram of time spent in WAITING phase for request.
+# TYPE lmdeploy:request_queue_time_seconds histogram
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="0.3",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="0.5",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="0.8",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="1.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="1.5",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="2.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="2.5",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="5.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="10.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="15.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="20.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="30.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="40.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="50.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="60.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="120.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="240.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="480.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="960.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="1920.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="7680.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_bucket{engine="0",le="+Inf",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_count{engine="0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_queue_time_seconds_sum{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:request_inference_time_seconds Histogram of time spent in RUNNING phase for request.
+# TYPE lmdeploy:request_inference_time_seconds histogram
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="0.3",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="0.5",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="0.8",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="1.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="1.5",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="2.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="2.5",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="5.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="10.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="15.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="20.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="30.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="40.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="50.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="60.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="120.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="240.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="480.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="960.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="1920.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="7680.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_bucket{engine="0",le="+Inf",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_count{engine="0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_inference_time_seconds_sum{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:request_prefill_time_seconds Histogram of time spent in PREFILL phase for request.
+# TYPE lmdeploy:request_prefill_time_seconds histogram
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="0.3",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="0.5",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="0.8",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="1.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="1.5",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="2.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="2.5",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="5.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="10.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="15.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="20.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="30.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="40.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="50.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="60.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="120.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="240.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="480.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="960.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="1920.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="7680.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_bucket{engine="0",le="+Inf",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_count{engine="0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_prefill_time_seconds_sum{engine="0",model_name="qwen3-8b"} 0.0
+# HELP lmdeploy:request_decode_time_seconds Histogram of time spent in DECODE phase for request.
+# TYPE lmdeploy:request_decode_time_seconds histogram
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="0.3",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="0.5",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="0.8",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="1.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="1.5",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="2.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="2.5",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="5.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="10.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="15.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="20.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="30.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="40.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="50.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="60.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="120.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="240.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="480.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="960.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="1920.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="7680.0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_bucket{engine="0",le="+Inf",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_count{engine="0",model_name="qwen3-8b"} 0.0
+lmdeploy:request_decode_time_seconds_sum{engine="0",model_name="qwen3-8b"} 0.0

@@ -85,6 +85,114 @@ def get_rollout_worker_base_cls(config: "RolloutConfig") -> type["RolloutWorker"
         )
 
 
+# Scraping /metrics must never affect training: the inference server may be
+# sleeping or offloaded during weight sync, so both the fetch and the parse
+# fail open to an empty dict.
+SERVING_METRICS_SCRAPE_TIMEOUT_S = 2.0
+SERVING_METRICS_WARNING_INTERVAL_S = 300.0
+# Bound the whole gather (controller over workers, trainer over controller) so a
+# stuck actor can only delay a metrics step by seconds, not by the hours-long
+# timeouts used for real control-plane RPCs.
+SERVING_METRICS_GATHER_TIMEOUT_S = 10.0
+
+# Output keys of instantaneous gauges; every other scraped key is a cumulative
+# counter or histogram sum/count that consumers difference between scrapes.
+SERVING_GAUGE_KEYS = frozenset({"requests_running", "requests_waiting", "gpu_cache_usage", "prefix_cache_hit_rate"})
+
+_SERVING_GAUGE_SAMPLES = {
+    "lmdeploy:num_requests_running": "requests_running",
+    "lmdeploy:num_requests_waiting": "requests_waiting",
+    "lmdeploy:gpu_cache_usage_perc": "gpu_cache_usage",
+    "lmdeploy:prefix_cache_hit_rate": "prefix_cache_hit_rate",
+}
+_SERVING_COUNTER_SAMPLES = {
+    "lmdeploy:prompt_tokens_total": "prompt_tokens",
+    "lmdeploy:generation_tokens_total": "generation_tokens",
+    "lmdeploy:cached_tokens_total": "cached_tokens",
+    "lmdeploy:request_success_total": "finished",
+}
+_SERVING_HISTOGRAM_SAMPLES = {
+    "lmdeploy:time_to_first_token_seconds_sum": "ttft_sum",
+    "lmdeploy:time_to_first_token_seconds_count": "ttft_count",
+    "lmdeploy:time_per_output_token_seconds_sum": "tpot_sum",
+    "lmdeploy:time_per_output_token_seconds_count": "tpot_count",
+    "lmdeploy:e2e_request_latency_seconds_sum": "e2e_sum",
+    "lmdeploy:e2e_request_latency_seconds_count": "e2e_count",
+}
+
+
+def parse_serving_metrics(text: str) -> dict[str, float]:
+    """Parse allowlisted LMDeploy ``/metrics`` exposition text into flat
+    scalars.
+
+    Only allowlisted samples are kept; the default python/process collectors are
+    ignored. Gauges are averaged across labeled samples (multiple engines behind
+    one endpoint) while counters and histogram sums/counts are summed.
+    ``lmdeploy:request_success_total`` is split per finish reason into
+    ``finished_<reason>`` keys alongside the ``finished`` aggregate.
+
+    Args:
+        text (str): Prometheus text exposition fetched from ``/metrics``.
+
+    Returns:
+        dict[str, float]: Flat metric values; counters and histogram sums/counts
+        are cumulative, gauges are instantaneous. Empty when parsing fails.
+    """
+    try:
+        from prometheus_client.parser import text_string_to_metric_families
+    except ImportError:
+        return {}
+    try:
+        families = list(text_string_to_metric_families(text))
+    except ValueError:
+        return {}
+
+    gauge_values: dict[str, list[float]] = {}
+    scalars: dict[str, float] = {}
+    for family in families:
+        for sample in family.samples:
+            gauge_key = _SERVING_GAUGE_SAMPLES.get(sample.name)
+            if gauge_key is not None:
+                gauge_values.setdefault(gauge_key, []).append(sample.value)
+                continue
+            counter_key = _SERVING_COUNTER_SAMPLES.get(sample.name)
+            if counter_key is not None:
+                scalars[counter_key] = scalars.get(counter_key, 0.0) + sample.value
+                reason = sample.labels.get("finished_reason")
+                if reason is not None:
+                    reason_key = f"finished_{reason.split('.')[-1].lower()}"
+                    scalars[reason_key] = scalars.get(reason_key, 0.0) + sample.value
+                continue
+            histogram_key = _SERVING_HISTOGRAM_SAMPLES.get(sample.name)
+            if histogram_key is not None:
+                scalars[histogram_key] = scalars.get(histogram_key, 0.0) + sample.value
+    for key, values in gauge_values.items():
+        scalars[key] = sum(values) / len(values)
+    return scalars
+
+
+def aggregate_serving_metrics(per_endpoint: list[dict[str, float]]) -> dict[str, float]:
+    """Merge per-endpoint serving metric dicts into one.
+
+    Gauges are averaged across the endpoints that report them; counters and
+    histogram sums/counts are summed.
+
+    Args:
+        per_endpoint (list[dict[str, float]]): One scrape result per endpoint;
+            empty dicts mark endpoints that failed to scrape.
+
+    Returns:
+        dict[str, float]: Aggregated values with the same key layout.
+    """
+    totals: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for metrics in per_endpoint:
+        for key, value in metrics.items():
+            totals[key] = totals.get(key, 0.0) + value
+            counts[key] = counts.get(key, 0) + 1
+    return {key: totals[key] / counts[key] if key in SERVING_GAUGE_KEYS else totals[key] for key in totals}
+
+
 class RolloutConfig(BaseModel):
     """Rollout worker configuration for XTuner.
 
@@ -619,6 +727,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.serverl_url: str = ""
         self.partial_rollout_handler = PartialRolloutHandler()
         self.enable_partial_rollout: bool = False
+        self._last_scrape_warning_s = 0.0
 
     @classmethod
     @abstractmethod
@@ -871,6 +980,33 @@ class RolloutWorker(SingleAcceleratorWorker):
         except requests.RequestException as e:
             self.logger.error(f"Health check failed for server {self.server_url}: {e}")
             return False
+
+    async def scrape_metrics(self) -> dict[str, float]:
+        """Scrape allowlisted serving metrics from this worker's inference
+        server.
+
+        Fail-open by design: the server may be sleeping or offloaded during
+        weight sync, so any failure logs a rate-limited warning and returns an
+        empty dict instead of affecting training.
+
+        Returns:
+            dict[str, float]: Cumulative counters/histogram sums/counts and
+            instantaneous gauges; empty when the endpoint or the parser is
+            unavailable.
+        """
+        now = time.monotonic()
+        try:
+            # Keep metrics I/O off the default actor event loop's synchronous
+            # path so pause/abort can run while the server is slow to respond.
+            async with httpx.AsyncClient(timeout=SERVING_METRICS_SCRAPE_TIMEOUT_S) as client:
+                response = await client.get(f"{self.server_url}/metrics")
+            response.raise_for_status()
+            return parse_serving_metrics(response.text)
+        except (httpx.HTTPError, ValueError) as exc:
+            if now - self._last_scrape_warning_s >= SERVING_METRICS_WARNING_INTERVAL_S:
+                self._last_scrape_warning_s = now
+                self.logger.warning(f"Scraping /metrics failed for server {self.server_url}: {exc}")
+            return {}
 
     async def _decode_routed_experts(self, routed_experts: Any) -> Any:
         return routed_experts
