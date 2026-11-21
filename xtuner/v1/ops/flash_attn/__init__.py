@@ -34,7 +34,7 @@ def get_flash_attn_varlen() -> FlashAttnVarlenProtocol:
             try:
                 from flash_attn.flash_attn_interface import flash_attn_gpu
             except ImportError as e:
-                print(f"Import FlashAttention 2 failed {e}, Please install it manually.")
+                raise ImportError(f"Import FlashAttention 2 failed {e}, Please install it manually.")
             from .gpu import flash_attn_varlen_func_v2 as flash_attn_varlen_func  # type: ignore
 
         return flash_attn_varlen_func
