@@ -13,6 +13,11 @@ TestMonitorLifecycle
 TestMemoryOutput
     test_short_write_is_retried
     test_synthetic_sources_cover_record_and_cgroup_versions
+TestLogMemoryEvent
+    test_line_converts_bytes_to_gib
+    test_missing_and_non_memory_keys_are_skipped
+    test_logs_without_periodic_switch
+    test_unreadable_status_is_silent
 """
 
 import json
@@ -20,10 +25,12 @@ import os
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from xtuner.v1.utils.memory_watch import MemoryEvent, _MemoryWatch, monitor_rank_memory
+import xtuner.v1.utils.memory_watch as memory_watch
+from xtuner.v1.utils.memory_watch import MemoryEvent, _MemoryWatch, log_memory_event, monitor_rank_memory
 
 
 def _write(path: Path, content: str) -> None:
@@ -272,3 +279,61 @@ class TestMemoryOutput:
         )
         assert host_start["cgroup"]["cpuset.cpus.effective" if version == 2 else "cpuset.cpus"] == "2-3"
         assert host_stop["oom_kill_delta"] == 1
+
+
+class TestLogMemoryEvent:
+    """事件打点的格式、开关独立性与异常降级。"""
+
+    def test_line_converts_bytes_to_gib(self, monkeypatch):
+        # 合成 status 应按固定字段顺序换算为 GiB，rss 带单位后缀。
+        lines = []
+        monkeypatch.setattr(
+            memory_watch,
+            "_read_status",
+            lambda _path: {
+                "VmRSS": 2 * 1024**3,
+                "RssAnon": 1536 * 1024**2,
+                "RssShmem": 256 * 1024**2,
+                "RssFile": 64 * 1024**2,
+                "VmSwap": 0,
+                "VmHWM": 3 * 1024**3,
+            },
+        )
+        monkeypatch.setattr(memory_watch, "get_logger", lambda: SimpleNamespace(info=lines.append))
+
+        log_memory_event("driver", "train_step=3")
+
+        assert lines == [
+            f"[MemReport][driver][pid={os.getpid()}][train_step=3] "
+            "rss=2.00GiB anon=1.50 shmem=0.25 file=0.06 swap=0.00 hwm=3.00"
+        ]
+
+    def test_missing_and_non_memory_keys_are_skipped(self, monkeypatch):
+        # 缺失字段与非内存字段应被跳过，不产生空行或异常。
+        lines = []
+        monkeypatch.setattr(memory_watch, "_read_status", lambda _path: {"VmRSS": 1024**3, "Cpus_allowed_list": "0-3"})
+        monkeypatch.setattr(memory_watch, "get_logger", lambda: SimpleNamespace(info=lines.append))
+
+        log_memory_event("driver", "train_step=1")
+
+        assert lines == [f"[MemReport][driver][pid={os.getpid()}][train_step=1] rss=1.00GiB"]
+
+    def test_logs_without_periodic_switch(self, monkeypatch):
+        # 事件打点不受周期采样开关控制，关闭时也应输出一行。
+        lines = []
+        monkeypatch.setenv("XTUNER_MEMORY_WATCH_ENABLED", "0")
+        monkeypatch.setattr(memory_watch, "_read_status", lambda _path: {"VmRSS": 1024**3})
+        monkeypatch.setattr(memory_watch, "get_logger", lambda: SimpleNamespace(info=lines.append))
+
+        log_memory_event("driver", "train_step=1")
+
+        assert len(lines) == 1
+
+    def test_unreadable_status_is_silent(self, monkeypatch):
+        # 读取失败时应静默降级，不得打断训练。
+        def raise_os_error(_path):
+            raise OSError("unreadable")
+
+        monkeypatch.setattr(memory_watch, "_read_status", raise_os_error)
+
+        log_memory_event("driver", "train_step=1")
