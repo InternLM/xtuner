@@ -18,6 +18,8 @@ Only the call shape GLM-5.3-Flash uses is supported -- no ``initial_state``/``ou
 set) and no FLA context parallelism. Anything else should keep using FLA's own entry point.
 """
 
+import os
+
 import torch
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
@@ -318,6 +320,11 @@ def chunk_kda(
         use_qk_l2norm_in_kernel (bool): Must stay ``True``; GLM-5.3-Flash always L2-norms q/k, and
             the backward depends on the ``rstd`` that path produces.
 
+    Set ``XTUNER_RL_KDA_INTERNAL_FP32=1`` before tracing/worker startup to promote q/k/v
+    before normalization and dtype-dependent chunk intermediates. Outputs retain q's input
+    dtype; gate/beta and the default precision policy are unchanged. This increases memory
+    and compute cost and does not establish bitwise alignment with inference backends.
+
     Returns:
         tuple[torch.Tensor, None]: Outputs ``[B, T, H, V]``, and ``None`` for the final state,
         which this entry point does not produce.
@@ -340,6 +347,10 @@ def chunk_kda(
         )
     if scale is None:
         scale = q.shape[-1] ** -0.5
-    return ChunkKDAFunction.apply(
+    output_dtype = q.dtype
+    if os.environ.get("XTUNER_RL_KDA_INTERNAL_FP32", "0") == "1":
+        q, k, v = q.float(), k.float(), v.float()
+    output, final_state = ChunkKDAFunction.apply(
         q, k, v, g, beta, scale, cu_seqlens, cu_seqlens_cpu, safe_gate, lower_bound, transpose_state_layout
     )
+    return output.to(output_dtype), final_state
