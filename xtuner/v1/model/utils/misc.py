@@ -108,6 +108,8 @@ class ModelForwardExtraLogInfo(dict):
             "reduced_train_policy_kl1_sum",
             "reduced_train_policy_kl3_sum",
             "reduced_train_policy_valid_count",
+            "reduced_critic_value_clip_count",
+            "reduced_critic_value_valid_count",
             "reduced_distillation_kl_sum",
             "reduced_distillation_abs_loss_sum",
             "reduced_distillation_valid_count",
