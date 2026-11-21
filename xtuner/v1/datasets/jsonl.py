@@ -10,12 +10,14 @@ import os
 import random
 import shutil
 import time
+import traceback
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
 from io import BytesIO
 from multiprocessing import Process, Queue
 from pathlib import Path
+from queue import Empty
 from threading import Lock
 from typing import Any, Callable, Dict, TypeVar, cast
 
@@ -164,23 +166,24 @@ def tokenize_worker(
         logger.debug(f"Failed to set CPU affinity: {e}")
 
     shared_memory = SharedMemory(name=shm_name, create=False)
-    while True:
-        data_chunk = data_queue.get()
+    try:
+        while True:
+            data_chunk = data_queue.get()
 
-        if data_chunk is None:
-            out_queue.put(None)
-            break
-        chunk_results = []
-        for idx, (start, end) in data_chunk:
-            databytes = shared_memory.buf[start:end].tobytes()
-            # f.seek(start)
-            # databytes = f.read(end - start)
-            chunk_results.append([idx, tokenize_fun(databytes)])
-        out_queue.put(chunk_results)
-
-    while not out_queue.empty():
-        time.sleep(0.01)
-    shared_memory.close()
+            if data_chunk is None:
+                out_queue.put(None)
+                break
+            chunk_results = []
+            for idx, (start, end) in data_chunk:
+                databytes = shared_memory.buf[start:end].tobytes()
+                try:
+                    chunk_results.append([idx, tokenize_fun(databytes)])
+                except Exception:
+                    out_queue.put((idx, traceback.format_exc()))
+                    return
+            out_queue.put(chunk_results)
+    finally:
+        shared_memory.close()
 
 
 def chunk_data_to_queue(
@@ -224,33 +227,59 @@ def parallel_execute(
     local_cpu_ids = cpu_ids[rank::local_rank_concurrency]
 
     processes: list[Process] = []
-    data_queue: Queue[tuple[int, tuple[int, int]]] = Queue()  # idx, (start, end)
-    output_queue: Queue[dict] = Queue()  # {"num_tokens": int}
-    # task_id = bar.add_task(total=task_num, description=description)
-    chunk_data_to_queue(data_queue, offsets, chunksize, nproc)
+    data_queue: Queue[Any] = Queue()  # idx, (start, end), or the stop sentinel
+    output_queue: Queue[Any] = Queue()
+    succeeded = False
+    try:
+        chunk_data_to_queue(data_queue, offsets, chunksize, nproc)
 
-    cpus_per_process = min(len(local_cpu_ids) // nproc, 1)
-    ctx = multiprocessing.get_context("fork")
-    for idx in range(nproc):
-        bind_cpu_ids = local_cpu_ids[idx * cpus_per_process : (idx + 1) * cpus_per_process]
-        process = ctx.Process(
-            target=tokenize_worker,
-            args=(tokenize_fn, shm_name, data_queue, output_queue, bind_cpu_ids),
-        )
-        process.start()
-        # ForkedProcess instances should be acceptable for a list of type Process
-        processes.append(process)  # type: ignore
+        cpus_per_process = min(len(local_cpu_ids) // nproc, 1)
+        ctx = multiprocessing.get_context("fork")
+        for idx in range(nproc):
+            bind_cpu_ids = local_cpu_ids[idx * cpus_per_process : (idx + 1) * cpus_per_process]
+            process = ctx.Process(
+                target=tokenize_worker,
+                args=(tokenize_fn, shm_name, data_queue, output_queue, bind_cpu_ids),
+            )
+            process.start()
+            # ForkedProcess instances should be acceptable for a list of type Process
+            processes.append(process)  # type: ignore
 
-    results: list[dict] = []
-    finished_process = 0
-    while finished_process < nproc:
-        chunk_results = output_queue.get()
-        if chunk_results is None:
-            finished_process += 1
-            continue
-        results.extend(chunk_results)
-    results = [x[1] for x in sorted(results, key=lambda x: x[0])]
-    return results
+        results: list[dict] = []
+        finished_process = 0
+        while finished_process < nproc:
+            try:
+                chunk_results = output_queue.get(timeout=1)
+            except Empty:
+                for worker in processes:
+                    if worker.exitcode not in (None, 0):
+                        raise RuntimeError(f"Tokenization worker {worker.pid} exited with code {worker.exitcode}")
+                if sum(worker.exitcode is not None for worker in processes) > finished_process:
+                    raise RuntimeError("Tokenization worker exited without reporting completion")
+                continue
+            if chunk_results is None:
+                finished_process += 1
+            elif isinstance(chunk_results, tuple):
+                index, error = chunk_results
+                raise RuntimeError(f"Tokenization failed for sample {index}:\n{error}")
+            else:
+                results.extend(chunk_results)
+        results = [x[1] for x in sorted(results, key=lambda x: x[0])]
+        succeeded = True
+        return results
+    finally:
+        if not succeeded:
+            for worker in processes:
+                if worker.is_alive():
+                    # Workers inherit the parent's signal handlers when forked.
+                    worker.kill()
+        for worker in processes:
+            worker.join()
+        if not succeeded:
+            # Pending input can no longer drain after the workers are stopped.
+            data_queue.cancel_join_thread()
+        data_queue.close()
+        output_queue.close()
 
 
 class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
