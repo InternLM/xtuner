@@ -355,18 +355,16 @@ class RolloutController:
         if self.proxy_manager is not None:
             self.proxy_manager.retire_sessions(session_ids)
 
-    def shutdown(self):
-        """Shut down all rollout workers tracked by the controller."""
-        self.health_manager.stop()
-        try:
-            actors = self.registry.all_actors()
-            ray.get(
-                [actor.shutdown.remote(stop_session_server=True) for actor in actors],  # type: ignore[attr-defined]
-                timeout=ROLLOUT_RAY_GET_TIMEOUT,
-            )
-        finally:
-            if self.proxy_manager is not None:
-                self.proxy_manager.close()
+    async def shutdown(self):
+        """Bound exit phases without blocking this actor's event loop."""
+        from .shutdown import shutdown_controller
+
+        return await shutdown_controller(self)
+
+    async def shutdown_status(self):
+        from .shutdown import shutdown_status
+
+        return shutdown_status(self)
 
     def _broadcast_to_workers(self, method_name: str, target_state: WorkerLifecycleState, **kwargs):
         workers = self.registry.get_target_state_workers(target_state)
