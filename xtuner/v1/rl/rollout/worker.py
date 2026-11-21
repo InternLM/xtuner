@@ -44,6 +44,7 @@ from .constants import ROLLOUT_HTTP_MAX_CONNECTIONS, ROLLOUT_RAY_GENERATE_MAX_CO
 from .health_manager import ROLLOUT_RAY_GET_TIMEOUT
 from .rollout_topology import RolloutTopology, ServerLaunchSpec
 from .session_server import SessionServerActor
+from .shutdown import WorkerShutdown
 from .utils import PartialRolloutHandler
 
 
@@ -630,6 +631,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.session_server_actor: Any | None = None
         self.session_server_url: str | None = None
         self.logger = get_logger(log_dir=config.worker_log_dir, tag="RolloutWorker")
+        self._shutdown = WorkerShutdown(self)
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
         self.check_flag = True  # only print once
         self.enable_return_routed_experts = self.config.enable_return_routed_experts
@@ -681,6 +683,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         """
         if self.server_launch_spec is None:
             raise RuntimeError("Rollout worker must bind a server launch spec before starting server.")
+        self._shutdown.prepare_start()
         self.receive_abort_request.clear()
         self._launch_server()
         self._start_session_server()
@@ -717,11 +720,14 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.server_url = f"http://{self.host}:{self.server_port}"
         return self.rank, dist_init_addr
 
-    def shutdown(self, *, stop_session_server: bool = False):
-        """Shut down the worker, its server task, and any child processes."""
-        if stop_session_server:
-            self._stop_session_server()
+    async def shutdown(self, *, stop_session_server: bool = False):
+        """Always attempt backend cleanup, even when SessionServer stop fails."""
+        return await self._shutdown.close(stop_session_server=stop_session_server)
 
+    async def shutdown_status(self):
+        return self._shutdown.status()
+
+    def _shutdown_backend(self):
         if self.server_task is not None:
             server_task = self.server_task
             self._request_server_terminate()
@@ -840,11 +846,11 @@ class RolloutWorker(SingleAcceleratorWorker):
     def _stop_session_server(self) -> None:
         if self.session_server_actor is not None:
             try:
-                ray.get(self.session_server_actor.stop.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)
+                ray.get(self.session_server_actor.stop.remote(), timeout=90)
             finally:
                 ray.kill(self.session_server_actor)
                 self.session_server_actor = None
-            self.session_server_url = None
+                self.session_server_url = None
 
     async def pause_generation(self):
         """Pause the worker's generation process."""
