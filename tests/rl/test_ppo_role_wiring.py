@@ -19,7 +19,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import torch
 import torch.distributed as dist
@@ -266,17 +266,26 @@ class _FakeRole:
         self.calls.append("onload_optimizer")
         self._optimizer_on_device = True
 
-    def offload_model(self) -> None:
+    def offload_model(self) -> bool:
         self.calls.append("offload_model")
+        moved = self._model_on_device
         self._model_on_device = False
+        return moved
 
-    def offload_optimizer(self) -> None:
+    def offload_optimizer(self) -> bool:
         self.calls.append("offload_optimizer")
+        moved = self._optimizer_on_device
         self._optimizer_on_device = False
+        return moved
 
 
 class TestResidencyAndGuards(unittest.TestCase):
     """worker 跨角色驻留与 role 侧 RPC 守卫。"""
+
+    def setUp(self) -> None:
+        cache_patch = patch("xtuner.v1.rl.trainer.worker.DEVICE_MODULE.empty_cache")
+        self.empty_cache = cache_patch.start()
+        self.addCleanup(cache_patch.stop)
 
     def _worker(self):
         worker = TrainingWorker.__new__(TrainingWorker)
@@ -308,6 +317,84 @@ class TestResidencyAndGuards(unittest.TestCase):
         worker.critic = None
         with self.assertRaisesRegex(ValueError, "not configured"):
             TrainingWorker.set_residency(worker, "critic", "critic")
+
+    def test_cache_released_once_between_role_offloads_and_onloads(self) -> None:
+        for source, target in (("actor", "critic"), ("critic", "actor")):
+            with self.subTest(source=source):
+                worker = self._worker()
+                for name, role in worker._roles().items():
+                    role._model_on_device = name == source
+                    role._optimizer_on_device = name == source
+                events = MagicMock()
+                for name, method in (
+                    (source, "offload_optimizer"),
+                    (source, "offload_model"),
+                    (target, "onload_model"),
+                    (target, "onload_optimizer"),
+                ):
+                    role = worker._roles()[name]
+                    wrapped = MagicMock(wraps=getattr(role, method))
+                    setattr(role, method, wrapped)
+                    events.attach_mock(wrapped, method)
+                events.attach_mock(self.empty_cache, "empty_cache")
+
+                TrainingWorker.set_residency(worker, target, target)
+
+                self.assertEqual(
+                    events.mock_calls,
+                    [
+                        call.offload_optimizer(),
+                        call.offload_model(),
+                        call.empty_cache(),
+                        call.onload_model(),
+                        call.onload_optimizer(),
+                    ],
+                )
+
+    def test_cache_release_only_when_state_actually_offloaded(self) -> None:
+        for model, optimizer in ((True, False), (False, True), (True, True), (False, False)):
+            with self.subTest(model=model, optimizer=optimizer):
+                worker = self._worker()
+                worker.actor._model_on_device = model
+                worker.actor._optimizer_on_device = optimizer
+                self.empty_cache.reset_mock()
+                TrainingWorker.set_residency(worker, None, None)
+                self.assertEqual(self.empty_cache.call_count, int(model or optimizer))
+                self.assertFalse(worker.actor.model_on_device)
+                self.assertFalse(worker.actor.optimizer_on_device)
+
+    def test_unchanged_and_onload_only_residency_preserve_cache(self) -> None:
+        worker = self._worker()
+        TrainingWorker.set_residency(worker, "actor", "actor")
+        self.empty_cache.assert_not_called()
+        worker.actor._model_on_device = False
+        worker.actor._optimizer_on_device = False
+        TrainingWorker.set_residency(worker, "critic", "critic")
+        self.empty_cache.assert_not_called()
+
+    def test_no_cache_release_when_offload_reports_no_movement(self) -> None:
+        worker = self._worker()
+        worker.actor.offload_model = MagicMock(return_value=False)
+        worker.actor.offload_optimizer = MagicMock(return_value=False)
+        TrainingWorker.set_residency(worker, "critic", "critic")
+        worker.actor.offload_model.assert_called_once_with()
+        worker.actor.offload_optimizer.assert_called_once_with()
+        self.empty_cache.assert_not_called()
+
+    def test_mixed_role_residency_releases_only_offloaded_state(self) -> None:
+        worker = self._worker()
+        TrainingWorker.set_residency(worker, "actor", "critic")
+        self.assertEqual(worker.actor.calls, ["offload_optimizer", "onload_model"])
+        self.assertEqual(worker.critic.calls, ["onload_optimizer"])
+        self.empty_cache.assert_called_once_with()
+
+    def test_invalid_residency_has_no_side_effects(self) -> None:
+        worker = self._worker()
+        with self.assertRaisesRegex(ValueError, "not configured"):
+            TrainingWorker.set_residency(worker, "missing", None)
+        self.assertEqual(worker.actor.calls, [])
+        self.assertEqual(worker.critic.calls, [])
+        self.empty_cache.assert_not_called()
 
     def test_role_guards_check_actual_placement(self):
         actor = ActorWorker.__new__(ActorWorker)
