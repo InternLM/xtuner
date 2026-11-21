@@ -4,10 +4,6 @@ import torch
 from typing_extensions import override
 
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.module.decoder_layer.moe_decoder_layer import (
-    MoEDecoderLayerMicroBatchOutput,
-    MoEDecoderLayerOutput,
-)
 from xtuner.v1.module.mtp import MTPBlock, MTPLayer
 from xtuner.v1.module.mtp.mtp_block import MTPInternalOutput
 
@@ -21,7 +17,7 @@ class GLM52MTPLayer(MTPLayer):
     """MTP layer whose wrapped GLM-5.2 decoder consumes explicit DSA IDs."""
 
     @override
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         hidden_states: torch.Tensor | list[torch.Tensor],
         *,
@@ -107,7 +103,7 @@ class GLM52MTPBlock(MTPBlock):
         dsa_topk_ids = None if previous_results is None else previous_results["dsa_topk_ids"]
 
         return cast(
-            MoEDecoderLayerOutput | MoEDecoderLayerMicroBatchOutput,
+            MTPInternalOutput,
             glm_layer(
                 hidden_states,
                 future_embeddings=future_embeddings,

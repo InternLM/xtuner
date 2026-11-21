@@ -34,6 +34,8 @@ XTuner v1 的 `TrainEngine` 通过不同的 `TransformerConfig` 子类支持多�
 | `Qwen3MoEFoPEConfig` | `Qwen3MoEConfig` | MoE | FoPE（基于频率的位置编码）变体 |
 | `Qwen3VLTextMoE30BA3Config` | `Qwen3MoEConfig` | MoE（VL 文本主干） | 约 30B 总参，用于多模态 |
 | `Qwen3VLTextMoE235BA22Config` | `Qwen3MoEConfig` | MoE（VL 文本主干） | 约 235B 总参，用于多模态 |
+| `Qwen3_5_VLTextDense4BConfig` | `Qwen3_5_VLTextDenseConfig` | Dense（VL 文本主干） | 约 4B 参数，用于多模态 |
+| `Qwen3_5_VLTextDense27BConfig` | `Qwen3_5_VLTextDenseConfig` | Dense（VL 文本主干） | 约 27B 参数，用于多模态 |
 | `Qwen3_5_VLTextMoE35BA3BConfig` | `Qwen3_5_VLTextMoEConfig` | MoE（VL 文本主干） | 约 35B 总参 / 约 3B 激活，用于多模态 |
 
 ## Compose 多模态模型
@@ -56,6 +58,8 @@ XTuner v1 的 `TrainEngine` 通过不同的 `TransformerConfig` 子类支持多�
 | `Qwen3VLMoE235BA22Config` | `Qwen3VLBaseConfig` | `Qwen3VLTextMoE235BA22Config` | 约 235B 总参，MoE VL |
 | `Qwen3VLDense4BConfig` | `Qwen3VLBaseConfig` | `Qwen3VLTextDense4BConfig` | 约 4B 参数，Dense VL |
 | `Qwen3VLDense8BConfig` | `Qwen3VLBaseConfig` | `Qwen3VLTextDense8BConfig` | 约 8B 参数，Dense VL |
+| `Qwen3_5_VLDense4BConfig` | `Qwen3_5_BaseConfig` | `Qwen3_5_VLTextDense4BConfig` | 约 4B 参数，Dense VL |
+| `Qwen3_5_VLDense27BConfig` | `Qwen3_5_BaseConfig` | `Qwen3_5_VLTextDense27BConfig` | 约 27B 参数，Dense VL |
 | `Qwen3_5_VLMoE35BA3Config` | `Qwen3_5_BaseConfig` | `Qwen3_5_VLTextMoE35BA3BConfig` | 约 35B 总参 / 约 3B 激活，MoE VL |
 | `InternVL3P5Dense8BConfig` | `InternVLBaseConfig` | `Qwen3Dense8BConfig` | 约 8B 参数，Dense VL |
 | `InternVL3P5MoE30BA3Config` | `InternVLBaseConfig` | `Qwen3MoE30BA3Config` | 约 30B 总参，MoE VL |
@@ -73,12 +77,15 @@ XTunerBaseModelConfig
 │   ├── Dense 模型
 │   │   ├── Qwen2DenseConfig
 │   │   │   └── Qwen2Dense7BConfig
-│   │   └── Qwen3DenseConfig
-│   │       ├── Qwen3Dense8BConfig
-│   │       │   └── Qwen3VLTextDense8BConfig
-│   │       ├── Qwen3Dense4BConfig
-│   │       │   └── Qwen3VLTextDense4BConfig
-│   │       └── Qwen3Dense0P6BConfig
+│   │   ├── Qwen3DenseConfig
+│   │   │   ├── Qwen3Dense8BConfig
+│   │   │   │   └── Qwen3VLTextDense8BConfig
+│   │   │   ├── Qwen3Dense4BConfig
+│   │   │   │   └── Qwen3VLTextDense4BConfig
+│   │   │   └── Qwen3Dense0P6BConfig
+│   │   └── Qwen3_5_VLTextDenseConfig
+│   │       ├── Qwen3_5_VLTextDense4BConfig
+│   │       └── Qwen3_5_VLTextDense27BConfig
 │   └── MoE 模型（经由 MoEConfig）
 │       ├── DeepSeekV3Config
 │       ├── GptOssConfig
@@ -99,6 +106,8 @@ XTunerBaseModelConfig
     │   ├── Qwen3VLDense4BConfig
     │   ├── Qwen3VLDense8BConfig
     │   └── Qwen3_5_BaseConfig
+    │       ├── Qwen3_5_VLDense4BConfig
+    │       ├── Qwen3_5_VLDense27BConfig
     │       └── Qwen3_5_VLMoE35BA3Config
     ├── InternVLBaseConfig
     │   ├── InternVL3P5Dense8BConfig
