@@ -35,7 +35,6 @@ class InternS1MultiModalProjector(BaseModel):
         self.linear_2 = nn.Linear(config.text_hidden_size, config.text_hidden_size)
 
         self._hf_prefix = "model.multi_modal_projector."
-        self._init_load_spec()
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.layer_norm(image_features)

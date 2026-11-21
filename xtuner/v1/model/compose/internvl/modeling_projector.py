@@ -19,4 +19,3 @@ class InternVLMultiModalProjector(InternS1MultiModalProjector):
         self.linear_2 = nn.Linear(config.text_hidden_size, config.text_hidden_size)
 
         self._hf_prefix = "multi_modal_projector."
-        self._init_load_spec()
