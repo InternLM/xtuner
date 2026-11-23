@@ -11,15 +11,18 @@ Bad Tests:
 
 import asyncio
 import json
+import logging
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
-from aiohttp import web
+from aiohttp import ClientSession, ConnectionTimeoutError, web
 from aiohttp.test_utils import TestClient, TestServer
 
+from xtuner.v1.rl.rollout.controller import RolloutController, RolloutRequestState
+from xtuner.v1.rl.rollout.cross_weight_update_rollout import CrossWeightUpdateRolloutConfig
 from xtuner.v1.rl.rollout.request_gate import RequestGate
-from xtuner.v1.rl.rollout.session_server import SessionServer
+from xtuner.v1.rl.rollout.session_server import SessionServer, SessionServerActor
 
 
 def _chat_response(*, finish_reason: str = "stop", status: int = 200) -> web.Response:
@@ -55,6 +58,7 @@ class TestSessionServerCrossWeightUpdateRollout(unittest.IsolatedAsyncioTestCase
 
         self.session_server = SessionServer.__new__(SessionServer)
         self.session_server.worker_base_url = str(self.upstream_server.make_url("")).rstrip("/")
+        self.session_server._forward_timeouts = {}
         self.session_server.request_timeout = 10.0
         self.session_server.read_bufsize = 2**20
         self.session_server.enable_return_routed_experts = False
@@ -179,6 +183,159 @@ class TestSessionServerCrossWeightUpdateRollout(unittest.IsolatedAsyncioTestCase
         self.upstream_gate.set()
         self.assertEqual((await asyncio.wait_for(first, timeout=2)).status, 200)
         self.assertEqual(self.session_server.request_gate.snapshot()["failures"], {})
+
+    async def test_never_sent_connection_timeout_fails_without_poisoning_publication(self):
+        await self._publish()
+        target = self.session_server.worker_base_url
+        original = ClientSession.request
+
+        def request(client, method, url, **kwargs):
+            if str(url).startswith(target):
+                raise ConnectionTimeoutError("connector never sent headers")
+            return original(client, method, url, **kwargs)
+
+        with patch("xtuner.v1.rl.rollout.session_server.ClientSession.request", new=request):
+            response = await self.proxy_client.post("/v1/chat/completions", json=self._payload())
+            await response.read()
+        self.assertGreaterEqual(response.status, 500)
+        self.assertEqual(self.upstream_calls, [])
+        gate = self.session_server.request_gate
+        await gate.seal(2)
+        await gate.drain(1)
+        await gate.install_version(2, 1)
+        await gate.reopen(2)
+        response = await self.proxy_client.post("/v1/chat/completions", json=self._payload())
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.on_response.await_args.kwargs["lease"].model_step, 1)
+
+    async def _timeout_controller(self, fault=None):
+        # Run real controller + actor methods; only Ray transport and native backend sleep are doubles.
+        loop = asyncio.get_running_loop()
+
+        def remote(method):
+            async def invoke(*args, **kwargs):
+                result = method(*args, **kwargs)
+                if asyncio.iscoroutine(result):
+                    result = await result
+                return result
+
+            return SimpleNamespace(remote=lambda *a, **kw: asyncio.run_coroutine_threadsafe(invoke(*a, **kw), loop))
+
+        actor = SessionServerActor.__new__(SessionServerActor)
+        actor.server = self.session_server
+        server = SimpleNamespace(
+            **{
+                name: remote(getattr(actor, name))
+                for name in (
+                    "request_status",
+                    "seal_requests",
+                    "drain_requests",
+                    "settle_after_backend_sleep",
+                    "install_request_version",
+                    "reopen_requests",
+                )
+            }
+        )
+        stopped = False
+
+        async def sleep(epoch):
+            nonlocal stopped
+            if fault == "sleep":
+                raise RuntimeError("native sleep failed")
+            stopped = True
+            if fault == "topology":
+                worker.session_url = "http://replacement"
+            self.upstream_gate.set()
+            return dict(
+                epoch=epoch,
+                backend_url="wrong" if fault == "identity" else self.session_server.worker_base_url,
+                level=2,
+                native_sleep_returned=True,
+                is_sleeping=True,
+            )
+
+        async def release(_sessions):
+            self.assertTrue(stopped, "trace cleanup preceded backend stop")
+            if fault == "trace":
+                raise RuntimeError("trace cleanup failed")
+            return _sessions
+
+        self.session_server.store.release_sessions = SimpleNamespace(remote=release)
+        self.session_server.store.list_sessions = SimpleNamespace(remote=AsyncMock(return_value=[]))
+        worker = SimpleNamespace(
+            url=self.session_server.worker_base_url,
+            session_url="http://session",
+            actor=SimpleNamespace(get_session_server=remote(lambda: server), sleep_for_timeout_recovery=remote(sleep)),
+        )
+        controller = RolloutController.__new__(RolloutController)
+        controller.config = SimpleNamespace(cross_weight_update_rollout=CrossWeightUpdateRolloutConfig())
+        controller.registry = SimpleNamespace(active_entrypoints=lambda: (worker,), active_workers=lambda: (worker,))
+        controller.health_manager = SimpleNamespace(
+            pause=lambda: None, wait_recovery_done=lambda **kw: True, resume=lambda: None
+        )
+        controller._request_state = RolloutRequestState()
+        controller.logger = logging.getLogger(__name__)
+        controller._broadcast_to_workers = lambda *a, **kw: [True]
+        return controller
+
+    async def test_sent_timeout_recovers_through_pause_and_publishes_next_version(self):
+        await self._publish()
+        self.upstream_gate = asyncio.Event()
+        self.session_server.request_timeout = 0.1
+        responses = await asyncio.gather(
+            *(
+                self.proxy_client.post("/v1/chat/completions", json=self._payload(session_id=f"session-{i}"))
+                for i in range(2)
+            )
+        )
+        for response in responses:
+            await response.read()
+            self.assertGreaterEqual(response.status, 500)
+        self.assertEqual(len(self.upstream_calls), 2)
+        self.assertTrue(self.session_server.request_gate.snapshot()["failures"])
+        controller = await self._timeout_controller()
+        # The fixture published epoch 1; controller must own the next barrier epoch.
+        controller._request_state.epoch = 1
+
+        def resolve(refs, timeout=None):
+            return [ref.result(timeout=timeout) for ref in refs]
+
+        try:
+            with patch("xtuner.v1.rl.rollout.controller.ray.get", side_effect=resolve):
+                await asyncio.to_thread(controller.pause_generation)
+                self.assertFalse(self.session_server.request_gate.snapshot()["active"])
+                await asyncio.to_thread(controller.continue_generation, model_step=1)
+            response = await self.proxy_client.post("/v1/chat/completions", json=self._payload(session_id="next"))
+            self.assertEqual(response.status, 200)
+            self.assertEqual(self.on_response.await_args.kwargs["lease"].model_step, 1)
+        finally:
+            self.upstream_gate.set()
+
+    async def test_failed_recovery_never_allows_publication(self):
+        for fault in ("sleep", "trace", "identity", "topology", "unknown"):
+            with self.subTest(fault=fault):
+                self.session_server.request_gate = RequestGate(wait_timeout=5, initially_open=False)
+                self.session_server._forward_timeouts = {}
+                await self._publish()
+                self.upstream_gate = asyncio.Event()
+                self.session_server.request_timeout = 0.1
+                response = await self.proxy_client.post("/v1/chat/completions", json=self._payload())
+                await response.read()
+                if fault == "unknown":
+                    self.session_server._forward_timeouts.clear()
+                controller = await self._timeout_controller(fault)
+                controller._request_state.epoch = 1
+                try:
+                    with patch(
+                        "xtuner.v1.rl.rollout.controller.ray.get",
+                        side_effect=lambda refs, timeout=None: [r.result(timeout) for r in refs],
+                    ):
+                        with self.assertRaises(RuntimeError):
+                            await asyncio.to_thread(controller.pause_generation)
+                    with self.assertRaisesRegex(RuntimeError, "unsettled"):
+                        await self.session_server.request_gate.install_version(2, 1)
+                finally:
+                    self.upstream_gate.set()
 
 
 if __name__ == "__main__":

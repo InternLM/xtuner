@@ -142,6 +142,20 @@ class RequestGate:
                 raise RuntimeError(f"Unsettled requests prevent weight update: {self._failures}")
             return self.snapshot()
 
+    async def settle_after_backend_sleep(self, epoch: int, request_ids: set[str]) -> dict[str, Any]:
+        """Release only failed leases whose backend and terminal cleanup the caller certified."""
+        async with self._condition:
+            if self._open or epoch != self._epoch or not request_ids:
+                raise RuntimeError("Timeout recovery requires the sealed current barrier")
+            if set(self._failures) != request_ids or set(self._active) != request_ids:
+                raise RuntimeError("Unknown or still-running requests prevent timeout recovery")
+            for request_id in request_ids:
+                self._active[request_id].settlement = SettlementReceipt(True, "failed_after_backend_sleep")
+                del self._active[request_id]
+                del self._failures[request_id]
+            self._condition.notify_all()
+            return self.snapshot()
+
     async def install_version(self, epoch: int, model_step: int) -> None:
         async with self._condition:
             if self._open:

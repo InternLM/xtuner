@@ -232,7 +232,23 @@ class LMDeployWorker(RolloutWorker):
 
     def offload(self):
         """Offloads the model weights and KV cache."""
+        if getattr(self, "_timeout_recovery_sleep", False):
+            return "already offloaded by timeout recovery"
         return self._sleep(level=2)
+
+    def sleep_for_timeout_recovery(self, epoch: int) -> dict:
+        """Confirm native sleep completion before any failed request can be settled."""
+        self._sleep(level=2)
+        self._timeout_recovery_sleep = True
+        response = requests.get(
+            self.server_url + "/is_sleeping",
+            headers={"Authorization": f"Bearer {self.api_keys}"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        if response.json().get("is_sleeping") is not True:
+            raise RuntimeError("Backend did not confirm sleeping state")
+        return dict(epoch=epoch, backend_url=self.server_url, level=2, native_sleep_returned=True, is_sleeping=True)
 
     def onload_weights(self):
         """Onloads the model weights by waking up the model."""
@@ -336,6 +352,7 @@ class LMDeployWorker(RolloutWorker):
         data = {"tags": tags}
         response = requests.post(url, headers=headers, params=data, timeout=600)
         assert response.status_code == 200, response.status_code
+        self._timeout_recovery_sleep = False
         return response.text
 
     def _request_server_terminate(self) -> bool:
