@@ -24,6 +24,15 @@ DEVICE_MODULE = get_torch_device_module()
 
 _RL_FP8_QUANTIZE_IN_BF16_ENV = "XTUNER_RL_FP8_QUANTIZE_IN_BF16"
 
+# `precompute_tilewise_float8_scale_for_fsdp` stacks all same-shape weights into a
+# single tensor to compute their per-block scales in one shot. The stack peak memory
+# grows linearly with the total size of the shape group and can OOM on large MoE
+# models (e.g. a 10 GiB spike for 35B-A3B). Scales of each weight only depend on its
+# own elements (amax is reduced within each 128x128 block and across `reduce_mesh`,
+# never across the stacked dim), so processing the group in chunks bounded by this
+# byte budget yields bitwise-identical results with a bounded peak.
+_PRECOMPUTE_SCALE_STACK_BYTES = 1 << 30  # 1 GiB
+
 
 def tensor_to_per_block_fp8_devided_64_scales(
     tensor: "WeightWithDynamicTilewiseFloat8CastTensor",
@@ -124,6 +133,7 @@ def precompute_tilewise_float8_scale_for_fsdp(
     module: nn.Module,
     reduce_mesh_mapping: Dict[Tuple[int, int], DeviceMesh],  # absmax need to be reduced in this group
     reduce_mesh_devided_64: Optional[DeviceMesh] = None,  # All params share the same reduce mesh
+    max_stack_bytes: int = _PRECOMPUTE_SCALE_STACK_BYTES,
 ) -> None:
     from xtuner.v1.float8 import TileWiseFloat8GroupedLinear, TileWiseFloat8Linear
 
@@ -162,23 +172,31 @@ def precompute_tilewise_float8_scale_for_fsdp(
             assert reduce_mesh.ndim == 1, (
                 f"Currently only reduce_mesh.ndim should equal to 1, got reduce_mesh.ndim = {reduce_mesh.ndim} for local_shape {local_shape}"
             )
-        weights_same_shape_stack = torch.stack(weights_same_shape, dim=0)  # type: ignore
-        # 因为当前RL用bf16参数传输到推理引擎，这里为了训推一致性做类似处理
-        if os.environ.get(_RL_FP8_QUANTIZE_IN_BF16_ENV, "0") == "1":
-            weights_same_shape_stack = weights_same_shape_stack.bfloat16().float()
-        if dim >= 128 and dim % 128 == 64:
-            assert reduce_mesh_devided_64 is not None, (
-                f"reduce_mesh_devided_64 should not be None for local_shape {local_shape}."
-            )
-            w_scales = tensor_to_per_block_fp8_devided_64_scales(weights_same_shape_stack, reduce_mesh_devided_64)  # type: ignore
-        else:
-            w_scales = tensor_to_per_block_fp8_scales(weights_same_shape_stack, reduce_mesh)  # type: ignore
+        # Chunk the stack so its peak memory stays within the budget. The weights are
+        # traversed in a deterministic order and padded to identical shapes on every
+        # rank, so all ranks derive the same chunk boundaries; chunking only adds
+        # extra `reduce_mesh` collectives (one per chunk) without changing results.
+        bytes_per_weight = weights_same_shape[0].numel() * 4  # worst case float32 stack
+        chunk_size = max(1, max_stack_bytes // bytes_per_weight)
+        for chunk_start in range(0, len(weights_same_shape), chunk_size):
+            weights_chunk = weights_same_shape[chunk_start : chunk_start + chunk_size]
+            weights_same_shape_stack = torch.stack(weights_chunk, dim=0)  # type: ignore
+            # 因为当前RL用bf16参数传输到推理引擎，这里为了训推一致性做类似处理
+            if os.environ.get(_RL_FP8_QUANTIZE_IN_BF16_ENV, "0") == "1":
+                weights_same_shape_stack = weights_same_shape_stack.bfloat16().float()
+            if dim >= 128 and dim % 128 == 64:
+                assert reduce_mesh_devided_64 is not None, (
+                    f"reduce_mesh_devided_64 should not be None for local_shape {local_shape}."
+                )
+                w_scales = tensor_to_per_block_fp8_devided_64_scales(weights_same_shape_stack, reduce_mesh_devided_64)  # type: ignore
+            else:
+                w_scales = tensor_to_per_block_fp8_scales(weights_same_shape_stack, reduce_mesh)  # type: ignore
 
-        for i, w in enumerate(weights_same_shape):
-            # torch compile 在处理 storage_offset 不是 0 的 tensor 的时候可能会出现结果错误的问题
-            # 参考 https://github.com/pytorch/pytorch/issues/155690
-            # 虽然 clone 操作会带来一些额外耗时（几毫秒不等），但可以保证后续结果的正确性
-            w._precomputed_scale = w_scales[i].clone()
+            for i, w in enumerate(weights_chunk):
+                # torch compile 在处理 storage_offset 不是 0 的 tensor 的时候可能会出现结果错误的问题
+                # 参考 https://github.com/pytorch/pytorch/issues/155690
+                # 虽然 clone 操作会带来一些额外耗时（几毫秒不等），但可以保证后续结果的正确性
+                w._precomputed_scale = w_scales[i].clone()
 
 
 # FSDP pads its local tensor on dim-0. The subclass should be preserved such
