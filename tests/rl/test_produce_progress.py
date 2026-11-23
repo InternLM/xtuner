@@ -81,7 +81,7 @@ class TestProduceProgress(unittest.TestCase):
         self.assertEqual(local_progress.target_samples, {"task_a": 1, "task_b": 3})
         self.assertEqual(disagg_progress.target_samples, {"task_a": 3, "task_b": 5})
         self.assertFalse(hasattr(local_progress, "producer_future_step"))
-        self.assertFalse(hasattr(local_progress, "next_consumer_step"))
+        self.assertEqual(local_progress.next_consumer_step, 1)
         self.assertFalse(hasattr(local_progress, "consumed_samples"))
         self.assertFalse(hasattr(local_progress, "target_upto_future_step"))
         self.assertFalse(hasattr(local_progress, "state_dict"))
@@ -105,6 +105,8 @@ class TestProduceProgress(unittest.TestCase):
                 "raw_rewards_count": {"task_a": 2, "task_b": 1},
                 "produced_samples": {"task_a": 3, "task_b": 4},
                 "produced_tokens": {"task_a": 30, "task_b": 40},
+                "failed_samples": {"task_a": 1, "task_b": 0},
+                "filtered_samples": {"task_a": 0, "task_b": 2},
                 "produce_time_s": 2.5,
             }
         )

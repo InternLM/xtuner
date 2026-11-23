@@ -84,9 +84,8 @@ class HFCheckpointLoader:
     def _resolve_fused_mtp_expert(self, key: str) -> tuple[str, int, str] | None:
         """Resolve only MTP expert aliases in unquantized safetensors sources.
 
-        Qwen3.5 checkpoints can store [experts, 2*intermediate, hidden]
-        gate/up and [experts, hidden, intermediate] down tensors while the
-        native MTP load spec addresses per-expert matrices.
+        Qwen3.5 checkpoints can store [experts, 2*intermediate, hidden] gate/up and [experts, hidden, intermediate]
+        down tensors while the native MTP load spec addresses per-expert matrices.
         """
         if not self.use_safetensors:
             return None

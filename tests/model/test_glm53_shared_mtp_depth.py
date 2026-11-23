@@ -81,7 +81,9 @@ class TestFrozenMTP:
                 "forward",
                 lambda hidden, positions: (torch.zeros_like(hidden), torch.zeros_like(hidden)),
             ),
-            patch.object(model, "_micro_batch_decoder_stack", side_effect=lambda **kwargs: kwargs["hidden_states_list"]),
+            patch.object(
+                model, "_micro_batch_decoder_stack", side_effect=lambda **kwargs: kwargs["hidden_states_list"]
+            ),
             patch.object(model, "norm", nn.Identity()),
             patch.object(model.lm_head, "forward", return_value=(torch.tensor(1.0), (None, None))),
             patch.object(model.aux_loss, "finalize", return_value=(None, None, torch.zeros(1))),

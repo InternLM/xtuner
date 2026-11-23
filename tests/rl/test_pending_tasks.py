@@ -24,42 +24,30 @@ from xtuner.v1.rl.agent_loop_manager.produce_utils import _PendingTasks, pause_p
 
 
 class TestPendingTasks(unittest.IsolatedAsyncioTestCase):
-    async def test_pause_pending_tasks_drains_local_set_and_pending_container(self):
-        # 验证共卡本地 set 和非共卡 _PendingTasks 都复用同一套 pause/drain 协议。
-        for pending_tasks in (set(), _PendingTasks()):
-            ctx = MagicMock()
-            ctx.task_name = "test_pause_helper"
-            ctx.agent_loop.pause = AsyncMock(return_value=None)
-            claimed_results: list[str] = []
+    async def test_pause_pending_tasks_drains_complete_group_tasks(self):
+        # 完整组 Task 已自行交付；pause 只读取终态，不再通过回调二次 put。
+        pending_tasks = _PendingTasks()
+        ctx = MagicMock()
+        ctx.task_name = "test_pause_helper"
+        ctx.agent_loop.pause = AsyncMock(return_value=None)
 
+        async def spawn_one():
             async def done():
                 return "done"
 
-            if isinstance(pending_tasks, set):
-                pending_tasks.add(asyncio.create_task(done()))
-            else:
-                async def spawn_one():
-                    return asyncio.create_task(done())
+            return asyncio.create_task(done())
 
-                await pending_tasks.schedule_one(
-                    max_pending=1,
-                    should_abort=lambda: False,
-                    spawn_one=spawn_one,
-                )
+        await pending_tasks.schedule_one(
+            max_pending=1,
+            should_abort=lambda: False,
+            spawn_one=spawn_one,
+        )
 
-            async def put_claimed_task(task: asyncio.Task) -> None:
-                claimed_results.append(task.result())
+        pause_time_s = await pause_pending_tasks(pending_tasks=pending_tasks, ctx=ctx)
 
-            pause_time_s = await pause_pending_tasks(
-                pending_tasks=pending_tasks,
-                ctx=ctx,
-                put_claimed_task=put_claimed_task,
-            )
-
-            self.assertGreaterEqual(pause_time_s, 0.0)
-            self.assertEqual(claimed_results, ["done"])
-            self.assertEqual(len(pending_tasks) if isinstance(pending_tasks, set) else pending_tasks.count(), 0)
-            self.assertGreaterEqual(ctx.agent_loop.pause.await_count, 1)
+        self.assertGreaterEqual(pause_time_s, 0.0)
+        self.assertEqual(pending_tasks.count(), 0)
+        self.assertGreaterEqual(ctx.agent_loop.pause.await_count, 1)
 
     async def test_claim_ready_returns_each_done_task_once(self):
         # 验证 done task 被 claim 后会从 pending 集合移除，避免 producer/pause 重复处理同一结果。
@@ -131,6 +119,68 @@ class TestPendingTasks(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(await pending_tasks.cancel_all(), 1)
         self.assertEqual(await pending_tasks.wait_and_claim(timeout_s=0), set())
+        self.assertEqual(pending_tasks.count(), 0)
+
+    async def test_close_cancels_pending_tasks_once_and_waits_for_cleanup(self):
+        # close 必须等待原任务的 finally 清理真正结束，而不是发出 cancel 就返回。
+        pending_tasks = _PendingTasks()
+        cleaned_up = asyncio.Event()
+
+        async def spawn_one():
+            async def wait_and_clean():
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    await asyncio.sleep(0.01)
+                    cleaned_up.set()
+
+            return asyncio.create_task(wait_and_clean())
+
+        self.assertTrue(
+            await pending_tasks.schedule_one(max_pending=1, should_abort=lambda: False, spawn_one=spawn_one)
+        )
+        await pending_tasks.close()
+
+        self.assertTrue(cleaned_up.is_set())
+        self.assertEqual(pending_tasks.count(), 0)
+        self.assertFalse(
+            await pending_tasks.schedule_one(max_pending=1, should_abort=lambda: False, spawn_one=spawn_one)
+        )
+
+    async def test_close_reports_cleanup_errors(self):
+        pending_tasks = _PendingTasks()
+
+        async def spawn_one():
+            async def fail_while_closing():
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    raise RuntimeError("pool cleanup failed") from None
+
+            return asyncio.create_task(fail_while_closing())
+
+        self.assertTrue(
+            await pending_tasks.schedule_one(max_pending=1, should_abort=lambda: False, spawn_one=spawn_one)
+        )
+        await asyncio.sleep(0)
+
+        with self.assertRaisesRegex(RuntimeError, "pool cleanup failed"):
+            await pending_tasks.close()
+
+    async def test_close_is_idempotent(self):
+        pending_tasks = _PendingTasks()
+
+        async def spawn_one():
+            async def wait_forever():
+                await asyncio.Event().wait()
+
+            return asyncio.create_task(wait_forever())
+
+        self.assertTrue(
+            await pending_tasks.schedule_one(max_pending=1, should_abort=lambda: False, spawn_one=spawn_one)
+        )
+        await pending_tasks.close()
+        await pending_tasks.close()
         self.assertEqual(pending_tasks.count(), 0)
 
     async def test_wait_and_claim_ignores_tasks_claimed_by_another_path(self):

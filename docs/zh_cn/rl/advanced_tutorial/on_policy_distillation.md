@@ -525,3 +525,51 @@ Training-side Teacher 还会记录：
 - Training-side Teacher 支持 CPU offload，但不支持 disk offload。
 - 当前 Top-K 是 Teacher-selected Top-K，不是 full-vocabulary distillation。
 - Reference Model 和 OPD Teacher 是不同角色；即使 checkpoint 相同，配置语义也不相同。
+
+
+## GLM53 图文训练侧 Teacher
+
+GLM53 的单轮图文 RL/OPD 使用 `RLGlm53VLTokenizeFnConfig`，复用 SFT 的 chat renderer 和 HF processor，
+同时生成 rollout 的原始占位符 prompt 与训练所需的展开 prompt、像素、grid 和逐 token 模态标记：
+
+```python
+from xtuner.v1.datasets.rl_tokenize_fn import RLGlm53VLTokenizeFnConfig
+
+tokenize_fn_cfg = RLGlm53VLTokenizeFnConfig(
+    processor_path=model_path,
+    max_length=max_prompt_length,
+)
+```
+
+在 VLM dataset 配置的 `tokenize_fn` 项中使用上述 `tokenize_fn_cfg`；记录的 `prompt` 为消息列表或包含 `messages`/`tools` 的字典，
+并提供 `data_source`。图片沿用 SFT 的 `image`/`image_url` 格式和 `image_wh` 元数据。
+训练侧的 Student 和 composed Teacher 均须使用 GLM53 视觉组合配置（`Glm53BaseConfig`），
+并按本节已有的 `TrainTeacherConfig` / `DistillationConfig` 方式配置 teacher 与数据源映射。
+rollout 引擎与训练 tokenizer 应使用一致的 processor 配置与图像尺寸预算；文本单独使用时模态标记为 0。
+
+训练输入按 `prompt + response[:-1]` 构造，response 输入位置补 0；packing 的纯文本与 padding 段也补 0。
+Teacher 继承这些视觉输入与 CPU offsets，并重新计算视觉特征，不复用 Student 的 embeddings 或 rollout 路由缓存。
+
+视频的 processor 产物和 Ray 传输支持训练侧回放；当前内置在线 rollout 和 rollout Teacher 请求均不支持视频，
+会在构造请求/评分前显式拒绝 `video_data` 或视频像素输入，防止生成与训练的视觉条件静默错位。
+这不代表已支持在线视频 rollout。单条样本中混合图片和视频的限制与 SFT 相同。
+
+### 图文 rollout 的图片预算透传
+
+`RLGlm53VLTokenizeFnConfig` 和 `RLQwen3VLTokenizeFnConfig` 在处理图片时，会从实际使用的
+image processor（含 HF 默认值和训练配置覆盖）导出预算，放入 `RolloutState.extra_fields.image_processor_kwargs`。
+LMDeploy Actor 的 token-ID / messages 请求，以及 LMDeploy Rollout Teacher 的评分请求，均将其包装为
+`mm_processor_kwargs.image`。纯文本不新增此字段；其他后端保留既有请求行为，本节不保证其预算对齐。
+
+- GLM53 的历史配置名 `min_pixels/max_pixels` 实际是视觉 token 预算，导出为
+  `min_image_tokens/max_image_tokens`；Qwen3-VL 导出 `size` 中实际生效的像素预算，保持像素单位。
+- GLM53 后端须采用支持原生 GLM processor 的 Transformers，并具有 LMDeploy
+  [#5113](https://github.com/InternLM/lmdeploy/pull/5113) 的请求级参数语义。
+  旧 GLM4V compatibility processor 不接受同样的原生 token 参数；XT 不进行远端能力探测，部署时须确认两端契约。
+- Rollout Teacher 会接收样本的同一策略，当前只支持与 Actor 相同的 tokenizer 和视觉 processor 契约。
+  不应将 GLM 原生预算发送给 Qwen 或旧兼容 processor；外部 endpoint 没有模型元信息，XT 无法自动判定异构 Teacher。
+- 本次同步的是图片预算，不会同步整个 processor 的所有设置；两端仍须使用兼容的 processor 配置、媒体加载和 RGB/EXIF 策略。
+  预算一致不代表 pixels 或 logprobs 已证明一致，应比较实际展开 token、grid 和 pixels。
+- 不导出视频抽帧参数，不扩大在线视频支持；视频训练回放保留原有链路。
+
+图片策略在 runtime 构造 RolloutState 时导出，不改变只记录长度等元信息的 cache 阶段。
