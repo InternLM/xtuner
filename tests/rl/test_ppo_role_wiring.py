@@ -327,7 +327,7 @@ class TestResidencyAndGuards(unittest.TestCase):
 class TestCriticConstruction(unittest.TestCase):
     """critic 构造复用宿主拓扑，不再持有 host。"""
 
-    def test_critic_uses_host_fsdp_and_strict_load(self):
+    def test_critic_uses_host_fsdp_and_actor_load(self):
         self.assertNotIn("fsdp_cfg", CriticWorkerConfig.model_fields)
         self.assertNotIn("sp_size", CriticWorkerConfig.model_fields)
 
@@ -357,7 +357,8 @@ class TestCriticConstruction(unittest.TestCase):
         self.assertFalse(hasattr(worker, "host"))
         self.assertIs(train_engine.call_args.kwargs["fsdp_cfg"], fsdp_cfg)
         self.assertIs(build_scheduler.call_args.args[0], train_engine.return_value.optimizer)
-        train_engine.return_value.from_hf.assert_called_once_with("/tmp/critic", strict=True)
+        # Same load semantics as the actor: a checkpoint may carry weights (e.g. MTP) the critic does not build.
+        train_engine.return_value.from_hf.assert_called_once_with("/tmp/critic")
 
 
 class _CustomTokenEstimator(TokenAdvantageEstimator):
@@ -684,6 +685,7 @@ class _DummyRole(RoleWorker):
 class TestRoleTrainUpdate(unittest.TestCase):
     """RoleWorker._train_update owns the global step and scheduler stepping."""
 
+    @patch("xtuner.v1.rl.trainer.role_worker.DEVICE_MODULE", new=MagicMock())
     def test_steps_scheduler_only_for_applied_updates(self):
         role = _DummyRole.__new__(_DummyRole)
         role.role_name = "actor"
