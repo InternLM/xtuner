@@ -984,7 +984,7 @@ class SessionServer:
                 read_bufsize=self.read_bufsize, timeout=timeout, trace_configs=[send_trace]
             ) as client:
                 yield client
-        except TimeoutError as exc:
+        except (asyncio.TimeoutError, TimeoutError) as exc:
             if lease is not None:
                 if isinstance(exc, ConnectionTimeoutError) and not headers_sent:
                     # No backend work exists. The caller still receives the failed request; never replay POST.
