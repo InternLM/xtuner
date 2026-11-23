@@ -152,6 +152,7 @@ rollout_config = RolloutConfig(
     enable_float8=False,
     skip_load_weights=skip_load_weights,
     context_length=max_response_length,
+    enable_prefix_caching=True,
     enable_return_routed_experts=True,
     rollout_max_batch_size_per_instance=128,
     rollout_timeout=1200,
