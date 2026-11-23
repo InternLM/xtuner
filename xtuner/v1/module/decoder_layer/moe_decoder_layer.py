@@ -524,7 +524,7 @@ class MoEDecoderLayer(nn.Module):
             pre_dispatched=pre_dispatched,
             dispatched=dispatched,
         )
-        if self.recv_tokens_hook is not None:
+        if getattr(self, "recv_tokens_hook", None) is not None:
             self.recv_tokens_hook(post_dispatched["hidden_states"].shape[0])
         # ProberList.after_dispatch(
         #     self.layer_idx,
@@ -691,7 +691,7 @@ class MoEDecoderLayer(nn.Module):
                 dispatched=dispatched,
                 async_op=True,
             )
-            if self.recv_tokens_hook is not None:
+            if getattr(self, "recv_tokens_hook", None) is not None:
                 self.recv_tokens_hook(post_dispatched["hidden_states"].shape[0])
             if self.ep_mesh is not None:
                 # Preserve the same dynamic-token compile contract for every in-layer micro-batch.

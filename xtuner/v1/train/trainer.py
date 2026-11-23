@@ -82,8 +82,6 @@ from xtuner.v1.utils.internal_metrics import (
 from xtuner.v1.utils.numa_affinity import try_bind_numa
 
 from .sp_batch_broadcast import broadcast_batch, broadcast_control, mirror_base_seed_draw
-
-
 from .toy_tokenizer import UTF8ByteTokenizer
 
 
