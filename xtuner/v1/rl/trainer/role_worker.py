@@ -126,12 +126,25 @@ class RoleWorker(ABC):
         self.offload_optimizer()
         self.offload_model()
 
+    def log_gpu_memory(self, event: str) -> None:
+        if self.device.type != "cuda":
+            return
+        free, total = torch.cuda.mem_get_info(self.device)
+        self.logger.info(
+            f"[GPU memory] event={event}, rank={self.rank}, device={self.device}, "
+            f"free={free / 1024**3:.2f}GiB, total={total / 1024**3:.2f}GiB, "
+            f"used={(total - free) / 1024**3:.2f}GiB, "
+            f"allocated={torch.cuda.memory_allocated(self.device) / 1024**2:.2f}MiB, "
+            f"reserved={torch.cuda.memory_reserved(self.device) / 1024**2:.2f}MiB"
+        )
+
     def onload_model(self) -> bool:
         """Move the model to the compute device; return whether it moved."""
         moved = self.engine.put_model_to_device(self.device)
         if not moved:
             self.logger.info("Skip model onload because model placement is unchanged.")
         self._model_on_device = True
+        self.log_gpu_memory("model onloaded")
         return moved
 
     def onload_optimizer(self) -> bool:
@@ -150,10 +163,12 @@ class RoleWorker(ABC):
         if not moved:
             self.logger.info("Skip model offload because model placement is unchanged.")
             return False
+        DEVICE_MODULE.empty_cache()
         self.logger.info(
             f"Offloaded model to CPU. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, "
             f"reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
         )
+        self.log_gpu_memory("model offloaded")
         return True
 
     def offload_optimizer(self) -> bool:

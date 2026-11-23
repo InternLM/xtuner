@@ -573,6 +573,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.set_residency(None, self._resident_optimizer_role())
         DEVICE_MODULE.empty_cache()
         self._clear_cublas_workspaces()
+        self.actor.log_gpu_memory("training offload complete")
 
     @ray_method
     def offload_optimizer(self):

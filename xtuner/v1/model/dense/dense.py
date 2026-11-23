@@ -175,8 +175,14 @@ class Dense(BaseModel):
     __call__ = nn.Module.__call__
 
     @override
-    def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
-        loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
+    def from_hf(
+        self,
+        hf_path: str | Path,
+        strict: bool = True,
+        *,
+        load_device: torch.device | str | None = None,
+    ) -> tuple:
+        loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict, load_device=load_device)
         # If model is built on meta device, we need to rebuild rotary embedding since from_hf will not
         # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer.
         # xTODO: remove this line below when with torch.device(DEVICE) in __init__()

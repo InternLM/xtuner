@@ -1384,7 +1384,13 @@ class MoE(BaseModel):
         )
 
     @override
-    def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
+    def from_hf(
+        self,
+        hf_path: str | Path,
+        strict: bool = True,
+        *,
+        load_device: torch.device | str | None = None,
+    ) -> tuple:
         # If model is built on meta device, we need to rebuild rotary embedding since from_hf will not
         # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer.
         # This is used for training without FSDP.
@@ -1394,7 +1400,7 @@ class MoE(BaseModel):
         # self.rotary_emb = self.build_rotary_embedding(self.config).to(self.device)
 
         # logger.debug(f"before load hf: self.rotary_emb.sin_coef = {self.rotary_emb.sin_coef}, self.rotary_emb.cos_coef = {self.rotary_emb.cos_coef}")
-        loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
+        loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict, load_device=load_device)
         # logger.debug(f"after load hf: self.rotary_emb.sin_coef = {self.rotary_emb.sin_coef}, self.rotary_emb.cos_coef = {self.rotary_emb.cos_coef}")
 
         return loaded_keys, unloaded_keys, missing_keys

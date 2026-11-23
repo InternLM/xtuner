@@ -193,6 +193,15 @@ class HeadLoadPlan(NamedTuple):
     allowed_extra: set[str]
 
 
+@dataclass
+class PreparedHFParams:
+    load_plans: dict[str, tuple[Any, list[torch.Tensor]]]
+    loaded_keys: set[str]
+    unloaded_keys: set[str]
+    missing_keys: set[str]
+    head_load: HeadLoadPlan
+
+
 class HeadConfig(PydanticBaseModel):
     """Output head construction and checkpoint policy."""
 
@@ -897,7 +906,11 @@ class BaseModel(nn.Module):
         self._hf_path = Path(hf_path)
 
     def from_hf(
-        self, hf_path: str | Path, strict: bool = True
+        self,
+        hf_path: str | Path,
+        strict: bool = True,
+        *,
+        load_device: torch.device | str | None = None,
     ) -> tuple[
         Annotated[set[str], "loaded keys"], Annotated[set[str], "unloaded keys"], Annotated[set[str], "missing keys"]
     ]:
@@ -916,7 +929,12 @@ class BaseModel(nn.Module):
 
         hf_loader = HFCheckpointLoader(hf_path)
         head_load = self._prepare_head_load(hf_loader)
-        loaded_keys, unloaded_keys, missing_keys = self._load_params(hf_loader, strict=strict, head_load=head_load)
+        loaded_keys, unloaded_keys, missing_keys = self._load_params(
+            hf_loader,
+            strict=strict,
+            head_load=head_load,
+            load_device=load_device,
+        )
         return self._finish_head_load(head_load, loaded_keys, unloaded_keys, missing_keys)
 
     @torch.no_grad()
@@ -2129,12 +2147,137 @@ class BaseModel(nn.Module):
         if dist.is_initialized():
             torch.distributed.barrier()
 
+    def prepare_hf(self, hf_path: str | Path, strict: bool = True) -> PreparedHFParams:
+        """Read HF tensors into CPU memory without materializing the model."""
+        self._init_load_spec()
+        self._assert_load_spec_initialized()
+        self._hf_path = Path(hf_path)
+        if isinstance(hf_path, Path):
+            hf_path = str(hf_path)
+        checkpoint_loader = HFCheckpointLoader(hf_path)
+        head_load = self._prepare_head_load(checkpoint_loader)
+        present_hf_keys = set(checkpoint_loader.weight_map)
+        expected_hf_keys = {key for spec in self.load_spec_mapping.values() for key in spec.global_hf_keys}
+        expected_keys = set(self.state_dict())
+        allowed_missing = head_load.allowed_missing
+        allowed_extra = head_load.allowed_extra
+        if strict:
+            missing = expected_hf_keys - present_hf_keys - allowed_missing
+            unexpected = present_hf_keys - expected_hf_keys - allowed_extra
+            if missing or unexpected:
+                raise RuntimeError(
+                    f"Missing keys in checkpoint: {missing or '{}'}. Unexpected keys: {unexpected or '{}'}."
+                )
+        missing_keys: set[str] = set()
+        loaded_keys: set[str] = set()
+        load_plans: dict[str, tuple[Any, list[torch.Tensor]]] = {}
+
+        @torch.no_grad()
+        def _prepare_module(module: nn.Module, module_prefix: str) -> None:
+            for name, _ in chain(
+                module.named_parameters(recurse=False, prefix=module_prefix),
+                module.named_buffers(recurse=False, prefix=module_prefix),
+            ):
+                name = self._clean_param_name(name)
+                if name not in expected_keys:
+                    continue
+                load_spec = self.load_spec_mapping.get(name)
+                if load_spec is None:
+                    raise RuntimeError(f"Internal Error. Parameter {name} not found in load_spec_mapping.")
+                load_plan = load_spec.plan_hf_load()
+                loaded_tensors, param_missing = self._read_hf_tensors(
+                    load_plan.hf_keys,
+                    checkpoint_loader,
+                    device=torch.device("cpu"),
+                )
+                if param_missing:
+                    missing_keys.update(param_missing)
+                else:
+                    load_plans[name] = (load_plan, loaded_tensors)
+                    loaded_keys.add(name)
+            for name, child in module.named_children():
+                prefix = f"{module_prefix}.{name}" if module_prefix else name
+                _prepare_module(child, prefix)  # noqa: F821
+
+        try:
+            _prepare_module(self, "")
+        finally:
+            # Break the recursive closure cycle so it does not retain the loader or model until cyclic GC.
+            del _prepare_module
+        unloaded_keys = expected_keys - loaded_keys
+        if strict:
+            bad_missing = missing_keys - allowed_missing
+            bad_unloaded = {
+                name
+                for name in unloaded_keys
+                if not set(self.load_spec_mapping[name].global_hf_keys) <= allowed_missing
+            }
+            if bad_missing or bad_unloaded:
+                raise RuntimeError(
+                    f"Internal error, Missing keys in checkpoint: {bad_missing or '{}'}; "
+                    f"Unloaded keys in model: {bad_unloaded or '{}'}"
+                )
+        return PreparedHFParams(load_plans, loaded_keys, unloaded_keys, missing_keys, head_load)
+
+    def materialize_prepared_hf(
+        self,
+        prepared: PreparedHFParams,
+        *,
+        device: torch.device | str = DEVICE,
+    ) -> tuple[set[str], set[str], set[str]]:
+        """Materialize prepared CPU tensors into this rank's runtime
+        parameters."""
+        materialize_device = torch.device(device)
+
+        @torch.no_grad()
+        def _materialize_module(module: nn.Module, module_prefix: str) -> None:
+            if self._has_meta_param(module):
+                module.to_empty(device=materialize_device, recurse=False)
+            for name, param in chain(
+                module.named_parameters(recurse=False, prefix=module_prefix),
+                module.named_buffers(recurse=False, prefix=module_prefix),
+            ):
+                name = self._clean_param_name(name)
+                if name not in prepared.load_plans:
+                    continue
+                load_plan, loaded_tensors = prepared.load_plans[name]
+                local_tensor = param._local_tensor if isinstance(param, DTensor) else param
+                load_plan.load_into(
+                    loaded_tensors,
+                    local_tensor,
+                    canonicalize=self.hf_tensor_to_canonical,
+                )
+            for name, child in module.named_children():
+                prefix = f"{module_prefix}.{name}" if module_prefix else name
+                _materialize_module(child, prefix)  # noqa: F821
+
+        try:
+            if materialize_device.type == "cpu":
+                _materialize_module(self, "")
+                torch.cpu.synchronize()
+            else:
+                with profile_time_and_memory("[HF loading cost]"):
+                    _materialize_module(self, "")
+                    torch.accelerator.synchronize()
+                    torch.cpu.synchronize()
+        finally:
+            # Prepared tensors can be large, so do not leave them reachable through a recursive closure cycle.
+            del _materialize_module
+        return self._finish_head_load(
+            prepared.head_load,
+            prepared.loaded_keys,
+            prepared.unloaded_keys,
+            prepared.missing_keys,
+        )
+
     def _load_params(
         self,
         checkpoint_loader: HFCheckpointLoader,
         strict: bool = True,
         head_load: HeadLoadPlan | None = None,
+        load_device: torch.device | str | None = None,
     ) -> tuple:
+        materialize_device = torch.device(DEVICE if load_device is None else load_device)
         # The load spec (with hf_key_mapping applied) is the single source of truth
         # for the expected HF key set; strict checks and the copy loop below share it.
         present_hf_keys: set[str] = set(checkpoint_loader.weight_map)
@@ -2159,7 +2302,7 @@ class BaseModel(nn.Module):
         @torch.no_grad  # type: ignore
         def _load_params_from_module(module: nn.Module, module_prefix: str):
             if self._has_meta_param(module):
-                module.to_empty(device=DEVICE, recurse=False)
+                module.to_empty(device=materialize_device, recurse=False)
 
             for name, param in chain(
                 module.named_parameters(recurse=False, prefix=module_prefix),
@@ -2185,10 +2328,14 @@ class BaseModel(nn.Module):
                 _load_params_from_module(child, _prefix)  # type: ignore  # noqa: F821
 
         try:
-            with profile_time_and_memory("[HF loading cost]"):
+            if materialize_device.type == "cpu":
                 _load_params_from_module(self, "")  # type: ignore
-                torch.accelerator.synchronize()
                 torch.cpu.synchronize()
+            else:
+                with profile_time_and_memory("[HF loading cost]"):
+                    _load_params_from_module(self, "")  # type: ignore
+                    torch.accelerator.synchronize()
+                    torch.cpu.synchronize()
         finally:
             # Break the recursive closure cycle so it does not retain the loader or model until cyclic GC.
             del _load_params_from_module
@@ -2252,6 +2399,8 @@ class BaseModel(nn.Module):
         loaded_tensors: list[torch.Tensor] = []
         missing_keys: list[str] = []
         for hf_key in hf_keys:
+            if device.type == "cpu" and checkpoint_loader.is_key_exist(hf_key + "_scale_inv"):
+                raise NotImplementedError("Loading FP8 checkpoint tensors directly to CPU is not supported")
             tensor = self._read_hf_tensor(hf_key, checkpoint_loader)
             if tensor is None:
                 missing_keys.append(hf_key)
@@ -2383,11 +2532,13 @@ class BaseModel(nn.Module):
         DEVICE_MODULE.synchronize()
         return
 
-    def _to_empty_meta(self):
+    def _to_empty_meta(self, device: torch.device | str | None = None):
+        materialize_device = self.device if device is None else torch.device(device)
         for module in self.modules():
             if self._has_meta_param(module):
-                module.to_empty(device=self.device, recurse=False)
-        DEVICE_MODULE.synchronize()
+                module.to_empty(device=materialize_device, recurse=False)
+        if materialize_device.type != "cpu":
+            DEVICE_MODULE.synchronize()
         return
 
     def _wait_save_task(self, tasks: list[Future]):

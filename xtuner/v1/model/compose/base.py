@@ -27,6 +27,7 @@ from xtuner.v1.model.base import (
     DataBatchInfo,
     ModelItem,
     ModelOutputs,
+    PreparedHFParams,
     XTunerBaseModelConfig,
 )
 from xtuner.v1.utils import get_device, get_logger, log_rank0
@@ -107,6 +108,8 @@ class BaseComposeModel(BaseModel):
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
+        *,
+        materialize_device: torch.device | str | None = None,
     ) -> Self:
         self.fsdp_config = fsdp_config
         self.language_model.fully_shard(self.fsdp_config)
@@ -139,18 +142,49 @@ class BaseComposeModel(BaseModel):
             self.multi_modal_projector.set_modules_to_forward_prefetch([self.language_model])  # type: ignore
         self.language_model.set_modules_to_forward_prefetch([self.language_model.layers["0"]])  # type: ignore
 
-        self._to_empty_meta()
+        self._to_empty_meta(materialize_device)
         return self
 
-    def from_hf(self, hf_path: str | Path, strict=True):
+    def prepare_hf(  # type: ignore[override]
+        self, hf_path: str | Path, strict: bool = True
+    ) -> dict[str, PreparedHFParams]:
+        self._hf_path = Path(hf_path)
+        prepared = {
+            "language_model": self.language_model.prepare_hf(hf_path, strict=False),
+            "vision_tower": self.vision_tower.prepare_hf(hf_path, strict=False),
+            "multi_modal_projector": self.multi_modal_projector.prepare_hf(hf_path, strict=False),
+        }
+        if strict:
+            missing = set().union(*(item.missing_keys for item in prepared.values()))
+            if missing:
+                raise RuntimeError(f"Missing parameters from {hf_path}: {list(missing)}. ")
+        return prepared
+
+    def materialize_prepared_hf(  # type: ignore[override]
+        self,
+        prepared: dict[str, PreparedHFParams],
+        *,
+        device: torch.device | str = DEVICE,
+    ) -> None:
+        self.language_model.materialize_prepared_hf(prepared["language_model"], device=device)
+        self.vision_tower.materialize_prepared_hf(prepared["vision_tower"], device=device)
+        self.multi_modal_projector.materialize_prepared_hf(prepared["multi_modal_projector"], device=device)
+
+    def from_hf(
+        self,
+        hf_path: str | Path,
+        strict=True,
+        *,
+        load_device: torch.device | str | None = None,
+    ):
         self._hf_path = Path(hf_path)
 
         if isinstance(hf_path, Path):
             hf_path = str(hf_path)
 
-        _, _, missing_llm_keys = self.language_model.from_hf(hf_path, strict=False)
-        _, _, missing_vision_keys = self.vision_tower.from_hf(hf_path, strict=False)
-        _, _, missing_project_keys = self.multi_modal_projector.from_hf(hf_path, strict=False)
+        _, _, missing_llm_keys = self.language_model.from_hf(hf_path, strict=False, load_device=load_device)
+        _, _, missing_vision_keys = self.vision_tower.from_hf(hf_path, strict=False, load_device=load_device)
+        _, _, missing_project_keys = self.multi_modal_projector.from_hf(hf_path, strict=False, load_device=load_device)
 
         missing = missing_llm_keys | missing_vision_keys | missing_project_keys
         if strict:

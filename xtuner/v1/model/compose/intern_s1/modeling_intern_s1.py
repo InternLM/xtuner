@@ -63,6 +63,8 @@ class InternS1ForConditionalGeneration(BaseComposeModel):
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
+        *,
+        materialize_device: torch.device | str | None = None,
     ) -> Self:
         self.fsdp_config = fsdp_config
         self.language_model.fully_shard(self.fsdp_config)
@@ -97,7 +99,7 @@ class InternS1ForConditionalGeneration(BaseComposeModel):
         self.multi_modal_projector.set_modules_to_forward_prefetch([self.language_model])  # type: ignore
         self.language_model.set_modules_to_forward_prefetch([self.language_model.layers["0"]])  # type: ignore
 
-        self._to_empty_meta()
+        self._to_empty_meta(materialize_device)
         return self
 
     def extract_feature(self, pixel_values):

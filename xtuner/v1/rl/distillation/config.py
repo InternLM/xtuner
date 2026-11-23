@@ -90,6 +90,7 @@ class TrainTeacherConfig(BaseModel):
     model_path: str | Path
     model_cfg: TransformerConfig | BaseComposeConfig
     fsdp_cfg: FSDPConfig | None = None
+    residency: Literal["cpu", "disk"] = "cpu"
 
 
 TeacherConfig = RolloutTeacherConfig | TrainTeacherConfig
@@ -154,6 +155,7 @@ class TrainTeacherManagerConfig(BaseModel):
     teachers: list[TrainTeacherConfig] = Field(min_length=1)
     data_source_teacher_map: dict[str, str] = Field(min_length=1)
     target_config: TeacherTargetConfig
+    prefetch: bool = True
 
     @model_validator(mode="after")
     def validate_config(self) -> TrainTeacherManagerConfig:
@@ -188,6 +190,7 @@ class DistillationConfig(BaseModel):
     loss_config: DistillationLossConfig
     teachers: list[TeacherConfig] = Field(min_length=1)
     data_source_teacher_map: dict[str, str] = Field(min_length=1)
+    train_teacher_prefetch: bool = True
     _teacher_index_by_data_source: dict[str, int] = PrivateAttr(default_factory=dict)
 
     @model_validator(mode="after")
@@ -249,6 +252,7 @@ class DistillationConfig(BaseModel):
             teachers=list(self.train_teachers),
             data_source_teacher_map=dict(self.data_source_teacher_map),
             target_config=self.teacher_target_config,
+            prefetch=self.train_teacher_prefetch,
         )
 
     def validate_student_model(self, student_model_cfg: TransformerConfig | BaseComposeConfig) -> None:
