@@ -17,6 +17,7 @@ from .disagg_producer import (
     DisaggProduceStrategy,
     DisaggProduceStrategyConfig,
 )
+from .domain_scheduler import AdaptiveDomainSchedulerConfig, FixedDomainSchedulerConfig
 from .produce_utils import ProduceBatchResult, ProduceBatchStatus
 from .producer import (
     AsyncProduceStrategy,
@@ -33,6 +34,8 @@ from .sampler import Sampler, SamplerConfig
 
 # manager 包只暴露批量调度、采样和生产策略；单条 agent loop 保持在 agent_loop 包。
 __all__ = [
+    "AdaptiveDomainSchedulerConfig",
+    "FixedDomainSchedulerConfig",
     "AgentLoopManagerConfig",
     "AgentLoopManager",
     "DisaggAgentLoopManager",
