@@ -7,6 +7,7 @@ import triton
 import triton.language as tl
 
 from xtuner.v1.float8.float8_utils import to_fp8_saturated
+from xtuner.v1.float8.triton_kernels.quantization import quantize_per_block
 
 
 SM_MARGIN = int(os.environ.get("XTUNER_SM_MARGIN", 0))
@@ -102,10 +103,8 @@ def trans_per_block_quant_expand_128x_kernel(
         mask_input = (offs_am[:, None] < token_end) & (offs_an < N)
         input_block = tl.load(input_offset, mask=mask_input, other=0.0).to(tl.float32)
 
-        output_block_scale = tl.max(tl.max(tl.abs(input_block), 0), 0) / fmax
-        output_block_scale = tl.clamp(output_block_scale, 1e-12, 3e38)
-        input_block = input_block / output_block_scale
-        input_block = tl.clamp(input_block, fmin, fmax).trans(1, 0).to(output_ptr.dtype.element_ty)
+        input_block, output_block_scale = quantize_per_block(input_block, fmin, fmax)
+        input_block = input_block.trans(1, 0).to(output_ptr.dtype.element_ty)
 
         mask_out = offs_bm[None, :] < N
         tl.store(output_offset, input_block, mask=mask_out)
