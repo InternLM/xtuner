@@ -1,0 +1,216 @@
+"""Core monitor policy and detached-entry adapter tests with bounded deadlines."""
+
+import asyncio
+import importlib.util
+import time
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+import httpx
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SOURCE = ROOT / "xtuner/v1/rl/agent_loop/sandbox_agent_loop/process_monitor.py"
+spec = importlib.util.spec_from_file_location("tested_monitor", SOURCE)
+monitor = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(monitor)
+
+
+class RecoveryTests(unittest.IsolatedAsyncioTestCase):
+    def client(self, outcomes, state="running"):
+        values = iter(outcomes)
+
+        async def probe(pid):
+            value = next(values, outcomes[-1])
+            if isinstance(value, BaseException):
+                raise value
+            return value
+
+        async def lifecycle():
+            return state
+
+        return SimpleNamespace(is_pid_running=probe, get_lifecycle_state=lifecycle)
+
+    async def run_monitor(self, client, rc=None, **kw):
+        async def read_rc():
+            return rc
+
+        return await monitor.observe_process(
+            client,
+            pid=123,
+            timeout=kw.get("timeout", 0.5),
+            recovery_timeout=kw.get("recovery_timeout", 0.1),
+            poll_interval=0.01,
+            retry_interval=0.01,
+            rc_wait_timeout=0.03,
+            rc_poll_interval=0.01,
+            read_rc=read_rc,
+        )
+
+    async def test_more_than_three_errors_can_recover(self):
+        result = await self.run_monitor(self.client([httpx.RemoteProtocolError("fixture")] * 5 + [False]), rc=0)
+        # rc is already trusted, so completion can occur before probe recovery.
+        self.assertEqual(result[0], "entry_completed")
+        seen = 0
+        client = self.client([httpx.RemoteProtocolError("fixture")] * 5 + [False])
+
+        async def read_rc():
+            nonlocal seen
+            seen += 1
+            return 0 if seen > 5 else None
+
+        result = await monitor.observe_process(
+            client,
+            pid=123,
+            timeout=0.5,
+            recovery_timeout=0.2,
+            poll_interval=0.01,
+            retry_interval=0.01,
+            rc_wait_timeout=0.03,
+            rc_poll_interval=0.01,
+            read_rc=read_rc,
+        )
+        self.assertEqual(result[0], "entry_completed")
+        self.assertEqual(result[2]["pid_check_errors_total"], 5)
+
+    async def test_persistent_unknown_and_terminal(self):
+        started = time.monotonic()
+        result = await self.run_monitor(self.client([httpx.ReadError("fixture")]), recovery_timeout=0.05)
+        self.assertEqual(result[0], "pid_monitor_error")
+        self.assertLess(time.monotonic() - started, 0.2)
+        self.assertTrue(result[2]["recovery_deadline_reached"])
+        result = await self.run_monitor(self.client([httpx.ReadError("fixture")], state="failed"))
+        self.assertEqual(result[0], "sandbox_unavailable")
+
+    async def test_entry_deadline_and_cancellation(self):
+        result = await self.run_monitor(self.client([httpx.ReadError("fixture")]), timeout=0.04, recovery_timeout=120)
+        self.assertEqual(result[0], "pid_monitor_error")
+        self.assertTrue(result[2]["deadline_reached"])
+        with self.assertRaises(asyncio.CancelledError):
+            await self.run_monitor(self.client([asyncio.CancelledError()]))
+
+    async def test_exit_rc_missing_zombie_and_unknown_boolean(self):
+        self.assertEqual((await self.run_monitor(self.client([False]), rc=7))[:2], ("entry_failed", 7))
+        self.assertEqual((await self.run_monitor(self.client([False])))[0], "rc_missing")
+        self.assertEqual((await self.run_monitor(self.client([True]), timeout=0.03))[0], "timeout")
+        self.assertEqual((await self.run_monitor(self.client([None]), recovery_timeout=0.03))[0], "pid_monitor_error")
+
+    async def test_rc_errors_are_not_missing_and_good_pid_does_not_reset_budget(self):
+        async def read_rc():
+            raise httpx.ReadTimeout("fixture")
+
+        for recovery in (0, 0.04):
+            result = await monitor.observe_process(
+                self.client([False]),
+                pid=123,
+                timeout=0.3,
+                recovery_timeout=recovery,
+                poll_interval=0.01,
+                retry_interval=0.01,
+                rc_wait_timeout=0.01,
+                rc_poll_interval=0.01,
+                read_rc=read_rc,
+            )
+            self.assertEqual(result[0], "pid_monitor_error")
+            self.assertEqual(result[2]["probe_kind"], "rc")
+            self.assertLessEqual(len(result[2]["rc_checks"]), 3)
+
+    async def test_python310_asyncio_timeout_is_an_unknown_observation(self):
+        from unittest.mock import patch
+
+        class LegacyAsyncioTimeout(Exception):
+            pass
+
+        with patch.object(monitor.asyncio, "TimeoutError", LegacyAsyncioTimeout):
+            result = await self.run_monitor(self.client([LegacyAsyncioTimeout()]), recovery_timeout=0.03)
+        self.assertEqual(result[0], "pid_monitor_error")
+        self.assertGreater(result[2]["pid_check_errors_total"], 0)
+
+    async def test_rc_recovers_after_read_outage(self):
+        reads = iter([httpx.ReadError("fixture"), None, 0])
+
+        async def read_rc():
+            value = next(reads)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        result = await monitor.observe_process(
+            self.client([False]),
+            pid=123,
+            timeout=0.3,
+            recovery_timeout=0.1,
+            poll_interval=0.01,
+            retry_interval=0.01,
+            rc_wait_timeout=0.05,
+            rc_poll_interval=0.01,
+            read_rc=read_rc,
+        )
+        self.assertEqual(result[:2], ("entry_completed", 0))
+        self.assertEqual(result[2]["rc_check_errors_total"], 1)
+
+
+class DetachedEntryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_entry_observation_and_defaults(self):
+        import inspect
+
+        from xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox import DetachedShellEntry, EntryCapture
+
+        defaults = inspect.signature(DetachedShellEntry).parameters
+        self.assertEqual(defaults["pid_check_recovery_timeout_sec"].default, 0)
+        self.assertEqual(defaults["pid_check_max_failures"].default, 3)
+        self.assertEqual(defaults["pid_check_retry_interval_sec"].default, 10)
+        entry = DetachedShellEntry(
+            "unused", capture=EntryCapture(), timeout=0.2, poll_interval_sec=0.01, pid_check_retry_interval_sec=0.01
+        )
+
+        async def unavailable(_):
+            raise httpx.ReadTimeout("PID observation unavailable")
+
+        async def download(_):
+            return b"0\n"
+
+        result = await entry._wait_with_pid_poll(
+            SimpleNamespace(is_pid_running=unavailable, download_file=download),
+            SimpleNamespace(id="entry-fixture"),
+            SimpleNamespace(rc_file="/trusted/rc"),
+            123,
+        )
+        self.assertEqual((result.reason, result.result.return_code), ("entry_completed", 0))
+
+    async def test_exit_code_reader_preserves_unknown_vs_missing(self):
+        from xtuner.v1.rl.agent_loop.sandbox_agent_loop.sandbox import DetachedShellEntry
+
+        entry = DetachedShellEntry.__new__(DetachedShellEntry)
+        request = httpx.Request("GET", "http://fixture/rc")
+        cases = [
+            (b"7\n", 7),
+            (FileNotFoundError(), None),
+            (httpx.HTTPStatusError("missing", request=request, response=httpx.Response(404, request=request)), None),
+            (
+                httpx.HTTPStatusError("unavailable", request=request, response=httpx.Response(503, request=request)),
+                httpx.HTTPStatusError,
+            ),
+            (httpx.ReadTimeout("unavailable"), httpx.ReadTimeout),
+            (RuntimeError("legacy provider transport failure"), httpx.ReadError),
+            (b"broken", httpx.RemoteProtocolError),
+        ]
+        for value, expected in cases:
+
+            async def download(_, value=value):
+                if isinstance(value, Exception):
+                    raise value
+                return value
+
+            client = SimpleNamespace(download_file=download)
+            with self.subTest(expected=expected):
+                if isinstance(expected, type) and issubclass(expected, Exception):
+                    with self.assertRaises(expected):
+                        await entry._read_int_capture_file(client, "/trusted/rc")
+                else:
+                    self.assertEqual(await entry._read_int_capture_file(client, "/trusted/rc"), expected)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
