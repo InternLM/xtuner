@@ -21,7 +21,7 @@ training policy (e.g., FSDP FP32).
 Key Features:
 1. Three aggregation levels: token, sequence, geometric
 2. Two handling modes: truncate, mask
-3. Per-token veto mechanism for catastrophic outliers
+3. Per-sequence veto of sequences with catastrophic token outliers
 4. Memory-efficient computation to prevent CUDA OOM
 5. Comprehensive metrics tracking
 
@@ -53,16 +53,21 @@ class RolloutImportanceSampling(BaseModel):
     probabilities. It is referenced by RL loss configs.
 
     Args:
-        rollout_is_level (str): Granularity used to compute importance weights.
-            Common values are "token" and "sequence". Defaults to "token".
-        rollout_is_mode (str): Handling mode for samples outside configured
-            thresholds. Defaults to "truncate".
-        rollout_is_threshold (tuple[float, float] | None): Lower and upper
-            clipping thresholds for importance weights. Defaults to None.
-        rollout_is_mask_threshold (tuple[float, float] | None): Lower and upper
-            thresholds for masking tokens. Defaults to None.
-        rollout_is_veto_threshold (tuple[float, float] | None): Lower and upper
-            thresholds for rejecting a rollout group. Defaults to None.
+        rollout_is_level (str): Granularity used to compute importance weights:
+            "token", "sequence" or "geometric". Defaults to "token".
+        rollout_is_mode (str): Handling mode for weights outside the thresholds:
+            "truncate" clamps them, "mask" drops them from the loss, "both" does
+            both. Defaults to "truncate".
+        rollout_is_threshold (tuple[float, float] | None): ``(upper, lower)``
+            clamping thresholds for importance weights; ``None`` disables rollout
+            importance sampling. Defaults to None.
+        rollout_is_mask_threshold (tuple[float, float] | None): ``(upper, lower)``
+            thresholds for masking in "mask" and "both" modes; ``None`` reuses
+            ``rollout_is_threshold``. Defaults to None.
+        rollout_is_veto_threshold (tuple[float, float] | None): ``(upper, lower)``
+            per-token ratio thresholds; a sequence with any token outside them is
+            dropped from the loss, whatever the mode. ``None`` disables the veto.
+            Defaults to None.
 
     **Examples:**
 
@@ -71,7 +76,7 @@ class RolloutImportanceSampling(BaseModel):
         config = RolloutImportanceSampling(
             rollout_is_level="token",
             rollout_is_mode="truncate",
-            rollout_is_threshold=(0.8, 1.2),
+            rollout_is_threshold=(1.2, 0.8),
         )
     """
 
