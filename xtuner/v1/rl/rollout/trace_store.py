@@ -325,6 +325,22 @@ class Trie:
 
         return "".join(key_path), matched_nodes
 
+    def clear(self, *, free_legacy_refs: bool = False) -> None:
+        """Clear Trie holders and optionally free legacy Ray references.
+
+        Args:
+            free_legacy_refs (bool): Whether to explicitly free references not marked as shared.
+        """
+        stack = [self.root]
+        while stack:
+            node = stack.pop()
+            stack.extend(node.children.values())
+            if free_legacy_refs and node.value is not None and not getattr(node.value, "routed_experts_shared", False):
+                _free_ray_refs(node.value)
+            node.value = None
+            node.children.clear()
+            node.parent = None
+
     def release(self, key: str | None = None):
         """Drop trace ownership; exported and sibling route references remain
         valid.
@@ -339,15 +355,7 @@ class Trie:
         """
         if key is None:
             # Drop only this store's ownership. Borrowers retain live refs.
-            stack = [self.root]
-            while stack:
-                node = stack.pop()
-                stack.extend(node.children.values())
-                if node.value is not None and not getattr(node.value, "routed_experts_shared", False):
-                    _free_ray_refs(node.value)
-                node.value = None
-                node.children.clear()
-                node.parent = None
+            self.clear(free_legacy_refs=True)
             return
 
         node = self.root
@@ -458,6 +466,7 @@ class RolloutTraceStore:
                 continue
             # Drop only the store's holder. Exported rollout states may still
             # borrow legacy or shared refs, so this path must not force-free.
+            self.sessions[session_id].clear()
             self.sessions[session_id] = Trie()
             emptied_session_ids.append(session_id)
         return emptied_session_ids

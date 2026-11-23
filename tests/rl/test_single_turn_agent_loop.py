@@ -240,6 +240,19 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed.logprobs, before.logprobs)
         self.assertEqual(completed.reward, before.reward)
 
+    async def test_mixed_group_preserves_input_order_when_completed_state_is_last(self):
+        judger = _BatchJudger()
+        loop = self._build_loop({2: Status.COMPLETED}, judger=judger)
+        pending = self._state(2)
+        completed = self._completed_state(1)
+
+        result = await loop.generate_group([pending, completed])
+
+        self.assertEqual([state.rollout_id for state in result], [2, 1])
+        self.assertEqual([state.rollout_id for state in judger.calls[0]], [2, 1])
+        self.assertIs(result[0], pending)
+        self.assertIs(result[1], completed)
+
     async def test_mixed_group_judges_full_group_but_teaches_only_fresh_samples(self):
         events: list[str] = []
         judger = _BatchJudger(events)

@@ -44,6 +44,34 @@ AGENT_LOOP_CONCURRENCY_GROUP_GENERATE = "generate"
 IsValidSampleFn: TypeAlias = Callable[[list[RolloutState]], bool]
 
 
+def _select_retry_state_slots(states: list[RolloutState]) -> tuple[list[int], list[RolloutState]]:
+    """Select non-completed states together with their original positions."""
+    retry_indices = [index for index, state in enumerate(states) if state.status != Status.COMPLETED]
+    return retry_indices, [states[index] for index in retry_indices]
+
+
+def _merge_generated_state_slots(
+    states: list[RolloutState],
+    retry_indices: list[int],
+    generated_slots: list[list[RolloutState]],
+) -> tuple[list[RolloutState], set[int]]:
+    """Restore generated slots to input order and return fresh state
+    identities.
+
+    A regular AgentLoop produces one state per input slot, while an agentic sandbox may expand one input into multiple
+    trainable segments. Expanded states stay adjacent at the original input position.
+    """
+    if len(retry_indices) != len(generated_slots):
+        raise ValueError(f"Generated slot count mismatch: expected {len(retry_indices)}, got {len(generated_slots)}")
+
+    generated_by_index = dict(zip(retry_indices, generated_slots))
+    fresh_state_ids = {id(state) for slot in generated_slots for state in slot}
+    merged: list[RolloutState] = []
+    for index, state in enumerate(states):
+        merged.extend(generated_by_index.get(index, [state]))
+    return merged, fresh_state_ids
+
+
 def maybe_filter_invalid_sample(
     group: list[RolloutState],
     is_valid_sample_fn: IsValidSampleFn | None,
@@ -281,8 +309,7 @@ class AgentLoop(ABC):
             receives newly generated samples.
         """
 
-        reused_states = [state for state in rollout_state if state.status == Status.COMPLETED]
-        retry_states = [state for state in rollout_state if state.status != Status.COMPLETED]
+        retry_indices, retry_states = _select_retry_state_slots(rollout_state)
 
         async def generate_one(state: RolloutState) -> RolloutState:
             state.sample_params = self.sample_params
@@ -291,11 +318,13 @@ class AgentLoop(ABC):
             return state
 
         generated_group = list(await asyncio.gather(*(create_task(generate_one(state)) for state in retry_states)))
-        group = reused_states + generated_group
-        fresh_group = generated_group
-        fresh_start = len(reused_states)
+        group, _ = _merge_generated_state_slots(
+            rollout_state,
+            retry_indices,
+            [[state] for state in generated_group],
+        )
         if (
-            fresh_group
+            retry_indices
             and self.judger is not None
             and self.enable_batch_judge
             and all(sample.status == Status.COMPLETED for sample in group)
@@ -304,7 +333,7 @@ class AgentLoop(ABC):
 
         group = maybe_filter_invalid_sample(group, self.is_valid_sample_fn, self.logger)
         # 仅对本轮新生成的样本进行 Teacher 评分，避免重复评分已复用的 COMPLETED 样本。
-        generated_group = group[fresh_start:]
+        generated_group = [group[index] for index in retry_indices]
         if generated_group:
             await self._teacher_scorer.on_group_ready(generated_group)
         return self.canonicalize_train_fields(group)

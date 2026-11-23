@@ -10,7 +10,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.agent_loop.localhost_agent_loop.agent_in_localhost_loop import AgentInLocalhostLoop
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import AgentRolloutItem, RolloutStatus
 
@@ -48,7 +48,10 @@ def _make_item() -> AgentRolloutItem:
 
 
 def _fake_store(trace: dict) -> SimpleNamespace:
-    return SimpleNamespace(export_training_trace=SimpleNamespace(remote=AsyncMock(return_value=trace)))
+    return SimpleNamespace(
+        export_training_trace=SimpleNamespace(remote=AsyncMock(return_value=trace)),
+        empty_sessions=SimpleNamespace(remote=AsyncMock(return_value=["123"])),
+    )
 
 
 class TestLocalhostTraceFields(unittest.IsolatedAsyncioTestCase):
@@ -85,6 +88,61 @@ class TestLocalhostTraceFields(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.logprobs, [0.0, 0.1, 0.2])
         self.assertIsNone(state.routed_experts)
         self.assertEqual(state.response, "answer")
+
+    async def test_shared_routed_experts_are_detached_without_force_free(self):
+        loop = _make_loop()
+        state = RolloutState(message=[{"role": "user", "content": "hi"}], session_id=123)
+        expert_ref = object()
+        trace = {
+            "input_ids": [1, 2],
+            "labels": [-100, 2],
+            "logprobs": [0.0, 0.1],
+            "routed_experts": [expert_ref],
+            "routed_experts_shared": True,
+            "prompt_ids": [1],
+            "response_ids": [2],
+        }
+
+        with patch(f"{LOOP_MODULE}.get_store", return_value=_fake_store(trace)):
+            await loop._fill_rollout_state(state, _make_item())
+
+        self.assertIs(state.routed_experts[0], expert_ref)
+        self.assertTrue(state.routed_experts_shared)
+        with patch("xtuner.v1.rl.utils.ray_utils.free_object_refs") as free_refs:
+            state.reset_response()
+
+        free_refs.assert_not_called()
+        self.assertIsNone(state.routed_experts)
+        self.assertFalse(state.routed_experts_shared)
+
+
+class TestLocalhostGenerateGroup(unittest.IsolatedAsyncioTestCase):
+    async def test_mixed_group_preserves_input_order_when_completed_state_is_last(self):
+        loop = AgentInLocalhostLoop.__new__(AgentInLocalhostLoop)
+        loop.mode = "train"
+        loop.sample_params = SampleParams()
+        loop._sample_semaphore = None
+        loop.is_valid_sample_fn = None
+        loop.logger = MagicMock()
+        loop._teacher_scorer = SimpleNamespace(
+            on_sample_ready=AsyncMock(side_effect=lambda sample: sample),
+            on_group_ready=AsyncMock(side_effect=lambda group: group),
+        )
+        pending = RolloutState(rollout_id=1, message=[], status=Status.EXPIRED)
+        completed = RolloutState(rollout_id=2, message=[], status=Status.COMPLETED, input_ids=[2])
+
+        async def generate_sample(state: RolloutState, **kwargs: object) -> RolloutState:
+            state.status = Status.COMPLETED
+            return state
+
+        loop.generate_sample = AsyncMock(side_effect=generate_sample)
+        loop.canonicalize_train_fields = lambda group: group
+
+        samples = await loop.generate_group([pending, completed])
+
+        self.assertEqual([state.rollout_id for state in samples], [1, 2])
+        self.assertIs(samples[0], pending)
+        self.assertIs(samples[1], completed)
 
 
 if __name__ == "__main__":

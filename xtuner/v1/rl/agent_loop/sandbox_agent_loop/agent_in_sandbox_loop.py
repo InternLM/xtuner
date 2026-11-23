@@ -18,7 +18,13 @@ from xtuner.v1.rl.utils import await_cancellable_tasks
 
 from ...rollout.chat_template import canonicalize_messages_for_chat_template
 from ...rollout.trace_store import get_store
-from ..agent_loop import AgentLoop, AgentLoopConfig, maybe_filter_invalid_sample
+from ..agent_loop import (
+    AgentLoop,
+    AgentLoopConfig,
+    _merge_generated_state_slots,
+    _select_retry_state_slots,
+    maybe_filter_invalid_sample,
+)
 from .schemas import AgentRolloutItem, RolloutStatus
 
 
@@ -304,9 +310,7 @@ class AgentInSandboxLoop(AgentLoop):
         self.min_valid_attempts = min_valid_attempts
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
-        reused_states = [state for state in rollout_state if state.status == Status.COMPLETED]
-        retry_states = [state for state in rollout_state if state.status != Status.COMPLETED]
-        reused_ids = {id(state) for state in reused_states}
+        retry_indices, retry_states = _select_retry_state_slots(rollout_state)
 
         async def generate_one(state: RolloutState) -> list[RolloutState]:
             if self._sample_semaphore is None:
@@ -320,11 +324,11 @@ class AgentInSandboxLoop(AgentLoop):
             state.sample_params = self.sample_params
         # Cancellation must reach every sample and wait for all Runner.finally cleanups before this group ends.
         sample_groups = await await_cancellable_tasks(generate_one(state) for state in retry_states)
-        samples = reused_states + [sample for sample_group in sample_groups for sample in sample_group]
+        samples, fresh_state_ids = _merge_generated_state_slots(rollout_state, retry_indices, sample_groups)
         samples = _drop_failed_train_samples(samples, self.mode, self.min_valid_attempts)
         samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
         fresh_samples = [
-            state for state in samples if id(state) not in reused_ids and state.status == Status.COMPLETED
+            state for state in samples if id(state) in fresh_state_ids and state.status == Status.COMPLETED
         ]
         if fresh_samples:
             await self._teacher_scorer.on_group_ready(fresh_samples)

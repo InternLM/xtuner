@@ -50,8 +50,32 @@ class TestSandboxGenerateGroup(unittest.IsolatedAsyncioTestCase):
 
         samples = await loop.generate_group(states)
 
-        self.assertCountEqual([state.rollout_id for state in samples], [1, 2])
+        self.assertEqual([state.rollout_id for state in samples], [1, 2])
         self.assertEqual([call.args[0].rollout_id for call in loop.generate_sample.await_args_list], [1])
+
+    async def test_generate_group_expands_fresh_segments_at_original_input_position(self):
+        loop = AgentInSandboxLoop.__new__(AgentInSandboxLoop)
+        loop.mode = "train"
+        loop.sample_params = SampleParams()
+        loop._sample_semaphore = None
+        loop.min_valid_attempts = None
+        loop.is_valid_sample_fn = None
+        loop.logger = MagicMock()
+        loop._teacher_scorer = SimpleNamespace(
+            on_sample_ready=AsyncMock(side_effect=lambda sample: sample),
+            on_group_ready=AsyncMock(side_effect=lambda group: group),
+        )
+        retry = _state(1, 10, Status.EXPIRED)
+        reused = _state(2, 20, Status.COMPLETED)
+        first_segment = _state(11, 10, Status.COMPLETED)
+        second_segment = _state(12, 10, Status.COMPLETED)
+        loop.generate_sample = AsyncMock(return_value=[first_segment, second_segment])
+        loop.canonicalize_train_fields = lambda group: group
+
+        samples = await loop.generate_group([retry, reused])
+
+        self.assertEqual([state.rollout_id for state in samples], [11, 12, 2])
+        loop._teacher_scorer.on_group_ready.assert_awaited_once_with([first_segment, second_segment])
 
 
 class TestRetryGroupInputNormalization(unittest.TestCase):

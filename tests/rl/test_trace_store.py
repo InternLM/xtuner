@@ -22,6 +22,7 @@ TestExportPartialTrainingTrace —— export_partial_training_trace 的部分导
 import asyncio
 import time
 import unittest
+import weakref
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -31,6 +32,7 @@ from xtuner.v1.rl.rollout import trace_store as trace_store_module
 from xtuner.v1.rl.rollout.trace_store import (
     RolloutTraceStore,
     TokenizedSegment,
+    Trie,
     _free_ray_refs,
     empty_existing_sessions,
     get_existing_store,
@@ -40,6 +42,21 @@ from xtuner.v1.rl.rollout.trace_store import (
 
 
 class TestRolloutTraceCleanup(unittest.TestCase):
+    def test_trie_clear_breaks_cycles_without_force_free(self):
+        trie = Trie()
+        value = TokenizedSegment(text="old", token_ids=[1], expert_key=object())
+        trie.insert("old", value)
+        _, nodes = trie.search("old")
+        node_ref = weakref.ref(nodes[0])
+
+        with patch("xtuner.v1.rl.rollout.trace_store._free_ray_refs") as free_refs:
+            trie.clear()
+
+        del nodes
+        self.assertIsNone(node_ref())
+        self.assertEqual(trie.keys(), [])
+        free_refs.assert_not_called()
+
     def test_release_and_discard_detaches_only_trace_owned_refs(self):
         trace_owned_ref = object()
         rollout_owned_ref = object()

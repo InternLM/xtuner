@@ -630,6 +630,44 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(empty_sessions.await_count, 2)
         empty_sessions.assert_awaited_with(["401"])
 
+    async def test_refresh_retry_empty_runs_outside_buffer_lock(self):
+        replay_buffer = AsyncReplayBufferConfig().build()
+        stale = make_rollout_state(1, session_id=401, response_model_steps=[1])
+        await replay_buffer.put([stale], "task")
+
+        empty_started = asyncio.Event()
+        allow_empty = asyncio.Event()
+
+        async def delayed_empty(session_ids: list[str]) -> set[str]:
+            empty_started.set()
+            await allow_empty.wait()
+            return set(session_ids)
+
+        with patch(
+            "xtuner.v1.rl.replay_buffer.empty_existing_sessions",
+            new=AsyncMock(side_effect=delayed_empty),
+        ) as empty_sessions:
+            refresh_task = asyncio.create_task(
+                replay_buffer.refresh_staleness(
+                    task_stale_thresholds={"task": 2},
+                    expired_groups_retryable_by_task={"task": True},
+                    current_train_step=4,
+                )
+            )
+            await asyncio.wait_for(empty_started.wait(), timeout=1.0)
+            try:
+                count = await asyncio.wait_for(
+                    replay_buffer.count("task", Status.EXPIRED),
+                    timeout=1.0,
+                )
+                self.assertEqual(count, 1)
+            finally:
+                allow_empty.set()
+            expired_counts = await refresh_task
+
+        empty_sessions.assert_awaited_once_with(["401"])
+        self.assertEqual(expired_counts, {"task": 1})
+
     async def test_refresh_staleness_batches_non_retryable_release_outside_lock(self):
         replay_buffer = AsyncReplayBufferConfig().build()
         first = make_rollout_state(1, session_id=301, response_model_steps=[1])

@@ -20,7 +20,13 @@ from xtuner.v1.rl.rollout.chat_template import canonicalize_messages_for_chat_te
 from xtuner.v1.rl.rollout.trace_store import get_store
 from xtuner.v1.rl.utils import create_task
 
-from ..agent_loop import AgentLoop, AgentLoopConfig, maybe_filter_invalid_sample
+from ..agent_loop import (
+    AgentLoop,
+    AgentLoopConfig,
+    _merge_generated_state_slots,
+    _select_retry_state_slots,
+    maybe_filter_invalid_sample,
+)
 
 
 def _import_from_path(path: str) -> Any:
@@ -137,9 +143,7 @@ class AgentInLocalhostLoop(AgentLoop):
         self.mode = mode
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
-        reused_states = [state for state in rollout_state if state.status == Status.COMPLETED]
-        retry_states = [state for state in rollout_state if state.status != Status.COMPLETED]
-        reused_ids = {id(state) for state in reused_states}
+        retry_indices, retry_states = _select_retry_state_slots(rollout_state)
 
         async def generate_one(state: RolloutState) -> RolloutState:
             if self._sample_semaphore is None:
@@ -156,13 +160,18 @@ class AgentInLocalhostLoop(AgentLoop):
             task = create_task(generate_one(state))
             tasks.append(task)
 
-        samples = reused_states + list(await asyncio.gather(*tasks))
+        generated = list(await asyncio.gather(*tasks))
+        samples, fresh_state_ids = _merge_generated_state_slots(
+            rollout_state,
+            retry_indices,
+            [[state] for state in generated],
+        )
         samples = _drop_failed_train_samples(samples, self.mode)
         samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
         fresh_indices = [
             index
             for index, state in enumerate(samples)
-            if id(state) not in reused_ids and state.status == Status.COMPLETED
+            if id(state) in fresh_state_ids and state.status == Status.COMPLETED
         ]
         if fresh_indices:
             await self._teacher_scorer.on_group_ready([samples[index] for index in fresh_indices])
@@ -298,6 +307,7 @@ class AgentInLocalhostLoop(AgentLoop):
         rollout_state.response_ids = list(data["response_ids"])
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
+        rollout_state.routed_experts_shared = data.get("routed_experts_shared", False)
         content = response_message.get("content")
         rollout_state.response = content if isinstance(content, str) else (str(content) if content is not None else "")
         if rollout_state.status == Status.COMPLETED and rollout_state.session_id is not None:
