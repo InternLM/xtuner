@@ -1054,11 +1054,8 @@ class RolloutWorker(SingleAcceleratorWorker):
                 # Image placeholders are compressed on the wire; routes use expanded positions.
                 prompt_ids = rollout_state.extra_fields.get("train_prompt_ids", rollout_state.prompt_ids)
                 return len(prompt_ids or []) + len(rollout_state.response_ids) - 1
-            prefix = rollout_state.extra_fields.get("_r3_retained_prefix_ids")
-            tokens = rollout_state.tokens
-            # An agent may append tool/user tokens, but must not edit the retained prefix.
-            if prefix and tokens is not None and tokens[: len(prefix)] == prefix:
-                return len(prefix)
+            # Built-in multi-turn loops append tokens; restarting clears routed_experts.
+            return rollout_state.extra_fields.get("_r3_retained_num_rows", 0)
         return 0
 
     def _prepare_request_payload(
@@ -1080,7 +1077,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         """
         if discard_response:
             rollout_state.reset_response()
-            rollout_state.extra_fields.pop("_r3_retained_prefix_ids", None)
+            rollout_state.extra_fields.pop("_r3_retained_num_rows", None)
             rollout_state.sample_params = rollout_state.sample_params.model_copy(
                 update={"max_tokens": request_max_tokens}
             )
@@ -1088,7 +1085,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         elif not self.enable_partial_rollout and rollout_state.status == Status.ABORTED:
             # ABORTED samples can be replayed; without partial rollout, rerun from the original prompt.
             rollout_state.reset_response()
-            rollout_state.extra_fields.pop("_r3_retained_prefix_ids", None)
+            rollout_state.extra_fields.pop("_r3_retained_num_rows", None)
             rollout_state.sample_params = rollout_state.sample_params.model_copy(
                 update={"max_tokens": request_max_tokens}
             )
@@ -1339,12 +1336,12 @@ class RolloutWorker(SingleAcceleratorWorker):
                             + response["meta_info"]["completion_tokens"]
                             - 1,
                         )
-                    # Only token-exact retained history can authorize the next incremental request.
-                    rollout_state.extra_fields.pop("_r3_retained_prefix_ids", None)
-                    if routed_experts is not None and rollout_state.tokens is not None:
-                        prefix = (rollout_state.tokens + response_ids)[:-1]
-                        if len(prefix) == response["meta_info"]["prompt_tokens"] + len(response_ids) - 1:
-                            rollout_state.extra_fields["_r3_retained_prefix_ids"] = prefix
+                    rollout_state.extra_fields.pop("_r3_retained_num_rows", None)
+                    if routed_experts is not None:
+                        # R3 rows use expanded multimodal positions, not the compressed wire token count.
+                        rollout_state.extra_fields["_r3_retained_num_rows"] = (
+                            response["meta_info"]["prompt_tokens"] + len(response_ids) - 1
+                        )
                     rollout_state.response = returned_response
                     rollout_state.response_ids = response_ids
                     rollout_state.logprobs = logprobs

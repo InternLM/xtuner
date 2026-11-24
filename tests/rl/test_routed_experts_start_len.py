@@ -178,12 +178,14 @@ class TestIncrementalRoutedExperts:
         state.response_ids = [3, 4]
         state.routed_experts = np.zeros((3, 2, 2), dtype=np.uint16)
         state.status = Status.FAILED
+        state.extra_fields["_r3_retained_num_rows"] = 3
         state, payload = worker._prepare_request_payload(state, 8, discard_response=True)
         assert payload["input_ids"] == [1, 2]
         assert "routed_experts_start_len" not in payload
         assert state.routed_experts is None
         assert not state.response_ids
         assert state.sample_params.max_tokens == 8
+        assert "_r3_retained_num_rows" not in state.extra_fields
 
     def test_old_server_ignoring_start_is_rejected_and_ref_freed(self) -> None:
         async def run() -> None:
@@ -266,10 +268,25 @@ class TestImageExpandedRoutedExpertsStart:
 
 class TestNonPartialIncrementalRoutedExperts:
     @pytest.mark.parametrize("with_tool_tokens", [False, True])
-    def test_three_turns_merge_routes_but_not_responses(self, with_tool_tokens: bool) -> None:
+    @pytest.mark.parametrize("image_token_counts", [[], [16], [256], [16, 64]])
+    def test_three_turns_merge_routes_but_not_responses(
+        self, with_tool_tokens: bool, image_token_counts: list[int]
+    ) -> None:
         async def run():
             worker = _worker(partial=False)
             state = _state()
+            if image_token_counts:
+                wire, expanded = [1], [1]
+                for index, count in enumerate(image_token_counts):
+                    wire.extend([99, index + 2])
+                    expanded.extend([99] * count + [index + 2])
+                state.prompt_ids = wire
+                state.tokens = list(wire)
+                state.extra_fields = {
+                    "train_prompt_ids": expanded,
+                    "image_data": ["fixture"] * len(image_token_counts),
+                }
+            expansion = sum(count - 1 for count in image_token_counts)
             expected = None
             tokens = list(state.tokens)
             for turn in range(3):
@@ -279,11 +296,16 @@ class TestNonPartialIncrementalRoutedExperts:
                 start = payload.get("routed_experts_start_len", 0)
                 assert start == (0 if expected is None else len(expected))
                 ids = [10 + turn * 2, 11 + turn * 2]
-                full = np.arange((len(tokens) + 1) * 4, dtype=np.uint16).reshape(-1, 2, 2) + turn * 100
+                prompt_len = len(tokens) + expansion
+                full = np.arange((prompt_len + 1) * 4, dtype=np.uint16).reshape(-1, 2, 2) + turn * 100
                 worker._decode_routed_experts.return_value = _ObjectRef(full[start:])
-                state = await worker._safe_handle_response(state, _response(len(tokens), ids, finish="length"))
+                state = await worker._safe_handle_response(state, _response(prompt_len, ids, finish="length"))
                 expected = full if expected is None else np.concatenate([expected, full[len(expected) :]])
                 np.testing.assert_array_equal(state.routed_experts.value, expected)
+                assert state.extra_fields["_r3_retained_num_rows"] == len(expected)
+                if image_token_counts:
+                    assert payload["image_data"] == ["fixture"] * len(image_token_counts)
+                    assert state.extra_fields["train_prompt_ids"] == expanded
                 assert state.response_ids == ids  # Not cumulative: agent owns turn assembly.
                 assert len(state.logprobs) == 2
                 tokens.extend(ids)
@@ -300,21 +322,31 @@ class TestNonPartialIncrementalRoutedExperts:
             asyncio.run(run())
             assert free.call_count == 4
 
-    @pytest.mark.parametrize("changed", ["edited", "shortened", "missing_history", "r3_disabled"])
-    def test_changed_prefix_falls_back_to_full(self, changed: str) -> None:
+    @pytest.mark.parametrize("disabled", ["missing_history", "missing_count", "r3_disabled"])
+    def test_missing_history_or_disabled_capture_does_not_crop(self, disabled: str) -> None:
         worker = _worker(partial=False)
         state = _state()
         state.tokens = [1, 2, 3, 4, 99]
-        state.extra_fields["_r3_retained_prefix_ids"] = [1, 2, 3]
+        state.extra_fields["_r3_retained_num_rows"] = 3
         state.routed_experts = np.zeros((3, 2, 2), dtype=np.uint16)
-        if changed == "edited":
-            state.tokens[0] = 8
-        elif changed == "shortened":
-            state.tokens = [1, 2]
-        elif changed == "missing_history":
+        if disabled == "missing_history":
             state.routed_experts = None
+        elif disabled == "missing_count":
+            state.extra_fields.pop("_r3_retained_num_rows")
         else:
             state.sample_params.return_routed_experts = False
+        assert worker._get_routed_experts_start_len(state) == 0
+
+    def test_expiry_reset_invalidates_retained_routes_but_keeps_images(self) -> None:
+        worker = _worker(partial=False)
+        state = _state()
+        state.tokens = [1, 2, 3, 4]
+        state.response_ids = [3, 4]
+        state.routed_experts = np.zeros((3, 2, 2), dtype=np.uint16)
+        state.extra_fields = {"_r3_retained_num_rows": 3, "image_data": ["fixture"]}
+        state.reset_response()  # ReplayBuffer uses this same reset for expired samples.
+        assert state.tokens == state.prompt_ids
+        assert state.extra_fields["image_data"] == ["fixture"]
         assert worker._get_routed_experts_start_len(state) == 0
 
     def test_sglang_incremental_is_not_enabled(self) -> None:
@@ -326,13 +358,13 @@ class TestNonPartialIncrementalRoutedExperts:
             worker = _worker(partial=False)
             state = _state()
             state.tokens = [1, 2, 3, 4, 80, 81]
-            state.extra_fields["_r3_retained_prefix_ids"] = [1, 2, 3]
+            state.extra_fields["_r3_retained_num_rows"] = 3
             state.routed_experts = np.zeros((3, 2, 2), dtype=np.uint16)
             worker._decode_routed_experts.return_value = _ObjectRef(np.zeros((0, 2, 2), dtype=np.uint16))
             state = await worker._safe_handle_response(state, _response(6, [], routes="key" if has_routes else None))
             assert state.status == Status.ABORTED
             assert state.routed_experts is None
-            assert "_r3_retained_prefix_ids" not in state.extra_fields
+            assert "_r3_retained_num_rows" not in state.extra_fields
             _, payload = worker._prepare_request_payload(state, 8)
             assert payload["input_ids"] == [1, 2]
             assert "routed_experts_start_len" not in payload
