@@ -30,6 +30,16 @@ class Float8Config(BaseModel):
             Parameter(help="Scaling granularity for grouped GEMM operations. Currently only TILEWISE is supported"),
         ]
     ] = None
+    max_stack_bytes: Optional[
+        Annotated[
+            int,
+            Parameter(
+                help="Peak-memory budget in bytes for the stacked weight tensor when precomputing "
+                "tilewise FP8 scales. Larger groups are processed in chunks bounded by this budget. "
+                "Defaults to 1 GiB."
+            ),
+        ]
+    ] = None
     model_config = ConfigDict(extra="forbid")
 
     @property
@@ -56,4 +66,5 @@ class Float8Config(BaseModel):
         return Float8Handler(
             scaling_granularity_gemm=self.scaling_granularity_gemm,
             scaling_granularity_grouped_gemm=self.scaling_granularity_grouped_gemm,
+            max_stack_bytes=self.max_stack_bytes,
         )

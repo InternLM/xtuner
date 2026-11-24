@@ -4,6 +4,7 @@ import unittest.mock
 import pytest
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 import torch.nn as nn
 from torch.distributed._tensor import DTensor, Shard
 from torch.distributed.device_mesh import init_device_mesh
@@ -94,3 +95,41 @@ def test_chunked_scales_match_block_amax_reference(device_mesh):
     amax = blocks.abs().amax(-1).to(torch.float64)
     expected = (torch.clamp(amax, min=1e-12) / torch.finfo(torch.float8_e4m3fn).max).to(torch.float32).view(2, 4)
     assert torch.equal(scale, expected)
+
+
+def _chunked_equiv_worker(rank, world_size, init_path, dout, use_divided_64):
+    # 每个 rank 独立构造相同 seed 的 padded local 权重(模拟真实 FSDP 场景下各 rank 的本地分片),
+    # 先以超大预算(单 chunk)算参照,再以单权重预算(3 chunks)算被测结果。
+    # 若各 rank 推导出的 chunk 边界不一致,all_reduce 次数会对不上,进程会直接挂死,
+    # 因此跑通本身即验证跨 rank chunk 边界一致性。
+    torch.set_num_threads(1)
+    dist.init_process_group("gloo", rank=rank, world_size=world_size, init_method=f"file://{init_path}")
+    mesh = init_device_mesh("cpu", (world_size,))
+    din = 256
+    weights_kwargs = {"reduce_mesh_mapping": {}, "reduce_mesh_devided_64": None}
+    if use_divided_64:
+        weights_kwargs["reduce_mesh_devided_64"] = mesh
+    else:
+        weights_kwargs["reduce_mesh_mapping"] = {(dout, din): mesh}
+
+    def scales(max_stack_bytes):
+        module = nn.ModuleList([_make_sharded_linear(din, dout, mesh, rank * 100 + seed) for seed in (0, 1, 2)])
+        precompute_tilewise_float8_scale_for_fsdp(module, max_stack_bytes=max_stack_bytes, **weights_kwargs)
+        return [m.weight._local_tensor._precomputed_scale for m in module.modules() if isinstance(m, TileWiseFloat8Linear)]
+
+    reference = scales(1 << 40)  # 单 chunk
+    chunked = scales(dout * din * 4)  # 单权重预算 -> 逐权重 3 个 chunk
+    for i, (ref, got) in enumerate(zip(reference, chunked)):
+        assert ref is not None and got is not None
+        assert torch.equal(ref, got), f"rank{rank} weight{i}: chunked scales differ from single-shot"
+    dist.destroy_process_group()
+
+
+def test_chunked_stack_matches_full_stack_reduce_path_multi_rank(tmp_path):
+    # dout=64 < 128:amax 需要跨 reduce_mesh all_reduce 的路径,2 个 gloo rank 上验证分 chunk 与单次 stack bitwise 一致
+    mp.spawn(_chunked_equiv_worker, args=(2, str(tmp_path / "gloo_init"), 64, False), nprocs=2, join=True)
+
+
+def test_chunked_stack_matches_full_stack_divided_64_path_multi_rank(tmp_path):
+    # dout=192(=128+64):divided_64 路径(128-block 横跨两 rank),2 个 gloo rank 上验证分 chunk 与单次 stack bitwise 一致
+    mp.spawn(_chunked_equiv_worker, args=(2, str(tmp_path / "gloo_init"), 192, True), nprocs=2, join=True)

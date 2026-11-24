@@ -10,6 +10,7 @@ from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from xtuner.v1.float8.config import ScalingGranularity
 from xtuner.v1.float8.fsdp_utils import (
+    _PRECOMPUTE_SCALE_STACK_BYTES,
     precompute_tensorwise_float8_scale_for_fsdp,
     precompute_tilewise_float8_scale_for_fsdp,
 )
@@ -47,7 +48,11 @@ class Float8Handler:
         self,
         scaling_granularity_gemm: Optional[ScalingGranularity] = None,
         scaling_granularity_grouped_gemm: Optional[ScalingGranularity] = None,
+        max_stack_bytes: Optional[int] = None,
     ) -> None:
+        # Peak-memory budget for the stacked weight tensor when precomputing
+        # tilewise FP8 scales; None falls back to the default budget.
+        self.max_stack_bytes = max_stack_bytes if max_stack_bytes is not None else _PRECOMPUTE_SCALE_STACK_BYTES
         torch.serialization.add_safe_globals(
             [
                 WeightWithDynamicTilewiseFloat8CastTensor,
@@ -222,7 +227,7 @@ class Float8Handler:
         for m in models:
             if self.is_tilewise_fp8:
                 precompute_tilewise_float8_scale_for_fsdp(
-                    m, self.tilewise_reduce_mesh_mapping, self.tilewise_reduce_mesh_devided_64
+                    m, self.tilewise_reduce_mesh_mapping, self.tilewise_reduce_mesh_devided_64, self.max_stack_bytes
                 )
             if self.is_tensorwise_fp8:
                 assert self.fsdp_mesh is not None, "FSDP mesh must be set for tensorwise float8 training."

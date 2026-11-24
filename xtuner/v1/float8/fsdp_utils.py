@@ -176,6 +176,10 @@ def precompute_tilewise_float8_scale_for_fsdp(
         # traversed in a deterministic order and padded to identical shapes on every
         # rank, so all ranks derive the same chunk boundaries; chunking only adds
         # extra `reduce_mesh` collectives (one per chunk) without changing results.
+        # Budget against the final float32 stack (4 bytes/elem). With
+        # _RL_FP8_QUANTIZE_IN_BF16_ENV=1 the bf16 roundtrip below transiently keeps
+        # the original stack, the bf16 copy and the fp32 copy alive (up to ~2.5x this
+        # estimate for float32 weights), so leave headroom when lowering the budget.
         bytes_per_weight = weights_same_shape[0].numel() * 4  # worst case float32 stack
         chunk_size = max(1, max_stack_bytes // bytes_per_weight)
         for chunk_start in range(0, len(weights_same_shape), chunk_size):
