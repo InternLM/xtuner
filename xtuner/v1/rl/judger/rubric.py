@@ -6,6 +6,7 @@ import json
 import math
 import mimetypes
 import os
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, cast
 
@@ -13,11 +14,24 @@ import httpx
 from pydantic import Field
 
 from xtuner.v1.data_proto.rl_data import RolloutState
+from xtuner.v1.utils.logger import get_logger
 
 from .native import Judger, JudgerConfig, JudgerOutput, JudgerOutputBatch, JudgerPayloadBatch
 
 
+logger = get_logger()
+
+
 RubricTransport = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+
+
+class _JudgeModelOutputError(ValueError):
+    pass
+
+
+# evidence 只需引用证明评分点的最短原文片段；上限与请求 schema 中的 maxLength 保持一致。
+_MAX_EVIDENCE_CHARS = 256
+
 
 _SYSTEM_PROMPT = """You are a strict multimodal rubric judge.
 Evaluate the assistant response against every supplied rubric independently.
@@ -29,6 +43,7 @@ Return only one JSON object with this schema:
 The verdict must be either "met" or "unmet". Include every rubric exactly once.
 For "met", evidence must be a verbatim substring of the assistant response proving the criterion.
 For example, if the response says "The grid has two shaded squares.", evidence can be exactly "The grid has two shaded squares.".
+Keep evidence short: quote the shortest contiguous span that proves the criterion, never more than 50 words, and never use ellipsis or paraphrase inside evidence.
 Never copy the criterion into evidence, and never use phrases such as "The response identifies" as evidence.
 For "unmet", give a short explanation of what is missing or incorrect.
 Do not invent criteria, omit criteria, or reveal hidden reference answers.
@@ -133,9 +148,82 @@ def _response_content(body: dict[str, Any]) -> str:
     raise ValueError("Judge response content must be a string or text-part list.")
 
 
+def _response_metadata(body: dict[str, Any]) -> dict[str, Any]:
+    finish_reason = None
+    choices = body.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        finish_reason = choices[0].get("finish_reason")
+    raw_usage = body.get("usage")
+    usage = {}
+    if isinstance(raw_usage, dict):
+        usage = {
+            key: raw_usage[key]
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+            if key in raw_usage
+        }
+    return {"finish_reason": finish_reason, "content_chars": None, "usage": usage}
+
+
+def _judge_error_type(error: Exception, metadata: dict[str, Any]) -> str:
+    if isinstance(error, httpx.TimeoutException):
+        return "transport"
+    if isinstance(error, httpx.HTTPStatusError):
+        return "http"
+    if isinstance(error, httpx.HTTPError):
+        return "transport"
+    if metadata.get("finish_reason") == "length":
+        return "output_truncated"
+    if isinstance(error, _JudgeModelOutputError):
+        return "model_output"
+    return "protocol"
+
+
+def _dump_judge_failure(
+    payload: dict[str, Any],
+    diagnostics: dict[str, Any],
+    error: Exception,
+    body: dict[str, Any] | None,
+) -> Path | None:
+    # RUBRIC_JUDGE_DEBUG_DIR 设置后，重试耗尽的判分失败会把完整原始响应落盘，
+    # 用于区分服务端返回的 content / reasoning_content 和诊断前缀之外的输出形态。
+    # payload 只含图片路径，raw body 原样保存；目录由调用方保证不进入共享产物。
+    debug_dir = os.environ.get("RUBRIC_JUDGE_DEBUG_DIR")
+    if not debug_dir:
+        return None
+    try:
+        path = Path(debug_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        name = (
+            f"group{diagnostics.get('group_id')}_rollout{diagnostics.get('rollout_id')}"
+            f"_{diagnostics.get('error_type')}.json"
+        )
+        record = {
+            "diagnostics": diagnostics,
+            "error": repr(error),
+            "payload": payload,
+            "raw_response": body,
+        }
+        dump_path = path / name
+        dump_path.write_text(json.dumps(record, ensure_ascii=False, indent=1, default=str))
+    except OSError:
+        logger.warning("Failed to dump rubric judge failure record.", exc_info=True)
+        return None
+    return dump_path
+
+
 def _parse_results(content: str, rubrics: list[dict[str, Any]], response: str) -> list[dict[str, Any]]:
-    decoder = json.JSONDecoder()
+    # strict=False 放宽字符串内控制字符：实测 judge 引用回复中的 LaTeX 时会输出
+    # 字面 \x08 转义残留（\boldsymbol -> \x08oldsymbol），严格模式整份输出无法解析；
+    # 放宽后证据无法逐字匹配回复，仍由 met 证据校验 fail-closed 为 unmet。
+    decoder = json.JSONDecoder(strict=False)
     parsed: dict[str, Any] | None = None
+    try:
+        top_level = json.loads(content, strict=False)
+    except json.JSONDecodeError:
+        pass
+    else:
+        if isinstance(top_level, list):
+            parsed = {"results": top_level}
     for index, char in enumerate(content):
         if char != "{":
             continue
@@ -152,16 +240,31 @@ def _parse_results(content: str, rubrics: list[dict[str, Any]], response: str) -
         for offset in range(1, len(marker)):
             if not stripped.startswith(marker[offset:]):
                 continue
+            # 长输入下实测还会缺失成对的外层花括号（"results": [...] 首尾各缺一个），
+            # 前缀修复时同时尝试补结尾的 }。
+            for suffix in ("", "}"):
+                try:
+                    candidate, _ = decoder.raw_decode(marker[:offset] + stripped + suffix)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(candidate, dict) and isinstance(candidate.get("results"), list):
+                    parsed = candidate
+                break
+            break
+    if parsed is None:
+        # 长输入下模型还可能在裸数组前输出垃圾前缀（实测出现 ":\n[...]"）；
+        # 从首个 [ 起按完整裸数组解析，之后仍执行全部严格校验。
+        bracket = content.find("[")
+        if bracket != -1:
             try:
-                candidate, _ = decoder.raw_decode(marker[:offset] + stripped)
+                candidate, _ = decoder.raw_decode(content[bracket:])
             except json.JSONDecodeError:
                 pass
             else:
-                if isinstance(candidate, dict) and isinstance(candidate.get("results"), list):
-                    parsed = candidate
-            break
+                if isinstance(candidate, list):
+                    parsed = {"results": candidate}
     if parsed is None or not isinstance(parsed.get("results"), list):
-        raise ValueError(
+        raise _JudgeModelOutputError(
             f"Judge output must contain a JSON object with a results list; content prefix: {content[:200]!r}"
         )
 
@@ -195,6 +298,15 @@ def _parse_results(content: str, rubrics: list[dict[str, Any]], response: str) -
                 verdict="unmet",
                 score=0.0,
                 validation_error="met evidence is not a verbatim substring of the response",
+            )
+        elif verdict == "met" and len(evidence) > _MAX_EVIDENCE_CHARS:
+            # response_format 的 maxLength 只在 guided decoding 生效的后端有强制力；
+            # 判分侧独立执行同一上限，防止超长证据耗尽后续样本的输出预算。
+            result.update(
+                judge_verdict="met",
+                verdict="unmet",
+                score=0.0,
+                validation_error=f"met evidence exceeds {_MAX_EVIDENCE_CHARS} characters",
             )
         results_by_id[local_id] = result
     missing = set(expected) - set(results_by_id)
@@ -302,6 +414,9 @@ class RubricJudger(Judger):
             "question": _question_text(rollout_state.message),
             "rubrics": rubrics,
             "image_sources": image_sources,
+            "rollout_id": rollout_state.rollout_id,
+            "group_id": rollout_state.group_id,
+            "task_name": rollout_state.task_name,
         }
 
     async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
@@ -315,10 +430,18 @@ class RubricJudger(Judger):
         rubrics = cast(list[dict[str, Any]], payload["rubrics"])
         request = self._build_request(payload, rubrics)
         last_error: Exception | None = None
+        last_metadata: dict[str, Any] = {}
+        last_body: dict[str, Any] | None = None
+        started_at = time.monotonic()
         for attempt in range(self.max_retries + 1):
+            metadata: dict[str, Any] = {}
             try:
                 body = await self._request(request)
-                results = _parse_results(_response_content(body), rubrics, cast(str, payload["response"]))
+                last_body = body
+                metadata = _response_metadata(body)
+                content = _response_content(body)
+                metadata["content_chars"] = len(content)
+                results = _parse_results(content, rubrics, cast(str, payload["response"]))
                 weight_sum = sum(result["weight"] for result in results)
                 score = sum(result["weight"] * result["score"] for result in results) / weight_sum
                 invalid_evidence_count = sum("validation_error" in result for result in results)
@@ -330,12 +453,30 @@ class RubricJudger(Judger):
                     "invalid_evidence_count": invalid_evidence_count,
                     "judge_model": self.model,
                     "judge_attempts": attempt + 1,
+                    "judge_finish_reason": metadata["finish_reason"],
+                    "judge_usage": metadata["usage"],
+                    "judge_latency_seconds": time.monotonic() - started_at,
                 }
             except (httpx.HTTPError, ValueError, TypeError, KeyError, IndexError) as error:
                 last_error = error
+                last_metadata = metadata
                 if attempt < self.max_retries and self.retry_backoff:
                     await asyncio.sleep(self.retry_backoff * 2**attempt)
-        raise RuntimeError(f"Rubric judge failed after {self.max_retries + 1} attempts: {last_error}") from last_error
+        diagnostics = {
+            "rollout_id": payload.get("rollout_id"),
+            "group_id": payload.get("group_id"),
+            "task_name": payload.get("task_name"),
+            "error_type": _judge_error_type(cast(Exception, last_error), last_metadata),
+            "judge_latency_seconds": time.monotonic() - started_at,
+            **last_metadata,
+        }
+        debug_dump = _dump_judge_failure(payload, diagnostics, cast(Exception, last_error), last_body)
+        if debug_dump is not None:
+            diagnostics["debug_dump"] = str(debug_dump)
+        raise RuntimeError(
+            f"Rubric judge failed after {self.max_retries + 1} attempts; "
+            f"diagnostics={json.dumps(diagnostics, ensure_ascii=False, sort_keys=True)}; error={last_error}"
+        ) from last_error
 
     def _build_request(self, payload: dict[str, Any], rubrics: list[dict[str, Any]]) -> dict[str, Any]:
         content: list[dict[str, Any]] = [
@@ -385,7 +526,9 @@ class RubricJudger(Judger):
                                             "enum": [rubric["local_id"] for rubric in rubrics],
                                         },
                                         "verdict": {"type": "string", "enum": ["met", "unmet"]},
-                                        "evidence": {"type": "string"},
+                                        # 证据只需证明评分点的最短原文片段；不限制长度会让 judge
+                                        # 在长回复上逐段引用，耗尽 max_tokens 导致输出被截断。
+                                        "evidence": {"type": "string", "maxLength": _MAX_EVIDENCE_CHARS},
                                     },
                                     "required": ["local_id", "verdict", "evidence"],
                                     "additionalProperties": False,
