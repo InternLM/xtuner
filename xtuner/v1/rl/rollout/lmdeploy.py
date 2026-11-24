@@ -1,6 +1,7 @@
 import json
 import os
 from argparse import Namespace
+from dataclasses import fields
 from pathlib import Path
 from typing import Any, Dict, List, Mapping
 
@@ -63,8 +64,6 @@ def run_lmdeploy_server_wrapper(lmdeploy_config_namespace: Namespace):
 class LMDeployWorker(RolloutWorker):
     """A Ray actor that runs a text generation server using LMDeploy."""
 
-    supports_routed_experts_start_len: bool = True
-
     def __init__(
         self,
         config: RolloutConfig,
@@ -85,6 +84,13 @@ class LMDeployWorker(RolloutWorker):
             accelerator (str): The type of accelerator to use (e.g., "GPU").
                 Defaults to "GPU".
         """
+        from lmdeploy import GenerationConfig
+
+        self.supports_routed_experts_start_len = any(
+            field.name == "routed_experts_start_len" for field in fields(GenerationConfig)
+        )
+        if config.enable_return_routed_experts and not self.supports_routed_experts_start_len:
+            raise ValueError("R3 collection requires LMDeploy with GenerationConfig.routed_experts_start_len support")
         super().__init__(config, rank, master_addr, master_port, world_size, accelerator)
         self.server_func = run_lmdeploy_server_wrapper
         self.router_func_str = "lmdeploy.serve.proxy.proxy.proxy"

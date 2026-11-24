@@ -47,7 +47,7 @@ from .cross_weight_update_rollout import CrossWeightUpdateRolloutConfig
 from .health_manager import ROLLOUT_RAY_GET_TIMEOUT
 from .rollout_topology import RolloutTopology, ServerLaunchSpec
 from .session_server import SessionServerActor
-from .utils import PartialRolloutHandler, merge_incremental_routed_experts
+from .utils import PartialRolloutHandler, merge_incremental_routed_experts, routed_expert_row_count
 
 
 if TYPE_CHECKING:
@@ -980,7 +980,9 @@ class RolloutWorker(SingleAcceleratorWorker):
                             f"Invalid rollout response for request {uid} after {max_retries} attempts, marking as FAILED."
                         )
                         rollout_state.status = Status.FAILED
-                        rollout_state.error_msg = f"Invalid rollout response after {max_retries} attempts."
+                        rollout_state.error_msg = (
+                            rollout_state.error_msg or f"Invalid rollout response after {max_retries} attempts."
+                        )
                         return rollout_state
 
                     # Case 1.3: Invalid rollout response but we have retries left
@@ -1067,13 +1069,12 @@ class RolloutWorker(SingleAcceleratorWorker):
             and self.enable_return_routed_experts
             and rollout_state.sample_params.return_routed_experts
             and rollout_state.sample_params.return_token_ids
-            and not rollout_state.extra_fields.get("disable_routed_experts", False)
             and rollout_state.routed_experts is not None
         ):
             if self.enable_partial_rollout and rollout_state.response_ids:
                 # Image placeholders are compressed on the wire; routes use expanded positions.
                 prompt_ids = rollout_state.extra_fields.get("train_prompt_ids", rollout_state.prompt_ids)
-                return len(prompt_ids or []) + len(rollout_state.response_ids) - 1
+                return routed_expert_row_count(len(prompt_ids or []) + len(rollout_state.response_ids))
             # Built-in multi-turn loops append tokens; restarting clears routed_experts.
             return rollout_state.extra_fields.get("_r3_retained_num_rows", 0)
         return 0
@@ -1238,6 +1239,61 @@ class RolloutWorker(SingleAcceleratorWorker):
             result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
             return result
 
+    async def _postprocess_full_rollout(
+        self,
+        rollout_state: RolloutState,
+        *,
+        response: str,
+        response_ids: list[int],
+        logprobs: list[float],
+        routed_experts: Any,
+        finish_reason: str,
+        status: Status,
+        meta: dict,
+        routed_experts_start_len: int,
+    ) -> RolloutState:
+        """Replace the current turn while preserving its already retained routes.
+
+        Args:
+            rollout_state (RolloutState): Sample being updated.
+            response (str): Current turn's text.
+            response_ids (list[int]): Current turn's generated tokens.
+            logprobs (list[float]): Current turn's token logprobs.
+            routed_experts (Any): Current full routes or returned suffix.
+            finish_reason (str): Engine terminal reason.
+            status (Status): Parsed rollout status.
+            meta (dict): Engine prompt/completion token counts.
+            routed_experts_start_len (int): Offset requested from the engine.
+
+        Returns:
+            RolloutState: Updated sample with complete retained routing history.
+        """
+        if routed_experts_start_len and not response_ids:
+            # A non-partial empty abort restarts from the original prompt.
+            for ref in (rollout_state.routed_experts, routed_experts):
+                if isinstance(ref, ray.ObjectRef):
+                    free_object_refs([ref])
+            routed_experts = None
+        else:
+            routed_experts = await merge_incremental_routed_experts(
+                rollout_state.routed_experts,
+                routed_experts,
+                start_len=routed_experts_start_len,
+                total_len=routed_expert_row_count(meta["prompt_tokens"] + meta["completion_tokens"]),
+            )
+        rollout_state.extra_fields.pop("_r3_retained_num_rows", None)
+        if routed_experts is not None:
+            rollout_state.extra_fields["_r3_retained_num_rows"] = routed_expert_row_count(
+                meta["prompt_tokens"] + len(response_ids)
+            )
+        rollout_state.response = response
+        rollout_state.response_ids = response_ids
+        rollout_state.logprobs = logprobs
+        rollout_state.routed_experts = routed_experts
+        rollout_state.finish_reason = finish_reason
+        rollout_state.status = status
+        return rollout_state
+
     async def _safe_handle_response(self, rollout_state: RolloutState, http_response: httpx.Response) -> RolloutState:
         uid = rollout_state.group_id
 
@@ -1343,32 +1399,23 @@ class RolloutWorker(SingleAcceleratorWorker):
                         routed_experts_start_len=routed_experts_start_len,
                     )
                 else:
-                    if routed_experts_start_len and rollout_status == Status.ABORTED and not response_ids:
-                        # Non-partial replay restarts the request; no suffix is required after an empty abort.
-                        if isinstance(routed_experts, ray.ObjectRef):
-                            free_object_refs([routed_experts])
-                        routed_experts = None
-                    elif routed_experts_start_len:
-                        routed_experts = await merge_incremental_routed_experts(
-                            rollout_state.routed_experts,
-                            routed_experts,
-                            start_len=routed_experts_start_len,
-                            total_len=response["meta_info"]["prompt_tokens"]
-                            + response["meta_info"]["completion_tokens"]
-                            - 1,
-                        )
-                    rollout_state.extra_fields.pop("_r3_retained_num_rows", None)
-                    if routed_experts is not None:
-                        # R3 rows use expanded multimodal positions, not the compressed wire token count.
-                        rollout_state.extra_fields["_r3_retained_num_rows"] = (
-                            response["meta_info"]["prompt_tokens"] + len(response_ids) - 1
-                        )
-                    rollout_state.response = returned_response
-                    rollout_state.response_ids = response_ids
-                    rollout_state.logprobs = logprobs
-                    rollout_state.routed_experts = routed_experts
-                    rollout_state.finish_reason = finish_reason
-                    rollout_state.status = rollout_status
+                    rollout_state = await self._postprocess_full_rollout(
+                        rollout_state,
+                        response=returned_response,
+                        response_ids=response_ids,
+                        logprobs=logprobs,
+                        routed_experts=routed_experts,
+                        finish_reason=finish_reason,
+                        status=rollout_status,
+                        meta=response["meta_info"],
+                        routed_experts_start_len=routed_experts_start_len,
+                    )
+                return rollout_state
+            except (ValueError, AssertionError) as e:
+                error_msg = f"R3 response rejected for rollout {uid}: {e}"
+                self.logger.error(error_msg)
+                rollout_state.status = Status.FAILED
+                rollout_state.error_msg = error_msg
                 return rollout_state
             except KeyError as e:
                 response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
@@ -1377,10 +1424,6 @@ class RolloutWorker(SingleAcceleratorWorker):
             except IndexError as e:
                 response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
                 error_msg = f"Index error {e} while processing response {response_for_log} for {uid}"
-                raise RuntimeError(error_msg)
-            except AssertionError as e:
-                response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
-                error_msg = f"AssertionError: {e} when processing response {response_for_log} for {uid}"
                 raise RuntimeError(error_msg)
             except json.JSONDecodeError as e:
                 error_msg = f"JSONDecodeError: {e} when processing response {response} for {uid}"

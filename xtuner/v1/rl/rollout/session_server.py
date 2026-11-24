@@ -18,6 +18,7 @@ from .chat_template import canonicalize_messages_for_chat_template
 from .cross_weight_update_rollout import CrossWeightUpdateRolloutConfig
 from .request_gate import RequestGate, RequestLease, SettlementReceipt
 from .trace_store import TokenizedSegment, get_store
+from .utils import routed_expert_row_count
 
 
 FMT_OPENAI = "openai"
@@ -315,8 +316,11 @@ class SessionServer:
         port (int): Port for this session server to listen on.
         request_timeout (float): Total timeout in seconds for forwarding requests to the worker.
         read_bufsize (int): Buffer limit for line reader in ClientSession. Default is 64MB (2**26).
+        enable_return_routed_experts (bool): Whether the worker collects routing data.
+        supports_routed_experts_start_len (bool): Whether the worker accepts routing offsets.
     """
 
+    supports_routed_experts_start_len: bool = False
     request_gate: RequestGate | None = None
 
     def __init__(
@@ -355,7 +359,8 @@ class SessionServer:
 
     async def on_request(self, req_body: dict, fmt: str, *, trace_enabled: bool = True) -> dict:
         """Normalize the request to drive the prefix cache + inject extension
-        fields.
+        fields. Trace requests derive routing offsets from complete retained nodes;
+        evaluation requests strip caller-provided routing offsets.
 
         When ``trace_enabled`` is False (evaluate mode), forward the request
         without token-in-token-out rewriting, so the upstream worker handles
@@ -379,7 +384,9 @@ class SessionServer:
         # → ``return_logprob`` rename and stripping the SessionServer-only
         # ``session_id`` field.
         if not trace_enabled:
-            worker_req = {k: v for k, v in req_body.items() if k not in _SESSION_SERVER_ONLY_KEYS}
+            worker_req = {
+                k: v for k, v in req_body.items() if k not in _SESSION_SERVER_ONLY_KEYS | {"routed_experts_start_len"}
+            }
             if "logprobs" in worker_req:
                 worker_req.setdefault("return_logprob", worker_req.pop("logprobs"))
             if not _bool_request_value(worker_req.get("return_logprob"), False):
@@ -444,13 +451,13 @@ class SessionServer:
         # Client-provided crops cannot authorize dropping training history.
         worker_req.pop("routed_experts_start_len", None)
         if (
-            getattr(self, "supports_routed_experts_start_len", False)
+            self.supports_routed_experts_start_len
             and self.enable_return_routed_experts
             and nodes
             and all(node.value.expert_key is not None for node in nodes)
         ):
             # Full responses are shifted by one dummy row below; start at prefix_len - 1.
-            start_len = sum(len(node.value.token_ids) for node in nodes) - 1
+            start_len = routed_expert_row_count(sum(len(node.value.token_ids) for node in nodes))
             if start_len > 0:
                 worker_req["routed_experts_start_len"] = start_len
         worker_req["return_token_ids"] = True
@@ -470,8 +477,13 @@ class SessionServer:
         return worker_req
 
     async def on_response(
-        self, worker_resp: dict, fmt: str, orig_req_body: dict, *,
-        routed_experts_start_len: int = 0, lease: RequestLease | None = None
+        self,
+        worker_resp: dict,
+        fmt: str,
+        orig_req_body: dict,
+        *,
+        routed_experts_start_len: int = 0,
+        lease: RequestLease | None = None,
     ) -> dict:
         """Trace the assistant turn into ``trace_store`` (always in OpenAI
         shape).
@@ -485,6 +497,7 @@ class SessionServer:
                 conversation for OpenAI-shape tracing because the wire body
                 forwarded to the worker no longer carries ``messages`` /
                 ``system`` / ``tools``.
+            routed_experts_start_len (int): Expanded routing rows skipped by the worker.
             lease (RequestLease | None): Admission lease of this request. Its identity is written to every
                 trace node; a non-``None`` lease makes routed-expert refs shared with sibling segments.
 
@@ -567,11 +580,13 @@ class SessionServer:
         response_expert: Any = None
         if raw_routed_expert is not None:
             raw_routed_expert = await self._decode_routed_experts(raw_routed_expert)
-            expected_len = prefix_len + delta_len + len(output_token_ids) - 1 - routed_experts_start_len
+            expected_len = (
+                routed_expert_row_count(prefix_len + delta_len + len(output_token_ids)) - routed_experts_start_len
+            )
             if len(raw_routed_expert) != expected_len:
                 raise ValueError("R3 response length does not match the requested offset")
             if routed_experts_start_len:
-                if routed_experts_start_len != prefix_len - 1 or not all(
+                if routed_experts_start_len != routed_expert_row_count(prefix_len) or not all(
                     node.value.expert_key is not None for node in prefix_nodes
                 ):
                     raise ValueError("Incremental R3 requires an unchanged, complete trace prefix")
@@ -583,7 +598,6 @@ class SessionServer:
                 topk_experts = raw_routed_expert.shape[2]
                 dummy_expert = np.full((1, num_layers, topk_experts), 0, dtype=raw_routed_expert.dtype)
                 raw_routed_expert = np.concatenate([dummy_expert, raw_routed_expert], axis=0)
-            assert route_base + delta_len + len(output_token_ids) == len(raw_routed_expert)
             if delta_len > 0:
                 delta_expert = ray.put(raw_routed_expert[route_base : route_base + delta_len])
             response_expert = ray.put(raw_routed_expert[route_base + delta_len :])
@@ -936,7 +950,10 @@ class SessionServer:
                 try:
                     trace_start = time.perf_counter()
                     await self.on_response(
-                        response_data, fmt, orig_req_body, lease=lease,
+                        response_data,
+                        fmt,
+                        orig_req_body,
+                        lease=lease,
                         routed_experts_start_len=request_data.get("routed_experts_start_len") or 0,
                     )
                     trace_s = time.perf_counter() - trace_start

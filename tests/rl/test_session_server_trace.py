@@ -367,7 +367,7 @@ class TestIncrementalSessionRoutedExperts(unittest.IsolatedAsyncioTestCase):
 
         from xtuner.v1.rl.rollout.trace_store import TokenizedSegment
 
-        async def run(incremental):
+        async def run(incremental, leased):
             server = SessionServer.__new__(SessionServer)
             server.enable_return_routed_experts = True
             server.supports_routed_experts_start_len = incremental
@@ -401,6 +401,7 @@ class TestIncrementalSessionRoutedExperts(unittest.IsolatedAsyncioTestCase):
                 "choices": [
                     {
                         "message": {"role": "assistant", "content": "response"},
+                        "finish_reason": "stop",
                         "output_ids": [16, 17],
                         "output_token_logprobs": [[-0.1, 16], [-0.2, 17]],
                         "routed_experts": "new-ref",
@@ -409,15 +410,24 @@ class TestIncrementalSessionRoutedExperts(unittest.IsolatedAsyncioTestCase):
             }
             with patch.object(session_server_module.ray, "put", side_effect=lambda x: x):
                 await server.on_response(
-                    response, session_server_module.FMT_OPENAI, request, routed_experts_start_len=start
+                    response,
+                    session_server_module.FMT_OPENAI,
+                    request,
+                    routed_experts_start_len=start,
+                    lease=SimpleNamespace(request_id="request-1", model_step=3) if leased else None,
                 )
             return inserted
 
-        legacy, incremental = await run(False), await run(True)
-        self.assertEqual(len(incremental), 2)
-        for left, right in zip(legacy, incremental):
-            self.assertEqual(left.token_ids, right.token_ids)
-            np.testing.assert_array_equal(left.expert_key, right.expert_key)
+        for leased in (False, True):
+            with self.subTest(leased=leased):
+                legacy, incremental = await run(False, leased), await run(True, leased)
+                self.assertEqual(len(incremental), 2)
+                for left, right in zip(legacy, incremental):
+                    self.assertEqual(left.token_ids, right.token_ids)
+                    np.testing.assert_array_equal(left.expert_key, right.expert_key)
+                    self.assertEqual(right.request_id, "request-1" if leased else None)
+                    self.assertEqual(right.model_step, 3 if leased else None)
+                    self.assertEqual(right.routed_experts_shared, leased)
 
     async def test_crop_requires_complete_trace_and_verified_backend(self):
         from xtuner.v1.rl.rollout.trace_store import TokenizedSegment
@@ -434,3 +444,19 @@ class TestIncrementalSessionRoutedExperts(unittest.IsolatedAsyncioTestCase):
             server.store = SimpleNamespace(search=SimpleNamespace(remote=AsyncMock(return_value=("prefix", [node]))))
             payload = await server.on_request({"session_id": "s", "messages": []}, session_server_module.FMT_OPENAI)
             self.assertNotIn("routed_experts_start_len", payload)
+
+
+class TestEvaluateOffsetHandling(unittest.IsolatedAsyncioTestCase):
+    async def test_evaluation_strips_client_crop_without_mutating_request(self):
+        server = SessionServer.__new__(SessionServer)
+        server.enable_return_routed_experts = False
+        request = {
+            "model": "test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "return_token_ids": False,
+            "routed_experts_start_len": 123,
+        }
+        forwarded = await server.on_request(request, session_server_module.FMT_OPENAI, trace_enabled=False)
+        self.assertNotIn("routed_experts_start_len", forwarded)
+        self.assertEqual(request["routed_experts_start_len"], 123)
+        self.assertFalse(forwarded["return_token_ids"])

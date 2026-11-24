@@ -2,6 +2,8 @@
 
 import asyncio
 import threading
+from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -11,7 +13,7 @@ import pytest
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.rollout.lmdeploy import LMDeployWorker
 from xtuner.v1.rl.rollout.sglang import SGLangWorker
-from xtuner.v1.rl.rollout.utils import PartialRolloutHandler
+from xtuner.v1.rl.rollout.utils import PartialRolloutHandler, merge_incremental_routed_experts, routed_expert_row_count
 from xtuner.v1.rl.rollout.worker import RolloutWorker
 
 
@@ -37,6 +39,7 @@ def _state() -> RolloutState:
 
 def _worker(worker_type: type = LMDeployWorker, *, partial: bool = True, capture: bool = True):
     worker = worker_type.__new__(worker_type)
+    worker.supports_routed_experts_start_len = worker_type is LMDeployWorker
     worker.enable_return_routed_experts = capture
     worker.enable_partial_rollout = partial
     worker.model_name = "test"
@@ -196,8 +199,9 @@ class TestIncrementalRoutedExperts:
             state.routed_experts = history
             wrong = _ObjectRef(np.zeros((4, 2, 2), dtype=np.uint16))
             worker._decode_routed_experts.return_value = wrong
-            with pytest.raises(RuntimeError, match="check server routed_experts_start_len support"):
-                await worker._safe_handle_response(state, _response(4, [5]))
+            result = await worker._safe_handle_response(state, _response(4, [5]))
+            assert result.status == Status.FAILED
+            assert "check server routed_experts_start_len support" in result.error_msg
             free.assert_called_once_with([wrong])
             assert state.routed_experts is history
 
@@ -213,7 +217,7 @@ class TestIncrementalRoutedExperts:
         state = _state()
         state.response_ids = [3, 4]
         state.routed_experts = np.zeros((3, 2, 2), dtype=np.uint16)
-        with pytest.raises(ValueError, match="retained full history"):
+        with pytest.raises(ValueError, match="offset does not match"):
             asyncio.run(
                 PartialRolloutHandler().postprocess(
                     state,
@@ -230,7 +234,7 @@ class TestIncrementalRoutedExperts:
             )
 
     def test_initial_crop_is_rejected(self) -> None:
-        with pytest.raises(ValueError, match="retained full history"):
+        with pytest.raises(ValueError, match="requires retained history"):
             asyncio.run(
                 PartialRolloutHandler().postprocess(
                     _state(),
@@ -359,7 +363,7 @@ class TestNonPartialIncrementalRoutedExperts:
             state = _state()
             state.tokens = [1, 2, 3, 4, 80, 81]
             state.extra_fields["_r3_retained_num_rows"] = 3
-            state.routed_experts = np.zeros((3, 2, 2), dtype=np.uint16)
+            state.routed_experts = _ObjectRef(np.zeros((3, 2, 2), dtype=np.uint16))
             worker._decode_routed_experts.return_value = _ObjectRef(np.zeros((0, 2, 2), dtype=np.uint16))
             state = await worker._safe_handle_response(state, _response(6, [], routes="key" if has_routes else None))
             assert state.status == Status.ABORTED
@@ -374,4 +378,107 @@ class TestNonPartialIncrementalRoutedExperts:
             patch("xtuner.v1.rl.rollout.worker.free_object_refs") as free,
         ):
             asyncio.run(run())
-            assert free.call_count == int(has_routes)
+            assert free.call_count == 1 + int(has_routes)
+
+
+@pytest.mark.parametrize("tokens, expected", [(0, 0), (1, 0), (4, 3), (128, 127)])
+def test_routed_expert_row_count(tokens, expected):
+    assert routed_expert_row_count(tokens) == expected
+
+
+@pytest.mark.parametrize("supported, capture", [(False, True), (False, False), (True, True)])
+def test_lmdeploy_capability_is_checked_before_worker_startup(supported, capture):
+    @dataclass
+    class LegacyGenerationConfig:
+        max_new_tokens: int = 32
+
+    @dataclass
+    class OffsetGenerationConfig:
+        routed_experts_start_len: int = 0
+
+    config = SimpleNamespace(
+        enable_return_routed_experts=capture, tokenizer_path="test", api_key="test", model_name="test"
+    )
+
+    def parent_init(self, *args):
+        self.config = config
+        self.endpoints = {}
+
+    generation_type = OffsetGenerationConfig if supported else LegacyGenerationConfig
+    with (
+        patch("lmdeploy.GenerationConfig", generation_type),
+        patch.object(RolloutWorker, "__init__", parent_init),
+        patch("xtuner.v1.rl.rollout.lmdeploy.AutoTokenizer.from_pretrained"),
+    ):
+        if capture and not supported:
+            with pytest.raises(ValueError, match="R3 collection requires LMDeploy"):
+                LMDeployWorker(config, 0, "127.0.0.1", 1, 1)
+        else:
+            worker = LMDeployWorker(config, 0, "127.0.0.1", 1, 1)
+            assert worker.supports_routed_experts_start_len is supported
+
+
+def test_full_transfer_passes_through_and_releases_old_history():
+    old = _ObjectRef(np.zeros((3, 2, 2), dtype=np.uint16))
+    current = _ObjectRef(np.ones((5, 2, 2), dtype=np.uint16))
+    with (
+        patch("xtuner.v1.rl.rollout.utils.RayObjectRef", _ObjectRef),
+        patch("xtuner.v1.rl.rollout.utils.free_object_refs") as free,
+    ):
+        result = asyncio.run(merge_incremental_routed_experts(old, current, start_len=0, total_len=5))
+        assert result is current
+        free.assert_called_once_with([old])
+
+
+def test_nonpartial_invalid_suffix_fails_only_the_sample():
+    async def run():
+        worker = _worker(partial=False)
+        state = _state()
+        state.tokens = [1, 2, 3, 4]
+        state.extra_fields["_r3_retained_num_rows"] = 3
+        state.routed_experts = _ObjectRef(np.zeros((3, 2, 2), dtype=np.uint16))
+        worker._decode_routed_experts.return_value = _ObjectRef(np.zeros((4, 2, 2), dtype=np.uint16))
+        failed = await worker._safe_handle_response(state, _response(4, [5], finish="length"))
+        assert failed.status == Status.FAILED
+        assert "Incremental R3 length mismatch" in failed.error_msg
+        # A sibling sample still completes on the same worker.
+        worker._decode_routed_experts.return_value = _ObjectRef(np.zeros((2, 2, 2), dtype=np.uint16))
+        completed = await worker._safe_handle_response(_state(), _response(2, [5], finish="length"))
+        assert completed.status == Status.COMPLETED
+
+    with (
+        patch("xtuner.v1.rl.rollout.worker.ray.ObjectRef", _ObjectRef),
+        patch("xtuner.v1.rl.rollout.utils.RayObjectRef", _ObjectRef),
+        patch("xtuner.v1.rl.rollout.utils.free_object_refs"),
+    ):
+        asyncio.run(run())
+
+
+def test_native_generate_contains_route_failure_and_preserves_diagnostic():
+    async def run():
+        from xtuner.v1.utils.httpx_utils import HttpRequestResult
+
+        worker = _worker(partial=False)
+        worker.server_url = "http://test"
+        worker.endpoints = {"generate": "generate"}
+        worker.eos_token = []
+        worker.config = SimpleNamespace(api_key="test", max_retry_per_sample=0)
+        state = _state()
+        state.tokens = [1, 2, 3, 4]
+        state.extra_fields["_r3_retained_num_rows"] = 3
+        state.routed_experts = np.zeros((3, 2, 2), dtype=np.uint16)
+        worker._decode_routed_experts.return_value = _ObjectRef(np.zeros((4, 2, 2), dtype=np.uint16))
+        worker._safe_post_request = AsyncMock(
+            return_value=HttpRequestResult(response=_response(4, [5], finish="length"))
+        )
+        result = await worker.generate(state)
+        assert result.status == Status.FAILED
+        assert "Incremental R3 length mismatch" in result.error_msg
+        assert result.routed_experts is None  # Native generate finally invalidates failed data.
+
+    with (
+        patch("xtuner.v1.rl.rollout.worker.ray.ObjectRef", _ObjectRef),
+        patch("xtuner.v1.rl.rollout.utils.RayObjectRef", _ObjectRef),
+        patch("xtuner.v1.rl.rollout.utils.free_object_refs"),
+    ):
+        asyncio.run(run())
