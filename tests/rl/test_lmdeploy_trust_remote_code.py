@@ -12,6 +12,7 @@ from xtuner.v1.rl.rollout.lmdeploy import (
     LMDeployWorker,
     _build_ssm_prefix_cache_engine_config,
     _model_dir_declares_custom_code,
+    _ssm_prefix_cache_config_is_active,
 )
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 
@@ -111,3 +112,14 @@ def test_ssm_prefix_cache_engine_config_requires_native_fields():
     assert _build_ssm_prefix_cache_engine_config(config, _SupportedPytorchEngineConfig) == expected
     with pytest.raises(RuntimeError, match="does not support the SSM prefix-checkpoint controls"):
         _build_ssm_prefix_cache_engine_config(config, _LegacyPytorchEngineConfig)
+
+
+def test_ssm_prefix_cache_config_is_inactive_for_default_disabled_rollout():
+    config = RolloutConfig(
+        model_path="/tmp/model",
+        context_length=128,
+        rollout_max_batch_size_per_instance=1,
+    )
+    assert _ssm_prefix_cache_config_is_active(config) is False
+    assert _ssm_prefix_cache_config_is_active(config.model_copy(update={"enable_prefix_caching": True})) is True
+    assert _ssm_prefix_cache_config_is_active(config.model_copy(update={"prefix_cache_state_budget": 1})) is True
