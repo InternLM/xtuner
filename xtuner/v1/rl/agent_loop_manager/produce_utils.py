@@ -16,6 +16,7 @@ from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     Status,
     calculate_group_effective_response_masks,
+    discard_rollout_state,
     get_group_status,
     validate_rollout_group,
 )
@@ -45,35 +46,42 @@ GROUP_GENERATE_TIME_KEY = "group_generate_time_s"
 PERIODIC_ABORT_INTERVAL_S = 5.0
 
 
-def normalize_retry_group_inputs(states: list[RolloutState]) -> list[RolloutState]:
+def normalize_retry_group_inputs(
+    states: list[RolloutState],
+) -> tuple[list[RolloutState], list[RolloutState]]:
     """Normalize expired sessions before handing a group to an agent loop.
 
-    Keep one expired state for each retried session, discard that session's old
-    siblings, and retain states from sessions that are not being retried.
+    Keep one expired state for each retried session, return that session's old
+    siblings separately, and retain states from sessions that are not being
+    retried. The caller owns the discarded states and must release their
+    rollout references before dropping them.
 
     Args:
         states (list[RolloutState]): The sampled rollout group.
 
     Returns:
-        list[RolloutState]: Inputs safe to pass to the agent loop.
+        tuple[list[RolloutState], list[RolloutState]]: Inputs safe to pass to
+            the agent loop and states removed during normalization.
     """
     retry_sessions = {
         state.session_id for state in states if state.status == Status.EXPIRED and state.session_id is not None
     }
     if not retry_sessions:
-        return states
+        return states, []
 
     selected: list[RolloutState] = []
+    dropped: list[RolloutState] = []
     retried_sessions: set[int] = set()
     for state in states:
         session_id = state.session_id
         if session_id in retry_sessions:
             if state.status != Status.EXPIRED or session_id in retried_sessions:
+                dropped.append(state)
                 continue
             assert session_id is not None
             retried_sessions.add(session_id)
         selected.append(state)
-    return selected
+    return selected, dropped
 
 
 class _ProgressDisplayer:
@@ -184,7 +192,23 @@ class BaseProduceContext:
             return await self.sampler.sample(task_name=self.task_name)
         group_status = [Status.EXPIRED, Status.ABORTED] if from_expired_pool else [Status.ABORTED]
         states = await self.sampler.sample(task_name=self.task_name, group_status=group_status)
-        return normalize_retry_group_inputs(states) if from_expired_pool else states
+        if not from_expired_pool:
+            return states
+
+        selected, dropped = normalize_retry_group_inputs(states)
+        if dropped:
+            # Dropped siblings normally share the retry session with ``selected``.
+            # Do not release the whole trace session here: the retained expired
+            # state still needs it for the new generation. Only discard this
+            # holder's ObjectRefs and payload.
+            for state in dropped:
+                discard_rollout_state(state)
+            logger.info(
+                "Discarded %d duplicate retry states for task=%r before generation",
+                len(dropped),
+                self.task_name,
+            )
+        return selected
 
     async def generate_group(
         self,

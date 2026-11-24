@@ -161,20 +161,15 @@ class AgentInLocalhostLoop(AgentLoop):
             tasks.append(task)
 
         generated = list(await asyncio.gather(*tasks))
-        samples, fresh_state_ids = _merge_generated_state_slots(
+        samples = _merge_generated_state_slots(
             rollout_state,
             retry_indices,
             [[state] for state in generated],
         )
         samples = _drop_failed_train_samples(samples, self.mode)
         samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
-        fresh_indices = [
-            index
-            for index, state in enumerate(samples)
-            if id(state) in fresh_state_ids and state.status == Status.COMPLETED
-        ]
-        if fresh_indices:
-            await self._teacher_scorer.on_group_ready([samples[index] for index in fresh_indices])
+        if samples:
+            await self._teacher_scorer.on_group_ready(samples)
         return self.canonicalize_train_fields(samples)
 
     def canonicalize_train_fields(self, group: list[RolloutState]) -> list[RolloutState]:

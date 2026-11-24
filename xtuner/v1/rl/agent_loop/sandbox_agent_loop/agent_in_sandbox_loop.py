@@ -324,14 +324,11 @@ class AgentInSandboxLoop(AgentLoop):
             state.sample_params = self.sample_params
         # Cancellation must reach every sample and wait for all Runner.finally cleanups before this group ends.
         sample_groups = await await_cancellable_tasks(generate_one(state) for state in retry_states)
-        samples, fresh_state_ids = _merge_generated_state_slots(rollout_state, retry_indices, sample_groups)
+        samples = _merge_generated_state_slots(rollout_state, retry_indices, sample_groups)
         samples = _drop_failed_train_samples(samples, self.mode, self.min_valid_attempts)
         samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
-        fresh_samples = [
-            state for state in samples if id(state) in fresh_state_ids and state.status == Status.COMPLETED
-        ]
-        if fresh_samples:
-            await self._teacher_scorer.on_group_ready(fresh_samples)
+        if samples:
+            await self._teacher_scorer.on_group_ready(samples)
         return self.canonicalize_train_fields(samples)
 
     def canonicalize_train_fields(self, group: list[RolloutState]) -> list[RolloutState]:

@@ -54,9 +54,8 @@ def _merge_generated_state_slots(
     states: list[RolloutState],
     retry_indices: list[int],
     generated_slots: list[list[RolloutState]],
-) -> tuple[list[RolloutState], set[int]]:
-    """Restore generated slots to input order and return fresh state
-    identities.
+) -> list[RolloutState]:
+    """Restore generated slots to input order.
 
     A regular AgentLoop produces one state per input slot, while an agentic sandbox may expand one input into multiple
     trainable segments. Expanded states stay adjacent at the original input position.
@@ -65,11 +64,10 @@ def _merge_generated_state_slots(
         raise ValueError(f"Generated slot count mismatch: expected {len(retry_indices)}, got {len(generated_slots)}")
 
     generated_by_index = dict(zip(retry_indices, generated_slots))
-    fresh_state_ids = {id(state) for slot in generated_slots for state in slot}
     merged: list[RolloutState] = []
     for index, state in enumerate(states):
         merged.extend(generated_by_index.get(index, [state]))
-    return merged, fresh_state_ids
+    return merged
 
 
 def maybe_filter_invalid_sample(
@@ -305,8 +303,8 @@ class AgentLoop(ABC):
             ordering described here. Without a validity check, Teacher scoring should
             start as soon as each newly generated sample finishes. With a validity check,
             only a completed group that passes filtering should be sent to the Teacher.
-            Group-level judging receives the full group; deferred Teacher scoring only
-            receives newly generated samples.
+            Group-level judging and deferred Teacher scoring receive the full group;
+            the scorer skips completed states that already have teacher targets.
         """
 
         retry_indices, retry_states = _select_retry_state_slots(rollout_state)
@@ -318,7 +316,7 @@ class AgentLoop(ABC):
             return state
 
         generated_group = list(await asyncio.gather(*(create_task(generate_one(state)) for state in retry_states)))
-        group, _ = _merge_generated_state_slots(
+        group = _merge_generated_state_slots(
             rollout_state,
             retry_indices,
             [[state] for state in generated_group],
@@ -332,10 +330,8 @@ class AgentLoop(ABC):
             group = await self.run_judger(group)
 
         group = maybe_filter_invalid_sample(group, self.is_valid_sample_fn, self.logger)
-        # 仅对本轮新生成的样本进行 Teacher 评分，避免重复评分已复用的 COMPLETED 样本。
-        generated_group = [group[index] for index in retry_indices]
-        if generated_group:
-            await self._teacher_scorer.on_group_ready(generated_group)
+        if group:
+            await self._teacher_scorer.on_group_ready(group)
         return self.canonicalize_train_fields(group)
 
     def canonicalize_train_fields(self, group: list[RolloutState]) -> list[RolloutState]:

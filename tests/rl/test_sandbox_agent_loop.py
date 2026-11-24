@@ -75,7 +75,7 @@ class TestSandboxGenerateGroup(unittest.IsolatedAsyncioTestCase):
         samples = await loop.generate_group([retry, reused])
 
         self.assertEqual([state.rollout_id for state in samples], [11, 12, 2])
-        loop._teacher_scorer.on_group_ready.assert_awaited_once_with([first_segment, second_segment])
+        loop._teacher_scorer.on_group_ready.assert_awaited_once_with([first_segment, second_segment, reused])
 
 
 class TestRetryGroupInputNormalization(unittest.TestCase):
@@ -99,25 +99,30 @@ class TestRetryGroupInputNormalization(unittest.TestCase):
             no_session_completed,
         ]
 
-        normalized = normalize_retry_group_inputs(states)
+        normalized, dropped = normalize_retry_group_inputs(states)
 
         self.assertEqual(
             normalized, [expired_first, untouched, other_expired, no_session_expired, no_session_completed]
         )
+        self.assertEqual(dropped, [completed_sibling, expired_sibling, aborted_sibling])
 
     def test_keeps_aborted_session_unchanged(self):
         states = [_state(1, 10, Status.COMPLETED), _state(2, 10, Status.ABORTED)]
 
-        self.assertIs(normalize_retry_group_inputs(states), states)
+        normalized, dropped = normalize_retry_group_inputs(states)
+
+        self.assertIs(normalized, states)
+        self.assertEqual(dropped, [])
 
     def test_keeps_one_expired_entry_per_session_in_original_order(self):
         first_session = _state(1, 10, Status.EXPIRED)
         another_session = _state(2, 20, Status.EXPIRED)
         duplicate_session = _state(3, 10, Status.EXPIRED)
 
-        normalized = normalize_retry_group_inputs([first_session, another_session, duplicate_session])
+        normalized, dropped = normalize_retry_group_inputs([first_session, another_session, duplicate_session])
 
         self.assertEqual(normalized, [first_session, another_session])
+        self.assertEqual(dropped, [duplicate_session])
 
 
 if __name__ == "__main__":

@@ -81,7 +81,9 @@ class _TeacherScorer:
     async def on_group_ready(self, group: list[RolloutState]) -> None:
         if not self.defers_to_filter or get_group_status(group) != Status.COMPLETED:
             return
-        await asyncio.gather(*(self.teacher.compute_logprobs(state) for state in group))
+        await asyncio.gather(
+            *(self.teacher.compute_logprobs(state) for state in group if state.teacher_targets is None)
+        )
 
 
 class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
@@ -111,6 +113,11 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
             input_ids=[uid, uid + 10],
             labels=[-100, uid + 10],
             logprobs=state.logprobs,
+        )
+        state.teacher_targets = TeacherTargets(
+            kind="sampled",
+            tokens=[uid + 10],
+            logprobs=[-0.5],
         )
         return state
 
@@ -253,7 +260,7 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result[0], pending)
         self.assertIs(result[1], completed)
 
-    async def test_mixed_group_judges_full_group_but_teaches_only_fresh_samples(self):
+    async def test_mixed_group_judges_full_group_but_skips_scored_completed_samples(self):
         events: list[str] = []
         judger = _BatchJudger(events)
         loop = self._build_loop(
@@ -272,6 +279,25 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events, ["judge", "filter", "teacher"])
         teacher.compute_logprobs.assert_awaited_once_with(result[1])
         self.assertEqual([state.rollout_id for state in result], [1, 2])
+
+    async def test_retry_scores_retained_completed_state_without_teacher_targets(self):
+        loop = self._build_loop(
+            {2: Status.COMPLETED},
+            is_valid_sample_fn=lambda _samples: True,
+        )
+        teacher = self._bind_teacher(loop, [])
+        retained = self._completed_state(1)
+        retained.teacher_targets = None
+        pending = self._state(2)
+        pending.extra_fields["origin_data_source"] = "math"
+
+        result = await loop.generate_group([retained, pending])
+
+        self.assertEqual(
+            {call.args[0].rollout_id for call in teacher.compute_logprobs.await_args_list},
+            {1, 2},
+        )
+        self.assertTrue(all(state.teacher_targets is not None for state in result))
 
     async def test_generate_filters_completed_group_after_batch_judge_and_logs(self):
         filtered_rewards = []

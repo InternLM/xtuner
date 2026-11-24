@@ -408,9 +408,13 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             batch_size=1,
         )
 
-        result = await ctx.sample_group(from_expired_pool=True)
+        with patch(
+            "xtuner.v1.rl.agent_loop_manager.produce_utils.discard_rollout_state"
+        ) as discard_state:
+            result = await ctx.sample_group(from_expired_pool=True)
 
         self.assertEqual(result, [retried, untouched])
+        discard_state.assert_called_once_with(completed_sibling)
         sampler.sample.assert_awaited_once_with(
             task_name="normalized_retry_inputs",
             group_status=[Status.EXPIRED, Status.ABORTED],

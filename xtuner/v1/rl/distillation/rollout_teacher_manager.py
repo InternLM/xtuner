@@ -505,8 +505,8 @@ class RolloutTeacherScorer:
         return await self._compute_logprobs(state)
 
     async def on_group_ready(self, group: list[RolloutState]) -> None:
-        """Score a completed group in place after validity filtering when
-        configured to defer."""
+        """Score pending states in a completed group after validity
+        filtering."""
         if (
             self._closed
             or not self._defers_to_filter
@@ -514,8 +514,9 @@ class RolloutTeacherScorer:
             or get_group_status(group) != Status.COMPLETED
         ):
             return
+        pending = [state for state in group if state.teacher_targets is None]
         await asyncio.gather(
-            *(create_task(self._compute_logprobs(state)) for state in group),
+            *(create_task(self._compute_logprobs(state)) for state in pending),
         )
 
     async def aclose(self) -> None:
