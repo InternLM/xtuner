@@ -510,8 +510,7 @@ class ReplayBuffer:
 
     @staticmethod
     async def _discard_non_retryable_expired_groups(groups: list[list[RolloutState]]) -> None:
-        """Release non-retryable trace sessions in one RPC, then discard
-        groups."""
+        """Release non-retryable trace sessions in one RPC, then discard groups."""
         if not groups:
             return
 
@@ -592,7 +591,7 @@ class ReplayBuffer:
         retryable_expired_session_ids: list[str] = []
         # 只有确认从 storage 删除后才能 discard；delete 失败时记录可能仍在 buffer。
         # finally 只保证必要清理，不会吞掉 delete、update 或 retry-empty 的异常。
-        non_retryable_deleted = False
+        storage_deleted = False
         try:
             async with self._lock:
                 updated_records: list[StorageItem] = []
@@ -625,13 +624,16 @@ class ReplayBuffer:
                                 continue
                         updated_records.append(replace(record, status=status, staleness=staleness))
                     expired_counts[task_name] = expired_count
-                await self._storage.delete(deleted_uids)
-                non_retryable_deleted = True
-                await self._storage.update(updated_records)
+                # Do not publish EXPIRED until the old trace is gone. Cleanup
+                # failures propagate to the top-level supervisor, which owns
+                # the stop/restart policy for the process or actor.
                 if retryable_expired_session_ids:
                     await empty_existing_sessions(retryable_expired_session_ids)
+                await self._storage.delete(deleted_uids)
+                storage_deleted = True
+                await self._storage.update(updated_records)
         finally:
-            if non_retryable_deleted:
+            if storage_deleted:
                 await self._discard_non_retryable_expired_groups(non_retryable_expired_groups)
         return expired_counts
 

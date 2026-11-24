@@ -527,7 +527,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 assert len(replay_buffer) == 1
                 assert await replay_buffer.get(1, "non_retryable_task", Status.EXPIRED) == []
 
-    async def test_refresh_staleness_discards_deleted_groups_when_retry_empty_fails(self):
+    async def test_refresh_staleness_propagates_retry_empty_failure(self):
         replay_buffer = AsyncReplayBufferConfig().build()
         non_retryable_stale = make_rollout_state(
             1,
@@ -535,14 +535,23 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
             response_model_steps=[1],
             mm_info={"pixel_values": np.ones((2, 3), dtype=np.float32)},
         )
-        retryable_stale = make_rollout_state(2, session_id=202, response_model_steps=[1])
+        # Exercise the already-EXPIRED path in the fail-fast cleanup flow.
+        retryable_stale = make_rollout_state(
+            2,
+            session_id=202,
+            status=Status.EXPIRED,
+            response_model_steps=[1],
+        )
+        fresh = make_rollout_state(3, session_id=203, response_model_steps=[4])
         await replay_buffer.put([non_retryable_stale], "non_retryable_task")
         await replay_buffer.put([retryable_stale], "retryable_task")
+        await replay_buffer.put([fresh], "fresh_task")
 
         with (
+            patch.object(replay_buffer._storage, "delete", new=AsyncMock()) as delete,
             patch(
                 "xtuner.v1.rl.rollout.trace_store.release_existing_sessions",
-                new=AsyncMock(return_value={"201"}),
+                new=AsyncMock(return_value={"201", "202", "203"}),
             ) as release_sessions,
             patch(
                 "xtuner.v1.rl.replay_buffer.empty_existing_sessions",
@@ -551,34 +560,29 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "trace store unavailable"):
                 await replay_buffer.refresh_staleness(
-                    task_stale_thresholds={"non_retryable_task": 2, "retryable_task": 2},
+                    task_stale_thresholds={
+                        "non_retryable_task": 2,
+                        "retryable_task": 2,
+                        "fresh_task": 2,
+                    },
                     expired_groups_retryable_by_task={
                         "non_retryable_task": False,
                         "retryable_task": True,
+                        "fresh_task": True,
                     },
                     current_train_step=4,
                 )
 
-            release_sessions.assert_awaited_once_with(["201"])
-            assert non_retryable_stale.prompt_ids is None
-            assert non_retryable_stale.mm_info is None
-            assert len(replay_buffer) == 1
+            # Fail-fast: the storage transaction is not committed and no
+            # compensating release/discard runs in this layer.
+            delete.assert_not_awaited()
+            release_sessions.assert_not_awaited()
+            assert await replay_buffer.count("non_retryable_task", Status.COMPLETED) == 1
+            assert await replay_buffer.count("retryable_task", Status.EXPIRED) == 1
+            assert await replay_buffer.count("fresh_task", Status.COMPLETED) == 1
+            assert len(replay_buffer) == 3
 
-            empty_sessions.side_effect = None
-            empty_sessions.return_value = {"202"}
-            await replay_buffer.refresh_staleness(
-                task_stale_thresholds={"non_retryable_task": 2, "retryable_task": 2},
-                expired_groups_retryable_by_task={
-                    "non_retryable_task": False,
-                    "retryable_task": True,
-                },
-                current_train_step=4,
-            )
-
-        self.assertEqual(empty_sessions.await_count, 2)
-        empty_sessions.assert_awaited_with(["202"])
-        release_sessions.assert_awaited_once_with(["201"])
-        assert len(replay_buffer) == 1
+        empty_sessions.assert_awaited_once_with(["202"])
 
     async def test_refresh_staleness_does_not_discard_groups_when_storage_delete_fails(self):
         replay_buffer = AsyncReplayBufferConfig().build()
