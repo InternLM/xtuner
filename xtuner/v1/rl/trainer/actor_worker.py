@@ -23,13 +23,14 @@ from xtuner.v1.loss.mtp_loss import MTPLossConfig, MTPLossContext
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.profiler import profiling_memory, profiling_time
-from xtuner.v1.rl.distillation import TrainTeacherManager, TrainTeacherTimings
+from xtuner.v1.rl.distillation import TrainTeacherManager, TrainTeacherPack, TrainTeacherTimings
 from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, kl_penalty
 from xtuner.v1.rl.model_utils import build_frozen_model
 from xtuner.v1.rl.weight_update import WeightUpdater
 from xtuner.v1.utils import get_device, get_torch_device_module
 
 from ..rollout_is import merge_rollout_is_metrics
+from .pack import get_lpt_pack_infos
 from .role_worker import RoleContext, RoleWorker
 from .schedule import build_lr_scheduler
 from .train_batch import FullPack, TrainBatch, iter_cpu_packs, resolve_pack_refs
@@ -395,27 +396,86 @@ class ActorWorker(RoleWorker):
         DEVICE_MODULE.empty_cache()
 
         pack_indices = [pack for step in batch.plan.steps for pack in step]
-        seq_ctx_list: list[SequenceContext] = []
-        loss_ctx_list: list[BaseRLLossContext] = []
+        loss_ctx_by_pack: dict[tuple[int, ...], BaseRLLossContext] = {}
+        teacher_sample_indices: dict[int, list[int]] = {}
+        sample_lengths: dict[int, int] = {}
+        sample_locations: dict[int, tuple[tuple[int, ...], int, int]] = {}
         try:
+            # 先遍历原始 pack，仅用于构建 loss context，并记录每个 sample
+            # 所属的 Teacher 及其在原始 pack 中的 token 偏移。
+            # Teacher forward 会延后到下面按 Teacher 重组后的 logical pack 阶段执行。
             for full_pack in iter_cpu_packs(batch, pack_indices, self._resolve_refs):
                 data = full_pack.full_data
-                seq_ctx = self._to_device_seq(data["seq_ctx"])
                 ctx = self.loss_cfg.build(data, sp_mesh=self.sp_mesh, device=self.device)
                 assert ctx is not None
                 ctx.bind_actor_snapshot(snapshots_by_pack[full_pack.indices])
-                seq_ctx_list.append(seq_ctx)
-                loss_ctx_list.append(ctx)
+                loss_ctx_by_pack[full_pack.indices] = ctx
 
-            # Keep the teacher's whole-batch interface: no per-pack on/offload.
-            timings = self._train_teacher_manager.compute_teacher_outputs(seq_ctx_list, loss_ctx_list)
-            for pack, ctx in zip(pack_indices, loss_ctx_list):
+                teacher_indices = data["teacher_indices"]
+                offset = 0
+                for sample_index, sample_length in zip(full_pack.indices, full_pack.lengths):
+                    sample_teacher_indices = teacher_indices[..., offset : offset + sample_length]
+                    if sample_teacher_indices.numel() == 0 or not bool(
+                        torch.all(sample_teacher_indices == sample_teacher_indices[..., :1])
+                    ):
+                        raise ValueError("Each sample must have one uniform training Teacher index")
+                    teacher_index = int(sample_teacher_indices.flatten()[0])
+                    teacher_sample_indices.setdefault(teacher_index, []).append(sample_index)
+                    sample_lengths[sample_index] = sample_length
+                    sample_locations[sample_index] = (
+                        full_pack.indices,
+                        offset,
+                        offset + sample_length,
+                    )
+                    offset += sample_length
+
+            # 按 Teacher 重新构建 logical pack。上面的原始 pack 遍历只负责
+            # 创建 loss context 和记录源 token 位置；Teacher forward 使用
+            # 下面这些重新分组后的 logical pack 执行。
+            teacher_packs: dict[int, list[TrainTeacherPack]] = {}
+            for teacher_index in range(self._train_teacher_manager.teacher_count):
+                indices = teacher_sample_indices.get(teacher_index, [])
+                lengths = [sample_lengths[index] for index in indices]
+                logical_chunks = get_lpt_pack_infos(
+                    indices,
+                    lengths,
+                    self.config.pack_max_length,
+                    num_bins=1,
+                    dp_size=1,
+                )
+                teacher_packs[teacher_index] = []
+                for chunk_indices in logical_chunks:
+                    if not chunk_indices:
+                        continue
+                    for full_pack in iter_cpu_packs(batch, [chunk_indices], self._resolve_refs):
+                        data = full_pack.full_data
+                        teacher_packs[teacher_index].append(
+                            TrainTeacherPack(
+                                # Keep regrouped packs on CPU; the manager
+                                # moves one chunk at a time before forward.
+                                seq_ctx=data["seq_ctx"].copy(),
+                                shifted_labels=data["shifted_labels"],
+                                sample_indices=full_pack.indices,
+                                sample_lengths=full_pack.lengths,
+                            )
+                        )
+            timings = self._train_teacher_manager.compute_teacher_outputs_grouped(
+                teacher_packs,
+                loss_ctx_by_pack,
+                sample_locations,
+                sp_mesh=self.sp_mesh,
+                pack_max_length=self.config.pack_max_length,
+            )
+
+            # The grouped Teacher packs are temporary.  Persist their outputs
+            # in the original pack's loss context/snapshot so a later
+            # iter_cpu_packs() can rebuild a fresh FullPack and bind the same
+            # train-Teacher tensors by stable pack id.
+            for pack, ctx in loss_ctx_by_pack.items():
                 snapshots_by_pack[pack] = self._capture_snapshot(ctx)
         finally:
             # Drop temporary device contexts before restoring the actor engine.
-            seq_ctx_list.clear()
-            loss_ctx_list.clear()
-            del seq_ctx, ctx
+            loss_ctx_by_pack.clear()
 
         # Restore only on success; failures propagate and terminate the round.
         self.onload_model()

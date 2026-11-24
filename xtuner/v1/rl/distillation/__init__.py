@@ -14,7 +14,7 @@ from .rollout_teacher_manager import (
     RolloutTeacherReplicaRouter,
     RolloutTeacherScorer,
 )
-from .train_teacher_manager import TrainTeacherManager, TrainTeacherOutputs, TrainTeacherTimings
+from .train_teacher_manager import TrainTeacherManager, TrainTeacherOutputs, TrainTeacherPack, TrainTeacherTimings
 from .trainer_adapter import DistillationTrainerAdapter
 
 
@@ -32,6 +32,7 @@ __all__ = [
     "RolloutTeacherScorer",
     "TrainTeacherManager",
     "TrainTeacherOutputs",
+    "TrainTeacherPack",
     "TrainTeacherTimings",
     "DistillationTrainerAdapter",
     "validate_opd_sample_params",

@@ -11,7 +11,8 @@ import torch
 import torch.distributed as dist
 
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.loss import LogProbConfig, LogProbContext, TopKLogProbConfig
+from xtuner.v1.loss import LogProbConfig, LogProbContext, TopKLogProbConfig, TopKLogProbContext
+from xtuner.v1.loss.utils import sp_gather, sp_split
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.rl.model_utils import (
     FrozenModel,
@@ -93,6 +94,16 @@ class TrainTeacherOutputs:
     timings: TrainTeacherTimings = field(default_factory=TrainTeacherTimings)
 
 
+@dataclass
+class TrainTeacherPack:
+    """A Teacher-specific logical pack and its source sample metadata."""
+
+    seq_ctx: SequenceContext
+    shifted_labels: torch.Tensor
+    sample_indices: tuple[int, ...]
+    sample_lengths: tuple[int, ...]
+
+
 class TrainTeacherManager:
     """Execute training-side Teachers in one TrainingWorker process.
 
@@ -136,6 +147,11 @@ class TrainTeacherManager:
         self._prefetch_executor: ThreadPoolExecutor | None = None
         self._prefetch_future: Future[tuple[FrozenModel, Any]] | None = None
         self._prefetch_teacher_index: int | None = None
+
+    @property
+    def teacher_count(self) -> int:
+        """Return the number of configured training Teachers."""
+        return len(self._teacher_configs)
 
     def compute_logprobs(
         self,
@@ -317,6 +333,222 @@ class TrainTeacherManager:
             return outputs.timings
         finally:
             self.offload_all_to_cpu()
+
+    def compute_teacher_outputs_grouped(
+        self,
+        teacher_packs: dict[int, list[TrainTeacherPack]],
+        loss_ctx_by_pack: dict[tuple[int, ...], BaseRLLossContext],
+        sample_locations: dict[int, tuple[tuple[int, ...], int, int]],
+        *,
+        sp_mesh=None,
+        pack_max_length: int | None = None,
+    ) -> TrainTeacherTimings:
+        """Run Teacher-specific logical packs and scatter results to source
+        packs.
+
+        The data flow has four stages:
+
+        1. ``teacher_packs`` contains logical packs grouped by Teacher on the
+           current rank; these are the only packs sent through Teacher forward.
+        2. SP-local Teacher outputs are gathered back to global sequence order.
+        3. Each sample's ``(original_pack_id, start, end)`` location maps the
+           logical-pack output back to its original training pack.
+        4. The global result is split again and stored in the original pack's
+           loss context for the Actor update.
+        """
+        sp_enabled = sp_mesh is not None and sp_mesh.size() > 1
+        uses_topk = self.target_config.uses_topk_targets
+        output_buffers: dict[tuple[int, ...], dict[str, torch.Tensor | None]] = {}
+        for original_pack_id, ctx in loss_ctx_by_pack.items():
+            labels = cast(Any, ctx.loss_kwargs).shifted_labels
+            global_shape = (labels.shape[0], labels.shape[1])
+            if sp_enabled:
+                if pack_max_length is None:
+                    raise ValueError("pack_max_length is required for grouped Teacher outputs with SP")
+                global_shape = (labels.shape[0], pack_max_length)
+            if uses_topk:
+                teacher_logprobs = torch.zeros(
+                    (*global_shape, cast(int, self.target_config.top_k)),
+                    dtype=torch.float32,
+                    device=DEVICE,
+                )
+            else:
+                teacher_logprobs = torch.zeros(
+                    global_shape,
+                    dtype=torch.float32,
+                    device=DEVICE,
+                )
+            target_ids_buffer = None
+            if uses_topk:
+                target_ids_buffer = torch.zeros(
+                    (*global_shape, cast(int, self.target_config.top_k)),
+                    dtype=torch.long,
+                    device=DEVICE,
+                )
+            output_buffers[original_pack_id] = {
+                "teacher_logprobs": teacher_logprobs,
+                "target_token_ids": target_ids_buffer,
+            }
+
+        timings = TrainTeacherTimings()
+        try:
+            if self._prefetch_enabled and any(
+                teacher_config.residency == "disk" for teacher_config in self._teacher_configs
+            ):
+                self._prefetch_executor = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="train-teacher-prefetch",
+                )
+                self._start_teacher_prefetch(0)
+
+            for teacher_index, teacher_name in enumerate(self._teacher_names):
+                teacher_local_packs = teacher_packs.get(teacher_index, [])
+                num_local_packs = self._global_max_count(len(teacher_local_packs))
+                if num_local_packs == 0:
+                    continue
+                teacher: FrozenModel | None = None
+                try:
+                    with self._teacher_on_device(teacher_index, timings, teacher_name) as teacher:
+                        for local_pack_index in range(num_local_packs):
+                            if local_pack_index < len(teacher_local_packs):
+                                teacher_local_pack = teacher_local_packs[local_pack_index]
+                                # Only one logical chunk is resident on the
+                                # device at a time; the remaining regrouped
+                                # packs stay on CPU.
+                                input_ids = teacher_local_pack.seq_ctx.input_ids
+                                if input_ids is None:
+                                    raise RuntimeError("Teacher logical pack must contain input_ids")
+                                global_length = input_ids.shape[1]
+                                seq_ctx = teacher_local_pack.seq_ctx.copy().to(DEVICE)
+                                if sp_enabled:
+                                    seq_ctx = seq_ctx.split(sequence_parallel_mesh=sp_mesh)
+                                shifted_labels = teacher_local_pack.shifted_labels
+                            else:
+                                teacher_local_pack = None
+                                dummy_length = pack_max_length or 1
+                                dummy_input_ids = cast(
+                                    torch.LongTensor,
+                                    torch.zeros((1, dummy_length), dtype=torch.long, device=DEVICE),
+                                )
+                                seq_ctx = SequenceContext.from_input_ids(
+                                    (dummy_input_ids,),
+                                    device=DEVICE,
+                                )
+                                shifted_labels = torch.full((1, dummy_length), -100, dtype=torch.long, device=DEVICE)
+
+                            loss_ctx: LogProbContext | TopKLogProbContext
+                            if uses_topk:
+                                loss_ctx = cast(TopKLogProbConfig, self.topk_logprob_config).build(data={})
+                            else:
+                                logprob_ctx = self.logprob_config.build(
+                                    data={"shifted_labels": shifted_labels},
+                                    sp_mesh=sp_mesh,
+                                    device=DEVICE,
+                                )
+                                assert logprob_ctx is not None
+                                loss_ctx = logprob_ctx
+                            with torch.no_grad():
+                                output = teacher(
+                                    seq_ctx=self.construct_teacher_seq_ctx(
+                                        seq_ctx,
+                                        is_composed=self._teacher_is_composed[teacher_index],
+                                    ),
+                                    loss_ctx={"lm": loss_ctx},
+                                )
+                            if teacher_local_pack is None:
+                                continue
+
+                            # Teacher output is local under SP.  Gather only
+                            # the log-probs/top-k ids needed for distillation;
+                            # the model activation path remains sharded.
+                            output_loss = self._local_to_global_teacher_output(
+                                cast(torch.Tensor, output.loss),
+                                sp_mesh=sp_mesh,
+                                global_length=global_length,
+                            )
+                            output_logits = None
+                            if uses_topk:
+                                output_logits = self._local_to_global_teacher_output(
+                                    cast(torch.Tensor, output.logits),
+                                    sp_mesh=sp_mesh,
+                                    global_length=global_length,
+                                )
+                            output_offset = 0
+                            for sample_index, sample_length in zip(
+                                teacher_local_pack.sample_indices, teacher_local_pack.sample_lengths
+                            ):
+                                original_pack_id, start, end = sample_locations[sample_index]
+                                output_slice = output_loss[..., output_offset : output_offset + sample_length]
+                                buffer = output_buffers[original_pack_id]
+                                cast(torch.Tensor, buffer["teacher_logprobs"])[..., start:end] = output_slice
+                                buffer_target_token_ids = cast(torch.Tensor | None, buffer["target_token_ids"])
+                                if buffer_target_token_ids is not None:
+                                    buffer_target_token_ids[..., start:end, :] = cast(torch.Tensor, output_logits)[
+                                        ..., output_offset : output_offset + sample_length, :
+                                    ]
+                                output_offset += sample_length
+                finally:
+                    teacher = None
+        finally:
+            self._finish_teacher_prefetch()
+            for original_pack_id, ctx in loss_ctx_by_pack.items():
+                loss_kwargs = cast(Any, ctx.loss_kwargs)
+                buffer = output_buffers[original_pack_id]
+                teacher_logprobs = cast(torch.Tensor, buffer["teacher_logprobs"])
+                loss_kwargs.teacher_logprobs = (
+                    sp_split(
+                        teacher_logprobs,
+                        sp_mesh,
+                        split_dim=1,
+                        padding_value=0.0,
+                    )
+                    if sp_enabled
+                    else teacher_logprobs
+                )
+                target_ids_buffer = cast(torch.Tensor | None, buffer["target_token_ids"])
+                if target_ids_buffer is not None:
+                    loss_kwargs.target_token_ids = (
+                        sp_split(
+                            target_ids_buffer,
+                            sp_mesh,
+                            split_dim=1,
+                            padding_value=0,
+                        )
+                        if sp_enabled
+                        else target_ids_buffer
+                    )
+            self.offload_all_to_cpu()
+        return timings
+
+    @staticmethod
+    def _local_to_global_teacher_output(
+        output: torch.Tensor,
+        *,
+        sp_mesh,
+        global_length: int,
+    ) -> torch.Tensor:
+        """Gather a local-SP Teacher output and remove sequence padding.
+
+        Teacher forwards consume a sequence-parallel ``SequenceContext`` and
+        therefore return only this rank's sequence shard.  The regrouping
+        scatter is expressed in global sample coordinates, so gather the
+        sequence dimension once here before copying token ranges back to the
+        original packs.  ``narrow`` works for both sampled log-probs ``[B, T]``
+        and top-k outputs ``[B, T, K]``.
+        """
+        if sp_mesh is not None and sp_mesh.size() > 1:
+            output = sp_gather(output, sp_mesh, dim=1)
+        return output.narrow(1, 0, global_length)
+
+    @staticmethod
+    def _global_max_count(local_count: int) -> int:
+        """Make Teacher/chunk loop counts identical on every distributed
+        rank."""
+        if not dist.is_available() or not dist.is_initialized():
+            return local_count
+        count = torch.tensor(local_count, dtype=torch.long, device=DEVICE)
+        dist.all_reduce(count, op=dist.ReduceOp.MAX)
+        return int(count.item())
 
     def offload_all_to_cpu(self) -> None:
         for teacher_index, (teacher, teacher_config) in enumerate(zip(self._teachers, self._teacher_configs)):
