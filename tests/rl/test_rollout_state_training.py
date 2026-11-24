@@ -177,7 +177,6 @@ class TestResetResponse(unittest.TestCase):
     def test_reset_drops_route_holder_without_force_free(self):
         state = make_state(
             routed_experts=[object()],
-            routed_experts_shared=True,
             extra_fields={"request_ids": ["old-request"]},
         )
 
@@ -186,7 +185,6 @@ class TestResetResponse(unittest.TestCase):
 
         free_refs.assert_not_called()
         self.assertIsNone(state.routed_experts)
-        self.assertFalse(state.routed_experts_shared)
         self.assertNotIn("request_ids", state.extra_fields)
 
     def test_regenerated_fields_can_be_published_again(self):

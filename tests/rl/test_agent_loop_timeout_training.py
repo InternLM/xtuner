@@ -56,6 +56,7 @@ from xtuner.v1.rl.agent_loop_manager import (
     TaskSpecConfig,
 )
 
+
 LOOP_MODULE = "xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop"
 
 
@@ -322,9 +323,8 @@ class TestTeacherScoring(unittest.IsolatedAsyncioTestCase):
 
         scored_states: list[RolloutState] = []
 
-        async def fake_on_group_ready(group: list[RolloutState]) -> list[RolloutState]:
+        async def fake_on_group_ready(group: list[RolloutState]) -> None:
             scored_states.extend(group)
-            return group
 
         loop._teacher_scorer = SimpleNamespace(
             on_sample_ready=AsyncMock(side_effect=lambda state: state),
@@ -358,7 +358,7 @@ class TestTeacherScoring(unittest.IsolatedAsyncioTestCase):
 
         loop._teacher_scorer = SimpleNamespace(
             on_sample_ready=fake_on_sample_ready,
-            on_group_ready=AsyncMock(side_effect=lambda group: group),
+            on_group_ready=AsyncMock(return_value=None),
         )
 
         with patch(f"{LOOP_MODULE}.get_store", return_value=_fake_store(partial_trace)):

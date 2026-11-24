@@ -628,8 +628,8 @@ class ReplayBuffer:
                 await self._storage.delete(deleted_uids)
                 non_retryable_deleted = True
                 await self._storage.update(updated_records)
-            if retryable_expired_session_ids:
-                await empty_existing_sessions(retryable_expired_session_ids)
+                if retryable_expired_session_ids:
+                    await empty_existing_sessions(retryable_expired_session_ids)
         finally:
             if non_retryable_deleted:
                 await self._discard_non_retryable_expired_groups(non_retryable_expired_groups)

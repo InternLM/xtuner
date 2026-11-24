@@ -307,7 +307,6 @@ class AgentInLocalhostLoop(AgentLoop):
         rollout_state.response_ids = list(data["response_ids"])
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
-        rollout_state.routed_experts_shared = data.get("routed_experts_shared", False)
         content = response_message.get("content")
         rollout_state.response = content if isinstance(content, str) else (str(content) if content is not None else "")
         if rollout_state.status == Status.COMPLETED and rollout_state.session_id is not None:

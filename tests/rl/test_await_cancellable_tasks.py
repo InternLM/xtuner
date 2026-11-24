@@ -169,7 +169,7 @@ class TestSandboxGroupCancellation(unittest.IsolatedAsyncioTestCase):
         loop.canonicalize_train_fields = lambda group: group
         loop._teacher_scorer = SimpleNamespace(
             on_sample_ready=AsyncMock(side_effect=lambda sample: sample),
-            on_group_ready=AsyncMock(side_effect=lambda samples: samples),
+            on_group_ready=AsyncMock(return_value=None),
         )
         started = [asyncio.Event(), asyncio.Event()]
         cleaned: list[int] = []

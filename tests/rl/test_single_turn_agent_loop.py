@@ -64,8 +64,8 @@ class _PassthroughTeacherScorer:
     async def on_sample_ready(self, state):
         return state
 
-    async def on_group_ready(self, group):
-        return group
+    async def on_group_ready(self, group: list[RolloutState]) -> None:
+        return
 
 
 class _TeacherScorer:
@@ -78,10 +78,10 @@ class _TeacherScorer:
             return state
         return await self.teacher.compute_logprobs(state)
 
-    async def on_group_ready(self, group):
+    async def on_group_ready(self, group: list[RolloutState]) -> None:
         if not self.defers_to_filter or get_group_status(group) != Status.COMPLETED:
-            return group
-        return list(await asyncio.gather(*(self.teacher.compute_logprobs(state) for state in group)))
+            return
+        await asyncio.gather(*(self.teacher.compute_logprobs(state) for state in group))
 
 
 class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):

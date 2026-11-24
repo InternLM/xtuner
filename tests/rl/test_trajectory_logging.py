@@ -80,7 +80,6 @@ class TestSandboxArtifactOwnership(unittest.IsolatedAsyncioTestCase):
                 # Trace store reports the initial prompt (token [1]) and the contiguous suffix.
                 "prompt_ids": [1],
                 "response_ids": [10 + index, 20 + index],
-                "routed_experts_shared": False,
             }
             for index in range(segment_count)
         ]

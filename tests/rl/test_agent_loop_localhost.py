@@ -14,6 +14,7 @@ from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.agent_loop.localhost_agent_loop.agent_in_localhost_loop import AgentInLocalhostLoop
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.schemas import AgentRolloutItem, RolloutStatus
 
+
 LOOP_MODULE = "xtuner.v1.rl.agent_loop.localhost_agent_loop.agent_in_localhost_loop"
 
 
@@ -89,7 +90,7 @@ class TestLocalhostTraceFields(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(state.routed_experts)
         self.assertEqual(state.response, "answer")
 
-    async def test_shared_routed_experts_are_detached_without_force_free(self):
+    async def test_routed_experts_are_detached_without_force_free(self):
         loop = _make_loop()
         state = RolloutState(message=[{"role": "user", "content": "hi"}], session_id=123)
         expert_ref = object()
@@ -98,7 +99,6 @@ class TestLocalhostTraceFields(unittest.IsolatedAsyncioTestCase):
             "labels": [-100, 2],
             "logprobs": [0.0, 0.1],
             "routed_experts": [expert_ref],
-            "routed_experts_shared": True,
             "prompt_ids": [1],
             "response_ids": [2],
         }
@@ -107,13 +107,11 @@ class TestLocalhostTraceFields(unittest.IsolatedAsyncioTestCase):
             await loop._fill_rollout_state(state, _make_item())
 
         self.assertIs(state.routed_experts[0], expert_ref)
-        self.assertTrue(state.routed_experts_shared)
         with patch("xtuner.v1.rl.utils.ray_utils.free_object_refs") as free_refs:
             state.reset_response()
 
         free_refs.assert_not_called()
         self.assertIsNone(state.routed_experts)
-        self.assertFalse(state.routed_experts_shared)
 
 
 class TestLocalhostGenerateGroup(unittest.IsolatedAsyncioTestCase):
@@ -126,7 +124,7 @@ class TestLocalhostGenerateGroup(unittest.IsolatedAsyncioTestCase):
         loop.logger = MagicMock()
         loop._teacher_scorer = SimpleNamespace(
             on_sample_ready=AsyncMock(side_effect=lambda sample: sample),
-            on_group_ready=AsyncMock(side_effect=lambda group: group),
+            on_group_ready=AsyncMock(return_value=None),
         )
         pending = RolloutState(rollout_id=1, message=[], status=Status.EXPIRED)
         completed = RolloutState(rollout_id=2, message=[], status=Status.COMPLETED, input_ids=[2])

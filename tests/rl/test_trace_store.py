@@ -33,7 +33,6 @@ from xtuner.v1.rl.rollout.trace_store import (
     RolloutTraceStore,
     TokenizedSegment,
     Trie,
-    _free_ray_refs,
     empty_existing_sessions,
     get_existing_store,
     release_and_discard_rollout_groups,
@@ -42,22 +41,20 @@ from xtuner.v1.rl.rollout.trace_store import (
 
 
 class TestRolloutTraceCleanup(unittest.TestCase):
-    def test_trie_clear_breaks_cycles_without_force_free(self):
+    def test_trie_clear_breaks_cycles_and_drops_holders(self):
         trie = Trie()
         value = TokenizedSegment(text="old", token_ids=[1], expert_key=object())
         trie.insert("old", value)
         _, nodes = trie.search("old")
         node_ref = weakref.ref(nodes[0])
 
-        with patch("xtuner.v1.rl.rollout.trace_store._free_ray_refs") as free_refs:
-            trie.clear()
+        trie.clear()
 
         del nodes
         self.assertIsNone(node_ref())
         self.assertEqual(trie.keys(), [])
-        free_refs.assert_not_called()
 
-    def test_release_and_discard_detaches_only_trace_owned_refs(self):
+    def test_release_and_discard_preserves_refs_until_state_discard(self):
         trace_owned_ref = object()
         rollout_owned_ref = object()
         trace_owned = SimpleNamespace(session_id="trace-owned", routed_experts=trace_owned_ref)
@@ -80,7 +77,7 @@ class TestRolloutTraceCleanup(unittest.TestCase):
             asyncio.run(release_and_discard_rollout_groups([[trace_owned, rollout_owned]]))
 
         release_sessions.assert_awaited_once_with(["trace-owned", "rollout-owned"])
-        self.assertIsNone(routed_experts_seen_by_discard["trace-owned"])
+        self.assertIs(routed_experts_seen_by_discard["trace-owned"], trace_owned_ref)
         self.assertIs(routed_experts_seen_by_discard["rollout-owned"], rollout_owned_ref)
         self.assertEqual(discard.call_count, 2)
 
@@ -184,14 +181,6 @@ class TestRolloutTraceStore(unittest.TestCase):
             return_value=None,
         ):
             self.assertEqual(asyncio.run(release_existing_sessions(["missing"])), set())
-
-    def test_free_ray_refs_recurses_into_nested_containers(self):
-        object_ref = ray.put({"payload": [1, 2, 3]})
-        with patch.object(ray.internal, "free") as free:
-            _free_ray_refs({"outer": [({"inner": object_ref},)]})
-
-        free.assert_called_once_with([object_ref], local_only=False)
-
 
 class TestExportPartialTrainingTrace(unittest.TestCase):
     """export_partial_training_trace 对 session trie 的部分导出行为。"""

@@ -14,34 +14,6 @@ _STORE_NAMESPACE = "xtuner_rollout"
 _handle_cache: Any = None
 
 
-def _free_ray_refs(obj: Any):
-    """Recursively free ray.ObjectRef instances trapped inside an object.
-
-    Args:
-        obj (Any): The object that may contain ray.ObjectRef references (e.g., dict, list, tuple).
-    """
-    if isinstance(obj, ray.ObjectRef):
-        try:
-            ray.internal.free([obj], local_only=False)
-        except Exception as e:
-            get_logger().error(f"Failed to free Ray ObjectRef {obj}: {e}")
-    elif isinstance(obj, dict):
-        for v in obj.values():
-            _free_ray_refs(v)
-    elif isinstance(obj, (list, tuple)):
-        for v in obj:
-            _free_ray_refs(v)
-    elif hasattr(obj, "model_dump"):  # Pydantic v2
-        for v in obj.model_dump().values() if hasattr(obj.model_dump, "__call__") else {}.values():
-            _free_ray_refs(v)
-    elif hasattr(obj, "dict") and callable(getattr(obj, "dict")):  # Pydantic v1
-        for v in obj.dict().values():
-            _free_ray_refs(v)
-    elif hasattr(obj, "__dict__"):
-        for v in vars(obj).values():
-            _free_ray_refs(v)
-
-
 def _common_prefix_len(left: str, right: str) -> int:
     for idx, (left_ch, right_ch) in enumerate(zip(left, right)):
         if left_ch != right_ch:
@@ -133,8 +105,6 @@ def _assemble_trace(nodes: List["TreeNode"], session_id: str) -> dict:
             # Assistant turn written before the field existed: count unknown.
             tool_call_counts.append(None)
     trace["routed_experts"] = _resolve_routed_experts(expert_keys, session_id)
-    # Ownership marker travels with partial/legacy exports too, so timeout states detach instead of freeing.
-    trace["routed_experts_shared"] = bool(getattr(nodes[0].value, "routed_experts_shared", False)) if nodes else False
     trace["tool_call_count"] = None if None in tool_call_counts else sum(tool_call_counts)
     # The first node holds the session's initial prompt segment (the only segment written
     # before any assistant turn), so everything after it is the contiguous response suffix
@@ -210,8 +180,6 @@ class TokenizedSegment(BaseModel):
     # the field existed; export reports ``None`` when any assistant turn is
     # unknown instead of silently undercounting.
     tool_call_count: int | None = Field(default=None, repr=False)
-    # Shared refs survive this store's release through Ray reference counting; legacy refs are freed explicitly.
-    routed_experts_shared: bool = False
     length: int | None = None
 
     def model_post_init(self, _):
@@ -325,18 +293,13 @@ class Trie:
 
         return "".join(key_path), matched_nodes
 
-    def clear(self, *, free_legacy_refs: bool = False) -> None:
-        """Clear Trie holders and optionally free legacy Ray references.
-
-        Args:
-            free_legacy_refs (bool): Whether to explicitly free references not marked as shared.
-        """
+    def clear(self) -> None:
+        """Clear Trie holders and let Ray reference counting release remote
+        objects."""
         stack = [self.root]
         while stack:
             node = stack.pop()
             stack.extend(node.children.values())
-            if free_legacy_refs and node.value is not None and not getattr(node.value, "routed_experts_shared", False):
-                _free_ray_refs(node.value)
             node.value = None
             node.children.clear()
             node.parent = None
@@ -346,8 +309,8 @@ class Trie:
         valid.
 
         If the key is None, the entire Trie is released. Prunes empty branches bottom-up. Request-aware nodes
-        detach their routed-expert refs only: sibling segments and trainers borrow the same refs, so Ray
-        reference counting decides when they die. Legacy nodes keep the explicit free contract.
+        detach their routed-expert refs only: sibling segments and trainers may borrow the same refs, so Ray reference
+        counting decides when they die.
 
         Args:
             key (Optional[str]): The key string whose associated nodes should be released.
@@ -355,7 +318,7 @@ class Trie:
         """
         if key is None:
             # Drop only this store's ownership. Borrowers retain live refs.
-            self.clear(free_legacy_refs=True)
+            self.clear()
             return
 
         node = self.root
@@ -374,8 +337,6 @@ class Trie:
                 return
 
         if node.value is not None:
-            if not getattr(node.value, "routed_experts_shared", False):
-                _free_ray_refs(node.value)
             node.value = None
 
         for parent, token in reversed(path):
@@ -551,9 +512,9 @@ class RolloutTraceStore:
             require_routed_experts (bool): Require routed experts on every node (MoE training).
 
         Returns:
-            dict: The trace dictionary containing `input_ids`, `labels`, `logprobs`, `routed_experts`,
-                `routed_experts_shared` and `tool_call_count`. The strict provenance path additionally returns
-                `prompt_ids`, `response_ids`, `response_model_steps` and `request_ids`.
+            dict: The trace dictionary containing `input_ids`, `labels`, `logprobs`, `routed_experts` and
+                `tool_call_count`. The strict provenance path additionally returns `prompt_ids`, `response_ids`,
+                `response_model_steps` and `request_ids`.
 
         Raises:
             ValueError: If the prompt_text does not completely match the trace keys in the session, or the
@@ -571,8 +532,6 @@ class RolloutTraceStore:
             versions.extend([node_val.model_step] * len(node_val.token_ids))
             if node_val.request_id is not None and node_val.request_id not in path_ids:
                 path_ids.append(node_val.request_id)
-        shared = getattr(nodes[0].value, "routed_experts_shared", False) if nodes else False
-
         if expected_request_ids is None:
             # Legacy export keeps its original behavior; the strict suffix fields stay out.
             return trace
@@ -618,7 +577,6 @@ class RolloutTraceStore:
             "response_model_steps": response_steps,
             "request_ids": path_ids,
             "routed_experts": trace["routed_experts"],
-            "routed_experts_shared": shared,
         }
 
     def _match_nodes(self, session_id: str, prompt_text: str) -> List["TreeNode"]:
@@ -764,19 +722,16 @@ async def release_existing_sessions(session_ids: list[str]) -> set[str]:
 
 
 async def release_and_discard_rollout_groups(groups: list[list[RolloutState]]) -> None:
-    """Release trace-owned resources before discarding terminal rollouts.
+    """Release trace sessions before discarding terminal rollout holders.
 
-    Sessions released by the trace store have already freed their routed-expert references. Detach those references
-    before the generic rollout-state cleanup so it does not explicitly free them a second time. Rollouts whose sessions
-    are absent from the store retain their references for the generic cleanup path.
+    Args:
+        groups (list[list[RolloutState]]): Terminal rollout groups whose holders should be discarded.
     """
-    released_session_ids = await release_existing_sessions(
+    await release_existing_sessions(
         [str(item.session_id) for group in groups for item in group if item.session_id is not None]
     )
     for group in groups:
         for item in group:
-            if item.session_id is not None and str(item.session_id) in released_session_ids:
-                item.routed_experts = None
             discard_rollout_state(item)
 
 

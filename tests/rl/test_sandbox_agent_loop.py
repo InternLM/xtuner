@@ -42,7 +42,7 @@ class TestSandboxGenerateGroup(unittest.IsolatedAsyncioTestCase):
         loop.logger = MagicMock()
         loop._teacher_scorer = SimpleNamespace(
             on_sample_ready=AsyncMock(side_effect=lambda sample: sample),
-            on_group_ready=AsyncMock(side_effect=lambda group: group),
+            on_group_ready=AsyncMock(return_value=None),
         )
         states = [_state(1, 10, Status.EXPIRED), _state(2, 20, Status.COMPLETED)]
         loop.generate_sample = AsyncMock(side_effect=lambda state: [state])
@@ -63,7 +63,7 @@ class TestSandboxGenerateGroup(unittest.IsolatedAsyncioTestCase):
         loop.logger = MagicMock()
         loop._teacher_scorer = SimpleNamespace(
             on_sample_ready=AsyncMock(side_effect=lambda sample: sample),
-            on_group_ready=AsyncMock(side_effect=lambda group: group),
+            on_group_ready=AsyncMock(return_value=None),
         )
         retry = _state(1, 10, Status.EXPIRED)
         reused = _state(2, 20, Status.COMPLETED)

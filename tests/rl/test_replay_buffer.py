@@ -630,7 +630,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(empty_sessions.await_count, 2)
         empty_sessions.assert_awaited_with(["401"])
 
-    async def test_refresh_retry_empty_runs_outside_buffer_lock(self):
+    async def test_refresh_holds_buffer_lock_until_trace_cleanup_finishes(self):
         replay_buffer = AsyncReplayBufferConfig().build()
         stale = make_rollout_state(1, session_id=401, response_model_steps=[1])
         await replay_buffer.put([stale], "task")
@@ -655,18 +655,19 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
                 )
             )
             await asyncio.wait_for(empty_started.wait(), timeout=1.0)
+            expired_count_task = asyncio.create_task(replay_buffer.count("task", Status.EXPIRED))
             try:
-                count = await asyncio.wait_for(
-                    replay_buffer.count("task", Status.EXPIRED),
-                    timeout=1.0,
-                )
-                self.assertEqual(count, 1)
+                await asyncio.sleep(0)
+                self.assertFalse(expired_count_task.done())
             finally:
                 allow_empty.set()
             expired_counts = await refresh_task
+            expired_count = await asyncio.wait_for(expired_count_task, timeout=1.0)
 
         empty_sessions.assert_awaited_once_with(["401"])
         self.assertEqual(expired_counts, {"task": 1})
+        self.assertEqual(expired_count, 1)
+        self.assertEqual(await replay_buffer.count("task", Status.COMPLETED), 0)
 
     async def test_refresh_staleness_batches_non_retryable_release_outside_lock(self):
         replay_buffer = AsyncReplayBufferConfig().build()

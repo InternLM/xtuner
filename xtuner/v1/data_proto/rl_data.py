@@ -168,8 +168,6 @@ class RolloutState(BaseModel):
     logprobs: list[float] | None = None
     teacher_targets: TeacherTargets | None = None
     routed_experts: np.ndarray | RayObjectRef | list[RayObjectRef] | None = None
-    # request-aware trace refs are shared with sibling segments; cleanup detaches instead of freeing them.
-    routed_experts_shared: bool = False
     finish_reason: str | None = None
     # response_model_steps：记录 response_ids 中每个 token 来自哪个 model_step，与 response_ids 长度相同。
     # 环境/工具等非模型生成位沿用所在 rollout cycle 的 model_step 占位（勿填 0，避免污染 min() 语义）。
@@ -260,17 +258,8 @@ class RolloutState(BaseModel):
         Returns:
             None
         """
-        routed_experts = self.routed_experts
-        if routed_experts is not None and not self.routed_experts_shared:
-            from ray import ObjectRef
-
-            from xtuner.v1.rl.utils.ray_utils import free_object_refs
-
-            if isinstance(routed_experts, (ObjectRef, list)):
-                free_object_refs(routed_experts)
-        # Shared refs are owned by sibling segments too; detach only and let Ray reference counting release them.
+        # Drop this holder; Ray reference counting releases the object after the final borrower lets go.
         self.routed_experts = None
-        self.routed_experts_shared = False
         prompt_ids = self.prompt_ids
         self.tokens = list(prompt_ids) if prompt_ids is not None else None
         self.response = ""
@@ -357,11 +346,9 @@ def free_rollout_state_refs(rollout_state: RolloutState) -> None:
 
     from xtuner.v1.rl.utils.ray_utils import free_object_refs
 
-    # Request-aware trace refs are shared with sibling segments and workers; detach them and keep the ordinary
-    # rollout's explicit free contract for everything else.
-    if rollout_state.routed_experts_shared:
-        rollout_state.routed_experts = None
-        rollout_state.routed_experts_shared = False
+    # Routed-expert refs may be shared across trace nodes, rollout states and trainers. Drop this holder before the
+    # generic traversal and let Ray reference counting reclaim the object after the final borrower lets go.
+    rollout_state.routed_experts = None
     refs: list[ObjectRef] = []
 
     def clear_object_refs(value: Any) -> Any:
