@@ -6,9 +6,19 @@ TestRubricScoring
     test_batch_judge
     test_retry_recovers_from_invalid_output
     test_invalid_output_is_not_silent_zero
+    test_transport_and_http_errors_are_classified
     test_non_json_error_includes_content_prefix
+    test_top_level_results_array_is_accepted_when_complete
+    test_junk_prefixed_results_array_is_accepted
+    test_results_object_missing_outer_braces
+    test_blank_output_error_includes_sample_and_response_metadata
+    test_truncated_output_error_is_classified
+    test_failure_debug_dump_captures_raw_response
     test_schema_fragment_without_outer_brace
     test_invalid_met_evidence_fails_closed
+    test_overlong_met_evidence_fails_closed
+    test_control_char_evidence_parses_and_fails_closed
+    test_prompt_and_schema_cap_evidence_length
     test_composed_real_outcome_and_fake_process
     test_remote_contract_preserves_sample_rubrics
 TestRubricInputValidation
@@ -22,10 +32,12 @@ TestRubricRewardMerge
 
 import asyncio
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
+import httpx
 import torch
 
 from xtuner.v1.data_proto.rl_data import RolloutState
@@ -42,8 +54,13 @@ from xtuner.v1.rl.judger import (
 from xtuner.v1.rl.judger.math_rule import MathRuleJudger
 
 
-def _body(results):
-    return {"choices": [{"message": {"content": json.dumps({"results": results})}}]}
+def _body(results, finish_reason="stop", usage=None, wrap_results=True):
+    payload = {"results": results} if wrap_results else results
+    content = results if isinstance(results, str) else json.dumps(payload)
+    return {
+        "choices": [{"message": {"content": content}, "finish_reason": finish_reason}],
+        "usage": usage or {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+    }
 
 
 def _results(verdicts=("met", "unmet"), met_evidence="The left ratio is 2/9"):
@@ -65,6 +82,9 @@ class RubricTestCase(unittest.TestCase):
         self.image_path = Path(self.temp_dir.name) / "question.png"
         self.image_path.write_bytes(b"fake-png-for-request-encoding")
         self.state = RolloutState(
+            group_id=3,
+            rollout_id=7,
+            task_name="rubric_test",
             message=[
                 {
                     "role": "user",
@@ -127,6 +147,10 @@ class TestRubricScoring(RubricTestCase):
 
         self.assertEqual(judged.reward["score"], 0.25)
         self.assertEqual([item["score"] for item in judged.reward["rubric_results"]], [1.0, 0.0])
+        self.assertEqual(judged.reward["judge_finish_reason"], "stop")
+        self.assertEqual(judged.reward["judge_usage"]["completion_tokens"], 20)
+        self.assertEqual(judged.reward["judge_attempts"], 1)
+        self.assertGreaterEqual(judged.reward["judge_latency_seconds"], 0.0)
         request = requests[0]
         self.assertEqual(request["model"], "GLM-5.3-Flash")
         self.assertEqual(request["temperature"], 0.0)
@@ -178,8 +202,28 @@ class TestRubricScoring(RubricTestCase):
         async def transport(request):
             return _body([_results()[0]])
 
-        with self.assertRaisesRegex(RuntimeError, "Judge omitted rubric local_ids"):
+        with self.assertRaises(RuntimeError) as raised:
             asyncio.run(self._judger(transport, max_retries=0).judge(self.state))
+        self.assertIn("Judge omitted rubric local_ids", str(raised.exception))
+        self.assertIn('"error_type": "protocol"', str(raised.exception))
+
+    def test_transport_and_http_errors_are_classified(self):
+        # 验证网络超时与 HTTP 状态错误分为 transport 和 http，均不生成过程奖励。
+        async def timeout_transport(request):
+            raise httpx.ReadTimeout("read timeout")
+
+        with self.assertRaises(RuntimeError) as raised:
+            asyncio.run(self._judger(timeout_transport, max_retries=0).judge(self.state))
+        self.assertIn('"error_type": "transport"', str(raised.exception))
+
+        async def http_error_transport(request):
+            http_request = httpx.Request("POST", "http://judge.test/v1/chat/completions")
+            response = httpx.Response(503, request=http_request)
+            raise httpx.HTTPStatusError("service unavailable", request=http_request, response=response)
+
+        with self.assertRaises(RuntimeError) as raised:
+            asyncio.run(self._judger(http_error_transport, max_retries=0).judge(self.state))
+        self.assertIn('"error_type": "http"', str(raised.exception))
 
     def test_non_json_error_includes_content_prefix(self):
         # 验证结构化解析失败时保留有长度限制的原始响应摘要。
@@ -188,6 +232,96 @@ class TestRubricScoring(RubricTestCase):
 
         with self.assertRaisesRegex(RuntimeError, "judge returned no JSON"):
             asyncio.run(self._judger(transport, max_retries=0).judge(self.state))
+
+    def test_top_level_results_array_is_accepted_when_complete(self):
+        # 验证 judge 返回裸 results 数组时仍按同一套 ID、verdict 和证据规则校验。
+        async def transport(request):
+            return _body(_results(), wrap_results=False)
+
+        judged = asyncio.run(self._judger(transport, max_retries=0).judge(self.state))
+        self.assertEqual(judged.reward["score"], 0.25)
+        self.assertEqual(judged.reward["judge_status"], "ok")
+
+    def test_junk_prefixed_results_array_is_accepted(self):
+        # 验证裸数组前带垃圾前缀（长输入实测为 ":\n"）时仍按完整数组解析并校验。
+        async def transport(request):
+            return _body(":\n" + json.dumps(_results()))
+
+        judged = asyncio.run(self._judger(transport, max_retries=0).judge(self.state))
+        self.assertEqual(judged.reward["score"], 0.25)
+        self.assertEqual(judged.reward["judge_status"], "ok")
+
+    def test_results_object_missing_outer_braces(self):
+        # 验证 results 键值完好但成对外层花括号缺失时可修复（长输入实测形态）。
+        async def transport(request):
+            content = json.dumps({"results": _results()})
+            return _body(content[1:-1])
+
+        judged = asyncio.run(self._judger(transport, max_retries=0).judge(self.state))
+        self.assertEqual(judged.reward["score"], 0.25)
+        self.assertEqual(judged.reward["judge_status"], "ok")
+
+    def test_blank_output_error_includes_sample_and_response_metadata(self):
+        # 验证空白输出保留样本身份、结束原因、token 用量和内容长度，且不发放过程奖励。
+        async def transport(request):
+            return _body(
+                "  \n  \n",
+                usage={"prompt_tokens": 8000, "completion_tokens": 1024, "total_tokens": 9024},
+            )
+
+        with self.assertRaises(RuntimeError) as raised:
+            asyncio.run(self._judger(transport, max_retries=0).judge(self.state))
+
+        message = str(raised.exception)
+        self.assertIn('"error_type": "model_output"', message)
+        self.assertIn('"rollout_id": 7', message)
+        self.assertIn('"group_id": 3', message)
+        self.assertIn('"task_name": "rubric_test"', message)
+        self.assertIn('"finish_reason": "stop"', message)
+        self.assertIn('"completion_tokens": 1024', message)
+        self.assertIn('"content_chars": 6', message)
+
+    def test_truncated_output_error_is_classified(self):
+        # 验证 max_tokens 截断与普通协议错误可区分，并保留输出用量。
+        async def transport(request):
+            return _body(
+                '{"results":[',
+                finish_reason="length",
+                usage={"prompt_tokens": 8000, "completion_tokens": 1024, "total_tokens": 9024},
+            )
+
+        with self.assertRaises(RuntimeError) as raised:
+            asyncio.run(self._judger(transport, max_retries=0).judge(self.state))
+
+        message = str(raised.exception)
+        self.assertIn('"error_type": "output_truncated"', message)
+        self.assertIn('"finish_reason": "length"', message)
+        self.assertIn('"completion_tokens": 1024', message)
+
+    def test_failure_debug_dump_captures_raw_response(self):
+        # 验证设置 RUBRIC_JUDGE_DEBUG_DIR 后失败样本落盘完整原始响应，成功样本不落盘。
+        async def bad_transport(request):
+            return _body('{"results":[', finish_reason="length")
+
+        with tempfile.TemporaryDirectory() as debug_dir:
+            os.environ["RUBRIC_JUDGE_DEBUG_DIR"] = debug_dir
+            try:
+                with self.assertRaises(RuntimeError) as raised:
+                    asyncio.run(self._judger(bad_transport, max_retries=0).judge(self.state))
+                dumps = list(Path(debug_dir).glob("*.json"))
+                self.assertEqual(len(dumps), 1)
+                record = json.loads(dumps[0].read_text())
+                self.assertEqual(record["raw_response"]["choices"][0]["message"]["content"], '{"results":[')
+                self.assertEqual(record["payload"]["rollout_id"], 7)
+                self.assertIn("debug_dump", str(raised.exception))
+
+                async def ok_transport(request):
+                    return _body(_results())
+
+                asyncio.run(self._judger(ok_transport).judge(self.state))
+                self.assertEqual(len(list(Path(debug_dir).glob("*.json"))), 1)
+            finally:
+                del os.environ["RUBRIC_JUDGE_DEBUG_DIR"]
 
     def test_schema_fragment_without_outer_brace(self):
         # 验证 results 标记在开头丢失任意数量字符时均可按已知结构修复。
@@ -215,6 +349,67 @@ class TestRubricScoring(RubricTestCase):
         self.assertEqual(judged.reward["invalid_evidence_count"], 1)
         self.assertEqual(judged.reward["rubric_results"][0]["judge_verdict"], "met")
         self.assertEqual(judged.reward["rubric_results"][0]["verdict"], "unmet")
+
+    def test_overlong_met_evidence_fails_closed(self):
+        # 验证 met 的证据虽是原文但超过长度上限时同样降级为 unmet，
+        # 防止后端不强制 schema maxLength 时长证据挤占输出预算。
+        long_quote = "The left ratio is 2/9 and the right ratio is 1/4. " * 8
+        self.state.response = long_quote
+
+        async def transport(request):
+            results = _results(met_evidence=long_quote[:300])
+            results[1]["verdict"] = "met"
+            results[1]["evidence"] = "The left ratio is 2/9"
+            return _body(results)
+
+        judged = asyncio.run(self._judger(transport, max_retries=0).judge(self.state))
+
+        self.assertEqual(judged.reward["score"], 0.75)
+        self.assertEqual(judged.reward["invalid_evidence_count"], 1)
+        overlong = judged.reward["rubric_results"][0]
+        self.assertEqual(overlong["judge_verdict"], "met")
+        self.assertEqual(overlong["verdict"], "unmet")
+        self.assertIn("exceeds", overlong["validation_error"])
+
+    def test_control_char_evidence_parses_and_fails_closed(self):
+        # 验证 judge 引用回复中的 LaTeX 时输出的字面控制字符（实测 \boldsymbol ->
+        # \x08oldsymbol）不会使整份 JSON 解析失败：宽松解析后证据无法逐字匹配回复，
+        # 该评分点 fail-closed 为 unmet，其余评分点正常计分。
+        content = (
+            '{\n"results": [\n'
+            '{\n"local_id": "a1",\n"verdict": "met",\n'
+            '"evidence": "The text says $B = \x08oldsymbol{\x08igemptyset}$."\n},\n'
+            '{"local_id": "a2", "verdict": "met", "evidence": "The left ratio is 2/9"}\n]\n}'
+        )
+
+        async def transport(request):
+            return _body(content)
+
+        judged = asyncio.run(self._judger(transport, max_retries=0).judge(self.state))
+
+        self.assertEqual(judged.reward["score"], 0.75)
+        self.assertEqual(judged.reward["judge_status"], "ok_with_invalid_evidence")
+        self.assertEqual(judged.reward["invalid_evidence_count"], 1)
+        corrupted = judged.reward["rubric_results"][0]
+        self.assertEqual(corrupted["judge_verdict"], "met")
+        self.assertEqual(corrupted["verdict"], "unmet")
+
+    def test_prompt_and_schema_cap_evidence_length(self):
+        # 验证 evidence 长度上限同时落在 system prompt 和请求 schema 中。
+        requests = []
+
+        async def transport(request):
+            requests.append(request)
+            return _body(_results())
+
+        asyncio.run(self._judger(transport).judge(self.state))
+
+        request = requests[0]
+        self.assertIn("50 words", request["messages"][0]["content"])
+        evidence_schema = request["response_format"]["json_schema"]["schema"]["properties"]["results"]["items"][
+            "properties"
+        ]["evidence"]
+        self.assertEqual(evidence_schema["maxLength"], 256)
 
     def test_composed_real_outcome_and_fake_process(self):
         # 验证真实数学结果判分与外部过程判分经组合接口得到正确融合分。
