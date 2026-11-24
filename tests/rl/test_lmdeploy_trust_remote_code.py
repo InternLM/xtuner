@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from xtuner.v1.rl.rollout.lmdeploy import LMDeployWorker, _model_dir_declares_custom_code
+from xtuner.v1.rl.rollout.lmdeploy import (
+    LMDeployWorker,
+    _build_ssm_prefix_cache_engine_config,
+    _model_dir_declares_custom_code,
+)
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 
 
@@ -24,6 +28,24 @@ def _select_lmdeploy_backend(monkeypatch):
 
 class _StubLaunchSpec:
     placement_group_bundle_idxs = [0, 1]
+
+
+class _SupportedPytorchEngineConfig:
+    def __init__(
+        self,
+        *,
+        prefill_save_alignment,
+        prefix_cache_state_budget,
+        prefix_cache_decode_save_first,
+        prefix_cache_decode_state_interval,
+        prefill_save_last_only,
+    ):
+        pass
+
+
+class _LegacyPytorchEngineConfig:
+    def __init__(self):
+        pass
 
 
 def _write_tokenizer_config(directory: Path, with_auto_map: bool) -> str:
@@ -71,3 +93,21 @@ def test_trust_remote_code_override_wins_both_ways(tmp_path):
     opt_in = _server_config(tmp_path, with_auto_map=False, extra={"lmdeploy_trust_remote_code": True})
     assert opt_out.trust_remote_code is False
     assert opt_in.trust_remote_code is True
+
+
+def test_ssm_prefix_cache_engine_config_requires_native_fields():
+    config = RolloutConfig(
+        model_path="/tmp/model",
+        context_length=128,
+        rollout_max_batch_size_per_instance=1,
+    )
+    expected = {
+        "prefill_save_alignment": 1024,
+        "prefix_cache_state_budget": 0,
+        "prefix_cache_decode_save_first": False,
+        "prefix_cache_decode_state_interval": 0,
+        "prefill_save_last_only": False,
+    }
+    assert _build_ssm_prefix_cache_engine_config(config, _SupportedPytorchEngineConfig) == expected
+    with pytest.raises(RuntimeError, match="does not support the SSM prefix-checkpoint controls"):
+        _build_ssm_prefix_cache_engine_config(config, _LegacyPytorchEngineConfig)

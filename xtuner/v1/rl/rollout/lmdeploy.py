@@ -1,3 +1,4 @@
+import inspect
 import json
 import os
 from argparse import Namespace
@@ -35,6 +36,28 @@ def _model_dir_declares_custom_code(model_path: str | Path) -> bool:
 
 SHARED_STORE = "shared_store"
 SHARED_STORE_NAMESPACE = "lmdeploy"
+
+
+def _build_ssm_prefix_cache_engine_config(config: RolloutConfig, engine_config_type: type) -> dict[str, Any]:
+    """Build SSM prefix-checkpoint settings after checking LMDeploy support."""
+    ssm_config = {
+        "prefill_save_alignment": config.prefill_save_alignment,
+        "prefix_cache_state_budget": config.prefix_cache_state_budget,
+        "prefix_cache_decode_save_first": config.prefix_cache_decode_save_first,
+        "prefix_cache_decode_state_interval": config.prefix_cache_decode_state_interval,
+        "prefill_save_last_only": config.prefill_save_last_only,
+    }
+    parameters = inspect.signature(engine_config_type).parameters
+    accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+    missing = sorted(set(ssm_config) - set(parameters)) if not accepts_kwargs else []
+    if missing:
+        missing_fields = ", ".join(missing)
+        raise RuntimeError(
+            "The installed LMDeploy PyTorch backend does not support the SSM prefix-checkpoint controls "
+            f"{missing_fields}. Install an LMDeploy revision containing the native SSM checkpoint settings, "
+            "including prefix_cache_decode_save_first from de668baf or a later revision."
+        )
+    return ssm_config
 
 
 def run_lmdeploy_server_wrapper(lmdeploy_config_namespace: Namespace):
@@ -436,11 +459,10 @@ class LMDeployWorker(RolloutWorker):
             extra_engine_config["enable_prefix_caching"] = True
         if backend == "pytorch":
             extra_engine_config.update(
-                prefill_save_alignment=self.config.prefill_save_alignment,
-                prefix_cache_state_budget=self.config.prefix_cache_state_budget,
-                prefix_cache_decode_save_first=self.config.prefix_cache_decode_save_first,
-                prefix_cache_decode_state_interval=self.config.prefix_cache_decode_state_interval,
-                prefill_save_last_only=self.config.prefill_save_last_only,
+                _build_ssm_prefix_cache_engine_config(
+                    self.config,
+                    PytorchEngineConfig,
+                )
             )
 
         assert self.server_launch_spec is not None
