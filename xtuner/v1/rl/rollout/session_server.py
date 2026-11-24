@@ -359,8 +359,8 @@ class SessionServer:
 
     async def on_request(self, req_body: dict, fmt: str, *, trace_enabled: bool = True) -> dict:
         """Normalize the request to drive the prefix cache + inject extension
-        fields. Trace requests derive routing offsets from complete retained nodes;
-        evaluation requests strip caller-provided routing offsets.
+        fields. Trace requests derive routing offsets from complete retained
+        nodes; evaluation requests strip caller-provided routing offsets.
 
         When ``trace_enabled`` is False (evaluate mode), forward the request
         without token-in-token-out rewriting, so the upstream worker handles

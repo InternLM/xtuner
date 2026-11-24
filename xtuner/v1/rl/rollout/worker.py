@@ -1252,7 +1252,8 @@ class RolloutWorker(SingleAcceleratorWorker):
         meta: dict,
         routed_experts_start_len: int,
     ) -> RolloutState:
-        """Replace the current turn while preserving its already retained routes.
+        """Replace the current turn while preserving its already retained
+        routes.
 
         Args:
             rollout_state (RolloutState): Sample being updated.
