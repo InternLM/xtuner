@@ -258,6 +258,13 @@ class RoleWorker(ABC):
             None
         """
         self.engine.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
+        self.logger.info(
+            f"In save_hf, before empty_cache. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
+        )
+        DEVICE_MODULE.empty_cache()
+        self.logger.info(
+            f"In save_hf, after empty_cache. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
+        )
 
     def _scheduler_config(self) -> dict | None:
         if self.lr_scheduler is None:

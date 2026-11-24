@@ -1,5 +1,7 @@
 import copy
 import json
+import re
+import time
 from functools import reduce
 from http import HTTPStatus
 from operator import add
@@ -13,6 +15,8 @@ from transformers import AutoTokenizer
 from xtuner.v1.utils import get_logger
 
 from .chat_template import canonicalize_messages_for_chat_template
+from .cross_weight_update_rollout import CrossWeightUpdateRolloutConfig
+from .request_gate import RequestGate, RequestLease, SettlementReceipt
 from .trace_store import TokenizedSegment, get_store
 
 
@@ -20,7 +24,7 @@ FMT_OPENAI = "openai"
 FMT_ANTHROPIC = "anthropic"
 
 # Fields the SessionServer consumes locally and never forwards upstream.
-_SESSION_SERVER_ONLY_KEYS = {"session_id"}
+_SESSION_SERVER_ONLY_KEYS = {"session_id", "_xt_request_id", "_xt_model_step"}
 
 
 def _normalize_path(req_path: str) -> str:
@@ -43,6 +47,52 @@ def _detect_format(req_path: str) -> str:
 
 def _is_error_payload(payload: dict) -> bool:
     return payload.get("error") is not None or payload.get("type") == "error" or payload.get("object") == "error"
+
+
+def _is_lmdeploy_context_rejection(status: int, body: bytes) -> bool:
+    """Recognize the pinned LMDeploy's input check before engine generation.
+
+    A finished HTTP error alone does not prove that backend execution ended. LMDeploy bc2c8da's AsyncEngine rejects
+    input_len >= session_len before submitting generation. Its OpenAI response has no stable machine error code, so
+    match that specific payload conservatively; unknown errors stay unsafe.
+    """
+    if status != HTTPStatus.BAD_REQUEST:
+        return False
+    try:
+        payload = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if "choices" in payload:
+        return False
+    expected = {"object": "error", "type": "invalid_request_error", "code": 400}
+    if any(payload.get(key) != value for key, value in expected.items()):
+        return False
+    message = payload.get("message")
+    if not isinstance(message, str):
+        return False
+    match = re.fullmatch(
+        r"Input length \(([0-9]{1,20})\) must be smaller than the model context length \(([0-9]{1,20})\)\.",
+        message,
+    )
+    if match is None:
+        return False
+    return int(match[1]) >= int(match[2]) > 0
+
+
+COMPLETE_TURN_FINISH_REASONS = {"stop", "length", "tool_calls"}
+
+
+def _is_complete_turn(response: dict | None) -> bool:
+    """Whether a parsed non-stream generation response is one successful
+    complete turn."""
+    if response is None:
+        return False
+    choices = response.get("choices")
+    if not choices:
+        return False
+    return all(choice.get("finish_reason") in COMPLETE_TURN_FINISH_REASONS for choice in choices)
 
 
 class _UpstreamResponseError(RuntimeError):
@@ -267,6 +317,8 @@ class SessionServer:
         read_bufsize (int): Buffer limit for line reader in ClientSession. Default is 64MB (2**26).
     """
 
+    request_gate: RequestGate | None = None
+
     def __init__(
         self,
         worker_base_url: str,
@@ -277,6 +329,7 @@ class SessionServer:
         read_bufsize: int = 2**26,
         enable_return_routed_experts: bool = False,
         supports_routed_experts_start_len: bool = False,
+        cross_weight_update_rollout: CrossWeightUpdateRolloutConfig | None = None,
     ):
         self.worker_base_url = worker_base_url.rstrip("/")
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -286,6 +339,12 @@ class SessionServer:
         self.read_bufsize = read_bufsize
         self.enable_return_routed_experts = enable_return_routed_experts
         self.supports_routed_experts_start_len = supports_routed_experts_start_len
+        # Cross-weight-update rollout servers are born closed: no request may observe version zero before the first publish.
+        self.request_gate = (
+            RequestGate(wait_timeout=cross_weight_update_rollout.wait_timeout, initially_open=False)
+            if cross_weight_update_rollout is not None
+            else None
+        )
         self.store = get_store()
         self.stop_word = self.tokenizer.eos_token or ""
 
@@ -411,7 +470,8 @@ class SessionServer:
         return worker_req
 
     async def on_response(
-        self, worker_resp: dict, fmt: str, orig_req_body: dict, *, routed_experts_start_len: int = 0
+        self, worker_resp: dict, fmt: str, orig_req_body: dict, *,
+        routed_experts_start_len: int = 0, lease: RequestLease | None = None
     ) -> dict:
         """Trace the assistant turn into ``trace_store`` (always in OpenAI
         shape).
@@ -425,11 +485,20 @@ class SessionServer:
                 conversation for OpenAI-shape tracing because the wire body
                 forwarded to the worker no longer carries ``messages`` /
                 ``system`` / ``tools``.
+            lease (RequestLease | None): Admission lease of this request. Its identity is written to every
+                trace node; a non-``None`` lease makes routed-expert refs shared with sibling segments.
 
         Returns:
             dict: The (possibly trimmed) response — currently unused by the
             caller but kept for symmetry.
         """
+        if lease is not None and not _is_complete_turn(worker_resp):
+            # A leased request may only commit a successful generation terminal. An error terminal is a safe
+            # failure handled by the forwarding layer, not a trainable trace node.
+            raise RuntimeError(
+                "Backend returned an unsuccessful generation terminal: "
+                + str([choice.get("finish_reason") for choice in worker_resp.get("choices", [])])
+            )
         session_id = orig_req_body["session_id"]
 
         if fmt == FMT_ANTHROPIC:
@@ -477,7 +546,11 @@ class SessionServer:
                 tokenize=False,
             )
         ).rstrip()
-        assert new_prompt.startswith(old_prompt) and new_prompt.endswith(self.stop_word)
+        # Templates such as GLM's do not append tokenizer.eos_token to assistant turns.
+        # Rendered text defines cache boundaries; raw output IDs define the training trace.
+        # TODO: 增加每个模型的 stop_word 列表，并用列表匹配endswith xxx
+        if not new_prompt.startswith(old_prompt):
+            raise RuntimeError("SessionServer response template does not preserve the generation prompt prefix.")
 
         # Re-derive the input delta the worker processed. on_request no longer
         # persists it (that would leave a None-expert placeholder in the store),
@@ -514,8 +587,8 @@ class SessionServer:
             if delta_len > 0:
                 delta_expert = ray.put(raw_routed_expert[route_base : route_base + delta_len])
             response_expert = ray.put(raw_routed_expert[route_base + delta_len :])
-        elif self.enable_return_routed_experts and _bool_request_value(
-            orig_req_body.get("return_routed_experts"), True
+        elif self.enable_return_routed_experts and (
+            lease is not None or _bool_request_value(orig_req_body.get("return_routed_experts"), True)
         ):
             raise RuntimeError(
                 "SessionServer response is missing routed_experts, but enable_return_routed_experts is True."
@@ -526,11 +599,20 @@ class SessionServer:
         # final ``expert_key`` (a valid ref for MoE, None for dense). Every assert /
         # raise above runs before any write, so a dropped turn leaves nothing
         # half-written in the store (and no orphan placeholder to clean up).
+        request_id = lease.request_id if lease is not None else None
+        model_step = lease.model_step if lease is not None else None
         if delta_ids:
             await self.store.insert.remote(
                 session_id,
                 key=old_prompt,
-                value=TokenizedSegment(text=delta_text, token_ids=delta_ids, expert_key=delta_expert),
+                value=TokenizedSegment(
+                    text=delta_text,
+                    token_ids=delta_ids,
+                    expert_key=delta_expert,
+                    request_id=request_id,
+                    model_step=model_step,
+                    routed_experts_shared=lease is not None,
+                ),
             )
         await self.store.insert.remote(
             session_id,
@@ -541,6 +623,10 @@ class SessionServer:
                 logprobs=output_logprobs,
                 labels=output_token_ids,
                 expert_key=response_expert,
+                tool_call_count=len(assistant_msg.get("tool_calls") or []),
+                request_id=request_id,
+                model_step=model_step,
+                routed_experts_shared=lease is not None,
                 length=len(output_token_ids),
             ),
         )
@@ -576,7 +662,39 @@ class SessionServer:
         get_logger().info("SessionServer stopped.")
 
     async def _handle_request(self, request: web.Request) -> web.Response:
+        """Admit generation requests behind the gate; forward everything else
+        directly."""
+        path = request.match_info["path"]
+        if self.request_gate is None or not _is_generation_endpoint(request.method, path):
+            return await self._forward_request(request)
+        fmt = _detect_format(path)
+        # TODO(anthropic-format): The admission/trace path currently rejects Anthropic /v1/messages and only accepts
+        # OpenAI chat completions. Extend gate admission, request normalization and trace assembly to support the
+        # Anthropic format as well. (Review on PR #2297.)
+        if fmt != FMT_OPENAI:
+            return web.json_response(
+                _error_payload(fmt, "cross-weight-update rollout supports OpenAI chat completions only", 400),
+                status=400,
+            )
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            return web.json_response(_error_payload(fmt, "Invalid generation JSON", 400), status=400)
+        # TODO(stream-support): Stream mode is currently rejected, but a streamed response can still be a complete
+        # turn when it ends normally. Support stream mode end-to-end while still recording a complete-turn settlement
+        # (backend ended + trace committed) before releasing the lease. (Review on PR #2297.)
+        if not isinstance(body, dict) or body.get("stream") or not _request_uses_trace_store(body):
+            return web.json_response(
+                _error_payload(fmt, "cross-weight-update rollout requires nonstream traced generation", 400),
+                status=400,
+            )
+        async with self.request_gate.request(str(body["session_id"])) as lease:
+            return await self._forward_request(request, lease=lease)
+
+    async def _forward_request(self, request: web.Request, lease: RequestLease | None = None) -> web.Response:
         """Proxy handler: detect format, run hooks, forward, stream back."""
+        request_start = time.perf_counter()
+        prepare_s = forward_s = trace_s = 0.0
 
         req_path = request.match_info["path"]
         is_generation_endpoint = _is_generation_endpoint(request.method, req_path)
@@ -646,13 +764,18 @@ class SessionServer:
                     orig_return_token_ids = _bool_request_value(request_data.get("return_token_ids"), False)
                     orig_return_routed_experts = _bool_request_value(request_data.get("return_routed_experts"), True)
 
+                    prepare_start = time.perf_counter()
                     request_data = await self.on_request(request_data, fmt, trace_enabled=trace_enabled)
+                    prepare_s = time.perf_counter() - prepare_start
                     request_body = json.dumps(request_data).encode("utf-8")
             except (json.JSONDecodeError, UnicodeDecodeError):
                 pass
             except Exception as exc:
                 message = f"SessionServer request hook failed: {type(exc).__name__}: {exc}"
                 get_logger().error(message)
+                if lease is not None:
+                    # Preparation failed before any backend send.
+                    lease.settlement = SettlementReceipt(backend_ended=True, outcome="not_started")
                 return web.json_response(_error_payload(fmt, message), status=500)
 
         trace_active = is_generation_endpoint and trace_enabled
@@ -687,6 +810,7 @@ class SessionServer:
             else None
         )
 
+        forward_start = time.perf_counter()
         timeout = ClientTimeout(total=self.request_timeout, sock_connect=30)
         async with ClientSession(read_bufsize=self.read_bufsize, timeout=timeout) as client:
             async with client.request(
@@ -777,6 +901,7 @@ class SessionServer:
                         body=final_raw_response,
                     )
 
+        forward_s = time.perf_counter() - forward_start
         # Apply abstract on_response processing
         response_data: Optional[dict] = None
         skip_done = bool(is_stream and not trace_response)
@@ -809,18 +934,40 @@ class SessionServer:
 
             if response_data is not None:
                 try:
+                    trace_start = time.perf_counter()
                     await self.on_response(
-                        response_data,
-                        fmt,
-                        orig_req_body,
-                        **(
-                            {"routed_experts_start_len": request_data["routed_experts_start_len"]}
-                            if request_data.get("routed_experts_start_len")
-                            else {}
-                        ),
+                        response_data, fmt, orig_req_body, lease=lease,
+                        routed_experts_start_len=request_data.get("routed_experts_start_len") or 0,
                     )
+                    trace_s = time.perf_counter() - trace_start
                 except Exception as exc:
                     session_error_msg = f"SessionServer response hook failed: {type(exc).__name__}: {exc}"
+
+        if lease is not None:
+            # A lease only exists for non-stream traced generation. ``response_data`` is therefore either a parsed
+            # successful non-error object or None (non-2xx / error payload); entry and parsing guarantees cover the
+            # streaming, HTTP-status and error-payload checks that used to be repeated here.
+            complete = _is_complete_turn(response_data)
+            # A known pre-generation rejection is a safely ended failed attempt, not a successful trace and not an
+            # ambiguous in-flight request.
+            rejected_before_generation = _is_lmdeploy_context_rejection(upstream_status, raw_response)
+            terminal = "trace_committed" if complete and not session_error_msg else "failed"
+            backend_ended = complete or rejected_before_generation
+            get_logger().info(
+                f"request_terminal id={lease.request_id} outcome={terminal} backend_ended={backend_ended}"
+            )
+            get_logger().info(
+                f"request_timing id={lease.request_id} prepare_s={prepare_s:.6f} "
+                f"forward_s={forward_s:.6f} trace_s={trace_s:.6f} "
+                f"total_s={time.perf_counter() - request_start:.6f}"
+            )
+            # The receipt is assigned only after the terminal outcome above is handled; its presence means
+            # "terminal recorded", so only the backend outcome needs to be judged by the gate.
+            lease.settlement = SettlementReceipt(backend_ended=backend_ended, outcome=terminal)
+            if terminal == "trace_committed":
+                payload = json.loads(response.body)
+                payload["id"] = lease.request_id
+                response.body = json.dumps(payload).encode("utf-8")
 
         if session_error_msg:
             get_logger().error(session_error_msg)
@@ -1158,6 +1305,7 @@ class SessionServerActor:
         request_timeout: float,
         enable_return_routed_experts: bool = False,
         supports_routed_experts_start_len: bool = False,
+        cross_weight_update_rollout: CrossWeightUpdateRolloutConfig | None = None,
     ):
         self.worker_base_url = worker_base_url
         self.tokenizer_path = tokenizer_path
@@ -1166,6 +1314,7 @@ class SessionServerActor:
         self.request_timeout = request_timeout
         self.enable_return_routed_experts = enable_return_routed_experts
         self.supports_routed_experts_start_len = supports_routed_experts_start_len
+        self.cross_weight_update_rollout = cross_weight_update_rollout
         self.server: SessionServer | None = None
 
     @property
@@ -1184,9 +1333,30 @@ class SessionServerActor:
             request_timeout=self.request_timeout,
             enable_return_routed_experts=self.enable_return_routed_experts,
             supports_routed_experts_start_len=self.supports_routed_experts_start_len,
+            cross_weight_update_rollout=self.cross_weight_update_rollout,
         )
         await self.server.start()
         return self.server.url
+
+    def _gate(self) -> RequestGate:
+        if self.server is None or self.server.request_gate is None:
+            raise RuntimeError("cross-weight-update rollout gate is not enabled")
+        return self.server.request_gate
+
+    async def request_status(self) -> dict:
+        return self._gate().snapshot()
+
+    async def seal_requests(self, epoch: int) -> None:
+        await self._gate().seal(epoch)
+
+    async def drain_requests(self, timeout: float) -> dict:
+        return await self._gate().drain(timeout)
+
+    async def install_request_version(self, epoch: int, model_step: int) -> None:
+        await self._gate().install_version(epoch, model_step)
+
+    async def reopen_requests(self, epoch: int) -> None:
+        await self._gate().reopen(epoch)
 
     async def stop(self) -> None:
         if self.server is not None:

@@ -20,7 +20,6 @@ trainer、Ray worker、模型或 rollout backend：
 """
 
 import asyncio
-import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -34,20 +33,13 @@ from xtuner.v1.data_proto.rl_data import (
     Status,
     validate_train_group,
 )
+from xtuner.v1.rl.agent_loop.agent_loop import AgentLoop
+from xtuner.v1.rl.agent_loop.localhost_agent_loop.agent_in_localhost_loop import AgentInLocalhostLoop
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import AgentInSandboxLoop
 from xtuner.v1.rl.agent_loop_manager.produce_utils import take_train_batch
 from xtuner.v1.rl.distillation import DistillationTrainerAdapter, RolloutTeacherScorer
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.trainer.controller import TrainingController
-
-
-# localhost/sandbox loop 模块顶层导入 lagent；测试环境不依赖其真实实现。
-# rate_limiter 必须整路径 stub：父级 MagicMock 没有 __path__，子模块 from-import 无法透传。
-for _stub_name in ("lagent", "lagent.utils", "lagent.utils.rate_limiter"):
-    sys.modules.setdefault(_stub_name, MagicMock())
-
-from xtuner.v1.rl.agent_loop.agent_loop import AgentLoop  # noqa: E402
-from xtuner.v1.rl.agent_loop.localhost_agent_loop.agent_in_localhost_loop import AgentInLocalhostLoop  # noqa: E402
-from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import AgentInSandboxLoop  # noqa: E402
 
 
 class _FakeAdvantageEstimator:

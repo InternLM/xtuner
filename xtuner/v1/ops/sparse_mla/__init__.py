@@ -19,6 +19,26 @@ from .protocol import (
 from .pytorch import torch_dsa_topk_indices, torch_sparse_mla
 
 
+def get_kpool_topk_indices(backend: KPoolIndexerBackend) -> KPoolTopKIndicesProtocol:
+    if backend == "torch":
+        return torch_kpool_topk_indices
+    if backend == "tilelang":
+        return kpool_topk_indices
+    if backend == "tilelang_deepselect":
+        return functools.partial(kpool_topk_indices, selector="deep_select")
+    if backend == "tilelang_cooperative":
+        return functools.partial(kpool_topk_indices, scorer="cooperative")
+    if backend == "lmdeploy_fp8":
+        from .lmdeploy_kpool import lmdeploy_fp8_kpool_topk_indices
+
+        return lmdeploy_fp8_kpool_topk_indices
+    if backend == "lmdeploy_bf16":
+        from .lmdeploy_kpool import lmdeploy_bf16_kpool_topk_indices
+
+        return lmdeploy_bf16_kpool_topk_indices
+    raise ValueError(f"Unsupported KPool indexer backend: {backend}")
+
+
 def get_sparse_mla(backend: SparseMLABackend) -> SparseMLAProtocol:
     if backend == "torch":
         return torch_sparse_mla
@@ -75,18 +95,6 @@ def get_dsa_topk_indices(backend: DSAIndexerBackend) -> DSATopKIndicesProtocol:
     raise ValueError(f"Unsupported DSA indexer backend: {backend}")
 
 
-def get_kpool_topk_indices(backend: KPoolIndexerBackend) -> KPoolTopKIndicesProtocol:
-    if backend == "torch":
-        return torch_kpool_topk_indices
-    if backend == "tilelang":
-        return kpool_topk_indices
-    if backend == "tilelang_deepselect":
-        return functools.partial(kpool_topk_indices, selector="deep_select")
-    if backend == "tilelang_cooperative":
-        return functools.partial(kpool_topk_indices, scorer="cooperative")
-    raise ValueError(f"Unsupported KPool indexer backend: {backend}")
-
-
 def dsa_topk_indices(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -113,6 +121,12 @@ def ensure_tilelang_runtime_available() -> None:
     from .tilelang import ensure_tilelang_runtime_available as _impl
 
     return _impl()
+
+
+def ensure_lmdeploy_kpool_runtime_available(precision: str) -> None:
+    from .lmdeploy_kpool import ensure_lmdeploy_kpool_runtime_available as _impl
+
+    _impl(precision)
 
 
 def ensure_cudnn_dsa_runtime_available() -> None:
@@ -180,6 +194,7 @@ __all__ = [
     "ensure_deep_select_runtime_available",
     "ensure_flash_mla_cudnn_runtime_available",
     "ensure_flash_mla_runtime_available",
+    "ensure_lmdeploy_kpool_runtime_available",
     "ensure_tilelang_runtime_available",
     "get_dsa_topk_indices",
     "get_kpool_topk_indices",

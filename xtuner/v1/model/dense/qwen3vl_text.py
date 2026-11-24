@@ -1,7 +1,6 @@
 import re
 
 import torch
-import torch.nn.functional as F
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.loss import BaseLossContext
@@ -83,7 +82,7 @@ class Qwen3VLTextDense(Qwen3Dense):
 
         if loss_ctx is None:
             # Inference mode
-            logits = F.linear(hidden_states, self.lm_head.weight, self.lm_head.bias)
+            _, (logits, _) = self.lm_head(hidden_states, None)
             output["logits"] = logits
         else:
             # Training mode

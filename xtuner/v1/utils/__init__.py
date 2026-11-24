@@ -2,7 +2,12 @@ from .compile import maybe_compile
 from .config import Config
 from .device import get_device, get_torch_device_module
 from .dist_utils import is_local_rank0
-from .dtensor import cal_total_norm, group_tensors_by_device_mesh_and_placements, is_evenly_distributed
+from .dtensor import (
+    cal_total_norm,
+    group_tensors_by_device_mesh_and_placements,
+    is_evenly_distributed,
+    is_sharded_placement,
+)
 from .enum_helper import StrEnum
 from .exception_helper import ParallelConfigException
 from .init_weight import default_init_weights, init_params
@@ -45,6 +50,7 @@ __all__ = [
     "get_torch_device_module",
     "maybe_compile",
     "is_evenly_distributed",
+    "is_sharded_placement",
     "profile_time_and_memory",
     "timer",
     "timer_logger",

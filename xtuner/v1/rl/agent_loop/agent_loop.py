@@ -27,6 +27,8 @@ from xtuner.v1.rl.utils import (
     JUDGER_PAUSE_JUDGE_TASK_TIMEOUT_S,
     CPUActorLauncher,
     CPUResourcesConfig,
+    await_cancellable_tasks,
+    await_owned_operation,
     cancel_and_drain,
     create_task,
     register_cpu_resources,
@@ -426,9 +428,11 @@ class RouterAgentLoop:
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         worker = await self._pick_worker()
         try:
-            return await worker.generate_group.remote(rollout_state, **kwargs)
+            # Cancel the actual worker call, and wait for its terminal state before releasing the worker slot.
+            (result,) = await await_cancellable_tasks([worker.generate_group.remote(rollout_state, **kwargs)])
+            return result
         finally:
-            await self._release_worker(worker)
+            await await_owned_operation(self._release_worker(worker))
 
     def get_worker_status(self) -> dict[str, int]:
         return {str(worker): load for worker, load in self._worker_loads.items()}
