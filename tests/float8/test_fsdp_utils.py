@@ -14,6 +14,7 @@ import xtuner.v1.float8.fsdp_utils as fsdp_utils
 from xtuner.v1.float8.float8_linear_tile_wise import TileWiseFloat8Linear
 from xtuner.v1.float8.fsdp_utils import (
     WeightWithDynamicTilewiseFloat8CastTensor,
+    _rl_bf16_roundtrip_peak_bytes,
     precompute_tilewise_float8_scale_for_fsdp,
 )
 
@@ -115,7 +116,9 @@ def _chunked_equiv_worker(rank, world_size, init_path, dout, use_divided_64):
     def scales(max_stack_bytes):
         module = nn.ModuleList([_make_sharded_linear(din, dout, mesh, rank * 100 + seed) for seed in (0, 1, 2)])
         precompute_tilewise_float8_scale_for_fsdp(module, max_stack_bytes=max_stack_bytes, **weights_kwargs)
-        return [m.weight._local_tensor._precomputed_scale for m in module.modules() if isinstance(m, TileWiseFloat8Linear)]
+        return [
+            m.weight._local_tensor._precomputed_scale for m in module.modules() if isinstance(m, TileWiseFloat8Linear)
+        ]
 
     reference = scales(1 << 40)  # 单 chunk
     chunked = scales(dout * din * 4)  # 单权重预算 -> 逐权重 3 个 chunk
@@ -133,3 +136,31 @@ def test_chunked_stack_matches_full_stack_reduce_path_multi_rank(tmp_path):
 def test_chunked_stack_matches_full_stack_divided_64_path_multi_rank(tmp_path):
     # dout=192(=128+64):divided_64 路径(128-block 横跨两 rank),2 个 gloo rank 上验证分 chunk 与单次 stack bitwise 一致
     mp.spawn(_chunked_equiv_worker, args=(2, str(tmp_path / "gloo_init"), 192, True), nprocs=2, join=True)
+
+
+def test_rl_bf16_roundtrip_peak_bytes_matches_torch_semantics():
+    # 钉住峰值系数依赖的 torch 行为:同 dtype .bfloat16() 零拷贝返回自身,.float() 总是拷贝;
+    # 若 _rl_bf16_roundtrip 的实现改动,需同步更新 _rl_bf16_roundtrip_peak_bytes
+    bf16_probe = torch.ones(1, dtype=torch.bfloat16)
+    fp32_probe = torch.ones(1, dtype=torch.float32)
+    fp16_probe = torch.ones(1, dtype=torch.float16)
+    assert bf16_probe.bfloat16() is bf16_probe
+    assert fp32_probe.bfloat16() is not fp32_probe
+    assert fp16_probe.bfloat16() is not fp16_probe
+    assert _rl_bf16_roundtrip_peak_bytes(torch.bfloat16) == 6  # stack 2 + bf16 零拷贝 0 + fp32 副本 4
+    assert _rl_bf16_roundtrip_peak_bytes(torch.float32) == 10  # stack 4 + bf16 副本 2 + fp32 副本 4
+    assert _rl_bf16_roundtrip_peak_bytes(torch.float16) == 8  # stack 2 + bf16 副本 2 + fp32 副本 4
+
+
+def test_chunked_stack_matches_full_stack_with_rl_bf16_env(device_mesh, monkeypatch):
+    # XTUNER_RL_FP8_QUANTIZE_IN_BF16=1 时预算按 10 B/elem 收账(fp32 权重),
+    # 验证该路径下分 chunk 与单次 stack 仍 bitwise 一致
+    monkeypatch.setenv("XTUNER_RL_FP8_QUANTIZE_IN_BF16", "1")
+
+    def build(seeds, mesh):
+        return nn.ModuleList([_make_sharded_linear(512, 256, mesh, seed) for seed in seeds])
+
+    bytes_per_weight = 256 * 512 * _rl_bf16_roundtrip_peak_bytes(torch.float32)  # 单权重峰值预算 -> 逐权重 3 个 chunk
+    _assert_chunk_invariant(
+        build, seeds=[0, 1, 2], max_stack_bytes=bytes_per_weight, mesh=device_mesh, expected_calls=3
+    )
