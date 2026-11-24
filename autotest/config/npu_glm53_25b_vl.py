@@ -25,7 +25,7 @@ model_cfg.text_config.attention.sparse_mla_backend = "torch_npu"
 model_cfg.text_config.attention.indexer_backend = "torch_npu"
 model_cfg.vision_config.attn_impl = "flash_attention"
 
-optim_cfg = AdamWConfig(lr=6e-05)
+optim_cfg = AdamWConfig(lr=1e-6)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
     cpu_offload=False,

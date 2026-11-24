@@ -23,7 +23,7 @@ moe_cfg.compile_cfg = True
 moe_cfg.attention.sparse_mla_backend = "torch_npu"
 moe_cfg.attention.indexer_backend = "torch_npu"
 
-optim_cfg = AdamWConfig(lr=6e-05)
+optim_cfg = AdamWConfig(lr=1e-6)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
     cpu_offload=False,
