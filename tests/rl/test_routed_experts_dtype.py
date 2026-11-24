@@ -44,6 +44,7 @@ def test_training_worker_keeps_ray_routes_and_padding_in_uint16():
     seq_ctx = SimpleNamespace(
         input_ids=torch.zeros((1, 2), dtype=torch.long),
         pixel_values=None,
+        pixel_values_videos=None,
         rollout_routed_experts=[route_ref, padding_marker],
     )
 
@@ -61,6 +62,7 @@ def test_training_worker_uses_uint16_for_full_padding_batch():
     seq_ctx = SimpleNamespace(
         input_ids=torch.zeros((1, 2), dtype=torch.long),
         pixel_values=None,
+        pixel_values_videos=None,
         rollout_routed_experts=torch.empty(0),
     )
 
@@ -76,6 +78,7 @@ def test_training_worker_preserves_long_fallback():
     seq_ctx = SimpleNamespace(
         input_ids=torch.zeros((1, 1), dtype=torch.long),
         pixel_values=None,
+        pixel_values_videos=None,
         rollout_routed_experts=[route_ref],
     )
 

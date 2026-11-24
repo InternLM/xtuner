@@ -159,6 +159,7 @@ def _fake_store(partial_trace: dict | None = None) -> SimpleNamespace:
                                            "logprobs": [0.0, 0.1], "routed_experts": None,
                                            "prompt_ids": [1], "response_ids": [2]})
         ),
+        empty_sessions=SimpleNamespace(remote=AsyncMock(return_value=None)),
     )
 
 

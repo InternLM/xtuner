@@ -327,7 +327,7 @@ class TestResidencyAndGuards(unittest.TestCase):
 class TestCriticConstruction(unittest.TestCase):
     """critic 构造复用宿主拓扑，不再持有 host。"""
 
-    def test_critic_uses_host_fsdp_and_strict_load(self):
+    def test_critic_uses_host_fsdp_and_loads_checkpoint(self):
         self.assertNotIn("fsdp_cfg", CriticWorkerConfig.model_fields)
         self.assertNotIn("sp_size", CriticWorkerConfig.model_fields)
 
@@ -357,7 +357,7 @@ class TestCriticConstruction(unittest.TestCase):
         self.assertFalse(hasattr(worker, "host"))
         self.assertIs(train_engine.call_args.kwargs["fsdp_cfg"], fsdp_cfg)
         self.assertIs(build_scheduler.call_args.args[0], train_engine.return_value.optimizer)
-        train_engine.return_value.from_hf.assert_called_once_with("/tmp/critic", strict=True)
+        train_engine.return_value.from_hf.assert_called_once_with("/tmp/critic")
 
 
 class _CustomTokenEstimator(TokenAdvantageEstimator):

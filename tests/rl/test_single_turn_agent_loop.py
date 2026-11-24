@@ -263,10 +263,14 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
     async def test_mixed_group_judges_full_group_but_skips_scored_completed_samples(self):
         events: list[str] = []
         judger = _BatchJudger(events)
+        def is_valid_sample_fn(_samples):
+            events.append("filter")
+            return True
+
         loop = self._build_loop(
             {2: Status.COMPLETED},
             judger=judger,
-            is_valid_sample_fn=lambda _samples: True,
+            is_valid_sample_fn=is_valid_sample_fn,
         )
         teacher = self._bind_teacher(loop, events)
         completed = self._completed_state(1)

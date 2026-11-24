@@ -8,6 +8,7 @@ import aiohttp
 import pytest
 from aiohttp import web
 
+from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import AgentInSandboxLoop
 from xtuner.v1.rl.rollout.affinity_router import SessionAffinityRouter
 from xtuner.v1.rl.rollout.request_gate import RequestGate, SettlementReceipt
@@ -95,7 +96,9 @@ def test_terminal_agent_retires_route_without_releasing_trace(outcome):
         retired = AsyncMock()
         loop.rollout_ctl = SimpleNamespace(retire_route_sessions=SimpleNamespace(remote=retired))
         item = SimpleNamespace(model_copy=lambda **kwargs: SimpleNamespace())
-        state = SimpleNamespace(extra_fields={"rollout_item": item}, session_id="trial", group_id=1)
+        state = SimpleNamespace(
+            extra_fields={"rollout_item": item}, session_id="trial", group_id=1, status=Status.INIT
+        )
         loop._run_item = AsyncMock(return_value=object())
         loop._build_rollout_states = AsyncMock(return_value=[state])
         if outcome == "failure":
@@ -123,6 +126,7 @@ def test_affinity_disabled_adds_no_terminal_rpc():
             extra_fields={"rollout_item": SimpleNamespace(model_copy=lambda **kwargs: SimpleNamespace())},
             session_id="trial",
             group_id=1,
+            status=Status.INIT,
         )
         loop._run_item = AsyncMock()
         loop._build_rollout_states = AsyncMock(return_value=[state])
