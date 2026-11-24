@@ -102,16 +102,14 @@ def test_ssm_prefix_cache_engine_config_requires_native_fields():
         context_length=128,
         rollout_max_batch_size_per_instance=1,
     )
-    expected = {
-        "prefill_save_alignment": 1024,
-        "prefix_cache_state_budget": 0,
-        "prefix_cache_decode_save_first": False,
-        "prefix_cache_decode_state_interval": 0,
-        "prefill_save_last_only": False,
-    }
-    assert _build_ssm_prefix_cache_engine_config(config, _SupportedPytorchEngineConfig) == expected
+    assert _build_ssm_prefix_cache_engine_config(config, _SupportedPytorchEngineConfig) == {}
+    assert _build_ssm_prefix_cache_engine_config(config, _LegacyPytorchEngineConfig) == {}
+    active = config.model_copy(update={"prefix_cache_state_budget": 1})
+    assert _build_ssm_prefix_cache_engine_config(active, _SupportedPytorchEngineConfig)[
+        "prefix_cache_state_budget"
+    ] == 1
     with pytest.raises(RuntimeError, match="does not support the SSM prefix-checkpoint controls"):
-        _build_ssm_prefix_cache_engine_config(config, _LegacyPytorchEngineConfig)
+        _build_ssm_prefix_cache_engine_config(active, _LegacyPytorchEngineConfig)
 
 
 def test_ssm_prefix_cache_config_is_inactive_for_default_disabled_rollout():
@@ -121,5 +119,5 @@ def test_ssm_prefix_cache_config_is_inactive_for_default_disabled_rollout():
         rollout_max_batch_size_per_instance=1,
     )
     assert _ssm_prefix_cache_config_is_active(config) is False
-    assert _ssm_prefix_cache_config_is_active(config.model_copy(update={"enable_prefix_caching": True})) is True
+    assert _ssm_prefix_cache_config_is_active(config.model_copy(update={"enable_prefix_caching": True})) is False
     assert _ssm_prefix_cache_config_is_active(config.model_copy(update={"prefix_cache_state_budget": 1})) is True

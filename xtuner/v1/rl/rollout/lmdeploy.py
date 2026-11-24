@@ -47,7 +47,7 @@ _SSM_PREFIX_CACHE_DEFAULTS = {
 
 def _ssm_prefix_cache_config_is_active(config: RolloutConfig) -> bool:
     """Return whether SSM prefix-checkpoint settings need backend support."""
-    return config.enable_prefix_caching or any(
+    return any(
         getattr(config, name) != default for name, default in _SSM_PREFIX_CACHE_DEFAULTS.items()
     )
 
@@ -55,9 +55,14 @@ def _ssm_prefix_cache_config_is_active(config: RolloutConfig) -> bool:
 def _build_ssm_prefix_cache_engine_config(config: RolloutConfig, engine_config_type: type) -> dict[str, Any]:
     """Build SSM prefix-checkpoint settings after checking LMDeploy support."""
     ssm_config = {name: getattr(config, name) for name in _SSM_PREFIX_CACHE_DEFAULTS}
+    active_config = {
+        name: value for name, value in ssm_config.items() if value != _SSM_PREFIX_CACHE_DEFAULTS[name]
+    }
+    if not active_config:
+        return {}
     parameters = inspect.signature(engine_config_type).parameters
     accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
-    missing = sorted(set(ssm_config) - set(parameters)) if not accepts_kwargs else []
+    missing = sorted(set(active_config) - set(parameters)) if not accepts_kwargs else []
     if missing:
         missing_fields = ", ".join(missing)
         raise RuntimeError(
@@ -65,7 +70,9 @@ def _build_ssm_prefix_cache_engine_config(config: RolloutConfig, engine_config_t
             f"{missing_fields}. Install an LMDeploy revision containing the native SSM checkpoint settings, "
             "including prefix_cache_decode_save_first from de668baf or a later revision."
         )
-    return ssm_config
+    if accepts_kwargs:
+        return ssm_config
+    return {name: value for name, value in ssm_config.items() if name in parameters}
 
 
 def run_lmdeploy_server_wrapper(lmdeploy_config_namespace: Namespace):
