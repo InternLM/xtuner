@@ -1,19 +1,14 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""The LMDeploy server must trust custom code only when the model dir declares
-it."""
+"""Tests for LMDeploy rollout server configuration."""
 
 import json
 from argparse import Namespace
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
-from xtuner.v1.rl.rollout.lmdeploy import (
-    LMDeployWorker,
-    _build_ssm_prefix_cache_engine_config,
-    _model_dir_declares_custom_code,
-    _ssm_prefix_cache_config_is_active,
-)
+from xtuner.v1.rl.rollout.lmdeploy import LMDeployWorker, _model_dir_declares_custom_code
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 
 
@@ -31,22 +26,36 @@ class _StubLaunchSpec:
     placement_group_bundle_idxs = [0, 1]
 
 
-class _SupportedPytorchEngineConfig:
-    def __init__(
-        self,
-        *,
-        prefill_save_alignment,
-        prefix_cache_state_budget,
-        prefix_cache_decode_save_first,
-        prefix_cache_decode_state_interval,
-        prefill_save_last_only,
-    ):
-        pass
-
-
+@dataclass(kw_only=True)
 class _LegacyPytorchEngineConfig:
-    def __init__(self):
-        pass
+    tp: int
+    ep: int
+    dp: int
+    dp_rank: int
+    max_batch_size: int
+    empty_init: bool
+    distributed_executor_backend: str
+    mp_engine_backend: str
+    device_type: str
+    logprobs_mode: str
+    session_len: int | None
+    model_format: str | None
+    cache_max_entry_count: float
+    enable_prefix_caching: bool = False
+
+
+@dataclass(kw_only=True)
+class _PartialPytorchEngineConfig(_LegacyPytorchEngineConfig):
+    prefix_cache_state_budget: int = 0
+    prefill_save_alignment: int = 256
+
+
+@dataclass(kw_only=True)
+class _SupportedPytorchEngineConfig(_PartialPytorchEngineConfig):
+    prefill_save_alignment: int = 1024
+    prefix_cache_decode_save_first: bool = False
+    prefix_cache_decode_state_interval: int = 0
+    prefill_save_last_only: bool = False
 
 
 def _write_tokenizer_config(directory: Path, with_auto_map: bool) -> str:
@@ -58,13 +67,15 @@ def _write_tokenizer_config(directory: Path, with_auto_map: bool) -> str:
     return str(directory)
 
 
-def _server_config(tmp_path: Path, with_auto_map: bool, extra: dict | None = None) -> Namespace:
+def _server_config(tmp_path: Path, with_auto_map: bool, extra: dict | None = None, **rollout_options) -> Namespace:
     model_path = _write_tokenizer_config(tmp_path / ("custom" if with_auto_map else "stock"), with_auto_map)
     worker = LMDeployWorker.__new__(LMDeployWorker)
     worker.config = RolloutConfig(
         model_path=model_path,
         context_length=128,
+        rollout_max_batch_size_per_instance=1,
         extra_rollout_config={"lmdeploy_backend": "turbomind", **(extra or {})},
+        **rollout_options,
     )
     worker.model_name = "test-model"
     worker.host = "127.0.0.1"
@@ -72,7 +83,6 @@ def _server_config(tmp_path: Path, with_auto_map: bool, extra: dict | None = Non
     worker.api_keys = None
     worker.accelerator = "GPU"
     worker.server_launch_spec = _StubLaunchSpec()
-    # turbomind backend avoids the ray runtime-context branch of the transform.
     return worker._transform_rollout_config_to_server_configs()
 
 
@@ -96,28 +106,55 @@ def test_trust_remote_code_override_wins_both_ways(tmp_path):
     assert opt_in.trust_remote_code is True
 
 
-def test_ssm_prefix_cache_engine_config_requires_native_fields():
-    config = RolloutConfig(
-        model_path="/tmp/model",
-        context_length=128,
-        rollout_max_batch_size_per_instance=1,
-    )
-    assert _build_ssm_prefix_cache_engine_config(config, _SupportedPytorchEngineConfig) == {}
-    assert _build_ssm_prefix_cache_engine_config(config, _LegacyPytorchEngineConfig) == {}
-    active = config.model_copy(update={"prefix_cache_state_budget": 1})
-    assert _build_ssm_prefix_cache_engine_config(active, _SupportedPytorchEngineConfig)[
-        "prefix_cache_state_budget"
-    ] == 1
-    with pytest.raises(RuntimeError, match="does not support the SSM prefix-checkpoint controls"):
-        _build_ssm_prefix_cache_engine_config(active, _LegacyPytorchEngineConfig)
+class TestLMDeployPrefixCaching:
+    @pytest.fixture(autouse=True)
+    def _stub_ray_placement(self, monkeypatch):
+        monkeypatch.setattr("ray.get_runtime_context", lambda: Namespace(namespace="test"))
+        monkeypatch.setattr("ray.util.get_current_placement_group", lambda: None)
+        monkeypatch.setattr("xtuner.v1.rl.rollout.lmdeploy.placement_group_table", lambda _: {"name": "test"})
 
+    @pytest.mark.parametrize("enabled", [False, True])
+    def test_legacy_engine_accepts_default_ssm_settings(self, tmp_path, monkeypatch, enabled):
+        monkeypatch.setattr("lmdeploy.messages.PytorchEngineConfig", _LegacyPytorchEngineConfig)
+        server = _server_config(
+            tmp_path, with_auto_map=False, extra={"lmdeploy_backend": "pytorch"}, enable_prefix_caching=enabled
+        )
+        assert server.backend_config.enable_prefix_caching is enabled
 
-def test_ssm_prefix_cache_config_is_inactive_for_default_disabled_rollout():
-    config = RolloutConfig(
-        model_path="/tmp/model",
-        context_length=128,
-        rollout_max_batch_size_per_instance=1,
-    )
-    assert _ssm_prefix_cache_config_is_active(config) is False
-    assert _ssm_prefix_cache_config_is_active(config.model_copy(update={"enable_prefix_caching": True})) is False
-    assert _ssm_prefix_cache_config_is_active(config.model_copy(update={"prefix_cache_state_budget": 1})) is True
+    def test_partial_engine_accepts_supported_ssm_setting(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("lmdeploy.messages.PytorchEngineConfig", _PartialPytorchEngineConfig)
+        server = _server_config(
+            tmp_path, with_auto_map=False, extra={"lmdeploy_backend": "pytorch"}, prefix_cache_state_budget=3
+        )
+        assert server.backend_config.prefix_cache_state_budget == 3
+        assert server.backend_config.prefill_save_alignment == 256
+
+    def test_partial_engine_rejects_requested_unsupported_field(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("lmdeploy.messages.PytorchEngineConfig", _PartialPytorchEngineConfig)
+        with pytest.raises(
+            RuntimeError, match="requested SSM prefix-checkpoint controls prefix_cache_decode_save_first"
+        ):
+            _server_config(
+                tmp_path,
+                with_auto_map=False,
+                extra={"lmdeploy_backend": "pytorch"},
+                prefix_cache_decode_save_first=True,
+            )
+
+    def test_supported_engine_receives_all_five_settings(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("lmdeploy.messages.PytorchEngineConfig", _SupportedPytorchEngineConfig)
+        settings = {
+            "prefill_save_alignment": 512,
+            "prefix_cache_state_budget": 3,
+            "prefix_cache_decode_save_first": True,
+            "prefix_cache_decode_state_interval": 64,
+            "prefill_save_last_only": True,
+        }
+        server = _server_config(
+            tmp_path,
+            with_auto_map=False,
+            extra={"lmdeploy_backend": "pytorch"},
+            enable_prefix_caching=True,
+            **settings,
+        )
+        assert {name: getattr(server.backend_config, name) for name in settings} == settings
