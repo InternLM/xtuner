@@ -1,4 +1,4 @@
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, Sequence, cast
 
 import torch
 import torch.distributed as dist
@@ -10,10 +10,12 @@ from xtuner.v1.loss.utils import sp_gather, sp_split
 
 # from ..utils import sp_split
 from xtuner.v1.rl.rollout_is import RolloutImportanceSampling
+from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.device import get_device
 
 
 DEVICE = get_device()
+logger = get_logger()
 
 
 def compute_kl_loss_weight(
@@ -337,6 +339,46 @@ class BaseRLLossContext(CELossContext):
 
         self.loss_kwargs.is_weights = rollout_is_weights
         return mismatch_metrics, rollout_is_metrics
+
+
+def calibrate_token_mean_loss_weights(loss_ctx_list: Sequence[BaseRLLossContext]) -> None:
+    """Set one optimizer step's policy and KL weights to a global token mean.
+
+    Every supervised token of the step, across all ranks, gets weight ``1 / global_grad_tokens`` (times its rollout
+    importance-sampling weight when present). Collective: every rank must call it once per step.
+
+    Args:
+        loss_ctx_list (Sequence[BaseRLLossContext]): Local contexts of one optimizer step.
+    """
+    assert len(loss_ctx_list) > 0, "loss_ctx_list can not be empty"
+    loss_cfg = loss_ctx_list[0].loss_cfg
+
+    rank_grad_tokens = sum((ctx.loss_kwargs.shifted_labels != loss_cfg.ignore_idx).sum() for ctx in loss_ctx_list)
+    global_grad_tokens = cast(torch.Tensor, rank_grad_tokens)
+    if dist.is_initialized():
+        dist.all_reduce(global_grad_tokens, op=dist.ReduceOp.SUM)
+
+    if global_grad_tokens == 0:
+        logger.warning("Global gradient tokens is 0, which may lead to division by zero in loss weight calculation.")
+        global_grad_tokens.add_(1)  # Avoid division by zero
+
+    for loss_ctx in loss_ctx_list:
+        loss_kwargs = loss_ctx.loss_kwargs
+        shifted_labels = loss_kwargs.shifted_labels
+        policy_loss_weight = torch.ones_like(shifted_labels, dtype=torch.float32) / global_grad_tokens
+        policy_loss_weight[shifted_labels == loss_cfg.ignore_idx] = 0.0
+        if loss_kwargs.is_weights is not None:
+            policy_loss_weight = policy_loss_weight * loss_kwargs.is_weights
+        if loss_cfg.use_kl_loss:
+            assert loss_kwargs.ref_logprobs is not None, "ref_logprobs can not be None"
+            kl_loss_weight = compute_kl_loss_weight(
+                shifted_labels, global_grad_tokens, loss_cfg.kl_loss_coef, loss_cfg.ignore_idx
+            )
+        else:
+            kl_loss_weight = None
+        loss_kwargs.policy_loss_weight = policy_loss_weight
+        loss_kwargs.kl_loss_weight = kl_loss_weight
+        loss_kwargs.global_grad_tokens = global_grad_tokens
 
 
 def finalize_train_policy_metrics(extra_info_dict: dict[str, Any], device: str | torch.device) -> dict[str, Any]:

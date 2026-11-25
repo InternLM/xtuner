@@ -4,6 +4,7 @@ from .base_loss import (
     BaseRLLossConfig,
     BaseRLLossContext,
     BaseRLLossKwargs,
+    calibrate_token_mean_loss_weights,
     compute_kl_loss_weight,
     finalize_train_policy_metrics,
 )
@@ -25,3 +26,4 @@ from .loss_fn import (
     sft_loss_fn,
 )
 from .oreal_loss import OrealLossConfig, OrealLossContext, OrealLossKwargs
+from .score_centering_loss import ScoreCenteringLossConfig, ScoreCenteringLossContext, ScoreCenteringLossKwargs
