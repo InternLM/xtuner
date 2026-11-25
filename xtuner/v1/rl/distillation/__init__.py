@@ -14,7 +14,7 @@ from .rollout_teacher_manager import (
     RolloutTeacherReplicaRouter,
     RolloutTeacherScorer,
 )
-from .train_teacher_manager import TrainTeacherManager, TrainTeacherOutputs, TrainTeacherPack, TrainTeacherTimings
+from .train_teacher_manager import TrainTeacherManager, TrainTeacherPack, TrainTeacherTimings
 from .trainer_adapter import DistillationTrainerAdapter
 
 
@@ -31,7 +31,6 @@ __all__ = [
     "RolloutTeacherReplicaRouter",
     "RolloutTeacherScorer",
     "TrainTeacherManager",
-    "TrainTeacherOutputs",
     "TrainTeacherPack",
     "TrainTeacherTimings",
     "DistillationTrainerAdapter",

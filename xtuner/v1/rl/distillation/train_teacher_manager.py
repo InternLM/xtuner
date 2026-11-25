@@ -88,13 +88,6 @@ class TrainTeacherTimings(TeacherTiming):
 
 
 @dataclass
-class TrainTeacherOutputs:
-    teacher_logprobs: list[torch.Tensor]
-    target_token_ids: list[torch.Tensor] | None = None
-    timings: TrainTeacherTimings = field(default_factory=TrainTeacherTimings)
-
-
-@dataclass
 class TrainTeacherPack:
     """A Teacher-specific logical pack and its source sample metadata."""
 
@@ -107,9 +100,8 @@ class TrainTeacherPack:
 class TrainTeacherManager:
     """Execute training-side Teachers in one TrainingWorker process.
 
-    The manager owns Teacher model construction, deterministic Teacher-major scheduling, CPU/device residency, and
-    sampled-token or top-k output calculation. The caller remains responsible for swapping the Actor and optimizer
-    around the Teacher phase.
+    The manager owns Teacher model construction, Teacher-grouped logical-pack execution, CPU/device residency, and
+    output scattering. The caller remains responsible for swapping the Actor and optimizer around the Teacher phase.
     """
 
     def __init__(self, config: TrainTeacherManagerConfig, *, chunk_size: int | None) -> None:
@@ -153,47 +145,6 @@ class TrainTeacherManager:
         """Return the number of configured training Teachers."""
         return len(self._teacher_configs)
 
-    def compute_logprobs(
-        self,
-        *,
-        seq_ctx_list: list[SequenceContext],
-        shifted_labels_list: list[torch.Tensor],
-        teacher_indices_list: list[torch.Tensor],
-    ) -> TrainTeacherOutputs:
-        try:
-            if self._prefetch_enabled and any(
-                teacher_config.residency == "disk" for teacher_config in self._teacher_configs
-            ):
-                self._prefetch_executor = ThreadPoolExecutor(
-                    max_workers=1,
-                    thread_name_prefix="train-teacher-prefetch",
-                )
-                self._start_teacher_prefetch(0)
-            timings = TrainTeacherTimings()
-            if self.target_config.uses_sampled_token_targets:
-                return TrainTeacherOutputs(
-                    teacher_logprobs=self._compute_sampled_logprobs(
-                        seq_ctx_list,
-                        shifted_labels_list,
-                        teacher_indices_list,
-                        timings,
-                    ),
-                    timings=timings,
-                )
-
-            target_token_ids, teacher_logprobs = self._compute_topk_targets(
-                seq_ctx_list,
-                teacher_indices_list,
-                timings,
-            )
-            return TrainTeacherOutputs(
-                teacher_logprobs=teacher_logprobs,
-                target_token_ids=target_token_ids,
-                timings=timings,
-            )
-        finally:
-            self._finish_teacher_prefetch()
-
     def _build_disk_teacher(self, teacher_index: int, device: torch.device | str) -> FrozenModel:
         teacher_config = self._teacher_configs[teacher_index]
         fsdp_cfg = teacher_config.fsdp_cfg
@@ -220,29 +171,26 @@ class TrainTeacherManager:
         )
         return teacher
 
-    def _start_teacher_prefetch(self, start_index: int) -> None:
+    def _start_teacher_prefetch_exact(self, teacher_index: int) -> None:
+        """Prefetch one known-to-be-used disk Teacher."""
         if not self._prefetch_enabled or self._prefetch_executor is None or self._prefetch_future is not None:
             return
-        for teacher_index in range(start_index, len(self._teacher_configs)):
-            teacher_config = self._teacher_configs[teacher_index]
-            if teacher_config.residency != "disk":
-                continue
-            self._prefetch_teacher_index = teacher_index
-            logger.info(f"[TrainTeacher] prefetch scheduled: teacher={self._teacher_names[teacher_index]}")
-            fsdp_cfg = teacher_config.fsdp_cfg
-            if fsdp_cfg is not None:
-                fsdp_cfg = fsdp_cfg.model_copy(update={"cpu_offload": False})
-            process_groups_before = self._snapshot_process_groups()
-            try:
-                model = build_frozen_model_shell(teacher_config.model_cfg, fsdp_cfg)
-            except BaseException:
-                self._destroy_process_groups(self._new_process_groups(process_groups_before))
-                raise
-            self._record_process_groups(teacher_index, process_groups_before)
-            self._prefetch_future = self._prefetch_executor.submit(
-                prepare_frozen_model, model, teacher_config.model_path
-            )
+        teacher_config = self._teacher_configs[teacher_index]
+        if teacher_config.residency != "disk":
             return
+        self._prefetch_teacher_index = teacher_index
+        logger.info(f"[TrainTeacher] prefetch scheduled: teacher={self._teacher_names[teacher_index]}")
+        fsdp_cfg = teacher_config.fsdp_cfg
+        if fsdp_cfg is not None:
+            fsdp_cfg = fsdp_cfg.model_copy(update={"cpu_offload": False})
+        process_groups_before = self._snapshot_process_groups()
+        try:
+            model = build_frozen_model_shell(teacher_config.model_cfg, fsdp_cfg)
+        except BaseException:
+            self._destroy_process_groups(self._new_process_groups(process_groups_before))
+            raise
+        self._record_process_groups(teacher_index, process_groups_before)
+        self._prefetch_future = self._prefetch_executor.submit(prepare_frozen_model, model, teacher_config.model_path)
 
     def _take_teacher_prefetch(self, teacher_index: int) -> FrozenModel | None:
         if self._prefetch_future is None:
@@ -289,50 +237,6 @@ class TrainTeacherManager:
         if self._prefetch_executor is not None:
             self._prefetch_executor.shutdown(wait=True)
             self._prefetch_executor = None
-
-    def compute_teacher_outputs(
-        self,
-        seq_ctx_list: list[SequenceContext],
-        loss_ctx_list: list[BaseRLLossContext],
-    ) -> TrainTeacherTimings:
-        """Compute Teacher outputs for the given loss contexts."""
-        teacher_indices_list: list[torch.Tensor] = []
-        shifted_labels_list: list[torch.Tensor] = []
-        for loss_ctx in loss_ctx_list:
-            loss_kwargs = cast(Any, loss_ctx.loss_kwargs)
-            teacher_indices = loss_kwargs.teacher_indices
-            if teacher_indices is None:
-                raise ValueError("teacher_indices are required when the training Teacher manager is enabled")
-            teacher_indices_list.append(teacher_indices)
-            shifted_labels_list.append(loss_kwargs.shifted_labels)
-
-        try:
-            outputs = self.compute_logprobs(
-                seq_ctx_list=seq_ctx_list,
-                shifted_labels_list=shifted_labels_list,
-                teacher_indices_list=teacher_indices_list,
-            )
-            target_token_ids_list: list[torch.Tensor | None] = (
-                list(outputs.target_token_ids)
-                if outputs.target_token_ids is not None
-                else [None] * len(outputs.teacher_logprobs)
-            )
-            for loss_ctx, teacher_logprobs, target_token_ids in zip(
-                loss_ctx_list,
-                outputs.teacher_logprobs,
-                target_token_ids_list,
-            ):
-                loss_kwargs = cast(Any, loss_ctx.loss_kwargs)
-                loss_kwargs.teacher_logprobs = teacher_logprobs
-                if target_token_ids is not None:
-                    loss_kwargs.target_token_ids = target_token_ids
-            logger.info(
-                f"[TrainTeacher] batch finished: onload={outputs.timings.onload:.3f}s, "
-                f"compute={outputs.timings.compute:.3f}s, offload={outputs.timings.offload:.3f}s"
-            )
-            return outputs.timings
-        finally:
-            self.offload_all_to_cpu()
 
     def compute_teacher_outputs_grouped(
         self,
@@ -390,25 +294,46 @@ class TrainTeacherManager:
                 "target_token_ids": target_ids_buffer,
             }
 
+        # Determine the active Teacher schedule globally before starting any
+        # prefetch.  Empty Teachers must not be prefetched: grouped execution
+        # skips them, so their futures would otherwise remain unconsumed until
+        # the final cleanup and make the training step appear to hang.
+        active_teacher_indices: list[int] = []
+        active_pack_counts: dict[int, int] = {}
+        for teacher_index in range(self.teacher_count):
+            global_pack_count = self._global_max_count(len(teacher_packs.get(teacher_index, [])))
+            if global_pack_count > 0:
+                active_teacher_indices.append(teacher_index)
+                active_pack_counts[teacher_index] = global_pack_count
+
         timings = TrainTeacherTimings()
         try:
-            if self._prefetch_enabled and any(
-                teacher_config.residency == "disk" for teacher_config in self._teacher_configs
+            if (
+                self._prefetch_enabled
+                and any(teacher_config.residency == "disk" for teacher_config in self._teacher_configs)
+                and active_teacher_indices
             ):
                 self._prefetch_executor = ThreadPoolExecutor(
                     max_workers=1,
                     thread_name_prefix="train-teacher-prefetch",
                 )
-                self._start_teacher_prefetch(0)
+                self._start_teacher_prefetch_exact(active_teacher_indices[0])
 
-            for teacher_index, teacher_name in enumerate(self._teacher_names):
+            for active_pos, teacher_index in enumerate(active_teacher_indices):
+                teacher_name = self._teacher_names[teacher_index]
+                next_teacher_index = (
+                    active_teacher_indices[active_pos + 1] if active_pos + 1 < len(active_teacher_indices) else None
+                )
                 teacher_local_packs = teacher_packs.get(teacher_index, [])
-                num_local_packs = self._global_max_count(len(teacher_local_packs))
-                if num_local_packs == 0:
-                    continue
+                num_local_packs = active_pack_counts[teacher_index]
                 teacher: FrozenModel | None = None
                 try:
-                    with self._teacher_on_device(teacher_index, timings, teacher_name) as teacher:
+                    with self._teacher_on_device(
+                        teacher_index,
+                        timings,
+                        teacher_name,
+                        prefetch_next_teacher_index=next_teacher_index,
+                    ) as teacher:
                         for local_pack_index in range(num_local_packs):
                             if local_pack_index < len(teacher_local_packs):
                                 teacher_local_pack = teacher_local_packs[local_pack_index]
@@ -478,9 +403,19 @@ class TrainTeacherManager:
                                 teacher_local_pack.sample_indices, teacher_local_pack.sample_lengths
                             ):
                                 original_pack_id, start, end = sample_locations[sample_index]
-                                output_slice = output_loss[..., output_offset : output_offset + sample_length]
                                 buffer = output_buffers[original_pack_id]
-                                cast(torch.Tensor, buffer["teacher_logprobs"])[..., start:end] = output_slice
+                                buffer_teacher_logprobs = cast(torch.Tensor, buffer["teacher_logprobs"])
+                                if uses_topk:
+                                    # Top-k outputs have shape ``[B, T, K]``.  The
+                                    # sequence range must be selected before the
+                                    # final K dimension; ``output_loss[..., start:end]``
+                                    # would slice K instead and leave all T tokens
+                                    # in ``output_slice``.
+                                    output_slice = output_loss[..., output_offset : output_offset + sample_length, :]
+                                    buffer_teacher_logprobs[..., start:end, :] = output_slice
+                                else:
+                                    output_slice = output_loss[..., output_offset : output_offset + sample_length]
+                                    buffer_teacher_logprobs[..., start:end] = output_slice
                                 buffer_target_token_ids = cast(torch.Tensor | None, buffer["target_token_ids"])
                                 if buffer_target_token_ids is not None:
                                     buffer_target_token_ids[..., start:end, :] = cast(torch.Tensor, output_logits)[
@@ -489,6 +424,11 @@ class TrainTeacherManager:
                                 output_offset += sample_length
                 finally:
                     teacher = None
+                    if self._teacher_configs[teacher_index].residency == "disk":
+                        # This runs after the ``with`` statement has released
+                        # its caller-side Teacher reference.  Logging inside
+                        # _teacher_on_device() would sample memory too early.
+                        self._collect_and_log_release(teacher_name)
         finally:
             self._finish_teacher_prefetch()
             for original_pack_id, ctx in loss_ctx_by_pack.items():
@@ -648,6 +588,7 @@ class TrainTeacherManager:
         teacher_index: int,
         timings: TrainTeacherTimings,
         teacher_name: str | None = None,
+        prefetch_next_teacher_index: int | None = None,
     ) -> Iterator[FrozenModel]:
         teacher_config = self._teacher_configs[teacher_index]
         teacher_timing = (
@@ -672,8 +613,11 @@ class TrainTeacherManager:
         h2d_begin = time.monotonic()
         teacher.to_device(DEVICE)
         h2d_elapsed = time.monotonic() - h2d_begin
-        if teacher_config.residency == "disk":
-            self._start_teacher_prefetch(teacher_index + 1)
+        # The grouped caller passes the next *active* Teacher explicitly.
+        # Do not fall back to ``teacher_index + 1``: a configured Teacher may
+        # have no samples in this batch and must not be prefetched.
+        if teacher_config.residency == "disk" and prefetch_next_teacher_index is not None:
+            self._start_teacher_prefetch_exact(prefetch_next_teacher_index)
         onload_elapsed = time.perf_counter() - onload_begin
         timings.onload += onload_elapsed
         if teacher_timing is not None:
@@ -691,6 +635,10 @@ class TrainTeacherManager:
             offload_begin = time.perf_counter()
             if teacher_config.residency == "disk":
                 self._drop_teacher(teacher_index)
+                # Clear the context-manager's local Teacher reference.  The
+                # caller performs GC after the ``with`` statement so its
+                # context-manager target has also been released.
+                teacher = None
             else:
                 self._offload_to_cpu(teacher)
             offload_elapsed = time.perf_counter() - offload_begin
@@ -742,99 +690,3 @@ class TrainTeacherManager:
             raw_inputs_embeds=None,
             **drop_visual,
         )
-
-    def _compute_topk_targets(
-        self,
-        seq_ctx_list: list[SequenceContext],
-        teacher_indices_list: list[torch.Tensor],
-        timings: TrainTeacherTimings,
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        top_k = cast(int, self.target_config.top_k)
-        topk_logprob_config = cast(TopKLogProbConfig, self.topk_logprob_config)
-        target_ids = [
-            torch.zeros((*teacher_indices.shape, top_k), dtype=torch.long, device=DEVICE)
-            for teacher_indices in teacher_indices_list
-        ]
-        target_logprobs = [
-            torch.zeros((*teacher_indices.shape, top_k), dtype=torch.float32, device=DEVICE)
-            for teacher_indices in teacher_indices_list
-        ]
-
-        # All ranks iterate Teachers and local packs in the same order so every
-        # FSDP rank enters the same collective sequence, even when a rank has no
-        # tokens routed to a particular Teacher.
-        for teacher_index, teacher_name in enumerate(self._teacher_names):
-            teacher: FrozenModel | None = None
-            try:
-                with self._teacher_on_device(teacher_index, timings, teacher_name) as teacher:
-                    # Every rank forwards every local pack before selecting routed
-                    # tokens so all ranks enter the same FSDP collective sequence.
-                    # TODO(perf): Use a collective-safe compacted-token path to
-                    # avoid computing teacher logprobs for tokens routed to other
-                    # Teachers.
-                    for batch_index, (seq_ctx, teacher_indices) in enumerate(zip(seq_ctx_list, teacher_indices_list)):
-                        loss_ctx = topk_logprob_config.build(data={})
-                        assert loss_ctx is not None
-                        with torch.no_grad():
-                            output = teacher(
-                                seq_ctx=self.construct_teacher_seq_ctx(
-                                    seq_ctx,
-                                    is_composed=self._teacher_is_composed[teacher_index],
-                                ),
-                                loss_ctx={"lm": loss_ctx},
-                            )
-                        selected = teacher_indices == teacher_index
-                        # Top-k teacher outputs reuse ModelOutputs.logits for token ids
-                        # and ModelOutputs.loss for selected logprobs.
-                        topk_token_ids = cast(torch.Tensor, output.logits)
-                        topk_logprobs = cast(torch.Tensor, output.loss)
-                        target_ids[batch_index][selected] = topk_token_ids[selected]
-                        target_logprobs[batch_index][selected] = topk_logprobs[selected]
-            finally:
-                teacher = None
-                if self._teacher_configs[teacher_index].residency == "disk":
-                    self._collect_and_log_release(teacher_name)
-        return target_ids, target_logprobs
-
-    def _compute_sampled_logprobs(
-        self,
-        seq_ctx_list: list[SequenceContext],
-        shifted_labels_list: list[torch.Tensor],
-        teacher_indices_list: list[torch.Tensor],
-        timings: TrainTeacherTimings,
-    ) -> list[torch.Tensor]:
-        target_logprobs = [
-            torch.zeros_like(shifted_labels, dtype=torch.float32) for shifted_labels in shifted_labels_list
-        ]
-
-        # Keep the Teacher-major schedule identical across ranks for FSDP.
-        for teacher_index, teacher_name in enumerate(self._teacher_names):
-            teacher: FrozenModel | None = None
-            try:
-                with self._teacher_on_device(teacher_index, timings, teacher_name) as teacher:
-                    # TODO(perf): Forward only tokens routed to this Teacher once
-                    # a collective-safe compacted-token path is available; the
-                    # current full-pack forward computes logprobs for other Teachers
-                    # as well.
-                    for batch_index, (seq_ctx, shifted_labels, teacher_indices) in enumerate(
-                        zip(seq_ctx_list, shifted_labels_list, teacher_indices_list)
-                    ):
-                        loss_ctx = cast(
-                            LogProbContext,
-                            self.logprob_config.build(data={"shifted_labels": shifted_labels}),
-                        )
-                        with torch.no_grad():
-                            output = teacher(
-                                seq_ctx=self.construct_teacher_seq_ctx(
-                                    seq_ctx,
-                                    is_composed=self._teacher_is_composed[teacher_index],
-                                ),
-                                loss_ctx={"lm": loss_ctx},
-                            )
-                        selected = teacher_indices == teacher_index
-                        target_logprobs[batch_index][selected] = cast(torch.Tensor, output.loss)[selected]
-            finally:
-                teacher = None
-                if self._teacher_configs[teacher_index].residency == "disk":
-                    self._collect_and_log_release(teacher_name)
-        return target_logprobs

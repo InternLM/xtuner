@@ -23,7 +23,6 @@ from xtuner.v1.rl.distillation import (
     TrainTeacherConfig,
     TrainTeacherManager,
     TrainTeacherManagerConfig,
-    TrainTeacherOutputs,
     TrainTeacherTimings,
 )
 from xtuner.v1.rl.distillation import train_teacher_manager as train_teacher_manager_module
@@ -533,45 +532,6 @@ class TestTrainTeacherTimings(unittest.TestCase):
 
         self.assertIsNone(manager._teachers[0])
         empty_cache.assert_called_once_with()
-
-    def test_compute_teacher_outputs_writes_teacher_outputs_to_loss_contexts(self) -> None:
-        manager = TrainTeacherManager.__new__(TrainTeacherManager)
-        teacher_indices = torch.tensor([[0, 1]], dtype=torch.long)
-        shifted_labels = torch.tensor([[-100, 10]], dtype=torch.long)
-        teacher_logprobs = [torch.tensor([[-0.1, -0.2]])]
-        target_token_ids = [torch.tensor([[[1, 2], [3, 4]]], dtype=torch.long)]
-        timings = TrainTeacherTimings()
-        seq_ctx = MagicMock()
-        loss_ctx = SimpleNamespace(
-            loss_kwargs=SimpleNamespace(
-                teacher_indices=teacher_indices,
-                shifted_labels=shifted_labels,
-            )
-        )
-
-        with (
-            patch.object(
-                manager,
-                "compute_logprobs",
-                return_value=TrainTeacherOutputs(
-                    teacher_logprobs=teacher_logprobs,
-                    target_token_ids=target_token_ids,
-                    timings=timings,
-                ),
-            ) as compute_logprobs,
-            patch.object(manager, "offload_all_to_cpu") as offload_all_to_cpu,
-        ):
-            result = manager.compute_teacher_outputs([seq_ctx], [loss_ctx])
-
-        self.assertIs(result, timings)
-        compute_logprobs.assert_called_once_with(
-            seq_ctx_list=[seq_ctx],
-            shifted_labels_list=[shifted_labels],
-            teacher_indices_list=[teacher_indices],
-        )
-        torch.testing.assert_close(loss_ctx.loss_kwargs.teacher_logprobs, teacher_logprobs[0])
-        torch.testing.assert_close(loss_ctx.loss_kwargs.target_token_ids, target_token_ids[0])
-        offload_all_to_cpu.assert_called_once_with()
 
     def test_distillation_loss_kwargs_carry_teacher_indices(self) -> None:
         loss_cfg = DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
