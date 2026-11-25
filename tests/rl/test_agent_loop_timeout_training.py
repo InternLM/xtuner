@@ -28,12 +28,10 @@ TestTeacherScoring —— teacher scoring 对超时样本的处理
 - test_sample_level_teacher_scoring_includes_timeout_samples:
     非 defer 模式下逐样本 teacher scoring 也收到超时样本。
 
-TestTimeoutTrainingConfigValidation —— train_on_timeout 与 expired rerollout 的配置期互斥
-- test_timeout_training_rejects_expired_rerollout:
-    train_on_timeout=True 时 tail_batch_trigger_size=0/1 使 TaskSpecConfig/DisaggTaskSpecConfig
-    构造抛 ValueError。
-- test_timeout_training_allows_disabled_rerollout:
-    tail_batch_trigger_size=-1 时允许打开 train_on_timeout。
+TestTimeoutTrainingConfigValidation —— train_on_timeout 可与 expired rerollout 组合
+- test_timeout_training_allows_expired_rerollout:
+    train_on_timeout=True 时 tail_batch_trigger_size=0/1 可以构造
+    TaskSpecConfig/DisaggTaskSpecConfig。
 - test_rerollout_without_timeout_training_is_allowed:
     未打开 train_on_timeout 时 tail_batch_trigger_size>=0 不受影响。
 """
@@ -399,20 +397,13 @@ class TestTimeoutTrainingConfigValidation(unittest.TestCase):
             sampler_config=self._sampler_config(),
         )
 
-    def test_timeout_training_rejects_expired_rerollout(self):
-        # 行为:train_on_timeout 打开时,任何启用 expired rerollout 的 tail_batch_trigger_size 都在配置期被拒绝
+    def test_timeout_training_allows_expired_rerollout(self):
+        # 过期前已清理旧 trace，重试会重新执行 agent，因此两种能力可以组合。
         for spec_factory in (self._task_spec, self._disagg_task_spec):
             for trigger_size in (0, 1):
                 with self.subTest(spec=spec_factory.__name__, tail_batch_trigger_size=trigger_size):
-                    with self.assertRaisesRegex(ValueError, "train_on_timeout"):
-                        spec_factory(train_on_timeout=True, tail_batch_trigger_size=trigger_size)
-
-    def test_timeout_training_allows_disabled_rerollout(self):
-        # 行为:tail_batch_trigger_size=-1(禁用 rerollout)时允许打开 train_on_timeout
-        for spec_factory in (self._task_spec, self._disagg_task_spec):
-            with self.subTest(spec=spec_factory.__name__):
-                spec = spec_factory(train_on_timeout=True, tail_batch_trigger_size=-1)
-                self.assertTrue(spec.agent_loop_config.train_on_timeout)
+                    spec = spec_factory(train_on_timeout=True, tail_batch_trigger_size=trigger_size)
+                    self.assertTrue(spec.agent_loop_config.train_on_timeout)
 
     def test_rerollout_without_timeout_training_is_allowed(self):
         # 行为:未打开 train_on_timeout 时,expired rerollout 配置不受影响
