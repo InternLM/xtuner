@@ -24,4 +24,5 @@ from .native import (
     RayJudgerProxy,
     RemoteJudger,
 )
+from .prm import PRMJudger, PRMJudgerConfig
 from .rubric import RubricJudger, RubricJudgerConfig, merge_outcome_and_process
