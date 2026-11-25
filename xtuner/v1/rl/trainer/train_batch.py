@@ -14,7 +14,7 @@ import numpy as np
 import ray
 import torch
 
-from xtuner.v1.data_proto.rl_data import MM_PIXEL_FIELDS, RolloutState
+from xtuner.v1.data_proto.rl_data import MM_PIXEL_FIELDS, RolloutState, SamplerTopK
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.model.compose.base import BaseComposeConfig
 
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 
 _UINT16_CAPACITY = 1 << 16
+_SAMPLER_TOPK_KEYS = ("sampler_topk_ids", "sampler_topk_logprobs")
 
 
 @dataclass
@@ -37,13 +38,15 @@ class TrainSample:
 
     ``values``, ``returns`` and ``advantages`` start as ``None`` and are filled by
     later stages. The source ``seq_ctx`` keeps object refs unresolved; each pack
-    resolves them again from the pristine cache.
+    resolves them again from the pristine cache. ``sampler_topk`` holds the shifted
+    ``[1, T - 1, k]`` int32 ids and float32 logprobs, loaded only when the loss requires them.
     """
 
     seq_ctx: SequenceContext
     shifted_labels: torch.Tensor
     rollout_logprobs: torch.Tensor | None
     teacher_targets: dict[str, torch.Tensor]
+    sampler_topk: tuple[torch.Tensor, torch.Tensor] | None = None
     reward_score: float | None = None
     values: torch.Tensor | None = None
     returns: torch.Tensor | None = None
@@ -78,6 +81,8 @@ class TrainBatch:
         teacher_loss_keys (list[str]): Extra loss fields required on every pack.
         distillation_config (DistillationConfig | None): Distillation config used to
             size teacher padding fields.
+        required_loss_keys (Sequence[str]): Optional fields the policy loss requires on
+            every pack (``BaseRLLossConfig.required_loss_keys``). Defaults to ``()``.
     """
 
     def __init__(
@@ -91,6 +96,7 @@ class TrainBatch:
         model_cfg: TransformerConfig | BaseComposeConfig,
         teacher_loss_keys: list[str],
         distillation_config: DistillationConfig | None,
+        required_loss_keys: Sequence[str] = (),
     ) -> None:
         self.plan = rank_plan
         self.attrs = attrs
@@ -98,9 +104,12 @@ class TrainBatch:
         self.model_cfg = model_cfg
         self.teacher_loss_keys = teacher_loss_keys
         self.distillation_config = distillation_config
+        self.required_loss_keys = list(required_loss_keys)
+        self._load_sampler_topk = any(key in self.required_loss_keys for key in _SAMPLER_TOPK_KEYS)
         self._samples: list[TrainSample] = [
             self._build_sample(state, attrs["use_3d_position_ids"], teacher_adapter) for state in states
         ]
+        self._sampler_topk_width = self._check_sampler_topk_width()
 
     def materialize(self, indices: tuple[int, ...]) -> FullPack:
         """Concatenate one pack's CPU samples and tail-pad it to capacity.
@@ -150,6 +159,11 @@ class TrainBatch:
                 if not all(value is not None for value in values):
                     raise ValueError(f"Required pack field {key} must be present on every sample: {key}")
                 fields[key] = torch.cat([cast(torch.Tensor, value) for value in values], dim=1)
+            if self._load_sampler_topk:
+                # Presence and width were checked once when the samples were built.
+                topk = [cast(tuple[torch.Tensor, torch.Tensor], sample.sampler_topk) for sample in samples]
+                fields["sampler_topk_ids"] = torch.cat([ids for ids, _ in topk], dim=1).long()
+                fields["sampler_topk_logprobs"] = torch.cat([logprobs for _, logprobs in topk], dim=1)
         else:
             # Scheduling-only padding slot: the whole pack materializes as padding.
             fields["shifted_labels"] = self._padding_loss_input("shifted_labels", padding_len)
@@ -163,6 +177,9 @@ class TrainBatch:
                 fields[key] = self._padding_loss_input(key, padding_len) if key in self._loss_keys() else None
             for key in self.teacher_loss_keys:
                 fields[key] = self._padding_loss_input(key, padding_len)
+            if self._load_sampler_topk:
+                for key in _SAMPLER_TOPK_KEYS:
+                    fields[key] = self._padding_loss_input(key, padding_len)
 
         if samples and padding_len > 0:
             fields = {
@@ -345,10 +362,19 @@ class TrainBatch:
 
     def _loss_keys(self) -> list[str]:
         keys = list(self.attrs["pack_loss_keys"])
-        for key in self.teacher_loss_keys:
+        for key in (*self.teacher_loss_keys, *self.required_loss_keys):
             if key not in keys:
                 keys.append(key)
         return keys
+
+    def _check_sampler_topk_width(self) -> int:
+        # A rank without samples only materializes padding packs; their width never meets real rows.
+        if not self._load_sampler_topk:
+            return 0
+        widths = {sample.sampler_topk[0].shape[-1] for sample in self._samples if sample.sampler_topk is not None}
+        if len(widths) > 1:
+            raise ValueError(f"Sampler top-k width must be equal across a batch, got {sorted(widths)}")
+        return widths.pop() if widths else 1
 
     def _expand_rows(self, payload: list[float] | TokenBatchProto) -> list[torch.Tensor]:
         if isinstance(payload, TokenBatchProto):
@@ -389,6 +415,18 @@ class TrainBatch:
         if state.logprobs is not None:
             rollout_logprobs = torch.tensor(state.logprobs[1:], dtype=torch.float32).unsqueeze(0)
 
+        sampler_topk: tuple[torch.Tensor, torch.Tensor] | None = None
+        if self._load_sampler_topk:
+            if state.sampler_topk is None:
+                raise ValueError(
+                    f"The policy loss requires sampler_topk on every sample: rollout_id={state.rollout_id}"
+                )
+            sampler_topk = _shifted_sampler_topk(
+                state.sampler_topk,
+                shifted_labels=shifted_labels,
+                vocab_size=_language_cfg(self.model_cfg).vocab_size,
+            )
+
         position_ids = state.position_ids
         if use_3d_position_ids and (position_ids is None or position_ids.ndim != 3):
             seq_len = input_ids_t.size(-1)
@@ -408,6 +446,7 @@ class TrainBatch:
             shifted_labels=shifted_labels_t,
             rollout_logprobs=rollout_logprobs,
             teacher_targets=teacher_adapter.rollout_teacher_targets(state, shifted_labels=shifted_labels),
+            sampler_topk=sampler_topk,
             reward_score=float(state.reward["score"])
             if state.reward is not None and "score" in state.reward
             else None,
@@ -420,6 +459,10 @@ class TrainBatch:
             return torch.zeros(1, padding_len, dtype=torch.float32)
         if key == "teacher_indices":
             return torch.full((1, padding_len), -1, dtype=torch.long)
+        if key == "sampler_topk_ids":
+            return torch.full((1, padding_len, self._sampler_topk_width), -1, dtype=torch.long)
+        if key == "sampler_topk_logprobs":
+            return torch.full((1, padding_len, self._sampler_topk_width), float("-inf"), dtype=torch.float32)
         if key in ("teacher_logprobs", "target_token_ids"):
             distillation_config = self.distillation_config
             assert distillation_config is not None, f"Padding {key} requires distillation_config"
@@ -641,6 +684,35 @@ def resolve_pack_refs(
         f"rollout_routed_experts.size(0) {seq_ctx.rollout_routed_experts.size(0)} "
         f"!= input_ids.size(1) {seq_ctx.input_ids.size(1)}"
     )
+
+
+def _shifted_sampler_topk(
+    sampler_topk: SamplerTopK, *, shifted_labels: list[int], vocab_size: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Validate the trained rows of a sampler top-k record and return them shifted to ``[1, T - 1, k]``."""
+    num_rows = len(shifted_labels) + 1
+    if sampler_topk.token_ids.shape[0] != num_rows:
+        raise ValueError(f"sampler_topk rows {sampler_topk.token_ids.shape[0]} do not match input_ids {num_rows}")
+    # Row t produced input_ids[t]; the loss position t predicts input_ids[t + 1], like rollout_logprobs.
+    ids = sampler_topk.token_ids[1:]
+    logprobs = sampler_topk.logprobs[1:]
+    present = ids >= 0
+    if ((ids < -1) | (ids >= vocab_size)).any():
+        raise ValueError(f"Sampler top-k token ids must be -1 or in [0, {vocab_size})")
+    if not np.where(present, np.isfinite(logprobs) & (logprobs <= 0), np.isneginf(logprobs)).all():
+        raise ValueError("Sampler top-k logprobs must be finite and <= 0 for recorded ids and -inf for id -1")
+    sorted_ids = np.sort(ids, axis=-1)
+    if ((sorted_ids[:, 1:] == sorted_ids[:, :-1]) & (sorted_ids[:, 1:] >= 0)).any():
+        raise ValueError("Sampler top-k token ids must be distinct within a row")
+    # A producer that records the sampler distribution records it for every generated token.
+    missing = (np.asarray(shifted_labels) != -100) & ~present.any(axis=-1)
+    if missing.any():
+        raise ValueError(
+            f"Sampler top-k must record a head for every supervised token; missing at shifted positions "
+            f"{np.flatnonzero(missing).tolist()}"
+        )
+    # Copy: arrays deserialized by Ray are read-only views of the object store.
+    return torch.tensor(ids).unsqueeze(0), torch.tensor(logprobs).unsqueeze(0)
 
 
 def _language_cfg(model_cfg: TransformerConfig | BaseComposeConfig):

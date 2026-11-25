@@ -355,6 +355,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             model_cfg=self.config.model_cfg,
             teacher_loss_keys=self.actor.teacher_loss_keys(),
             distillation_config=self.config.distillation_config,
+            required_loss_keys=self.config.loss_cfg.required_loss_keys,
         )
 
     @ray_method
