@@ -283,8 +283,9 @@ class TestResidencyAndGuards(unittest.TestCase):
     """worker 跨角色驻留与 role 侧 RPC 守卫。"""
 
     def setUp(self) -> None:
-        cache_patch = patch("xtuner.v1.rl.trainer.worker.DEVICE_MODULE.empty_cache")
-        self.empty_cache = cache_patch.start()
+        # Fake the accelerator boundary, including on CPU-only test hosts.
+        cache_patch = patch("xtuner.v1.rl.trainer.worker.DEVICE_MODULE")
+        self.empty_cache = cache_patch.start().empty_cache
         self.addCleanup(cache_patch.stop)
 
     def _worker(self):
@@ -577,6 +578,7 @@ class TestControllerPPOGuards(unittest.TestCase):
 class TestCheckpointOrchestration(unittest.TestCase):
     """checkpoint 保存/恢复的角色编排（public: save/resume/save_hf）。"""
 
+    @patch("xtuner.v1.rl.trainer.worker.DEVICE_MODULE", new=MagicMock())
     def test_checkpoint_cover_every_configured_role(self):
         # 行为：save/resume/save_hf 以 role-first 目录覆盖每个已配置角色及 SFT 状态
         worker = TrainingWorker.__new__(TrainingWorker)
