@@ -1,4 +1,4 @@
-"""Real Qwen3.5 VLM MoE checkpoint-engine recovery E2E test.
+"""Real Qwen3.5 VLM MoE LMDeploy checkpoint-engine recovery E2E test.
 
 This test focuses only on the recovery protocol:
 
@@ -49,7 +49,7 @@ from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
 from xtuner.v1.utils import get_logger
 
 
-EXPERIMENT_NAME = "qwen35_vl_moe_checkpoint_engine_recovery_e2e"
+EXPERIMENT_NAME = "qwen35_vl_moe_lmdeploy_checkpoint_engine_recovery_e2e"
 TOTAL_TRAIN_STEPS = 3
 TRAIN_BATCH_SIZE_BY_STEP = {1: 8, 2: 256, 3: 8}
 PROMPT_REPEAT_K = 2
@@ -62,6 +62,7 @@ POLL_INTERVAL_S = 0.5
 logger = get_logger()
 
 
+@unittest.skip("Disabled by default: requires checkpoint-engine environment.")
 class TestQwen35VLMoECheckpointEngineRecoveryE2E(unittest.TestCase):
     def setUp(self) -> None:
         self.model_path = self._required_path("QWEN3_5_MOE_PATH")
@@ -88,8 +89,8 @@ class TestQwen35VLMoECheckpointEngineRecoveryE2E(unittest.TestCase):
 
         self._patch_env(
             {
-                "XTUNER_USE_LMDEPLOY": "0",
-                "XTUNER_USE_SGLANG": "1",
+                "XTUNER_USE_LMDEPLOY": "1",
+                "XTUNER_USE_SGLANG": "0",
                 "XTUNER_USE_VLLM": "0",
                 "XTUNER_USE_FA3": "1",
                 "XTUNER_DETERMINISTIC": "false",
@@ -105,7 +106,7 @@ class TestQwen35VLMoECheckpointEngineRecoveryE2E(unittest.TestCase):
         if hasattr(self, "_old_env"):
             self._restore_env()
 
-    @unittest.skipIf(os.environ.get("XTUNER_USE_SGLANG", "0") == "0", "sglang backend is not enabled")
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "LMDeploy backend is not enabled")
     def test_checkpoint_engine_backend_failure_recovery(self) -> None:
         trainer = self._build_config().build()
         self._install_rollout_probe(trainer)
@@ -363,7 +364,12 @@ class TestQwen35VLMoECheckpointEngineRecoveryE2E(unittest.TestCase):
             health_check_interval_seconds=5.0,
             health_check_failure_threshold=1,
             extra_rollout_config={
-                "sglang_log_level": "error",
+                "lmdeploy_backend": "pytorch",
+                "lmdeploy_distributed_executor_backend": "ray",
+                "lmdeploy_log_level": "ERROR",
+                "lmdeploy_speculative_algorithm": "qwen3_5_mtp",
+                "lmdeploy_speculative_num_draft_tokens": 3,
+                "lmdeploy_uvicorn_log_level": "ERROR",
             },
         )
         model_cfg = Qwen3_5_VLMoE35BA3Config(freeze_vision=True, freeze_projector=True)

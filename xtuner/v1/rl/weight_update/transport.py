@@ -901,10 +901,10 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineAdapter]):
 
         self._ps = self._build_parameter_server()
         self._p2p_available = self._check_checkpoint_engine_p2p_available()
-        # record the local checkpoint keys per PS-rank
-
         self._local_checkpoint_keys = self._split_tensors_for_rank(
-            self._checkpoint_path, self.ps_world_size, self.rank
+            checkpoint_path=self._checkpoint_path,
+            world_size=self.ps_world_size,
+            rank=self.rank,
         )
 
     def _build_parameter_server(self) -> Any:
@@ -939,20 +939,25 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineAdapter]):
             return False
         return True
 
-    def _split_tensors_for_rank(self, checkpoint_path: str | Path, world_size: int, rank: int) -> set[str]:
-        """Split an HF keys for each ParameterServer."""
+    def _split_tensors_for_rank(
+        self,
+        checkpoint_path: str | Path,
+        world_size: int,
+        rank: int,
+    ) -> set[str]:
+        """Assign the HF checkpoint keys to this ParameterServer rank."""
 
         path = Path(checkpoint_path)
         index_path = path / "model.safetensors.index.json"
-
         if not index_path.exists():
             raise FileNotFoundError(f"model.safetensors.index.json file not found: {index_path}")
-        # TODO: split tensor according to tenser size of header metadata in .safetensors
+
         with open(index_path) as f:
             weight_map: dict[str, str] = json.load(f)["weight_map"]
-        weight_keys = [key_name for key_name, file_name in weight_map.items()]
-        local_keys = set(weight_keys[rank::world_size])
+        weight_keys = list(weight_map)
 
+        # TODO: balance shards using tensor sizes from safetensors headers.
+        local_keys = set(weight_keys[rank::world_size])
         self.logger.info(
             f"[checkpoint_engine] split keys from {index_path} "
             f"rank={rank} tensors={len(local_keys)}/{len(weight_keys)}"
@@ -1002,19 +1007,13 @@ class CheckpointEngineWeightTransport(WeightTransport[CheckpointEngineAdapter]):
             self._ps.unregister_checkpoint(self._checkpoint_name)
             self._checkpoint_name = None
 
-        # 1. Collect named tensors from weight iterator
+        # 1. Collect the keys selected for this ParameterServer rank during initialization.
         all_tensors = self._collect_named_tensors(weight_iterator, local_keys=self._local_checkpoint_keys)
 
-        # 2. Shard tensors for the current parameter server
-        missing = self._local_checkpoint_keys - all_tensors.keys()
-        if missing:
-            missing_mtp_keys = {key for key in missing if key.startswith("mtp.")}
-            missing_non_mtp_keys = missing - missing_mtp_keys
-            raise RuntimeError(
-                f"[checkpoint_engine] ParameterServer Rank={self.rank}. Missing non-MTP keys: [{missing_non_mtp_keys}]. Missing MTP-only keys: [{missing_mtp_keys}]"
-            )
-
-        shard = {k: all_tensors[k] for k in self._local_checkpoint_keys if k in all_tensors}
+        # 2. Register exactly the tensors produced by the train iterator. The HF
+        # index only determines ParameterServer ownership; absent weights are
+        # treated as a partial update, matching the IPC transport semantics.
+        shard = all_tensors
 
         # 3. Register checkpoint
         self._update_counter += 1

@@ -110,7 +110,9 @@ class RolloutConfig(BaseModel):
         weight_update_port (Optional[int]): Port used by train rank 0 to initialize the external NCCL weight update
             group. Defaults to 30000.
         weight_transport_type (Optional[str]): Transport path used to update rollout weights from training workers.
-            Supported values are "ipc" and "checkpoint_engine" for colocated mode, "nccl" for disaggregated mode. If not set, "ipc" will use in colocate and "nccl" will use in disaggregated. "checkpoint_engine" is currently supported only by the SGLang rollout backend in colocated mode. Defaults to None.
+            Supported values are "ipc" and "checkpoint_engine" for colocated mode, "nccl" for disaggregated mode.
+            If not set, "ipc" will use in colocate and "nccl" will use in disaggregated. "checkpoint_engine"
+            supports the SGLang and LMDeploy rollout backends in colocated mode. Defaults to None.
         checkpoint_name_prefix (str): Prefix used for Checkpoint Engine checkpoint names registered in the
             ParameterServer. Defaults to "xtuner-rl".
         checkpoint_engine_timeout (float): Timeout in seconds for Checkpoint Engine rollout weight update requests.
@@ -203,7 +205,8 @@ class RolloutConfig(BaseModel):
             help=(
                 "Transport path used to update rollout weights from training workers. "
                 "Supported values: 'ipc' for colocated in-process transfer, 'nccl' for disaggregated GPU-to-GPU "
-                "transfer, and 'checkpoint_engine' for SGLang rollout workers that fetch sharded checkpoints "
+                "transfer, and 'checkpoint_engine' for SGLang or LMDeploy rollout workers that fetch sharded "
+                "checkpoints "
                 "from Checkpoint Engine ParameterServer instances. Defaults to None."
             ),
         ),
