@@ -128,6 +128,34 @@ def _assemble_trace(nodes: List["TreeNode"], session_id: str) -> dict:
     return trace
 
 
+def _build_response_provenance(
+    nodes: List["TreeNode"],
+    trace: dict,
+    session_id: str,
+    *,
+    require_token_versions: bool,
+) -> tuple[list[int], list[int], list[int | None]]:
+    """Build and validate the prompt/response token-version suffix fields."""
+    prompt_ids = list(trace["prompt_ids"])
+    response_ids = list(trace["response_ids"])
+    token_model_steps: list[int | None] = []
+    for node in nodes:
+        node_val = node.value
+        if not isinstance(node_val, TokenizedSegment):
+            raise TypeError(f"Unexpected trace node value type: {type(node_val)!r}")
+        token_model_steps.extend([node_val.model_step] * len(node_val.token_ids))
+
+    response_model_steps = token_model_steps[len(prompt_ids) :]
+    if len(response_model_steps) != len(response_ids):
+        raise ValueError(
+            f"Trace {session_id!r} has incomplete response token provenance: response token length mismatch"
+        )
+    if require_token_versions and any(step is None for step in response_model_steps):
+        raise ValueError(f"Trace {session_id!r} has incomplete response token provenance: missing token versions")
+
+    return prompt_ids, response_ids, response_model_steps
+
+
 def _latest_chain(trie: "Trie") -> List["TreeNode"]:
     """Return the committed chain ending at the most recently written node.
 
@@ -467,7 +495,7 @@ class RolloutTraceStore:
         self.objects.clear()
         self.updated_at.clear()
 
-    def export_partial_training_trace(self, session_id: str) -> dict:
+    def export_partial_training_trace(self, session_id: str, *, require_turn_provenance: bool = False) -> dict:
         """Export the whole session trace without requiring a prompt text.
 
         Only fully finished turns are stored, so the export ends exactly at
@@ -484,15 +512,49 @@ class RolloutTraceStore:
 
         Args:
             session_id (str): The session identifier.
+            require_turn_provenance (bool): Require token versions, request IDs and routed experts
+                from the committed partial chain. Transcript and prompt-text matching are not
+                performed because a timeout may leave the current turn incomplete.
 
         Returns:
-            dict: The trace dictionary with the same contract as
-            ``export_training_trace``.
+            dict: The trace dictionary with the partial-export contract,
+            including ``prompt_ids``, ``response_ids`` and the per-token
+            ``response_model_steps`` for the response suffix.
         """
         trie = self.sessions.get(session_id)
         if trie is None:
-            return _assemble_trace([], session_id)
-        return _assemble_trace(_latest_chain(trie), session_id)
+            nodes: list["TreeNode"] = []
+        else:
+            nodes = _latest_chain(trie)
+
+        trace = _assemble_trace(nodes, session_id)
+        if require_turn_provenance and not nodes:
+            raise ValueError("A provenance export requires a non-empty committed trace path")
+        path_ids: list[str] = []
+        for node in nodes:
+            node_val = node.value
+            if not isinstance(node_val, TokenizedSegment):
+                raise TypeError(f"Unexpected trace node value type: {type(node_val)!r}")
+            if node_val.request_id is None:
+                if require_turn_provenance:
+                    raise ValueError("Partial trace is missing request IDs")
+            elif node_val.request_id not in path_ids:
+                path_ids.append(node_val.request_id)
+        if require_turn_provenance and not path_ids:
+            raise ValueError("Partial trace is missing request IDs")
+        if require_turn_provenance and not trace["routed_experts"]:
+            raise ValueError("MoE training requires routed experts on every trace node")
+
+        _, _, response_model_steps = _build_response_provenance(
+            nodes,
+            trace,
+            session_id,
+            require_token_versions=require_turn_provenance,
+        )
+        trace["response_model_steps"] = response_model_steps
+        if require_turn_provenance:
+            trace["request_ids"] = path_ids
+        return trace
 
     def export_training_trace(
         self,
@@ -523,13 +585,11 @@ class RolloutTraceStore:
         nodes = self._match_nodes(session_id, prompt_text)
         trace = _assemble_trace(nodes, session_id)
         input_ids: list[int] = trace["input_ids"]
-        versions: list[int | None] = []
         path_ids: list[str] = []
         for node in nodes:
             node_val = node.value
             if not isinstance(node_val, TokenizedSegment):
                 raise TypeError(f"Unexpected trace node value type: {type(node_val)!r}")
-            versions.extend([node_val.model_step] * len(node_val.token_ids))
             if node_val.request_id is not None and node_val.request_id not in path_ids:
                 path_ids.append(node_val.request_id)
         if expected_request_ids is None:
@@ -540,14 +600,9 @@ class RolloutTraceStore:
             raise ValueError("MoE training requires routed experts on every trace node")
         if not nodes:
             raise ValueError("A provenance export requires a non-empty committed trace path")
-        # The real prompt comes from the first prompt-only node, not from the dataset template that started the Agent.
-        first = nodes[0].value
-        assert isinstance(first, TokenizedSegment)
-        if any(label != -100 for label in first.labels or []):
-            raise ValueError("The first trace node must be prompt-only")
-        prompt_ids = list(first.token_ids)
-        response_ids = input_ids[len(prompt_ids) :]
-        response_steps = versions[len(prompt_ids) :]
+        prompt_ids, response_ids, response_steps = _build_response_provenance(
+            nodes, trace, session_id, require_token_versions=True
+        )
         if (
             not expected_request_ids
             or not path_ids
@@ -565,8 +620,8 @@ class RolloutTraceStore:
                 if node_request_id is not None:
                     missing.discard(node_request_id)
             stack.extend(node.children.values())
-        if missing or any(step is None for step in response_steps):
-            raise ValueError("Transcript references uncommitted requests or missing token versions")
+        if missing:
+            raise ValueError("Transcript references uncommitted requests")
         return {
             "input_ids": input_ids,
             "labels": trace["labels"],

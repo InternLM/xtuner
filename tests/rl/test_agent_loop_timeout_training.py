@@ -40,7 +40,12 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import (
+    RolloutState,
+    Status,
+    update_sample_version,
+    validate_train_group,
+)
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import (
     AgentInSandboxLoop,
     AgentInSandboxLoopConfig,
@@ -150,6 +155,8 @@ def _fake_store(partial_trace: dict | None = None) -> SimpleNamespace:
         "prompt_ids": list(partial["input_ids"][:1]),
         "response_ids": list(partial["input_ids"][1:]),
     }
+    partial.setdefault("response_model_steps", [0] * len(partial["response_ids"]))
+    partial.setdefault("request_ids", ["request-1"])
     return SimpleNamespace(
         export_partial_training_trace=SimpleNamespace(remote=AsyncMock(return_value=partial)),
         export_training_trace=SimpleNamespace(
@@ -176,10 +183,12 @@ class TestTimeoutTraining(unittest.IsolatedAsyncioTestCase):
             "tool_call_count": 2,
         }
 
-        with patch(f"{LOOP_MODULE}.get_store", return_value=_fake_store(partial_trace)) as get_store:
+        fake_store = _fake_store(partial_trace)
+        with patch(f"{LOOP_MODULE}.get_store", return_value=fake_store) as get_store:
             kept_list = await loop.generate_sample(state)
 
         get_store.assert_called_once_with()
+        fake_store.empty_sessions.remote.assert_awaited_once_with([str(state.session_id)])
         self.assertEqual(len(kept_list), 1)
         kept = kept_list[0]
         self.assertEqual(kept.status, Status.COMPLETED)
@@ -191,12 +200,60 @@ class TestTimeoutTraining(unittest.IsolatedAsyncioTestCase):
         # input_ids == prompt_ids + response_ids。
         self.assertEqual(kept.prompt_ids, [1])
         self.assertEqual(kept.response_ids, [2, 3])
+        self.assertIsNone(kept.response_model_steps)
         self.assertEqual(kept.input_ids, kept.prompt_ids + kept.response_ids)
         self.assertEqual(kept.logprobs, [0.0, 0.1, 0.2])
         self.assertIsNone(kept.routed_experts)
         self.assertEqual(kept.extra_fields["agent_status"], "timeout")
         # 优先使用 trace store 沿导出链求和的计数(与训练 token 同源)。
         self.assertEqual(kept.extra_fields["agent_tool_calls"], 2)
+        update_sample_version(kept, model_step=0)
+        loop.canonicalize_train_fields(kept_list)
+        validate_train_group(kept_list, task_name="timeout")
+
+    async def test_timeout_uses_strict_trace_provenance_when_enabled(self):
+        loop = _make_loop(train_on_timeout=True, require_turn_provenance=True)
+        state = _make_state(_timeout_item())
+        partial_trace = {
+            "input_ids": [1, 2, 3],
+            "labels": [-100, 5, 6],
+            "logprobs": [0.0, 0.1, 0.2],
+            "routed_experts": ["experts"],
+            "response_model_steps": [4, 4],
+            "request_ids": ["request-1"],
+        }
+
+        fake_store = _fake_store(partial_trace)
+        with patch(f"{LOOP_MODULE}.get_store", return_value=fake_store) as get_store:
+            kept_list = await loop.generate_sample(state)
+
+        self.assertEqual(kept_list[0].response_model_steps, [4, 4])
+        self.assertEqual(kept_list[0].extra_fields["request_ids"], ["request-1"])
+        fake_store.empty_sessions.remote.assert_awaited_once_with([str(state.session_id)])
+        get_store.return_value.export_partial_training_trace.remote.assert_awaited_once_with(
+            str(state.session_id), require_turn_provenance=True
+        )
+
+    async def test_timeout_trace_cleanup_failure_falls_back_to_failed(self):
+        loop = _make_loop(train_on_timeout=True)
+        state = _make_state(_timeout_item())
+        partial_trace = {
+            "input_ids": [1, 2, 3],
+            "labels": [-100, 5, 6],
+            "logprobs": [0.0, 0.1, 0.2],
+            "routed_experts": None,
+        }
+        fake_store = _fake_store(partial_trace)
+        fake_store.empty_sessions.remote = AsyncMock(side_effect=RuntimeError("trace cleanup failed"))
+
+        with patch(f"{LOOP_MODULE}.get_store", return_value=fake_store):
+            failed_list = await loop.generate_sample(state)
+
+        failed = failed_list[0]
+        self.assertEqual(failed.status, Status.FAILED)
+        self.assertEqual(failed.finish_reason, "error")
+        self.assertIsNone(failed.reward)
+        fake_store.empty_sessions.remote.assert_awaited_once_with([str(state.session_id)])
 
     async def test_timeout_tool_calls_is_none_without_store_count(self):
         # 行为:导出的 tool_call_count 为 None(旧节点缺字段)时,agent_tool_calls 保持
@@ -368,7 +425,7 @@ class TestTeacherScoring(unittest.IsolatedAsyncioTestCase):
 
 
 class TestTimeoutTrainingConfigValidation(unittest.TestCase):
-    """train_on_timeout 与 expired rerollout 的配置期互斥校验。"""
+    """train_on_timeout 与 expired rerollout 的配置组合校验。"""
 
     @staticmethod
     def _sampler_config() -> SamplerConfig:

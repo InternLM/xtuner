@@ -496,7 +496,10 @@ class AgentInSandboxLoop(AgentLoop):
         """
         if rollout_state.session_id is None:
             raise ValueError("session_id is missing on the timed-out sample")
-        data = await get_store().export_partial_training_trace.remote(str(rollout_state.session_id))
+        trace_store = get_store()
+        data = await trace_store.export_partial_training_trace.remote(
+            str(rollout_state.session_id), require_turn_provenance=self.require_turn_provenance
+        )
         input_ids = data["input_ids"]
         labels = data["labels"]
         if len(input_ids) < 2 or all(label == -100 for label in labels):
@@ -508,6 +511,9 @@ class AgentInSandboxLoop(AgentLoop):
         # 连续后缀），恢复 input_ids == prompt_ids + response_ids，不依赖 dataset 侧渲染。
         rollout_state.prompt_ids = list(data["prompt_ids"])
         rollout_state.response_ids = list(data["response_ids"])
+        if self.require_turn_provenance:
+            rollout_state.response_model_steps = list(data["response_model_steps"])
+            rollout_state.extra_fields["request_ids"] = data["request_ids"]
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
         rollout_state.response = (
@@ -517,6 +523,7 @@ class AgentInSandboxLoop(AgentLoop):
         # Trace-side count is source-of-truth: it only counts the turns actually
         # exported (and trained). ``None`` means legacy nodes without the field.
         rollout_state.extra_fields["agent_tool_calls"] = data.get("tool_call_count")
+        await trace_store.empty_sessions.remote([str(rollout_state.session_id)])
         rollout_state.status = Status.COMPLETED
         rollout_state.finish_reason = "timeout"
         rollout_state.reward = {"score": self.timeout_reward}

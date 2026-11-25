@@ -208,7 +208,8 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
                 store.insert.remote(
                     "s",
                     "hello ",
-                    TokenizedSegment(text="hello ", token_ids=[1, 2], labels=[-100, -100], logprobs=[0.0, 0.1]),
+                    TokenizedSegment(text="hello ", token_ids=[1, 2], labels=[-100, -100], logprobs=[0.0, 0.1],
+                                     model_step=0),
                 )
             )
             ray.get(
@@ -216,7 +217,7 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
                     "s",
                     "hello world",
                     TokenizedSegment(text="world", token_ids=[3, 4], labels=[6, 7], logprobs=[0.2, 0.3],
-                                     tool_call_count=2),
+                                     tool_call_count=2, model_step=0),
                 )
             )
 
@@ -230,6 +231,7 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
             # 首个节点是会话 prompt 段,其余是连续响应后缀
             self.assertEqual(trace["prompt_ids"], [1, 2])
             self.assertEqual(trace["response_ids"], [3, 4])
+            self.assertEqual(trace["response_model_steps"], [0, 0])
         finally:
             ray.kill(store)
 
