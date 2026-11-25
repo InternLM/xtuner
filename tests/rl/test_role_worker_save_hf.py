@@ -11,6 +11,15 @@ from xtuner.v1.rl.trainer.train_batch import TrainBatch
 from xtuner.v1.rl.trainer.worker import TrainingWorker, WorkerLogItem
 
 
+@pytest.fixture(autouse=True)
+def accelerator(monkeypatch: pytest.MonkeyPatch) -> Mock:
+    # Residency tests use a fake CUDA role; upstream export now also probes and
+    # releases the accelerator cache. Keep that boundary fake on CPU hosts.
+    device = Mock(memory_allocated=Mock(return_value=0), memory_reserved=Mock(return_value=0))
+    monkeypatch.setattr("xtuner.v1.rl.trainer.role_worker.DEVICE_MODULE", device)
+    return device
+
+
 class _SaveRole(RoleWorker):
     def fit(self, batch: TrainBatch) -> WorkerLogItem:
         raise NotImplementedError
@@ -37,11 +46,12 @@ class TestRoleWorkerSaveHf:
             role.save_hf(tmp_path, torch.bfloat16)
         role.engine.save_hf.assert_not_called()
 
-    def test_resident_role_saves_without_moving_optimizer(self, tmp_path: Path) -> None:
+    def test_resident_role_saves_without_moving_optimizer(self, tmp_path: Path, accelerator: Mock) -> None:
         role = _role("actor", model=True, optimizer=False)
         role.save_hf(tmp_path, torch.float32)
         role.engine.save_hf.assert_called_once_with(hf_dir=tmp_path, save_dtype=torch.float32)
         role.engine.put_optimizer_to_device.assert_not_called()
+        accelerator.empty_cache.assert_called_once_with()
 
 
 class TestTrainingWorkerSaveHf:
