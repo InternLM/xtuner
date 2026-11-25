@@ -74,6 +74,8 @@ class Dense(BaseModel):
         self.rotary_emb = self.build_rotary_embedding(config)
         self.embed_tokens = self.build_embeddings(config)
         self.mtp_block = self.build_mtp_block(config) if config.mtp_config is not None else None
+        if self.mtp_block is not None and not self._mtp_training_enabled:
+            self.mtp_block.requires_grad_(False)
 
         # Make sure it works properly when not using fsdp
         if config.tie_head:
@@ -83,6 +85,10 @@ class Dense(BaseModel):
         # _init_load_spec 放到 post init 里
         self._init_load_spec()
         self._maybe_enable_compile(self.compile_cfg)
+
+    @property
+    def _mtp_training_enabled(self) -> bool:
+        return self.mtp_block is not None and self.config.mtp_config is not None and not self.config.mtp_config.frozen
 
     def forward(
         self,
@@ -157,8 +163,9 @@ class Dense(BaseModel):
         position_ids: torch.Tensor,
         output: dict,
     ) -> None:
-        if self.mtp_block is None or loss_ctx is None:
+        if not self._mtp_training_enabled or loss_ctx is None:
             return
+        assert self.mtp_block is not None
         mtp_loss_ctx_list = loss_ctx.get("mtp")
         mtp_tv_loss_ctx = loss_ctx.get("mtp_e2e_tv")
         if mtp_loss_ctx_list is None and mtp_tv_loss_ctx is None:
@@ -202,7 +209,8 @@ class Dense(BaseModel):
         res: list[dict] = super().build_loss_ctx_batch(data_batch, sp_mesh)
         cu_seq_lens_list = [data["seq_ctx"].cu_seq_lens_k for data in data_batch]
 
-        mtp_config = self.config.mtp_config
+        # A frozen MTP block keeps its parameters for load/save/rollout but builds no training loss.
+        mtp_config = self.config.mtp_config if self._mtp_training_enabled else None
         if mtp_config is not None and mtp_config.loss_type == "e2e_tv":
             tv_loss_cfg = MTPE2ETVLossConfig(
                 ignore_idx=self.config.lm_loss_cfg.ignore_idx,

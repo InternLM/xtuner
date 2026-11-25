@@ -142,6 +142,61 @@ class TestQwen3_5_VLDense27BConfig(unittest.TestCase):
         self.assertNotIn("mp_policy", mtp_calls[0].kwargs)
 
 
+class TestDenseFrozenMTP(unittest.TestCase):
+    """``MTPConfig.frozen`` keeps dense MTP weights for load/save/rollout without training them."""
+
+    @staticmethod
+    def _build(frozen: bool, loss_type: str = "ce"):
+        cfg = _tiny_qwen3_8_text_config()
+        cfg.mtp_config = MTPConfig(num_layers=2, share_weights=True, frozen=frozen, loss_type=loss_type)
+        with torch.device("meta"):
+            return cfg.build()
+
+    @parametrize.parametrize("frozen", [(False,), (True,)])
+    def test_builder_retains_parameters_and_load_specs(self, frozen: bool) -> None:
+        model = self._build(frozen)
+        assert model.mtp_block is not None
+        mtp_parameters = dict(model.mtp_block.named_parameters())
+        self.assertTrue(mtp_parameters)
+        self.assertEqual(any(p.requires_grad for p in mtp_parameters.values()), not frozen)
+        self.assertEqual(model._mtp_training_enabled, not frozen)
+        self.assertEqual(any(name.startswith("mtp_block.") for name, _ in model.trainable_parameters()), not frozen)
+        self.assertTrue(any(spec.name.startswith("mtp_block.") for _, spec in model._load_spec_params()))
+
+    @parametrize.parametrize("loss_type", [("ce",), ("e2e_tv",)])
+    def test_frozen_mtp_builds_no_loss_context(self, loss_type: str) -> None:
+        input_ids = torch.arange(1, 9).view(1, -1)
+        data = {
+            "seq_ctx": SequenceContext.from_input_ids((input_ids,), device="cpu"),
+            "shifted_labels": torch.roll(input_ids, -1, dims=1),
+        }
+        trained = self._build(False, loss_type).build_loss_ctx_batch([data])[0]
+        frozen = self._build(True, loss_type).build_loss_ctx_batch([data])[0]
+        key = "mtp_e2e_tv" if loss_type == "e2e_tv" else "mtp"
+        self.assertIsNotNone(trained[key])
+        self.assertIsNone(frozen["mtp"])
+        self.assertIsNone(frozen["mtp_e2e_tv"])
+
+    def test_frozen_mtp_skips_forward_even_with_loss_context(self) -> None:
+        model = self._build(True)
+        assert model.mtp_block is not None
+        output: dict = {}
+        hidden_states = torch.zeros(1, 4, 64)
+        with patch.object(model.mtp_block, "forward") as mtp_forward:
+            model._maybe_forward_mtp(
+                layer_hidden_states=hidden_states,
+                hidden_states=hidden_states,
+                seq_ctx=SequenceContext.from_input_ids((torch.arange(4).view(1, -1),), device="cpu"),
+                loss_ctx={"lm": Mock(), "mtp": [Mock(), Mock()], "mtp_e2e_tv": None},
+                position_embeddings=(hidden_states, hidden_states),
+                input_ids=torch.arange(4).view(1, -1),
+                position_ids=torch.arange(4).view(1, -1),
+                output=output,
+            )
+        mtp_forward.assert_not_called()
+        self.assertNotIn("mtp_loss", output)
+
+
 @unittest.skipIf(
     Version(transformers_version) < Version("5.8.0"),
     f"transformers >= 5.8.0 is required, but got {transformers_version}",
