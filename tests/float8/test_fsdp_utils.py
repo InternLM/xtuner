@@ -11,6 +11,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor._dtensor_spec import DTensorSpec, TensorMeta
 
 import xtuner.v1.float8.fsdp_utils as fsdp_utils
+from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 from xtuner.v1.float8.float8_linear_tile_wise import TileWiseFloat8Linear
 from xtuner.v1.float8.fsdp_utils import (
     WeightWithDynamicTilewiseFloat8CastTensor,
@@ -86,6 +87,24 @@ def test_chunked_stack_matches_full_stack_mixed_shape_groups(device_mesh):
         mesh=device_mesh,
         expected_calls=3,
     )
+
+
+def test_max_stack_bytes_passthrough_config_to_precompute():
+    # 透传链:Float8Config.max_stack_bytes -> Float8Handler -> precompute 的第 4 个位置参数;
+    # 覆盖默认值(1 GiB)、显式预算与显式 None(关 chunking)三种取值
+    cases = [
+        ({}, 1 << 30),
+        ({"max_stack_bytes": 1 << 28}, 1 << 28),
+        ({"max_stack_bytes": None}, None),
+    ]
+    for config_kwargs, expected in cases:
+        handler = Float8Config(scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE, **config_kwargs).build()
+        with unittest.mock.patch(
+            "xtuner.v1.float8.float8_handler.precompute_tilewise_float8_scale_for_fsdp"
+        ) as mock_precompute:
+            handler.precompute_float8_dynamic_scale_for_fsdp(nn.Module())
+        assert mock_precompute.call_count == 1
+        assert mock_precompute.call_args.args[3] == expected
 
 
 def test_max_stack_bytes_none_disables_chunking(device_mesh):
