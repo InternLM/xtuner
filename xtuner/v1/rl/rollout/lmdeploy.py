@@ -1,6 +1,7 @@
 import json
 import os
 from argparse import Namespace
+from dataclasses import fields
 from pathlib import Path
 from typing import Any, Dict, List, Mapping
 
@@ -83,6 +84,13 @@ class LMDeployWorker(RolloutWorker):
             accelerator (str): The type of accelerator to use (e.g., "GPU").
                 Defaults to "GPU".
         """
+        from lmdeploy import GenerationConfig
+
+        self.supports_routed_experts_start_len = any(
+            field.name == "routed_experts_start_len" for field in fields(GenerationConfig)
+        )
+        if config.enable_return_routed_experts and not self.supports_routed_experts_start_len:
+            raise ValueError("R3 collection requires LMDeploy with GenerationConfig.routed_experts_start_len support")
         super().__init__(config, rank, master_addr, master_port, world_size, accelerator)
         self.server_func = run_lmdeploy_server_wrapper
         self.router_func_str = "lmdeploy.serve.proxy.proxy.proxy"
@@ -278,6 +286,9 @@ class LMDeployWorker(RolloutWorker):
                 )
             )
             payload.update(lmdeploy_sample_params)
+            start_len = self._get_routed_experts_start_len(rollout_state)
+            if start_len:
+                payload["routed_experts_start_len"] = start_len
         else:
             payload = {
                 "model": self.model_name,

@@ -18,6 +18,7 @@ from .chat_template import canonicalize_messages_for_chat_template
 from .cross_weight_update_rollout import CrossWeightUpdateRolloutConfig
 from .request_gate import RequestGate, RequestLease, SettlementReceipt
 from .trace_store import TokenizedSegment, get_store
+from .utils import routed_expert_row_count
 
 
 FMT_OPENAI = "openai"
@@ -315,8 +316,11 @@ class SessionServer:
         port (int): Port for this session server to listen on.
         request_timeout (float): Total timeout in seconds for forwarding requests to the worker.
         read_bufsize (int): Buffer limit for line reader in ClientSession. Default is 64MB (2**26).
+        enable_return_routed_experts (bool): Whether the worker collects routing data.
+        supports_routed_experts_start_len (bool): Whether the worker accepts routing offsets.
     """
 
+    supports_routed_experts_start_len: bool = False
     request_gate: RequestGate | None = None
 
     def __init__(
@@ -328,6 +332,7 @@ class SessionServer:
         request_timeout: float = 1200.0,
         read_bufsize: int = 2**26,
         enable_return_routed_experts: bool = False,
+        supports_routed_experts_start_len: bool = False,
         cross_weight_update_rollout: CrossWeightUpdateRolloutConfig | None = None,
     ):
         self.worker_base_url = worker_base_url.rstrip("/")
@@ -337,6 +342,7 @@ class SessionServer:
         self.request_timeout = request_timeout
         self.read_bufsize = read_bufsize
         self.enable_return_routed_experts = enable_return_routed_experts
+        self.supports_routed_experts_start_len = supports_routed_experts_start_len
         # Cross-weight-update rollout servers are born closed: no request may observe version zero before the first publish.
         self.request_gate = (
             RequestGate(wait_timeout=cross_weight_update_rollout.wait_timeout, initially_open=False)
@@ -353,7 +359,8 @@ class SessionServer:
 
     async def on_request(self, req_body: dict, fmt: str, *, trace_enabled: bool = True) -> dict:
         """Normalize the request to drive the prefix cache + inject extension
-        fields.
+        fields. Trace requests derive routing offsets from complete retained
+        nodes; evaluation requests strip caller-provided routing offsets.
 
         When ``trace_enabled`` is False (evaluate mode), forward the request
         without token-in-token-out rewriting, so the upstream worker handles
@@ -377,7 +384,9 @@ class SessionServer:
         # → ``return_logprob`` rename and stripping the SessionServer-only
         # ``session_id`` field.
         if not trace_enabled:
-            worker_req = {k: v for k, v in req_body.items() if k not in _SESSION_SERVER_ONLY_KEYS}
+            worker_req = {
+                k: v for k, v in req_body.items() if k not in _SESSION_SERVER_ONLY_KEYS | {"routed_experts_start_len"}
+            }
             if "logprobs" in worker_req:
                 worker_req.setdefault("return_logprob", worker_req.pop("logprobs"))
             if not _bool_request_value(worker_req.get("return_logprob"), False):
@@ -439,6 +448,18 @@ class SessionServer:
             k: v for k, v in req_body.items() if k not in _SESSION_SERVER_ONLY_KEYS | {"logprobs", "top_logprobs"}
         }
         worker_req["input_ids"] = input_ids
+        # Client-provided crops cannot authorize dropping training history.
+        worker_req.pop("routed_experts_start_len", None)
+        if (
+            self.supports_routed_experts_start_len
+            and self.enable_return_routed_experts
+            and nodes
+            and all(node.value.expert_key is not None for node in nodes)
+        ):
+            # Full responses are shifted by one dummy row below; start at prefix_len - 1.
+            start_len = routed_expert_row_count(sum(len(node.value.token_ids) for node in nodes))
+            if start_len > 0:
+                worker_req["routed_experts_start_len"] = start_len
         worker_req["return_token_ids"] = True
         worker_req["return_routed_experts"] = self.enable_return_routed_experts
         worker_req["return_logprob"] = True
@@ -456,7 +477,13 @@ class SessionServer:
         return worker_req
 
     async def on_response(
-        self, worker_resp: dict, fmt: str, orig_req_body: dict, *, lease: RequestLease | None = None
+        self,
+        worker_resp: dict,
+        fmt: str,
+        orig_req_body: dict,
+        *,
+        routed_experts_start_len: int = 0,
+        lease: RequestLease | None = None,
     ) -> dict:
         """Trace the assistant turn into ``trace_store`` (always in OpenAI
         shape).
@@ -470,6 +497,7 @@ class SessionServer:
                 conversation for OpenAI-shape tracing because the wire body
                 forwarded to the worker no longer carries ``messages`` /
                 ``system`` / ``tools``.
+            routed_experts_start_len (int): Expanded routing rows skipped by the worker.
             lease (RequestLease | None): Admission lease of this request. Its identity is written to every
                 trace node; a non-``None`` lease makes routed-expert refs shared with sibling segments.
 
@@ -552,15 +580,27 @@ class SessionServer:
         response_expert: Any = None
         if raw_routed_expert is not None:
             raw_routed_expert = await self._decode_routed_experts(raw_routed_expert)
-            if len(raw_routed_expert) > 0:
+            expected_len = (
+                routed_expert_row_count(prefix_len + delta_len + len(output_token_ids)) - routed_experts_start_len
+            )
+            if len(raw_routed_expert) != expected_len:
+                raise ValueError("R3 response length does not match the requested offset")
+            if routed_experts_start_len:
+                if routed_experts_start_len != routed_expert_row_count(prefix_len) or not all(
+                    node.value.expert_key is not None for node in prefix_nodes
+                ):
+                    raise ValueError("Incremental R3 requires an unchanged, complete trace prefix")
+                route_base = 0
+            else:
+                route_base = prefix_len
+            if not routed_experts_start_len and len(raw_routed_expert) > 0:
                 num_layers = raw_routed_expert.shape[1]
                 topk_experts = raw_routed_expert.shape[2]
                 dummy_expert = np.full((1, num_layers, topk_experts), 0, dtype=raw_routed_expert.dtype)
                 raw_routed_expert = np.concatenate([dummy_expert, raw_routed_expert], axis=0)
-            assert prefix_len + delta_len + len(output_token_ids) == len(raw_routed_expert)
             if delta_len > 0:
-                delta_expert = ray.put(raw_routed_expert[prefix_len : prefix_len + delta_len])
-            response_expert = ray.put(raw_routed_expert[prefix_len + delta_len :])
+                delta_expert = ray.put(raw_routed_expert[route_base : route_base + delta_len])
+            response_expert = ray.put(raw_routed_expert[route_base + delta_len :])
         elif self.enable_return_routed_experts and (
             lease is not None or _bool_request_value(orig_req_body.get("return_routed_experts"), True)
         ):
@@ -909,7 +949,13 @@ class SessionServer:
             if response_data is not None:
                 try:
                     trace_start = time.perf_counter()
-                    await self.on_response(response_data, fmt, orig_req_body, lease=lease)
+                    await self.on_response(
+                        response_data,
+                        fmt,
+                        orig_req_body,
+                        lease=lease,
+                        routed_experts_start_len=request_data.get("routed_experts_start_len") or 0,
+                    )
                     trace_s = time.perf_counter() - trace_start
                 except Exception as exc:
                     session_error_msg = f"SessionServer response hook failed: {type(exc).__name__}: {exc}"
@@ -1275,6 +1321,7 @@ class SessionServerActor:
         port: int,
         request_timeout: float,
         enable_return_routed_experts: bool = False,
+        supports_routed_experts_start_len: bool = False,
         cross_weight_update_rollout: CrossWeightUpdateRolloutConfig | None = None,
     ):
         self.worker_base_url = worker_base_url
@@ -1283,6 +1330,7 @@ class SessionServerActor:
         self.port = port
         self.request_timeout = request_timeout
         self.enable_return_routed_experts = enable_return_routed_experts
+        self.supports_routed_experts_start_len = supports_routed_experts_start_len
         self.cross_weight_update_rollout = cross_weight_update_rollout
         self.server: SessionServer | None = None
 
@@ -1301,6 +1349,7 @@ class SessionServerActor:
             port=self.port,
             request_timeout=self.request_timeout,
             enable_return_routed_experts=self.enable_return_routed_experts,
+            supports_routed_experts_start_len=self.supports_routed_experts_start_len,
             cross_weight_update_rollout=self.cross_weight_update_rollout,
         )
         await self.server.start()
