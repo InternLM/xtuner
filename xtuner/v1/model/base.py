@@ -2193,7 +2193,15 @@ class BaseModel(nn.Module):
                 if param_missing:
                     missing_keys.update(param_missing)
                 else:
-                    load_plans[name] = (load_plan, loaded_tensors)
+                    # Keep only the source regions owned by this rank.  This is
+                    # important for CPU Teacher prefetch: retaining the full
+                    # checkpoint tensor here defeats FSDP sharding and can
+                    # multiply host-memory usage by the world size.
+                    local_load_plan, local_tensors = load_plan.localize_checkpoint(
+                        loaded_tensors,
+                        self.hf_tensor_to_canonical,
+                    )
+                    load_plans[name] = (local_load_plan, local_tensors)
                     loaded_keys.add(name)
             for name, child in module.named_children():
                 prefix = f"{module_prefix}.{name}" if module_prefix else name

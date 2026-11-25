@@ -16,6 +16,7 @@ from xtuner.v1.loss.utils import sp_gather, sp_split
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.rl.model_utils import (
     FrozenModel,
+    _precompute_float8_dynamic_scale,
     build_frozen_model,
     build_frozen_model_shell,
     materialize_frozen_model,
@@ -612,6 +613,9 @@ class TrainTeacherManager:
         self._teachers[teacher_index] = teacher
         h2d_begin = time.monotonic()
         teacher.to_device(DEVICE)
+        # ``to_device`` can recreate FP8 parameter wrappers.  Recompute scales
+        # after every onload so the subsequent Teacher forward can unshard them.
+        _precompute_float8_dynamic_scale(teacher)
         h2d_elapsed = time.monotonic() - h2d_begin
         # The grouped caller passes the next *active* Teacher explicitly.
         # Do not fall back to ``teacher_index + 1``: a configured Teacher may

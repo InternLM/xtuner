@@ -4,7 +4,6 @@ from typing import cast
 import torch
 
 from xtuner.v1.config.fsdp import FSDPConfig
-from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import PreparedHFParams, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
@@ -15,6 +14,17 @@ DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
 FrozenModel = BaseComposeModel | XtunerBaseModel
+
+
+def _precompute_float8_dynamic_scale(model: FrozenModel) -> None:
+    """Precompute FP8 scales after the model's FSDP shards reach the GPU."""
+    if isinstance(model, BaseComposeModel):
+        target = model.language_model
+    else:
+        target = model
+    float8_handler = target.float8_handler
+    if float8_handler is not None:
+        float8_handler.precompute_float8_dynamic_scale_for_fsdp(target)
 
 
 def build_frozen_model(
@@ -42,45 +52,28 @@ def build_frozen_model(
         if materialize_device is not None and materialize_device.type == "cpu":
             if text_float8_cfg is not None and text_float8_cfg.enable_float8:
                 raise NotImplementedError("CPU materialization is not supported for Float8 Teachers")
-        if text_float8_cfg is not None and text_float8_cfg.enable_float8:
-            float8_handler = Float8Handler(
-                scaling_granularity_gemm=text_float8_cfg.scaling_granularity_gemm,
-                scaling_granularity_grouped_gemm=text_float8_cfg.scaling_granularity_grouped_gemm,
-            )
-        else:
-            float8_handler = None
         if fsdp_cfg is None:
             fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
         model = model.fully_shard(fsdp_cfg, materialize_device=materialize_device)
         model.from_hf(hf_path=load_from, load_device=load_device)
         model.eval()  # type: ignore
-        if float8_handler is not None:
-            # Composed models use FP8 only in the text backbone. The vision
-            # tower and projector remain in BF16.
-            float8_handler.precompute_float8_dynamic_scale_for_fsdp(model.language_model)  # type: ignore
     else:
         model_cfg = cast(TransformerConfig, model_cfg)
         if materialize_device is not None and materialize_device.type == "cpu":
             if model_cfg.float8_cfg is not None and model_cfg.float8_cfg.enable_float8:
                 raise NotImplementedError("CPU materialization is not supported for Float8 Teachers")
-        if model_cfg.float8_cfg is not None and model_cfg.float8_cfg.enable_float8:
-            float8_handler = Float8Handler(
-                scaling_granularity_gemm=model_cfg.float8_cfg.scaling_granularity_gemm,
-                scaling_granularity_grouped_gemm=model_cfg.float8_cfg.scaling_granularity_grouped_gemm,
-            )
-        else:
-            float8_handler = None
         if fsdp_cfg is None:
             fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
         model = model.fully_shard(fsdp_cfg)  # type: ignore
         model.from_hf(hf_path=load_from, load_device=load_device)
         model.eval()  # type: ignore
-        if float8_handler is not None:
-            float8_handler.precompute_float8_dynamic_scale_for_fsdp(model)  # type: ignore
 
     if materialize_device is None or materialize_device != target_device:
         model.to_device(target_device)  # type: ignore
-        DEVICE_MODULE.empty_cache()
+    # ``to_device`` may recreate FP8 tensor wrappers and drop their cached
+    # dynamic scales.  Always compute scales after the final device move.
+    _precompute_float8_dynamic_scale(model)
+    DEVICE_MODULE.empty_cache()
     return model
 
 
@@ -90,10 +83,6 @@ def build_frozen_model_shell(
 ) -> FrozenModel:
     """Build an FSDP-wrapped model on meta without loading checkpoint
     weights."""
-    text_cfg = model_cfg.text_config if isinstance(model_cfg, BaseComposeConfig) else model_cfg
-    float8_cfg = getattr(text_cfg, "float8_cfg", None)
-    if float8_cfg is not None and float8_cfg.enable_float8:
-        raise NotImplementedError("CPU prefetch is not supported for Float8 Teachers")
     if fsdp_cfg is None:
         fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
     with torch.device("meta"):
@@ -122,5 +111,6 @@ def materialize_frozen_model(
     model.materialize_prepared_hf(prepared)  # type: ignore[arg-type]
     model.eval()  # type: ignore
     model.to_device(DEVICE)  # type: ignore
+    _precompute_float8_dynamic_scale(model)
     DEVICE_MODULE.empty_cache()
     return model
