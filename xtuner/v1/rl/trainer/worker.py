@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
@@ -483,6 +485,41 @@ class TrainingWorker(SingleAcceleratorWorker):
         hf_path = Path(hf_dir)
         for name, role in self._roles().items():
             role.save_hf(hf_path / name, save_dtype)
+
+    @contextmanager
+    def hf_tensors(
+        self,
+        role: RoleName = "actor",
+        save_dtype: torch.dtype = torch.bfloat16,
+        bucket_size: int | None = None,
+    ) -> Iterator[tuple[list[str], Iterator[tuple[str, torch.Tensor]]]]:
+        """Stream ``role``'s model in Hugging Face layout inside this process, writing nothing.
+
+        For in-process consumers such as a subclass's RPC. Like :meth:`save_hf`, the role's
+        model is resident without any optimizer on the device while the context is open, and the
+        previous residency is restored on exit. The iterator is
+        :meth:`~xtuner.v1.model.base.BaseModel.iter_hf_tensors` on the compute device: every
+        worker must run it to its end inside the context, because each bucket is gathered with
+        collectives.
+
+        Args:
+            role (RoleName): The role whose model to stream.
+            save_dtype (torch.dtype): Output dtype.
+            bucket_size (int | None): Approximate reconstruction bytes per bucket; the model's
+                default when None.
+
+        Returns:
+            Iterator[tuple[list[str], Iterator[tuple[str, torch.Tensor]]]]: The model's HF keys
+            and the iterator of ``(hf_key, tensor)``.
+        """
+        model_role = self._resident_model_role()
+        optimizer_role = self._resident_optimizer_role()
+        try:
+            self.set_residency(role, None)
+            model = self._roles()[role].engine.model
+            yield model.hf_keys(), model.iter_hf_tensors(dtype=save_dtype, device=DEVICE, bucket_size=bucket_size)
+        finally:
+            self.set_residency(model_role, optimizer_role)
 
     @ray_method
     def suspend_train_nccl_process_groups(self) -> dict[str, object]:

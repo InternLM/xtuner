@@ -4,6 +4,7 @@ from collections.abc import Callable
 import pytest
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from pydantic import ValidationError
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Shard as DTensorShard
@@ -719,3 +720,37 @@ class TestBaseModelHFSave:
         assert names == ["rotary_coef"]
         assert tensors[0].dtype == torch.float32
         assert torch.equal(tensors[0], model.rotary_coef)
+
+
+class TestBaseModelHFStream:
+    def test_iter_hf_tensors_yields_each_hf_key_once_in_hf_keys_order(self) -> None:
+        class StreamModel(BaseModel):
+            def __init__(self) -> None:
+                super().__init__(XTunerBaseModelConfig())
+                self.fused = nn.Parameter(torch.arange(12, dtype=torch.float32).reshape(4, 3))
+                self.plain = nn.Parameter(torch.full((2,), 7.0))
+                self.tied = nn.Parameter(torch.full((2,), -1.0))
+                self._init_load_spec()
+
+            def to_hf_key_list(self, key: str) -> list[str]:
+                return {
+                    "fused": ["model.f.0", "model.f.1"],
+                    "plain": ["model.plain"],
+                    "tied": ["model.plain"],
+                }[key]
+
+            def _model_hf_keys(self, key: str) -> list[str]:
+                return self.to_hf_key_list(key)
+
+        model = StreamModel()
+
+        for bucket_size in (None, 1):
+            streamed = list(model.iter_hf_tensors(device="cpu", bucket_size=bucket_size))
+
+            assert [name for name, _ in streamed] == model.hf_keys() == ["model.f.0", "model.f.1", "model.plain"]
+            tensors = dict(streamed)
+            assert all(t.dtype == torch.bfloat16 for t in tensors.values())
+            assert torch.equal(tensors["model.f.0"], model.fused[:2].detach().bfloat16())
+            assert torch.equal(tensors["model.f.1"], model.fused[2:].detach().bfloat16())
+            # The first runtime tensor mapped to a key wins, as in save_hf.
+            assert torch.equal(tensors["model.plain"], model.plain.detach().bfloat16())
