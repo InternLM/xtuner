@@ -36,10 +36,10 @@ class Float8Config(BaseModel):
             Parameter(
                 help="Peak-memory budget in bytes for the stacked weight tensor when precomputing "
                 "tilewise FP8 scales. Larger groups are processed in chunks bounded by this budget. "
-                "Defaults to 1 GiB."
+                "Set to None to disable chunking and stack each shape group in one shot."
             ),
         ]
-    ] = None
+    ] = 1 << 30  # 1 GiB
     model_config = ConfigDict(extra="forbid")
 
     @property

@@ -48,11 +48,12 @@ class Float8Handler:
         self,
         scaling_granularity_gemm: Optional[ScalingGranularity] = None,
         scaling_granularity_grouped_gemm: Optional[ScalingGranularity] = None,
-        max_stack_bytes: Optional[int] = None,
+        max_stack_bytes: Optional[int] = _PRECOMPUTE_SCALE_STACK_BYTES,
     ) -> None:
         # Peak-memory budget for the stacked weight tensor when precomputing
-        # tilewise FP8 scales; None falls back to the default budget.
-        self.max_stack_bytes = max_stack_bytes if max_stack_bytes is not None else _PRECOMPUTE_SCALE_STACK_BYTES
+        # tilewise FP8 scales; None disables chunking and stacks each shape
+        # group in one shot.
+        self.max_stack_bytes = max_stack_bytes
         torch.serialization.add_safe_globals(
             [
                 WeightWithDynamicTilewiseFloat8CastTensor,

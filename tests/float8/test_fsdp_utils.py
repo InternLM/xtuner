@@ -47,7 +47,7 @@ def _precomputed_scales(module, mesh, max_stack_bytes):
 
 
 def _assert_chunk_invariant(module_fn, seeds, max_stack_bytes, mesh, expected_calls):
-    reference = _precomputed_scales(module_fn(seeds, mesh), mesh, max_stack_bytes=1 << 40)
+    reference = _precomputed_scales(module_fn(seeds, mesh), mesh, max_stack_bytes=None)  # 不分 chunk 的原路径
     with unittest.mock.patch(
         "xtuner.v1.float8.fsdp_utils.tensor_to_per_block_fp8_scales",
         wraps=fsdp_utils.tensor_to_per_block_fp8_scales,
@@ -88,9 +88,27 @@ def test_chunked_stack_matches_full_stack_mixed_shape_groups(device_mesh):
     )
 
 
+def test_max_stack_bytes_none_disables_chunking(device_mesh):
+    # max_stack_bytes=None 走原路径:3 个同 shape 权重一次 stack,kernel 只调 1 次,
+    # 且结果与逐权重分 chunk bitwise 一致
+    def build(seeds, mesh):
+        return nn.ModuleList([_make_sharded_linear(512, 256, mesh, seed) for seed in seeds])
+
+    with unittest.mock.patch(
+        "xtuner.v1.float8.fsdp_utils.tensor_to_per_block_fp8_scales",
+        wraps=fsdp_utils.tensor_to_per_block_fp8_scales,
+    ) as mock_scales:
+        reference = _precomputed_scales(build([0, 1, 2], device_mesh), device_mesh, max_stack_bytes=None)
+    assert mock_scales.call_count == 1
+    chunked = _precomputed_scales(build([0, 1, 2], device_mesh), device_mesh, max_stack_bytes=256 * 512 * 4)
+    for ref, got in zip(reference, chunked):
+        assert ref is not None and got is not None
+        assert torch.equal(ref, got)
+
+
 def test_chunked_scales_match_block_amax_reference(device_mesh):
     (linear,) = nn.ModuleList([_make_sharded_linear(512, 256, device_mesh, seed=6)])
-    (scale,) = _precomputed_scales(linear, device_mesh, max_stack_bytes=1 << 40)
+    (scale,) = _precomputed_scales(linear, device_mesh, max_stack_bytes=None)
     weight = linear.weight._local_tensor.float()
     blocks = weight.view(2, 128, 4, 128).permute(0, 2, 1, 3).reshape(-1, 128 * 128)
     amax = blocks.abs().amax(-1).to(torch.float64)
@@ -100,7 +118,7 @@ def test_chunked_scales_match_block_amax_reference(device_mesh):
 
 def _chunked_equiv_worker(rank, world_size, init_path, dout, use_divided_64):
     # 每个 rank 独立构造相同 seed 的 padded local 权重(模拟真实 FSDP 场景下各 rank 的本地分片),
-    # 先以超大预算(单 chunk)算参照,再以单权重预算(3 chunks)算被测结果。
+    # 先以不分 chunk 的原路径(max_stack_bytes=None)算参照,再以单权重预算(3 chunks)算被测结果。
     # 若各 rank 推导出的 chunk 边界不一致,all_reduce 次数会对不上,进程会直接挂死,
     # 因此跑通本身即验证跨 rank chunk 边界一致性。
     torch.set_num_threads(1)
@@ -120,7 +138,7 @@ def _chunked_equiv_worker(rank, world_size, init_path, dout, use_divided_64):
             m.weight._local_tensor._precomputed_scale for m in module.modules() if isinstance(m, TileWiseFloat8Linear)
         ]
 
-    reference = scales(1 << 40)  # 单 chunk
+    reference = scales(None)  # 不分 chunk
     chunked = scales(dout * din * 4)  # 单权重预算 -> 逐权重 3 个 chunk
     for i, (ref, got) in enumerate(zip(reference, chunked)):
         assert ref is not None and got is not None
