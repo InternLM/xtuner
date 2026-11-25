@@ -151,8 +151,11 @@ SCRIPT_NAME=$(basename "$0")
 cp "$0" "${WORK_DIR}/${SCRIPT_NAME}"
 cp "$CONFIG_PATH" "${WORK_DIR}/config.py"
 LOG_FILE="${WORK_DIR}/training_log_${current_time}.txt"
+# Probing's LMDeploy log tailer reads this when the Probing entry point is used.
+export PROBING_LMDEPLOY_LOG=${PROBING_LMDEPLOY_LOG:-$LOG_FILE}
 
-python xtuner/v1/train/cli/rl.py \
+PYTHON_ENTRY=${XTUNER_RL_ENTRY:-xtuner/v1/train/cli/rl.py}
+python "$PYTHON_ENTRY" \
     --config $CONFIG_PATH \
     --num-workers $XTUNER_RL_NUM_WORKERS \
     2>&1 | tee -a "${WORK_DIR}/training_log_${current_time}.txt"
