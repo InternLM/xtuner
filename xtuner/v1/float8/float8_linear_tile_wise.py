@@ -123,6 +123,7 @@ class fp8_matmul_weight_per_block_act_per_tile(torch.autograd.Function):
         dx = grad_output_hp_pad.new_empty((seq, din))
         gemm_fp8_fp8_bf16_nt((grad_out_pad_fp8, grad_out_pad_scale), (w_fp8_data, w_fp8_scale), dx)
         dx = dx.unsqueeze(0)
+        del grad_out_pad_fp8, grad_out_pad_scale
 
         grad_out_trans_fp8, grad_out_trans_scale = trans_per_tile_quant_gemm(grad_output_hp)
         dw = grad_output_hp.new_empty((dout, din))
