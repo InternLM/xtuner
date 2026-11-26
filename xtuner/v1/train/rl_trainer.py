@@ -1240,14 +1240,15 @@ class BaseRLTrainer:
             log_time_str = f"\nTrain step {train_step} finished and timing listed:\n"
             log_time_str += "\n".join([f" - {k:<25}: {v:.2f}s" for k, v in step_timer_dict.items()])
 
-        if produce_result.group_gen_count is not None:
-            all_scalars["timing/task_n"] = produce_result.group_gen_count
-            all_scalars["timing/task_mean_s"] = produce_result.group_gen_mean_s
-            all_scalars["timing/task_p50_s"] = produce_result.group_gen_p50_s
-            all_scalars["timing/task_p99_s"] = produce_result.group_gen_p99_s
-            all_scalars["timing/task_p99_p50_ratio"] = produce_result.group_gen_p99_p50_ratio
-        if produce_result.group_gen_pause_time_s is not None:
-            all_scalars["timing/pause_s"] = produce_result.group_gen_pause_time_s
+        group_timings = {
+            "timing/task_n": produce_result.group_gen_count,
+            "timing/task_mean_s": produce_result.group_gen_mean_s,
+            "timing/task_p50_s": produce_result.group_gen_p50_s,
+            "timing/task_p99_s": produce_result.group_gen_p99_s,
+            "timing/task_p99_p50_ratio": produce_result.group_gen_p99_p50_ratio,
+            "timing/pause_s": produce_result.group_gen_pause_time_s,
+        }
+        all_scalars.update({name: value for name, value in group_timings.items() if value is not None})
         all_scalars["async/init_samples"] = produce_result.leftover_init
         all_scalars["async/completed_samples"] = produce_result.leftover_completed
         all_scalars["async/aborted_samples"] = produce_result.leftover_aborted
