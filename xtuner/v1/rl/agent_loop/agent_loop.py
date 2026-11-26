@@ -339,7 +339,12 @@ class AgentLoop(ABC):
                 # 训练字段与摘要只通过 state 入口发布；已组装的全序列样本也在这里校验并生成 TrainMeta。
                 if state.input_ids is None or state.labels is None:
                     raise ValueError("Training input_ids and labels must be full and aligned")
-                state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
+                state.set_training_fields(
+                    input_ids=state.input_ids,
+                    labels=state.labels,
+                    logprobs=state.logprobs,
+                    sampler_topk=state.sampler_topk,
+                )
             except Exception as exc:
                 self.logger.error(f"Canonicalize train fields failed for rollout_id={state.rollout_id}: {exc}")
                 state.status = Status.FAILED

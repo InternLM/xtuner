@@ -119,8 +119,17 @@ class ModelForwardExtraLogInfo(dict):
             "reduced_topk_opd_teacher_selected_mass_sum",
             "reduced_topk_opd_overlap_fraction_sum",
             "reduced_topk_opd_valid_count",
+            "reduced_sc_correction_sum",
+            "reduced_sc_sampler_head_mass_sum",
+            "reduced_sc_train_head_mass_sum",
+            "reduced_sc_tail_ratio_sum",
+            "reduced_sc_weight_sum",
+            "reduced_sc_weight_zero_count",
+            "reduced_sc_rollout_kl3_sum",
+            "reduced_sc_rollout_abs_logprob_diff_sum",
+            "reduced_sc_valid_count",
         )
-        max_keys = ("max_ratio", "reduced_train_policy_ratio_max")
+        max_keys = ("max_ratio", "reduced_train_policy_ratio_max", "reduced_sc_tail_ratio_max")
         min_keys = ("reduced_train_policy_ratio_min",)
         for keys, op in ((sum_keys, "sum"), (max_keys, "max"), (min_keys, "min")):
             for key in keys:

@@ -1,4 +1,4 @@
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, Sequence, cast
 
 import torch
 import torch.distributed as dist
@@ -10,10 +10,12 @@ from xtuner.v1.loss.utils import sp_gather, sp_split
 
 # from ..utils import sp_split
 from xtuner.v1.rl.rollout_is import RolloutImportanceSampling
+from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.device import get_device
 
 
 DEVICE = get_device()
+logger = get_logger()
 
 
 def compute_kl_loss_weight(
@@ -91,6 +93,18 @@ class BaseRLLossConfig(CELossConfig):
         raise NotImplementedError
 
     @property
+    def required_loss_keys(self) -> list[str]:
+        """Optional pack fields this loss requires on every training pack.
+
+        ``TrainBatch`` loads exactly these optional fields (in addition to the batch-level ones) and fails when a
+        sample lacks one of them.
+
+        Returns:
+            list[str]: Field names such as ``rollout_logprobs`` or ``sampler_topk_ids``.
+        """
+        return []
+
+    @property
     def _loss_kwargs_cls(self) -> type["BaseRLLossKwargs"]:
         raise NotImplementedError
 
@@ -114,6 +128,8 @@ class BaseRLLossConfig(CELossConfig):
                 - old_logprobs (torch.Tensor | None): Old policy log probabilities (optional, can be set later)
                 - rollout_is_weights (torch.Tensor | None): Importance sampling weights
                 - ref_logprobs (torch.Tensor | None): Reference model log probabilities
+                - sampler_topk_ids (torch.Tensor | None): Sampler top-k token ids, ``[1, T, k]``
+                - sampler_topk_logprobs (torch.Tensor | None): Sampler top-k log probabilities, ``[1, T, k]``
             sp_mesh (DeviceMesh | None): Sequence parallel device mesh
             device (str | torch.device): Target device of the built loss kwargs. Defaults to the
                 accelerator device; pass ``"cpu"`` to build the context before any device transfer.
@@ -143,6 +159,8 @@ class BaseRLLossConfig(CELossConfig):
             rollout_logprobs=rollout_logprobs,
             is_weights=rollout_is_weights,
             ref_logprobs=ref_logprobs,
+            sampler_topk_ids=data.get("sampler_topk_ids"),
+            sampler_topk_logprobs=data.get("sampler_topk_logprobs"),
         ).to(device)
         if sp_mesh is not None and sp_mesh.size() > 1:
             loss_kwargs = loss_kwargs.sp_split(sp_mesh)
@@ -163,6 +181,9 @@ class BaseRLLossKwargs(CELossKwargs):
         kl_loss_weight (torch.Tensor | None): Weights for each token in the KL loss computation, if used.
         rollout_logprobs (torch.Tensor | None): Rollout log probabilities from inference engine, used for importance sampling.
         is_weights (torch.Tensor | None): Importance sampling weights. If None, importance sampling is not used.
+        sampler_topk_ids (torch.Tensor | None): Sampler top-k token ids ``[1, T, k]``, ``-1`` on unused slots.
+        sampler_topk_logprobs (torch.Tensor | None): Full-vocabulary sampler log probabilities of
+            ``sampler_topk_ids``, ``[1, T, k]``, ``-inf`` on unused slots.
     """
 
     rollout_logprobs: torch.Tensor | None = None
@@ -173,6 +194,8 @@ class BaseRLLossKwargs(CELossKwargs):
     kl_loss_weight: torch.Tensor | None = None
     global_grad_tokens: torch.Tensor | None = None
     is_weights: torch.Tensor | None = None
+    sampler_topk_ids: torch.Tensor | None = None
+    sampler_topk_logprobs: torch.Tensor | None = None
 
     def sp_split(self, sp_mesh: DeviceMesh) -> Self:
         # Call parent class to handle shifted_labels
@@ -183,6 +206,12 @@ class BaseRLLossKwargs(CELossKwargs):
             self.rollout_logprobs = sp_split(self.rollout_logprobs, sp_mesh=sp_mesh, split_dim=1, padding_value=0.0)
         if self.is_weights is not None:
             self.is_weights = sp_split(self.is_weights, sp_mesh=sp_mesh, split_dim=1, padding_value=1.0)
+        if self.sampler_topk_ids is not None:
+            self.sampler_topk_ids = sp_split(self.sampler_topk_ids, sp_mesh=sp_mesh, split_dim=1, padding_value=-1)
+        if self.sampler_topk_logprobs is not None:
+            self.sampler_topk_logprobs = sp_split(
+                self.sampler_topk_logprobs, sp_mesh=sp_mesh, split_dim=1, padding_value=float("-inf")
+            )
         # 1. 这里不用对old_logprobs和ref_logprobs进行sp_split，因为他是模型 fwd 生成的，
         # 因为模型 fwd 前一定会对 seq_ctx 进行 sp_split。
         # 2. global_grad_tokens 是scalar Tensor, 不用进行sp_split。
@@ -209,6 +238,10 @@ class BaseRLLossKwargs(CELossKwargs):
             self.policy_loss_weight = self.policy_loss_weight.to(device)
         if self.kl_loss_weight is not None:
             self.kl_loss_weight = self.kl_loss_weight.to(device)
+        if self.sampler_topk_ids is not None:
+            self.sampler_topk_ids = self.sampler_topk_ids.to(device)
+        if self.sampler_topk_logprobs is not None:
+            self.sampler_topk_logprobs = self.sampler_topk_logprobs.to(device)
         return self
 
 
@@ -306,6 +339,46 @@ class BaseRLLossContext(CELossContext):
 
         self.loss_kwargs.is_weights = rollout_is_weights
         return mismatch_metrics, rollout_is_metrics
+
+
+def calibrate_token_mean_loss_weights(loss_ctx_list: Sequence[BaseRLLossContext]) -> None:
+    """Set one optimizer step's policy and KL weights to a global token mean.
+
+    Every supervised token of the step, across all ranks, gets weight ``1 / global_grad_tokens`` (times its rollout
+    importance-sampling weight when present). Collective: every rank must call it once per step.
+
+    Args:
+        loss_ctx_list (Sequence[BaseRLLossContext]): Local contexts of one optimizer step.
+    """
+    assert len(loss_ctx_list) > 0, "loss_ctx_list can not be empty"
+    loss_cfg = loss_ctx_list[0].loss_cfg
+
+    rank_grad_tokens = sum((ctx.loss_kwargs.shifted_labels != loss_cfg.ignore_idx).sum() for ctx in loss_ctx_list)
+    global_grad_tokens = cast(torch.Tensor, rank_grad_tokens)
+    if dist.is_initialized():
+        dist.all_reduce(global_grad_tokens, op=dist.ReduceOp.SUM)
+
+    if global_grad_tokens == 0:
+        logger.warning("Global gradient tokens is 0, which may lead to division by zero in loss weight calculation.")
+        global_grad_tokens.add_(1)  # Avoid division by zero
+
+    for loss_ctx in loss_ctx_list:
+        loss_kwargs = loss_ctx.loss_kwargs
+        shifted_labels = loss_kwargs.shifted_labels
+        policy_loss_weight = torch.ones_like(shifted_labels, dtype=torch.float32) / global_grad_tokens
+        policy_loss_weight[shifted_labels == loss_cfg.ignore_idx] = 0.0
+        if loss_kwargs.is_weights is not None:
+            policy_loss_weight = policy_loss_weight * loss_kwargs.is_weights
+        if loss_cfg.use_kl_loss:
+            assert loss_kwargs.ref_logprobs is not None, "ref_logprobs can not be None"
+            kl_loss_weight = compute_kl_loss_weight(
+                shifted_labels, global_grad_tokens, loss_cfg.kl_loss_coef, loss_cfg.ignore_idx
+            )
+        else:
+            kl_loss_weight = None
+        loss_kwargs.policy_loss_weight = policy_loss_weight
+        loss_kwargs.kl_loss_weight = kl_loss_weight
+        loss_kwargs.global_grad_tokens = global_grad_tokens
 
 
 def finalize_train_policy_metrics(extra_info_dict: dict[str, Any], device: str | torch.device) -> dict[str, Any]:

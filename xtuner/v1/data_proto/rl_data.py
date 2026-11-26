@@ -118,6 +118,39 @@ class TeacherTargets(BaseModel):
         return self
 
 
+class SamplerTopK(BaseModel):
+    """The sampler's top-k distribution at every position, aligned with ``input_ids``.
+
+    Row ``t`` is the distribution that produced ``input_ids[t]``, the same alignment as
+    ``RolloutState.logprobs``. Log-probabilities are normalized over the full vocabulary, not
+    renormalized over the recorded head. Rows without a recorded distribution (prompt, tool output)
+    and unused slots hold token id ``-1`` and log-probability ``-inf``.
+
+    Args:
+        token_ids (np.ndarray): ``int32`` array of shape ``[T, k]``.
+        logprobs (np.ndarray): ``float32`` array of shape ``[T, k]``.
+    """
+
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    token_ids: np.ndarray
+    logprobs: np.ndarray
+
+    @model_validator(mode="after")
+    def _check_layout(self) -> Self:
+        if self.token_ids.dtype != np.int32 or self.logprobs.dtype != np.float32:
+            raise ValueError(
+                f"Sampler top-k arrays must be int32 token ids and float32 logprobs, got "
+                f"{self.token_ids.dtype} and {self.logprobs.dtype}"
+            )
+        if self.token_ids.ndim != 2 or self.token_ids.shape != self.logprobs.shape or self.token_ids.shape[1] < 1:
+            raise ValueError(
+                f"Sampler top-k arrays must share one [T, k] shape with k >= 1, got "
+                f"{self.token_ids.shape} and {self.logprobs.shape}"
+            )
+        return self
+
+
 @dataclass(frozen=True)
 class TrainMeta:
     """Lightweight training summary owned and published by ``RolloutState``.
@@ -135,6 +168,7 @@ class TrainMeta:
     has_rollout_logprobs: bool
     has_routed_experts: bool
     segment_index: int | None
+    has_sampler_topk: bool = False
 
 
 class RolloutState(BaseModel):
@@ -167,6 +201,8 @@ class RolloutState(BaseModel):
     response_ids: list[int] | None = None
     logprobs: list[float] | None = None
     teacher_targets: TeacherTargets | None = None
+    # Sampler top-k distribution aligned with input_ids; published by set_training_fields.
+    sampler_topk: SamplerTopK | None = None
     routed_experts: np.ndarray | RayObjectRef | list[RayObjectRef] | None = None
     # request-aware trace refs are shared with sibling segments; cleanup detaches instead of freeing them.
     routed_experts_shared: bool = False
@@ -203,13 +239,22 @@ class RolloutState(BaseModel):
         else:
             self.uid = self.rollout_id
 
-    def set_training_fields(self, *, input_ids: list[int], labels: list[int], logprobs: list[float] | None) -> None:
+    def set_training_fields(
+        self,
+        *,
+        input_ids: list[int],
+        labels: list[int],
+        logprobs: list[float] | None,
+        sampler_topk: SamplerTopK | None = None,
+    ) -> None:
         """Validate and publish the full, unshifted training fields.
 
         Args:
             input_ids (list[int]): Full training sequence.
             labels (list[int]): Per-position targets, aligned with ``input_ids``.
             logprobs (list[float] | None): Full rollout logprobs, aligned with ``input_ids``.
+            sampler_topk (SamplerTopK | None): Sampler top-k distribution, aligned with ``input_ids``.
+                Defaults to None.
 
         Returns:
             None
@@ -218,11 +263,14 @@ class RolloutState(BaseModel):
         ids = list(input_ids)
         target_labels = list(labels)
         full_logprobs = list(logprobs) if logprobs is not None else None
-        meta = self._build_train_meta(input_ids=ids, labels=target_labels, logprobs=full_logprobs)
+        meta = self._build_train_meta(
+            input_ids=ids, labels=target_labels, logprobs=full_logprobs, sampler_topk=sampler_topk
+        )
         # 验证成功后才赋值：训练字段、训练长度和摘要一起发布。
         self.input_ids = ids
         self.labels = target_labels
         self.logprobs = full_logprobs
+        self.sampler_topk = sampler_topk
         self.num_tokens = len(ids) - 1
         self.train_meta = meta
 
@@ -277,6 +325,7 @@ class RolloutState(BaseModel):
         self.response_ids = []
         self.logprobs = []
         self.teacher_targets = None
+        self.sampler_topk = None
         self.finish_reason = None
         self.response_model_steps = []
         self.reward = None
@@ -303,6 +352,7 @@ class RolloutState(BaseModel):
             input_ids=self.input_ids,
             labels=self.labels,
             logprobs=self.logprobs,
+            sampler_topk=self.sampler_topk,
             prompt_length=self.train_meta.prompt_length,
         )
         if self.num_tokens != len(self.input_ids) - 1 or self.train_meta != expected:
@@ -319,6 +369,7 @@ class RolloutState(BaseModel):
         input_ids: list[int],
         labels: list[int],
         logprobs: list[float] | None,
+        sampler_topk: SamplerTopK | None = None,
         prompt_length: int | None = None,
     ) -> TrainMeta:
         if len(input_ids) < 2:
@@ -327,6 +378,10 @@ class RolloutState(BaseModel):
             raise ValueError(f"labels length mismatch: {len(labels)} vs input_ids={len(input_ids)}")
         if logprobs is not None and len(logprobs) != len(input_ids):
             raise ValueError(f"logprobs length mismatch: {len(logprobs)} vs input_ids={len(input_ids)}")
+        if sampler_topk is not None and sampler_topk.token_ids.shape[0] != len(input_ids):
+            raise ValueError(
+                f"sampler_topk rows mismatch: {sampler_topk.token_ids.shape[0]} vs input_ids={len(input_ids)}"
+            )
         response_length = len(self.response_ids or [])
         if response_length > len(labels):
             raise ValueError("Response suffix exceeds full labels")
@@ -347,6 +402,7 @@ class RolloutState(BaseModel):
             has_rollout_logprobs=logprobs is not None,
             has_routed_experts=self.routed_experts is not None,
             segment_index=self.extra_fields.get("agent_trace_segment_index"),
+            has_sampler_topk=sampler_topk is not None,
         )
 
 
