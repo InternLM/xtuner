@@ -129,7 +129,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def _make_trainer(self, agent_loop_manager):
+    def _make_trainer(self, agent_loop_manager, *, mock_step_logging: bool = True):
         trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
         trainer._debug_rollout = trainer._debug_train = False
         trainer.logger = MagicMock()
@@ -171,7 +171,8 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._save_trajectories = MagicMock()
         trainer._save_eval_trajectories = MagicMock()
         trainer._release_trace_sessions = MagicMock(return_value=set())
-        trainer._log_step = MagicMock()
+        if mock_step_logging:
+            trainer._log_step = MagicMock()
         trainer._maybe_save_checkpoint = AsyncMock()
         trainer._maybe_save_hf = MagicMock()
         trainer._checkpoint_no_save_replay_buffer = False
@@ -564,18 +565,20 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         self.assertAlmostEqual(scalars["throughput/rollout_sgs"], 0.5)
         self.assertAlmostEqual(scalars["throughput/rollout_tgs"], 15.0)
 
-    def test_log_step_omits_missing_group_timings(self):
-        trainer = self._make_trainer(_FakeManager([]))
-        trainer._log_step = RLDisaggregatedTrainer._log_step.__get__(trainer, RLDisaggregatedTrainer)
-
-        trainer._log_step(
-            train_step=1,
-            step_timer_dict={},
-            produce_result=ProduceBatchResult(rollout_states=[], group_gen_count=1, group_gen_mean_s=0.0),
-            train_info={},
-            eval_info={},
+    def test_fit_logs_available_group_timings(self):
+        result = ProduceBatchResult(
+            rollout_states=[[make_train_state()]],
+            group_gen_count=1,
+            group_gen_mean_s=0.0,
         )
+        trainer = self._make_trainer(_FakeManager([result]), mock_step_logging=False)
+        trainer._sync_weights_and_save = AsyncMock()
+        train_info = self._minimal_train_info(training_samples=1, training_tokens=1)
+        trainer.train_controller.fit.return_value = (train_info["workers_log_item"], train_info["data_info"])
 
+        trainer.fit()
+
+        self.assertEqual(trainer._cur_step, 1)
         scalars = trainer._exp_tracker.add_scalars.call_args.kwargs["tag_scalar_dict"]
         self.assertEqual(scalars["timing/task_n"], 1)
         self.assertEqual(scalars["timing/task_mean_s"], 0.0)
