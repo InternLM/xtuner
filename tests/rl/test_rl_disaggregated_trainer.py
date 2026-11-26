@@ -564,6 +564,25 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         self.assertAlmostEqual(scalars["throughput/rollout_sgs"], 0.5)
         self.assertAlmostEqual(scalars["throughput/rollout_tgs"], 15.0)
 
+    def test_log_step_omits_missing_group_timings(self):
+        trainer = self._make_trainer(_FakeManager([]))
+        trainer._log_step = RLDisaggregatedTrainer._log_step.__get__(trainer, RLDisaggregatedTrainer)
+
+        trainer._log_step(
+            train_step=1,
+            step_timer_dict={},
+            produce_result=ProduceBatchResult(rollout_states=[], group_gen_count=1, group_gen_mean_s=0.0),
+            train_info={},
+            eval_info={},
+        )
+
+        scalars = trainer._exp_tracker.add_scalars.call_args.kwargs["tag_scalar_dict"]
+        self.assertEqual(scalars["timing/task_n"], 1)
+        self.assertEqual(scalars["timing/task_mean_s"], 0.0)
+        self.assertNotIn("timing/task_p50_s", scalars)
+        self.assertNotIn("timing/task_p99_s", scalars)
+        self.assertNotIn("timing/task_p99_p50_ratio", scalars)
+
     def test_log_step_records_every_teacher_timing_and_distillation_metric(self):
         trainer = self._make_trainer(_FakeManager([]))
         trainer._log_step = RLDisaggregatedTrainer._log_step.__get__(trainer, RLDisaggregatedTrainer)
