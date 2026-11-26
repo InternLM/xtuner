@@ -1,4 +1,5 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 import torch
 from torch.optim.adam import adam as torch_adam
@@ -18,6 +19,9 @@ class SwapAdamW(AdamW):
 
     Optimizer states are kept canonically on pinned CPU memory. During optimizer step, state tensors are copied to
     temporary device buffers, updated by fused kernels, and copied back to CPU.
+
+    For sharded (``DTensor``) parameters each state entry is a ``DTensor`` with the same mesh and placements as its
+    parameter, so every rank checkpoints only its own shard.
     """
 
     _state_keys = ("exp_avg", "exp_avg_sq", "max_exp_avg_sq")
@@ -52,13 +56,134 @@ class SwapAdamW(AdamW):
             fused=fused,
         )
         self._swap_optimizer_times = swap_optimizer_times
-        self._param_to_group_map: dict[torch.Tensor, dict] = {}
-        self._param_to_cpu_states_map: dict[torch.Tensor, dict[str, torch.Tensor | None]] = {}
         self._init_swap_states()
 
     def put_state_to_device(self, device: torch.device | str) -> bool:
         """Keep the canonical optimizer state on the host."""
         return False
+
+    @torch._disable_dynamo
+    @torch.no_grad()
+    def load_state_dict(self, state_dict: Mapping[str, Any]) -> None:
+        """Load into the preallocated pinned host buffers in place.
+
+        Follows the Optimizer.load_state_dict protocol (pre/post hooks, id map, in-place group update) but never
+        delegates to torch.optim.AdamW: the official loader replaces state/group objects and casts moments to the
+        parameter device, which would drop pin_memory. copy_ converts floating-point dtypes instead. An empty state
+        explicitly resets history (the engine's args-only load). Pre/post hooks are replayed from the base class'
+        private hook dicts (torch>=2.6), because calling ``super()`` would re-enter the device cast this method
+        exists to avoid.
+
+        NOTE: the engine only reaches this method through ``TrainEngine.load_dcp``, which fixes
+        ``StateDictOptions(cpu_offload=True)``: the incoming moments are CPU ``DTensor``s (CPU local tensors before
+        this PR), ``step`` is a plain CPU tensor, and they are the very objects held in ``self.state``
+        (``.to("cpu")`` is a no-op on CPU tensors), so ``dcp.load`` has already written the checkpoint into these
+        buffers. The ``copy_`` below is therefore a self-copy on the DCP path; it is kept so externally built
+        ``state_dict``s load correctly as well.
+
+        Args:
+            state_dict (Mapping[str, Any]): Optimizer state dict in the ``torch.optim.Optimizer.load_state_dict``
+                schema. ``param_groups`` parameter ids may be indices or FQNs; they are paired with this optimizer's
+                parameters by position, as the official loader does.
+
+        Returns:
+            None
+        """
+        # 1. Pre-hooks first; a hook may return a replacement state dict.
+        state_dict = dict(state_dict)
+        for pre_hook in self._optimizer_load_state_dict_pre_hooks.values():
+            result = pre_hook(self, state_dict)
+            if result is not None:
+                state_dict = result
+
+        # 2. Validate the group layout and pair saved ids with live parameters by position.
+        id_map = self._validate_state_layout(state_dict)
+
+        # 3. Copy every state entry into the preallocated pinned buffers; an empty state resets history.
+        self._copy_state_in_place(state_dict["state"], id_map)
+
+        # 4. Merge hyperparameters into the existing groups in place.
+        self._update_param_groups(state_dict["param_groups"])
+
+        # 5. Post-hooks run last, as in torch.optim.Optimizer.load_state_dict.
+        for post_hook in self._optimizer_load_state_dict_post_hooks.values():
+            post_hook(self)
+
+    def _validate_state_layout(self, state_dict: Mapping[str, Any]) -> dict[Any, torch.Tensor]:
+        # 在改动任何 buffer 之前先校验 checkpoint 结构:保存的 group 数量、每组的参数数量、以及 saved state 的
+        # id 集合都必须与本优化器完全一致。返回 saved-id -> 当前参数 的映射,供后续拷贝步骤使用。
+        saved_groups: list[dict[str, Any]] = state_dict["param_groups"]
+        saved_state: Mapping[Any, Mapping[str, Any]] = state_dict["state"]
+        if len(saved_groups) != len(self.param_groups):
+            raise ValueError("loaded state dict has a different number of parameter groups")
+        if any(
+            len(saved_group["params"]) != len(group["params"])
+            for saved_group, group in zip(saved_groups, self.param_groups)
+        ):
+            raise ValueError(
+                "loaded state dict contains a parameter group that doesn't match the size of optimizer's group"
+            )
+
+        id_map = {
+            old_id: param
+            for saved_group, group in zip(saved_groups, self.param_groups)
+            for old_id, param in zip(saved_group["params"], group["params"])
+        }
+        # Require an exact id match: the official loader silently resets the history of parameters without saved state
+        # (and keeps orphans), so a mismatch would resume training from mixed moments without any error.
+        if saved_state and set(saved_state) != set(id_map):
+            raise ValueError("loaded state dict contains a parameter state that doesn't match any parameter")
+        return id_map
+
+    def _copy_state_in_place(
+        self, saved_state: Mapping[Any, Mapping[str, Any]], id_map: dict[Any, torch.Tensor]
+    ) -> None:
+        # 用 copy_ 把 checkpoint 中的 moment 和 step 写入预分配的 pinned host buffer:不替换任何 state 条目或
+        # tensor 对象,保留 pin_memory。对 state key 或 local shape 不匹配的情况显式报错,而不是静默加载出错
+        # 乱的数据;saved state 为空时表示清零历史。
+        for param_id, param in id_map.items():
+            target_state = self.state[param]
+            # amsgrad=False keeps None placeholders for max_exp_avg_sq; they are not
+            # part of the state contract, so ignore None entries on both sides.
+            expected_keys = {key for key, value in target_state.items() if value is not None}
+            if not saved_state:
+                # The engine's args-only load passes an empty state: reset history instead of keeping it.
+                for key in expected_keys:
+                    self._to_local_tensor(target_state[key]).zero_()
+                continue
+
+            source_state = saved_state[param_id]
+            source_keys = {key for key, value in source_state.items() if value is not None}
+            if source_keys != expected_keys:
+                raise ValueError(
+                    f"loaded state dict has incompatible optimizer state keys for parameter {param_id}: "
+                    f"got {sorted(source_keys)}, expected {sorted(expected_keys)}"
+                )
+            for key in expected_keys:
+                target = self._to_local_tensor(target_state[key])
+                source = self._to_local_tensor(source_state[key])
+                assert isinstance(source, torch.Tensor)
+                # copy_ broadcasts on mismatch, so an old or differently sharded checkpoint would load scrambled
+                # moments silently; reject it with the parameter id and both shapes instead.
+                if target.shape != source.shape:
+                    raise ValueError(
+                        f"loaded state dict has incompatible optimizer state shape for parameter {param_id} "
+                        f"key {key}: got {tuple(source.shape)}, expected {tuple(target.shape)}"
+                    )
+                target.copy_(source)
+
+    def _update_param_groups(self, saved_groups: list[dict[str, Any]]) -> None:
+        # 把 checkpoint 中的超参(lr、betas、weight decay 等)原地合并进现有的 param group,
+        # 使 step() 持续读到更新后的值。
+        # Update in place so external references to these group objects (and step() below) see the new
+        # hyperparameters. Unlike torch, this merges into the existing groups, so a key absent from the
+        # checkpoint keeps its local value.
+        for group, saved_group in zip(self.param_groups, saved_groups):
+            # Shallow-copy per group so param_groups never aliases mutable values of the incoming state dict.
+            saved_group = dict(saved_group)
+            group.update({key: value for key, value in saved_group.items() if key != "params"})
+            # Fall back to AdamW semantics when the checkpoint predates this key.
+            group["decoupled_weight_decay"] = bool(saved_group.get("decoupled_weight_decay", True))
 
     @staticmethod
     def _to_local_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -67,11 +192,9 @@ class SwapAdamW(AdamW):
         return tensor
 
     def _init_swap_states(self) -> None:
-        for group in self.param_groups:
-            for param in group["params"]:
-                self._param_to_group_map[param] = group
-
-        swap_num = sum(self._to_local_tensor(main_param).numel() for main_param in self._param_to_group_map)
+        swap_num = sum(
+            self._to_local_tensor(param).numel() for group in self.param_groups for param in group["params"]
+        )
         self.swap_numel = swap_num // self._swap_optimizer_times
         swap_memory = swap_num * 8 / 1024 / 1024
         logger.info(
@@ -81,27 +204,21 @@ class SwapAdamW(AdamW):
         )
 
         for group in self.param_groups:
+            amsgrad = bool(group["amsgrad"])
             for param in group["params"]:
-                cpu_state_dtensor = self.state[param]
-                cpu_state: dict[str, torch.Tensor | None] = {}
-                amsgrad = bool(self._param_to_group_map[param]["amsgrad"])
-                local_param = self._to_local_tensor(param)
-
+                state = self.state[param]
                 for key in self._state_keys:
                     if key == "max_exp_avg_sq" and not amsgrad:
-                        cpu_state_dtensor[key] = None
-                        cpu_state[key] = None
+                        state[key] = None
                     else:
-                        cpu_tensor = torch.zeros_like(local_param, memory_format=torch.preserve_format)
-                        cpu_tensor = cpu_tensor.to(device="cpu", non_blocking=True)
-                        cpu_tensor = cpu_tensor.pin_memory()
-                        cpu_state_dtensor[key] = cpu_tensor
-                        cpu_state[key] = cpu_tensor
-
+                        # empty_like keeps DTensor global metadata.
+                        state_tensor = torch.empty_like(
+                            param, device="cpu", memory_format=torch.preserve_format, pin_memory=True
+                        )
+                        self._to_local_tensor(state_tensor).zero_()
+                        state[key] = state_tensor
                 # Keep per-parameter step semantics consistent with torch.optim.AdamW.
-                cpu_state_dtensor["step"] = torch.tensor(0.0, dtype=torch.float32, device="cpu")
-
-                self._param_to_cpu_states_map[param] = cpu_state
+                state["step"] = torch.tensor(0.0, dtype=torch.float32, device="cpu")
 
         DEVICE_MODULE.synchronize()
 
@@ -112,74 +229,61 @@ class SwapAdamW(AdamW):
             with torch.enable_grad():
                 loss = closure()
 
-        params_list = list(self._param_to_group_map.keys())
-
-        for param in params_list:
-            if param.grad is None:
-                continue
-            if param.grad.is_sparse:
-                raise RuntimeError("AdamW does not support sparse gradients")
-
-            group = self._param_to_group_map[param]
-            param_state = self.state[param]
-            step_tensor = param_state.get("step")
-            if step_tensor is None:
-                step_tensor = torch.tensor(0.0, dtype=torch.float32, device="cpu")
-                param_state["step"] = step_tensor
-            assert isinstance(step_tensor, torch.Tensor)
-
+        for group in self.param_groups:
             amsgrad = bool(group["amsgrad"])
             beta1, beta2 = group["betas"]
-            cpu_state = self._param_to_cpu_states_map[param]
-            cpu_exp_avg = cpu_state["exp_avg"]
-            cpu_exp_avg_sq = cpu_state["exp_avg_sq"]
-            cpu_max_exp_avg_sq = cpu_state.get("max_exp_avg_sq", None)
+            for param in group["params"]:
+                if param.grad is None:
+                    continue
+                if param.grad.is_sparse:
+                    raise RuntimeError("AdamW does not support sparse gradients")
 
-            assert isinstance(cpu_exp_avg, torch.Tensor)
-            assert isinstance(cpu_exp_avg_sq, torch.Tensor)
-            exp_avg = cpu_exp_avg.to(device=DEVICE, non_blocking=True)
-            exp_avg_sq = cpu_exp_avg_sq.to(device=DEVICE, non_blocking=True)
+                param_state = self.state[param]
+                step_tensor = param_state["step"]
+                assert isinstance(step_tensor, torch.Tensor)
 
-            max_exp_avg_sq: torch.Tensor | None = None
-            if amsgrad:
-                assert isinstance(cpu_max_exp_avg_sq, torch.Tensor)
-                max_exp_avg_sq = cpu_max_exp_avg_sq.to(device=DEVICE, non_blocking=True)
+                cpu_exp_avg = param_state["exp_avg"]
+                cpu_exp_avg_sq = param_state["exp_avg_sq"]
+                cpu_max_exp_avg_sq = param_state["max_exp_avg_sq"]
+                assert isinstance(cpu_exp_avg, torch.Tensor)
+                assert isinstance(cpu_exp_avg_sq, torch.Tensor)
 
-            local_param = self._to_local_tensor(param)
-            local_grad = self._to_local_tensor(param.grad)
-            local_exp_avg = self._to_local_tensor(exp_avg)
-            local_exp_avg_sq = self._to_local_tensor(exp_avg_sq)
-            local_max_exp_avg_sq = self._to_local_tensor(max_exp_avg_sq) if max_exp_avg_sq is not None else None
+                exp_avg = self._to_local_tensor(cpu_exp_avg).to(device=DEVICE, non_blocking=True)
+                exp_avg_sq = self._to_local_tensor(cpu_exp_avg_sq).to(device=DEVICE, non_blocking=True)
+                max_exp_avg_sq = None
+                if amsgrad:
+                    assert isinstance(cpu_max_exp_avg_sq, torch.Tensor)
+                    max_exp_avg_sq = self._to_local_tensor(cpu_max_exp_avg_sq).to(device=DEVICE, non_blocking=True)
 
-            torch_adam(
-                [local_param],
-                [local_grad],
-                [local_exp_avg],
-                [local_exp_avg_sq],
-                [local_max_exp_avg_sq] if local_max_exp_avg_sq is not None else [],
-                [step_tensor],
-                amsgrad=amsgrad,
-                has_complex=torch.is_complex(local_param),
-                lr=group["lr"],
-                beta1=beta1,
-                beta2=beta2,
-                weight_decay=group["weight_decay"],
-                eps=group["eps"],
-                maximize=group["maximize"],
-                foreach=group["foreach"],
-                capturable=group["capturable"],
-                differentiable=group["differentiable"],
-                fused=group["fused"],
-                grad_scale=getattr(self, "grad_scale", None),
-                found_inf=getattr(self, "found_inf", None),
-                decoupled_weight_decay=group["decoupled_weight_decay"],
-            )
+                torch_adam(
+                    [self._to_local_tensor(param)],
+                    [self._to_local_tensor(param.grad)],
+                    [exp_avg],
+                    [exp_avg_sq],
+                    [max_exp_avg_sq] if max_exp_avg_sq is not None else [],
+                    [step_tensor],
+                    amsgrad=amsgrad,
+                    has_complex=torch.is_complex(param),
+                    lr=group["lr"],
+                    beta1=beta1,
+                    beta2=beta2,
+                    weight_decay=group["weight_decay"],
+                    eps=group["eps"],
+                    maximize=group["maximize"],
+                    foreach=group["foreach"],
+                    capturable=group["capturable"],
+                    differentiable=group["differentiable"],
+                    fused=group["fused"],
+                    grad_scale=getattr(self, "grad_scale", None),
+                    found_inf=getattr(self, "found_inf", None),
+                    decoupled_weight_decay=group["decoupled_weight_decay"],
+                )
 
-            cpu_exp_avg.copy_(exp_avg, non_blocking=True)
-            cpu_exp_avg_sq.copy_(exp_avg_sq, non_blocking=True)
-            if amsgrad and max_exp_avg_sq is not None:
-                assert isinstance(cpu_max_exp_avg_sq, torch.Tensor)
-                cpu_max_exp_avg_sq.copy_(max_exp_avg_sq, non_blocking=True)
+                # Write the updated moments back into the same pinned host buffers.
+                self._to_local_tensor(cpu_exp_avg).copy_(exp_avg, non_blocking=True)
+                self._to_local_tensor(cpu_exp_avg_sq).copy_(exp_avg_sq, non_blocking=True)
+                if amsgrad and max_exp_avg_sq is not None:
+                    self._to_local_tensor(cpu_max_exp_avg_sq).copy_(max_exp_avg_sq, non_blocking=True)
 
         DEVICE_MODULE.synchronize()
         return loss

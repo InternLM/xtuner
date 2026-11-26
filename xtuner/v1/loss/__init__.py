@@ -2,6 +2,7 @@ from .aux_loss import AuxLossConfig, AuxLossContext
 from .base_loss_ctx import BaseLossConfig, BaseLossContext, BaseLossKwargs
 from .ce_loss import CELossConfig, CELossContext, LMHeadLossContext
 from .chunk_loss import ChunkLoss
+from .critic_loss import CriticLossConfig, CriticLossContext, CriticLossKwargs
 from .moe_loss import (
     BalancingLossConfig,
     BalancingLossContext,
@@ -26,6 +27,9 @@ __all__ = [
     "CELossContext",
     "CELossConfig",
     "ChunkLoss",
+    "CriticLossConfig",
+    "CriticLossContext",
+    "CriticLossKwargs",
     "BaseLossConfig",
     "BaseLossContext",
     "BaseLossKwargs",

@@ -36,6 +36,7 @@ token id in this module is global. Concretely that splits the work in two:
 """
 
 import math
+from collections.abc import Callable
 from typing import Literal
 
 import torch
@@ -60,6 +61,16 @@ def kpool_output_width(index_topk: int, index_kpool: int, alignment: int) -> int
     """
     width = index_topk + index_kpool - 1
     return -(-width // alignment) * alignment  # ceil_div(width, alignment) * alignment
+
+
+def gather_kpool_features(k: Tensor, gate_scores: Tensor, seq_ctx: SequenceContext) -> tuple[Tensor, Tensor]:
+    """Gather whole-sequence features before pooling; queries retain local
+    ownership."""
+    mesh = seq_ctx.sequence_parallel_mesh
+    return (
+        gather_for_sequence_parallel(k.squeeze(0), dim=0, sp_mesh=mesh),
+        gather_for_sequence_parallel(gate_scores.squeeze(0), dim=0, sp_mesh=mesh),
+    )
 
 
 def _doc_pool_layout(cu_seq_lens_q: Tensor, index_kpool: int) -> tuple[Tensor, Tensor]:
@@ -318,6 +329,7 @@ def kpool_topk_indices(
     selector: Literal["torch", "deep_select"] = "torch",
     balance_sp: bool = False,
     sp_full_pool_work_ratio: float = 0.5,
+    build_pools_fn: Callable[..., tuple[Tensor, Tensor, Tensor]] = build_pools,
 ) -> Tensor:
     """Build pools (A), score/select pools (B), expand to token ids + tail (C).
 
@@ -343,6 +355,9 @@ def kpool_topk_indices(
             restore attention ownership before token expansion and tail selection.
         sp_full_pool_work_ratio (float): Fixed per-query selection/launch estimate
             relative to the full pool width. Must be finite and nonnegative.
+        build_pools_fn (Callable): Pool builder resolved by the backend. The native
+            default is pure PyTorch; the explicit LMDeploy BF16 adapter supplies
+            serving compression while retaining this scoring/selection pipeline.
 
     Returns:
         Tensor: ``[S, 1, kpool_output_width(index_topk, index_kpool, alignment)]`` int32.
@@ -357,10 +372,9 @@ def kpool_topk_indices(
     # instead of the [P, index_head_dim] a post-pooling gather would move -- the price of
     # pooling being a whole-sequence operation.
     sp_mesh = seq_ctx.sequence_parallel_mesh
-    k = gather_for_sequence_parallel(k.squeeze(0), dim=0, sp_mesh=sp_mesh)
-    gate_scores = gather_for_sequence_parallel(gate_scores.squeeze(0), dim=0, sp_mesh=sp_mesh)
+    k, gate_scores = gather_kpool_features(k, gate_scores, seq_ctx)
 
-    pool_key, pool_index, _ = build_pools(k, gate_scores, kpool_ape, seq_ctx, index_kpool=index_kpool)
+    pool_key, pool_index, _ = build_pools_fn(k, gate_scores, kpool_ape, seq_ctx, index_kpool=index_kpool)
 
     q_local = q.squeeze(0).contiguous()
     index_n_heads = q_local.shape[1]

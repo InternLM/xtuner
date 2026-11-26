@@ -137,7 +137,8 @@ else
 fi
 
 while true; do
-  result=$(ray status | grep ${ACCELERATOR} | cut -d ' ' -f2 | cut -d '/' -f2)
+  # With pipefail and set -e, grep exits 1 when ray status has not printed the accelerator line yet and aborts the script before the retry loop. `|| true` treats that empty result as not ready yet.
+  result=$(ray status | grep ${ACCELERATOR} | cut -d ' ' -f2 | cut -d '/' -f2 || true)
   if [ "$result" = "$expected_accelerator_count.0" ]; then
     break
   else

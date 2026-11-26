@@ -7,7 +7,7 @@ import torch
 from pydantic import BaseModel, ConfigDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import MM_PIXEL_FIELDS, RolloutState, Status
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.dataloader import Dataloader
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
@@ -64,9 +64,10 @@ class SamplerConfig(BaseModel):
 # The best solution should be to start the dataloader using spawn.
 def put_to_ray(data: RolloutState) -> RolloutState:
     if hasattr(data, "mm_info") and data.mm_info is not None:
-        pixel_values = data.mm_info.get("pixel_values", None)
-        if pixel_values is not None:
-            data.mm_info["pixel_values"] = ray.put(pixel_values)
+        for name in MM_PIXEL_FIELDS:
+            value = data.mm_info.get(name, None)
+            if value is not None and not isinstance(value, ray.ObjectRef):
+                data.mm_info[name] = ray.put(value)
     return data
 
 
@@ -77,6 +78,7 @@ class _DatasetSampler:
         self.cur_epoch = 0
         self.prompt_repeat_k = prompt_repeat_k
         self._consumed_samples: int = 0
+        self._resume_epoch_ready = False
 
     def __len__(self) -> int:
         return len(self.dataloader)
@@ -96,6 +98,7 @@ class _DatasetSampler:
             data = cast(RolloutState, next(self.dataloader_iter)[0])
             data = put_to_ray(data)
 
+        self._resume_epoch_ready = False
         group_id = self._consumed_samples
         rollout_id_base = self._consumed_samples * self.prompt_repeat_k
 
@@ -138,6 +141,16 @@ class Sampler(_DatasetSampler):
         """Save the sampler's dataloader state to checkpoint."""
         checkpoint_path = Path(checkpoint_path)
         dataloader_state = self.dataloader.get_state_dict()
+        dataloader_state["rollout_group_count"] = self._consumed_samples
+        next_epoch = self.cur_epoch
+        if (
+            dataloader_state["sampler"]["step"] == 0
+            and dataloader_state.get("total_consumed_samples", 0) > 0
+            and not self._resume_epoch_ready
+        ):
+            next_epoch += 1
+        # Persist the logical next epoch without changing the running iterator.
+        dataloader_state["rollout_next_epoch"] = next_epoch
         torch.save(dataloader_state, checkpoint_path / self._DATALOADER_FILE)
 
     def resume(self, checkpoint_path: Path | str) -> None:
@@ -149,6 +162,17 @@ class Sampler(_DatasetSampler):
             return
         state = torch.load(dataloader_path, map_location="cpu")
         self.dataloader.load_state_dict(state)
+        # The dataloader cursor is epoch-local; rollout/group IDs are global.
+        # Legacy checkpoints already persist cumulative delivered samples.
+        self._consumed_samples = state.get(
+            "rollout_group_count", state.get("total_consumed_samples", state["sampler"]["step"])
+        )
+        saved_epoch = state["sampler"]["epoch"]
+        # Legacy epoch-boundary checkpoints wrap the cursor before advancing
+        # the epoch. New checkpoints persist the logical next epoch explicitly.
+        boundary = state["sampler"]["step"] == 0 and state.get("total_consumed_samples", 0) > 0
+        self.cur_epoch = state.get("rollout_next_epoch", saved_epoch + int(boundary))
+        if self.cur_epoch != saved_epoch:
+            self.dataloader.set_epoch(self.cur_epoch)
+        self._resume_epoch_ready = state["sampler"]["step"] == 0
         self.dataloader_iter = iter(self.dataloader)
-        self._consumed_samples = state["sampler"]["step"]
-        self.cur_epoch = state["sampler"]["epoch"]

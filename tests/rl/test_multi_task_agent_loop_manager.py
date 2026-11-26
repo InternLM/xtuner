@@ -33,7 +33,8 @@ from xtuner.v1.rl.agent_loop_manager.produce_utils import (
     _TaskRunner,
 )
 from xtuner.v1.rl.agent_loop_manager.producer import SyncProduceStrategyConfig
-from xtuner.v1.train.rl_trainer import _migrate_legacy_is_valid_sample_fn
+from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
+from xtuner.v1.train.rl_trainer import BaseRLTrainer, _migrate_legacy_is_valid_sample_fn
 
 
 class _FakeSampler:
@@ -87,6 +88,38 @@ class _FakeProduceStrategy:
         return self.cleanup_pause_time_s
 
 
+class _BlockingDisaggStrategy:
+    """Disagg strategy whose scheduling round blocks until the test releases it."""
+
+    def __init__(self) -> None:
+        self.produce_calls = 0
+        self.pause_calls = 0
+        self.started_events: list[asyncio.Event] = [asyncio.Event(), asyncio.Event()]
+        self.release = asyncio.Event()
+
+    def is_model_expired(self, train_step: int, model_step: int) -> bool:
+        return False
+
+    def pending_task_count(self) -> int:
+        return 0
+
+    async def produce_batch(self, ctx: Any) -> ProduceBatchStatus:
+        index = self.produce_calls
+        self.produce_calls += 1
+        if index < len(self.started_events):
+            self.started_events[index].set()
+        await self.release.wait()
+        self.release.clear()
+        return ProduceBatchStatus.NORMAL
+
+    async def pause_produce(self, ctx: Any) -> float:
+        self.pause_calls += 1
+        return 0.0
+
+    async def close(self) -> None:
+        return
+
+
 class _FakeTimedProduceStrategy:
     def __init__(self, pause_time_s: float):
         self.pause_time_s = pause_time_s
@@ -112,6 +145,29 @@ class _FakeTimedProduceStrategy:
         return self.pause_time_s
 
 
+class _LedgerProduceStrategy:
+    """Delivers one group per first window and keeps its context for a late delivery."""
+
+    def __init__(self) -> None:
+        self.ctx: Any = None
+        self.delivered = False
+        # Keep the late group fresh and retryable so it reaches the next report instead of expiring.
+        self.stale_threshold = 100
+        self.tail_batch_trigger_size = 0
+
+    def pending_task_count(self) -> int:
+        return 0
+
+    async def produce_batch(self, ctx: Any) -> None:
+        self.ctx = ctx
+        if not self.delivered:
+            self.delivered = True
+            await ctx.put_generated_group([_named_rollout_state("ledger-0")])
+
+    async def pause_produce(self, ctx: Any) -> float:
+        return 0.0
+
+
 class _FailingProduceStrategy:
     async def produce_batch(self, ctx) -> None:
         raise RuntimeError("original produce failure")
@@ -120,10 +176,18 @@ class _FailingProduceStrategy:
         raise RuntimeError("cleanup failure")
 
 
-class _FakeRolloutState:
-    def __init__(self, rollout_id: str, group_generate_time_s: float):
-        self.rollout_id = rollout_id
-        self.extra_fields = {GROUP_GENERATE_TIME_KEY: group_generate_time_s}
+def _named_rollout_state(name: str, group_generate_time_s: float | None = None) -> RolloutState:
+    extra_fields = {"test_name": name}
+    if group_generate_time_s is not None:
+        extra_fields[GROUP_GENERATE_TIME_KEY] = group_generate_time_s
+    return RolloutState(
+        rollout_id=int(name.split("-")[-1]),
+        message=[],
+        status=Status.COMPLETED,
+        input_ids=[1, 2],
+        labels=[-100, 2],
+        extra_fields=extra_fields,
+    )
 
 
 class _FakeReplayBuffer:
@@ -213,7 +277,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         task = TaskSpecConfig.model_construct(
             task_name="single_task",
             agent_loop_config=MagicMock(),
-            produce_strategy_config=MagicMock(),
+            produce_strategy_config=MagicMock(tail_batch_trigger_size=-1),
             sampler_config=MagicMock(),
             weight=1.0,
         )
@@ -227,7 +291,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         built_agent_loop = _fake_agent_loop()
         agent_loop_config = MagicMock()
         agent_loop_config.build.return_value = built_agent_loop
-        produce_strategy_config = MagicMock()
+        produce_strategy_config = MagicMock(tail_batch_trigger_size=-1)
         produce_strategy_config.build.return_value = _FakeProduceStrategy()
         sampler_config = MagicMock()
         sampler_config.build.return_value = _FakeSampler()
@@ -312,16 +376,19 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             _migrate_legacy_is_valid_sample_fn(cfg, MagicMock())
 
     async def test_take_train_batch_applies_token_staleness_mask(self):
-        # 启用 token staleness 时，公开 produce_batch 路径应返回最终 effective mask。
+        # take_train_batch 先烙制 staleness mask，训练入口检查后保留该 mask。
         state = RolloutState(
             rollout_id=1,
             group_id=1,
             message=[{"role": "user", "content": "prompt"}],
             prompt_ids=[1, 2],
             response_ids=[3, 4],
+            input_ids=[1, 2, 3, 4],
+            labels=[-100, -100, 3, 4],
             response_model_steps=[0, 4],
             status=Status.COMPLETED,
         )
+        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
         strategy = _FakeProduceStrategy(token_stale_threshold=4)
         replay_buffer = _FakeReplayBuffer(
             rollout_states_by_task={"task": [[state]]},
@@ -343,20 +410,28 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         )
 
         result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
+        self.assertEqual(result.rollout_states[0][0].labels, [-100, -100, -100, 4])
+        trainer = SimpleNamespace(logger=MagicMock(), agent_loop_manager=manager)
+        await BaseRLTrainer._prepare_train_batch(trainer, result.rollout_states, 5, result)
 
-        self.assertEqual(result.rollout_states[0][0].response_mask, [0, 1])
+        trained_state = result.rollout_states[0][0]
+        self.assertEqual(trained_state.labels, [-100, -100, -100, 4])
+        self.assertEqual(trained_state.train_meta.supervised_tokens, 1)
+        trained_state.validate_training()
         self.assertEqual(replay_buffer.task_token_stale_threshold_calls, [{"task": 4}])
 
-    async def test_take_train_batch_skips_agentic_token_staleness_mask(self):
+    async def test_take_train_batch_skips_states_without_response_ids(self):
+        # response_ids 缺失的样本没有可对齐的 response 段，不参与 token staleness 烙制。
         state = RolloutState(
             rollout_id=1,
             group_id=1,
             message=[{"role": "user", "content": "prompt"}],
             input_ids=[1, 2],
             labels=[-100, 2],
-            response_mask=[1],
+            logprobs=[0.0, -0.1],
             status=Status.COMPLETED,
         )
+        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
         strategy = _FakeProduceStrategy(token_stale_threshold=4)
         manager = AgentLoopManager(
             task_runners=[
@@ -377,8 +452,95 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         )
 
         result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
+        self.assertEqual(result.rollout_states[0][0].labels, [-100, 2])
+        trainer = SimpleNamespace(logger=MagicMock(), agent_loop_manager=manager)
+        await BaseRLTrainer._prepare_train_batch(trainer, result.rollout_states, 5, result)
 
-        self.assertEqual(result.rollout_states[0][0].response_mask, [1])
+        self.assertEqual(result.rollout_states[0][0].labels, [-100, 2])
+
+    async def test_take_train_batch_bakes_full_sequence_agentic_per_token_staleness(self):
+        # agentic 全序列形态（response_ids 为 input_ids 去掉 prompt 前缀的后缀，含环境 token）
+        # 同样按 token 级 staleness 烙制：逐 token 按 response_model_steps 判定，仅过期 token
+        # 的监督位被清零。
+        state = RolloutState(
+            rollout_id=1,
+            group_id=1,
+            message=[{"role": "user", "content": "prompt"}],
+            prompt_ids=[1, 2],
+            response_ids=[30, -1, 40],
+            response_model_steps=[0, 4, 4],
+            input_ids=[1, 2, 30, -1, 40],
+            labels=[-100, -100, 30, -100, 40],
+            status=Status.COMPLETED,
+        )
+        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
+        strategy = _FakeProduceStrategy(token_stale_threshold=4)
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=strategy,
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                )
+            ],
+            replay_buffer=_FakeReplayBuffer(
+                rollout_states_by_task={"task": [[state]]},
+                leftover_counts={},
+            ),
+            rollout_controller=_fake_rollout_controller(),
+        )
+
+        result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
+        self.assertEqual(result.rollout_states[0][0].labels, [-100, -100, -100, -100, 40])
+        trainer = SimpleNamespace(logger=MagicMock(), agent_loop_manager=manager)
+        await BaseRLTrainer._prepare_train_batch(trainer, result.rollout_states, 5, result)
+
+        trained_state = result.rollout_states[0][0]
+        self.assertEqual(trained_state.labels, [-100, -100, -100, -100, 40])
+        self.assertEqual(trained_state.train_meta.supervised_tokens, 1)
+        trained_state.validate_training()
+
+    async def test_take_train_batch_sync_path_leaves_labels_untouched(self):
+        # 同步路径（无 token staleness）零操作：labels 在生成期已是最终态（语义洞已烙入）。
+        state = RolloutState(
+            rollout_id=1,
+            group_id=1,
+            message=[{"role": "user", "content": "prompt"}],
+            prompt_ids=[1, 2],
+            response_ids=[3, 4, 5],
+            input_ids=[1, 2, 3, 4, 5],
+            labels=[-100, -100, 4, 5, -100],
+            status=Status.COMPLETED,
+        )
+        state.response_model_steps = [0, 0, 0]
+        state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=state.logprobs)
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=_FakeProduceStrategy(),
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                )
+            ],
+            replay_buffer=_FakeReplayBuffer(
+                rollout_states_by_task={"task": [[state]]},
+                leftover_counts={},
+            ),
+            rollout_controller=_fake_rollout_controller(),
+        )
+
+        result = await manager.produce_batch(batch_size=1, train_step=5, model_step=4)
+        self.assertEqual(result.rollout_states[0][0].labels, [-100, -100, 4, 5, -100])
+        trainer = SimpleNamespace(logger=MagicMock(), agent_loop_manager=manager)
+        await BaseRLTrainer._prepare_train_batch(trainer, result.rollout_states, 5, result)
+
+        self.assertEqual(result.rollout_states[0][0].labels, [-100, -100, 4, 5, -100])
 
     async def test_produce_batch_allocates_by_weight_and_returns_task_sorted_results(self):
         # 共卡 produce_batch 按 task 权重分配 batch，并按 task 名稳定返回训练数据和 leftover 统计。
@@ -387,8 +549,12 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         strategy_c = _FakeProduceStrategy(tail_batch_trigger_size=0)
         replay_buffer = _FakeReplayBuffer(
             rollout_states_by_task={
-                "task_a": [["a-0"], ["a-1"]],
-                "task_b": [["b-0"], ["b-1"], ["b-2"]],
+                "task_a": [[_named_rollout_state("a-0")], [_named_rollout_state("a-1")]],
+                "task_b": [
+                    [_named_rollout_state("b-0")],
+                    [_named_rollout_state("b-1")],
+                    [_named_rollout_state("b-2")],
+                ],
                 "task_c": [],
             },
             leftover_counts={
@@ -431,7 +597,10 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         result = await multi_task_manager.produce_batch(batch_size=7, train_step=3, model_step=2)
 
         self.assertEqual(result.task_batch_sizes, {"task_a": 5, "task_b": 2, "task_c": 0})
-        self.assertEqual(result.rollout_states, [["a-0"], ["a-1"], ["b-0"], ["b-1"]])
+        self.assertEqual(
+            [[item.extra_fields["test_name"] for item in group] for group in result.rollout_states],
+            [["a-0"], ["a-1"], ["b-0"], ["b-1"]],
+        )
         self.assertEqual(result.leftover_init, 0)
         self.assertEqual(result.leftover_completed, 1)
         self.assertEqual(result.leftover_aborted, 2)
@@ -450,12 +619,89 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy_b.called_expired_groups_retryable, [False])
         self.assertEqual(strategy_b.cleanup_expired_groups_retryable, [False])
 
+    async def test_colocate_ledger_carries_late_group_increment_into_next_report(self):
+        # 完整组任务可跨窗口交付；旧 ctx 写入的增量必须由下一份报告消费一次，不能被新账本抹掉。
+        strategy = _LedgerProduceStrategy()
+        replay_buffer = AsyncReplayBufferConfig().build()
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task_a",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=strategy,
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                )
+            ],
+            replay_buffer=replay_buffer,
+            rollout_controller=_fake_rollout_controller(),
+        )
+
+        first = await manager.produce_batch(batch_size=1, train_step=1, model_step=0)
+        self.assertEqual((first.produced_samples, first.produced_tokens), (1, 0))
+
+        # 窗口 1 已返回；旧 ctx 在此后完成一组交付，增量进入同一账本。
+        late_state = _named_rollout_state("ledger-1")
+        late_state.response_ids = [20, 21]
+        await strategy.ctx.put_generated_group([late_state])
+
+        second = await manager.produce_batch(batch_size=1, train_step=2, model_step=0)
+        self.assertEqual((second.produced_samples, second.produced_tokens), (1, 2))
+        self.assertEqual([group[0].extra_fields["test_name"] for group in second.rollout_states], ["ledger-1"])
+        self.assertEqual(strategy.ctx.progress.next_consumer_step, 3)
+
+    async def test_disagg_pause_waits_for_scheduling_round_and_resumes_next_round(self):
+        # 过渡方案：pause 先置 UPDATE/update_event，等当前生产调用（含结果处理）退出；continue 后才开始下一轮。
+        strategy = _BlockingDisaggStrategy()
+        rollout_controller = _fake_rollout_controller()
+        manager = DisaggAgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task_a",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=strategy,
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                )
+            ],
+            replay_buffer=MagicMock(),
+            rollout_controller=rollout_controller,
+        )
+
+        producer_task = asyncio.create_task(manager.produce_loop(batch_size=1))
+        await asyncio.wait_for(strategy.started_events[0].wait(), timeout=5)
+
+        pause_task = asyncio.create_task(manager.pause_produce())
+        await asyncio.sleep(0)
+        self.assertFalse(pause_task.done())
+
+        strategy.release.set()
+        await asyncio.wait_for(pause_task, timeout=5)
+        self.assertEqual(strategy.produce_calls, 1)
+        self.assertEqual(strategy.pause_calls, 1)
+        self.assertEqual(rollout_controller.pause_generation.remote.await_count, 1)
+
+        # 暂停期间不会开始新的一轮；continue 发布后才恢复调度。
+        await asyncio.sleep(0.05)
+        self.assertEqual(strategy.produce_calls, 1)
+        await manager.continue_produce(model_step=1)
+        await asyncio.wait_for(strategy.started_events[1].wait(), timeout=5)
+        self.assertEqual(strategy.produce_calls, 2)
+
+        strategy.release.set()
+        manager.shutdown()
+        producer_task.cancel()
+        await asyncio.gather(producer_task, return_exceptions=True)
+        await manager.close()
+
     async def test_disagg_get_batch_aggregates_multi_task_results_without_colocate_surface(self):
         # 非共卡 get_batch 使用后台 progress 消费 replay buffer，不依赖共卡 produce_batch 继承面。
         replay_buffer = _FakeReplayBuffer(
             rollout_states_by_task={
-                "task_a": [["a-0"], ["a-1"]],
-                "task_b": [["b-0"]],
+                "task_a": [[_named_rollout_state("a-0")], [_named_rollout_state("a-1")]],
+                "task_b": [[_named_rollout_state("b-0")]],
             },
             leftover_counts={
                 ("task_a", Status.COMPLETED): 2,
@@ -487,7 +733,10 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
         result = await manager.get_batch(batch_size=3, train_step=2)
 
-        self.assertEqual(result.rollout_states, [["a-0"], ["a-1"], ["b-0"]])
+        self.assertEqual(
+            [[item.extra_fields["test_name"] for item in group] for group in result.rollout_states],
+            [["a-0"], ["a-1"], ["b-0"]],
+        )
         self.assertEqual(result.task_batch_sizes, {"task_a": 2, "task_b": 1})
 
     async def test_produce_batch_uses_cleanup_and_reconstructs_group_timing_stats(self):
@@ -496,8 +745,8 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         replay_buffer = _FakeReplayBuffer(
             rollout_states_by_task={
                 "task_a": [
-                    [_FakeRolloutState("a-0", 0.5)],
-                    [_FakeRolloutState("a-1", 1.0)],
+                    [_named_rollout_state("a-0", 0.5)],
+                    [_named_rollout_state("a-1", 1.0)],
                 ],
             },
             leftover_counts={},
@@ -577,9 +826,9 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             ],
             replay_buffer=_FakeReplayBuffer(
                 rollout_states_by_task={
-                    "task_a": [["a-0"]],
-                    "task_b": [["b-0"]],
-                    "task_c": [["c-0"]],
+                    "task_a": [[_named_rollout_state("a-0")]],
+                    "task_b": [[_named_rollout_state("b-0")]],
+                    "task_c": [[_named_rollout_state("c-0")]],
                 },
                 leftover_counts={},
             ),
@@ -589,7 +838,10 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         result = await manager.produce_batch(batch_size=3, train_step=6, model_step=5)
 
         self.assertEqual(result.status, ProduceBatchStatus.NORMAL)
-        self.assertEqual(result.rollout_states, [["a-0"], ["b-0"], ["c-0"]])
+        self.assertEqual(
+            [[item.extra_fields["test_name"] for item in group] for group in result.rollout_states],
+            [["a-0"], ["b-0"], ["c-0"]],
+        )
 
     async def test_produce_batch_waits_all_tasks_before_any_pause(self):
         # fast task 不能在 slow task 仍在生产时提前 pause rollout worker。
@@ -637,7 +889,10 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                 ),
             ],
             replay_buffer=_FakeReplayBuffer(
-                rollout_states_by_task={"task_fast": [["fast-0"]], "task_slow": [["slow-0"]]},
+                rollout_states_by_task={
+                    "task_fast": [[_named_rollout_state("fast-0")]],
+                    "task_slow": [[_named_rollout_state("slow-0")]],
+                },
                 leftover_counts={},
             ),
             rollout_controller=_fake_rollout_controller(),
@@ -645,7 +900,10 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
         result = await manager.produce_batch(batch_size=2, train_step=4, model_step=3)
 
-        self.assertEqual(result.rollout_states, [["fast-0"], ["slow-0"]])
+        self.assertEqual(
+            [[item.extra_fields["test_name"] for item in group] for group in result.rollout_states],
+            [["fast-0"], ["slow-0"]],
+        )
         self.assertEqual(events[:2], ["fast_produce_done", "slow_produce_done"])
 
     async def test_produce_batch_preserves_original_terminal_exception(self):

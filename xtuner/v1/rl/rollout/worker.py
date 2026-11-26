@@ -25,7 +25,6 @@ from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     SampleParams,
     Status,
-    reset_rollout_response,
     update_status_from_finish_reason,
 )
 from xtuner.v1.rl.trace.rollout_api import (
@@ -35,17 +34,20 @@ from xtuner.v1.rl.utils import (
     AutoAcceleratorWorkers,
     CPUResourcesConfig,
     SingleAcceleratorWorker,
+    free_object_refs,
     get_eos_token,
     register_cpu_resources,
 )
+from xtuner.v1.rl.utils.misc import validate_image_only_rollout
 from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
 from .constants import ROLLOUT_HTTP_MAX_CONNECTIONS, ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY
+from .cross_weight_update_rollout import CrossWeightUpdateRolloutConfig
 from .health_manager import ROLLOUT_RAY_GET_TIMEOUT
 from .rollout_topology import RolloutTopology, ServerLaunchSpec
 from .session_server import SessionServerActor
-from .utils import PartialRolloutHandler
+from .utils import PartialRolloutHandler, merge_incremental_routed_experts, routed_expert_row_count
 
 
 if TYPE_CHECKING:
@@ -339,6 +341,13 @@ class RolloutConfig(BaseModel):
             help="Timeout duration (in seconds) for SessionServer requests forwarded to rollout workers.",
         ),
     ] = 1200.0
+    cross_weight_update_rollout: Annotated[
+        CrossWeightUpdateRolloutConfig | None,
+        Parameter(
+            group=infer_group,
+            help="Allow live Agent rollouts to continue across model weight updates; checkpoints do not save live Agent state.",
+        ),
+    ] = None
     context_length: Annotated[
         Optional[int],
         Parameter(
@@ -432,6 +441,13 @@ class RolloutConfig(BaseModel):
             help="Number of consecutive health check failures required before marking a worker inactive.",
         ),
     ] = 3
+    session_affinity: Annotated[
+        bool,
+        Parameter(
+            group=infer_group,
+            help="Pin external HTTP sessions to one concrete DP SessionServer through an in-job affinity router.",
+        ),
+    ] = False
     enable_proxy: Annotated[
         bool,
         Parameter(
@@ -565,6 +581,8 @@ class RolloutWorker(SingleAcceleratorWorker):
     handling generation requests. It is designed to be subclassed for specific inference backends like LMDeploy, vLLM
     or SGLang.
     """
+
+    supports_routed_experts_start_len: bool = False
 
     def __init__(
         self,
@@ -798,6 +816,8 @@ class RolloutWorker(SingleAcceleratorWorker):
                 port=self.session_server_port,
                 request_timeout=self.config.session_server_timeout,
                 enable_return_routed_experts=self.enable_return_routed_experts,
+                supports_routed_experts_start_len=self.supports_routed_experts_start_len,
+                cross_weight_update_rollout=self.config.cross_weight_update_rollout,
             )
         )
         self.session_server_url = ray.get(
@@ -808,6 +828,9 @@ class RolloutWorker(SingleAcceleratorWorker):
             raise RuntimeError(
                 f"Request-entrypoint rollout worker rank={self.rank} did not start session server during init."
             )
+
+    def get_session_server(self) -> Any | None:
+        return self.session_server_actor
 
     def _stop_session_server(self) -> None:
         if self.session_server_actor is not None:
@@ -957,7 +980,9 @@ class RolloutWorker(SingleAcceleratorWorker):
                             f"Invalid rollout response for request {uid} after {max_retries} attempts, marking as FAILED."
                         )
                         rollout_state.status = Status.FAILED
-                        rollout_state.error_msg = f"Invalid rollout response after {max_retries} attempts."
+                        rollout_state.error_msg = (
+                            rollout_state.error_msg or f"Invalid rollout response after {max_retries} attempts."
+                        )
                         return rollout_state
 
                     # Case 1.3: Invalid rollout response but we have retries left
@@ -1031,12 +1056,28 @@ class RolloutWorker(SingleAcceleratorWorker):
             if rollout_state.status == Status.FAILED:
                 error_msg = rollout_state.error_msg
                 status = rollout_state.status
-                reset_rollout_response(rollout_state)
+                rollout_state.reset_response()
                 rollout_state.status = status
                 rollout_state.error_msg = error_msg
                 rollout_state.sample_params = rollout_state.sample_params.model_copy(
                     update={"max_tokens": request_max_tokens}
                 )
+
+    def _get_routed_experts_start_len(self, rollout_state: RolloutState) -> int:
+        if (
+            self.supports_routed_experts_start_len
+            and self.enable_return_routed_experts
+            and rollout_state.sample_params.return_routed_experts
+            and rollout_state.sample_params.return_token_ids
+            and rollout_state.routed_experts is not None
+        ):
+            if self.enable_partial_rollout and rollout_state.response_ids:
+                # Image placeholders are compressed on the wire; routes use expanded positions.
+                prompt_ids = rollout_state.extra_fields.get("train_prompt_ids", rollout_state.prompt_ids)
+                return routed_expert_row_count(len(prompt_ids or []) + len(rollout_state.response_ids))
+            # Built-in multi-turn loops append tokens; restarting clears routed_experts.
+            return rollout_state.extra_fields.get("_r3_retained_num_rows", 0)
+        return 0
 
     def _prepare_request_payload(
         self,
@@ -1055,15 +1096,18 @@ class RolloutWorker(SingleAcceleratorWorker):
                 payload from the original prompt and the request entry
                 ``max_tokens``.
         """
+        validate_image_only_rollout(rollout_state)
         if discard_response:
-            rollout_state = reset_rollout_response(rollout_state)
+            rollout_state.reset_response()
+            rollout_state.extra_fields.pop("_r3_retained_num_rows", None)
             rollout_state.sample_params = rollout_state.sample_params.model_copy(
                 update={"max_tokens": request_max_tokens}
             )
             rollout_state.status = Status.INIT
         elif not self.enable_partial_rollout and rollout_state.status == Status.ABORTED:
             # ABORTED samples can be replayed; without partial rollout, rerun from the original prompt.
-            rollout_state = reset_rollout_response(rollout_state)
+            rollout_state.reset_response()
+            rollout_state.extra_fields.pop("_r3_retained_num_rows", None)
             rollout_state.sample_params = rollout_state.sample_params.model_copy(
                 update={"max_tokens": request_max_tokens}
             )
@@ -1195,11 +1239,68 @@ class RolloutWorker(SingleAcceleratorWorker):
             result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
             return result
 
+    async def _postprocess_full_rollout(
+        self,
+        rollout_state: RolloutState,
+        *,
+        response: str,
+        response_ids: list[int],
+        logprobs: list[float],
+        routed_experts: Any,
+        finish_reason: str,
+        status: Status,
+        meta: dict,
+        routed_experts_start_len: int,
+    ) -> RolloutState:
+        """Replace the current turn while preserving its already retained
+        routes.
+
+        Args:
+            rollout_state (RolloutState): Sample being updated.
+            response (str): Current turn's text.
+            response_ids (list[int]): Current turn's generated tokens.
+            logprobs (list[float]): Current turn's token logprobs.
+            routed_experts (Any): Current full routes or returned suffix.
+            finish_reason (str): Engine terminal reason.
+            status (Status): Parsed rollout status.
+            meta (dict): Engine prompt/completion token counts.
+            routed_experts_start_len (int): Offset requested from the engine.
+
+        Returns:
+            RolloutState: Updated sample with complete retained routing history.
+        """
+        if routed_experts_start_len and not response_ids:
+            # A non-partial empty abort restarts from the original prompt.
+            for ref in (rollout_state.routed_experts, routed_experts):
+                if isinstance(ref, ray.ObjectRef):
+                    free_object_refs([ref])
+            routed_experts = None
+        else:
+            routed_experts = await merge_incremental_routed_experts(
+                rollout_state.routed_experts,
+                routed_experts,
+                start_len=routed_experts_start_len,
+                total_len=routed_expert_row_count(meta["prompt_tokens"] + meta["completion_tokens"]),
+            )
+        rollout_state.extra_fields.pop("_r3_retained_num_rows", None)
+        if routed_experts is not None:
+            rollout_state.extra_fields["_r3_retained_num_rows"] = routed_expert_row_count(
+                meta["prompt_tokens"] + len(response_ids)
+            )
+        rollout_state.response = response
+        rollout_state.response_ids = response_ids
+        rollout_state.logprobs = logprobs
+        rollout_state.routed_experts = routed_experts
+        rollout_state.finish_reason = finish_reason
+        rollout_state.status = status
+        return rollout_state
+
     async def _safe_handle_response(self, rollout_state: RolloutState, http_response: httpx.Response) -> RolloutState:
         uid = rollout_state.group_id
 
         sample_params = rollout_state.sample_params
         is_token_out = sample_params.return_token_ids
+        routed_experts_start_len = self._get_routed_experts_start_len(rollout_state)
         response = http_response.json()
 
         if is_token_out:
@@ -1296,14 +1397,26 @@ class RolloutWorker(SingleAcceleratorWorker):
                         status=rollout_status,
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
+                        routed_experts_start_len=routed_experts_start_len,
                     )
                 else:
-                    rollout_state.response = returned_response
-                    rollout_state.response_ids = response_ids
-                    rollout_state.logprobs = logprobs
-                    rollout_state.routed_experts = routed_experts
-                    rollout_state.finish_reason = finish_reason
-                    rollout_state.status = rollout_status
+                    rollout_state = await self._postprocess_full_rollout(
+                        rollout_state,
+                        response=returned_response,
+                        response_ids=response_ids,
+                        logprobs=logprobs,
+                        routed_experts=routed_experts,
+                        finish_reason=finish_reason,
+                        status=rollout_status,
+                        meta=response["meta_info"],
+                        routed_experts_start_len=routed_experts_start_len,
+                    )
+                return rollout_state
+            except (ValueError, AssertionError) as e:
+                error_msg = f"R3 response rejected for rollout {uid}: {e}"
+                self.logger.error(error_msg)
+                rollout_state.status = Status.FAILED
+                rollout_state.error_msg = error_msg
                 return rollout_state
             except KeyError as e:
                 response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
@@ -1312,10 +1425,6 @@ class RolloutWorker(SingleAcceleratorWorker):
             except IndexError as e:
                 response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
                 error_msg = f"Index error {e} while processing response {response_for_log} for {uid}"
-                raise RuntimeError(error_msg)
-            except AssertionError as e:
-                response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
-                error_msg = f"AssertionError: {e} when processing response {response_for_log} for {uid}"
                 raise RuntimeError(error_msg)
             except json.JSONDecodeError as e:
                 error_msg = f"JSONDecodeError: {e} when processing response {response} for {uid}"

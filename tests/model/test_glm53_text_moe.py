@@ -176,11 +176,11 @@ class TestGlm53TextMoEInitWeights:
 
 class TestGlm53CompileCfg:
     def test_mhc_primitives_are_compiled_with_and_without_ep(self):
-        """`hc_pre` materializes fp32 rms-norm intermediates over `[B, S, hc_mult * hidden]` and
-        `_hc_post_eager` a broadcast-multiply that only inductor's fusion keeps off HBM. They
-        used to ride along inside `Glm53MoEDecoderLayer._pre/_post_moe_forward`'s boundary,
-        which the EP config drops (all2all does not trace), leaving 42 of 45 layers running
-        them eagerly under the production topology. They need their own entries."""
+        """Keep independent compile entries when EP drops the enclosing MoE-layer boundary.
+
+        Compilation fuses hc_pre's FP32 rms-norm intermediates and the elementwise operations
+        in _hc_post_eager's stream loop; the latter no longer creates an H-by-H-by-D tensor.
+        """
         # EP 表会 pop 掉 MoE 层边界，mHC 原语必须各自登记才不会退回 eager。
         from xtuner.v1.model.moe.glm53.glm53 import GLM53_MOE_EP_COMPILE_CFG, GLM53_MOE_NON_EP_COMPILE_CFG
 
@@ -209,36 +209,27 @@ class TestGlm53TextMoEFp32Params:
     bf16-unsafe, but declaring the parameters `dtype=torch.float32` buys nothing under FSDP2:
     `fully_shard` upcasts every trainable parameter to an fp32 master anyway and then casts to
     `MixedPrecisionPolicy.param_dtype` for the forward all-gather. The only lever that keeps a
-    parameter in fp32 *compute* is `hf_save_cfg.fp32_keys_pattern`, which routes it to
-    `fully_shard(ignored_params=...)` -- see `BaseModel._fully_shard`."""
-
-    def _matches(self, cfg, model, param_name: str) -> bool:
-        patterns = cfg.hf_save_cfg.fp32_keys_pattern or []
-        return any(re.search(p, k) for p in patterns for k in model.to_hf_key_list(param_name))
+    parameter in fp32 *compute* is declaring it in `fp32_param_names`, which routes it to
+    `fully_shard(ignored_params=...)` -- see `PrecisionPolicy`."""
 
     def test_sensitive_parameters_are_pinned_to_fp32(self):
         # Preserve sinkhorn, gate, and convolution precision through the HF key mapping.
         # hc_pre already casts hc_*_fn to the activation dtype, so leave those matrices sharded.
-        cfg = _tiny_cfg()
-        model = cfg.build()
-        pinned = [
-            n
-            for n, _ in model.named_parameters()
-            if re.search(r"hc_(attn|ffn)_(base|scale)|A_log|dt_bias|[qkv]_conv1d\.(weight|bias)", n)
-        ]
+        model = _tiny_cfg().build()
+        pattern = r"hc_(attn|ffn)_(base|scale)|A_log|dt_bias|[qkv]_conv1d\.(weight|bias)"
+        pinned = {name for name, _ in model.named_parameters() if re.search(pattern, name)}
         assert pinned, "tiny config should carry mHC and KDA parameters"
-        for name in pinned:
-            assert self._matches(cfg, model, name), f"{name} -> {model.to_hf_key_list(name)} not pinned to fp32"
-        assert not self._matches(cfg, model, "layers.0.hc_attn_fn")
-        assert not self._matches(cfg, model, "layers.0.self_attn.q_proj.weight")
+        assert pinned <= model.precision.param_names
+        assert "layers.0.hc_attn_fn" not in model.precision.param_names
+        assert "layers.0.self_attn.q_proj.weight" not in model.precision.param_names
 
     def test_convolution_export_preserves_fp32_masters(self):
         model = _tiny_cfg().build()
         for projection in ("q", "k", "v"):
-            key = model.to_hf_key_list(f"layers.0.self_attn.{projection}_conv1d.weight")[0]
-            assert model._get_save_dtype(key, torch.bfloat16) == torch.float32
-        key = model.to_hf_key_list("layers.0.self_attn.q_proj.weight")[0]
-        assert model._get_save_dtype(key, torch.bfloat16) == torch.bfloat16
+            name = f"layers.0.self_attn.{projection}_conv1d.weight"
+            assert model.precision.save_dtype(name, torch.bfloat16, is_buffer=False) == torch.float32
+        name = "layers.0.self_attn.q_proj.weight"
+        assert model.precision.save_dtype(name, torch.bfloat16, is_buffer=False) == torch.bfloat16
 
 
 @pytest.mark.gpu

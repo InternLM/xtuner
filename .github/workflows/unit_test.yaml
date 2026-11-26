@@ -5,6 +5,7 @@ on:
       - "main"
     paths-ignore:
       - "docs/**"
+      - "examples/**"
       - "**.md"
       - "autotest/**"
       - ".github/workflows/ete_test_gpu.yaml"

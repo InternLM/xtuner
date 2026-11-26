@@ -73,7 +73,7 @@ class Glm53Projector(BaseModel):
     def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
         return GLM53_PROJECTOR_COMPILE_CFG
 
-    def to_hf_key_list(self, key: str) -> list[str]:
+    def _model_hf_keys(self, key: str) -> list[str]:
         return [self._hf_prefix + key]
 
     @torch.no_grad()
@@ -100,9 +100,9 @@ class Glm53Projector(BaseModel):
             mp_policy = MixedPrecisionPolicy(
                 param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
             )
+            self.precision.set_default_mp_policy(mp_policy)
             self._fully_shard(
                 mesh=self.fsdp_mesh,
-                mp_policy=mp_policy,
                 reshard_after_forward=True,
                 offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
             )

@@ -11,7 +11,6 @@ from transformers import AutoTokenizer
 import torch.distributed as dist
 from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
 from xtuner.v1.loss.ce_loss import CELossConfig
-from xtuner.v1.model.base import HFSaveCfg
 from xtuner.v1.model.moe.moe import SequenceContext, MTPConfig
 from xtuner.v1.utils.test_utils import init_data_mesh
 from xtuner.v1.datasets import Qwen3VLTokenizeFnConfig
@@ -27,6 +26,14 @@ from safetensors import safe_open
 
 
 VIDEO_ROOT = os.environ["VIDEO_ROOT"]
+
+
+def clear_fp32_declarations(model: torch.nn.Module) -> None:
+    """Drop every `fp32_param_names` declaration so the model computes all weights in its runtime dtype."""
+    for module in model.modules():
+        if getattr(module, "fp32_param_names", ()):
+            module.fp32_param_names = ()
+
 
 @unittest.skipIf(
     Version(transformers_version) < Version("5.2.0"),
@@ -236,11 +243,14 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
  
         with torch.device("meta"):
             model_cfg = Qwen3_5_VLMoE35BA3Config(compile_cfg=False)
-            # hf_save_cfg of text_model is ignored to align with transformers's forward result
-            model_cfg.text_config.hf_save_cfg = HFSaveCfg()
             model_cfg.text_config.router_compute_dtype = "native"
-            qwen3vl_model = model_cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
+            qwen3vl_model = model_cfg.build()
 
+        # transformers keeps every text-tower weight in bf16, so drop the fp32 declarations (Qwen3.5
+        # normally pins `A_log` / `norm.weight`) to compare like with like. This must happen before the
+        # first policy query: `_to_device_dtype` already resolves and caches the declarations.
+        clear_fp32_declarations(qwen3vl_model)
+        qwen3vl_model = qwen3vl_model._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
         qwen3vl_model.from_hf(QWEN3_VL_MOE_PATH)
         qwen3vl_model.eval()
 
@@ -264,11 +274,12 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
         # test fsdp
         with torch.device("meta"):
             model_cfg = Qwen3_5_VLMoE35BA3Config(compile_cfg=False)
-            # hf_save_cfg of text_model is ignored to align with transformers's forward result
-            model_cfg.text_config.hf_save_cfg = HFSaveCfg()
             model_cfg.text_config.router_compute_dtype = "native"
-            qwen3vl_model = model_cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
-        
+            qwen3vl_model = model_cfg.build()
+
+        clear_fp32_declarations(qwen3vl_model)
+        qwen3vl_model = qwen3vl_model._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
+
         fsdp_config = FSDPConfig(cpu_offload=False)
         fsdp_mesh = init_world_mesh()
         qwen3vl_model.vision_tower.fsdp_mesh = fsdp_mesh

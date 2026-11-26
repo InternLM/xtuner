@@ -16,9 +16,9 @@ from xtuner.v1.data_proto.rl_data import (
     calculate_group_effective_response_masks,
     get_group_status,
     refresh_seq_staleness,
-    reset_rollout_response,
     update_sample_version,
 )
+from xtuner.v1.data_proto.utils import calculate_seq_staleness
 from xtuner.v1.rl.rollout.trace_store import release_and_discard_rollout_groups
 from xtuner.v1.rl.utils import (
     BetweenNode,
@@ -459,7 +459,7 @@ class ReplayBuffer:
 
         # 1. update seq-level staleness
         refresh_seq_staleness(group, current_train_step)
-        # 2. calculate token-level staleness
+        # 2. Token-level effective masks drive expiry decisions; labels are baked at take_train_batch.
         token_level_effective_masks = calculate_group_effective_response_masks(
             group,
             current_train_step=current_train_step,
@@ -475,6 +475,20 @@ class ReplayBuffer:
             effective_mask = token_level_effective_masks[index]
             if effective_mask is not None and not any(effective_mask):
                 expired_mask[index] = True
+            elif (
+                item.status == Status.ABORTED
+                and item.labels is None
+                and item.response_ids
+                and token_stale_threshold is not None
+            ):
+                # Partial responses have no training labels yet. Expire an entirely
+                # stale prefix without constructing or modifying training masks.
+                model_steps = item.response_model_steps
+                if model_steps is None or len(model_steps) != len(item.response_ids):
+                    raise ValueError("response_model_steps must align with response_ids")
+                expired_mask[index] = all(
+                    calculate_seq_staleness(step, current_train_step) >= token_stale_threshold for step in model_steps
+                )
 
         # 3. return storage_status when no expired sample in group
         if not any(expired_mask):
@@ -485,7 +499,7 @@ class ReplayBuffer:
             for item, expired in zip(group, expired_mask):
                 if expired:
                     item.status = Status.EXPIRED
-                    reset_rollout_response(item)
+                    item.reset_response()
         else:
             for item in group:
                 item.status = Status.EXPIRED

@@ -44,6 +44,9 @@ class VLMJsonlDataset(JsonlDataset):
             else:
                 data = raw_data
         except Exception as e:
+            # RL 不接受 SFT 假样本；保留原始异常及 traceback，避免被兜底过程的二次异常遮住。
+            if not getattr(self.tokenize_fn, "supports_fake_data_fallback", True):
+                raise
             logger.warning(f"[{os.path.basename(self.path)}]: {e}. Dumping a fake data.")
             data = self.tokenize_fn(self.fake_data)
             assert isinstance(data, dict), f"Expected dict, got {type(data)}"

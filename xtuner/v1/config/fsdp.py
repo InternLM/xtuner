@@ -19,8 +19,8 @@ class FSDPConfig(BaseModel):
     vision_recompute_ratio: Annotated[float, Parameter(help="Recompute ratio for vision modules")] = 1.0
     checkpoint_preserve_rng_state: Annotated[bool, Parameter(help="Preserve RNG state during checkpointing")] = True
     # Training-time FSDP CPU offload is version-sensitive for XTuner model configs
-    # that keep selected fp32 trainable parameters outside FSDP via
-    # fp32_keys_pattern. The Qwen3.5-VL MoE RL path was verified to run on Torch
+    # that keep selected fp32 trainable parameters outside FSDP (see
+    # `PrecisionPolicy`). The Qwen3.5-VL MoE RL path was verified to run on Torch
     # 2.9, but on PyTorch 2.12.x the combination of ignored fp32 params,
     # checkpointed forward/backward, and CPU offload can trigger autograd's
     # internal stream assertion:
@@ -31,7 +31,8 @@ class FSDPConfig(BaseModel):
     # TODO: (caoweihan) Convert `torch.dtype` to `Annotated` for compatibility with cyclopts
     param_dtype: Annotated[torch.dtype, Parameter(help="Data type for model parameters")] = torch.bfloat16
     reduce_dtype: Annotated[torch.dtype, Parameter(help="Data type for reduction operations")] = torch.bfloat16
-    fp32_lm_head: Annotated[bool, Parameter(help="Use float32 for language model head")] = False
+    fp32_lm_head: Annotated[bool, Parameter(help="Use float32 for the language model head")] = False
+    fp32_value_head: Annotated[bool, Parameter(help="Use float32 for the critic value head")] = False
     # TODO: deprecate `torch_compile` in favor of `compile_cfg` in XTunerBaseModelConfig
     torch_compile: Annotated[bool, Parameter(help="Enable model compilation for faster inference")] = True
     mesh_prefix: Annotated[str, Parameter(help="Prefix for device mesh configuration in distributed training")] = (

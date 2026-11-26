@@ -76,7 +76,7 @@ class Qwen3VLProjector(BaseModel):
             deepstack_projected_features.append(self.deepstack_merger_list[i](deepstack_feature))
         return hidden_states, deepstack_projected_features
 
-    def to_hf_key_list(self, key: str) -> list[str]:
+    def _model_hf_keys(self, key: str) -> list[str]:
         return [self._hf_prefix + key]
 
     # TODO: 暂时不开 checkpoint
@@ -103,9 +103,9 @@ class Qwen3VLProjector(BaseModel):
             mp_policy = MixedPrecisionPolicy(
                 param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
             )
+            self.precision.set_default_mp_policy(mp_policy)
             self._fully_shard(
                 mesh=self.fsdp_mesh,
-                mp_policy=mp_policy,
                 reshard_after_forward=True,
                 offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
             )

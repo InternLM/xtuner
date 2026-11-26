@@ -302,7 +302,7 @@ class Qwen3VLVisionModel(BaseModel):
         if (missing := expected_param_name - initialized_params):
             raise RuntimeError(f"{missing} is not initialized")
 
-    def to_hf_key_list(self, key: str) -> list[str]:
+    def _model_hf_keys(self, key: str) -> list[str]:
         return [self._hf_prefix + key]
 
     @override
@@ -322,6 +322,7 @@ class Qwen3VLVisionModel(BaseModel):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype, cast_forward_inputs=False
         )
+        self.precision.set_default_mp_policy(mp_policy)
 
         # NOTE: 在 cpu_offload 模式下，mesh 应该是 cuda 的，在 meta fully_shard 后在调用 .to_empty(device=cpu)
         self.fsdp_mesh = init_world_mesh()
@@ -358,8 +359,7 @@ class Qwen3VLVisionModel(BaseModel):
             if self.config.fully_shard:
                 self._fully_shard(
                     mesh=self.fsdp_mesh,
-                    mp_policy=mp_policy,
-                    reshard_after_forward=True,
+                        reshard_after_forward=True,
                     offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
                     module=layer,
                 )
@@ -370,7 +370,6 @@ class Qwen3VLVisionModel(BaseModel):
 
             self._fully_shard(
                 mesh=self.fsdp_mesh,
-                mp_policy=mp_policy,
                 reshard_after_forward=True,
                 offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
             )

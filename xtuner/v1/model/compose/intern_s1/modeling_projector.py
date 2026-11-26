@@ -44,7 +44,7 @@ class InternS1MultiModalProjector(BaseModel):
         hidden_states = self.linear_2(hidden_states)
         return hidden_states
 
-    def to_hf_key_list(self, key: str) -> list[str]:
+    def _model_hf_keys(self, key: str) -> list[str]:
         return [self._hf_prefix + key]
 
     # Note: 因为 model 本身就是 self，暂时无法实现在 fully_shard 时候进行 checkpoint
@@ -57,6 +57,7 @@ class InternS1MultiModalProjector(BaseModel):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
+        self.precision.set_default_mp_policy(mp_policy)
         self.fsdp_mesh = init_world_mesh()
         assert self.fsdp_mesh is not None
 
@@ -72,7 +73,6 @@ class InternS1MultiModalProjector(BaseModel):
 
         self._fully_shard(
             mesh=self.fsdp_mesh,
-            mp_policy=mp_policy,
             reshard_after_forward=True,
             offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
         )

@@ -19,7 +19,7 @@ logger = get_logger()
 
 
 class DeepSeekV3(MoE):
-    def to_hf_key_list(self, key: str) -> list[str]:
+    def _model_hf_keys(self, key: str) -> list[str]:
         if "layers" in key or "embed_tokens" in key:
             key = "model." + key
 

@@ -1,5 +1,7 @@
 import asyncio
-from typing import Any, TypeAlias
+from dataclasses import dataclass
+from time import monotonic
+from typing import Any, Callable, TypeAlias, cast
 from uuid import uuid4
 
 import ray
@@ -13,6 +15,7 @@ from xtuner.v1.rl.weight_update.data import RolloutWeightUpdateTarget
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
 from .constants import ROLLOUT_RAY_GENERATE_MAX_CONCURRENCY
+from .cross_weight_update_rollout import CrossWeightUpdateRolloutConfig, RequestBarrier
 from .health_manager import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthManager
 from .proxy_manager import RolloutProxyManager
 from .rollout_topology import RolloutTopology
@@ -23,6 +26,15 @@ from .worker import (
     get_rollout_worker_base_cls,
 )
 from .worker_registry import RolloutWorkerRegistry, WorkerLifecycleState
+
+
+@dataclass
+class RolloutRequestState:
+    """Controller-owned state for requests spanning rollout weight updates."""
+
+    epoch: int = 0
+    barrier: RequestBarrier | None = None
+    published_model_step: int | None = None
 
 
 # Keep this as a Ray actor because Ray AgentLoop actors need a shared, cross-process handle to the same controller
@@ -65,6 +77,7 @@ class RolloutController:
             worker_lifecycle_listeners=[self.proxy_manager] if self.proxy_manager is not None else None,
         )
         self.health_manager.start()
+        self._request_state = RolloutRequestState()
 
     def get_weight_update_targets(
         self, target_state: WorkerLifecycleState | None = None, return_group_ranks: bool = False
@@ -174,18 +187,44 @@ class RolloutController:
             ]
         )
 
-    def pause_generation(self):
+    def assert_request_gates_healthy(self) -> None:
+        """Fail fast if an admission gate or its settled-request ledger is
+        unhealthy."""
+        if self.config.cross_weight_update_rollout is None:
+            raise RuntimeError("Cross-weight-update rollout request gates are not enabled")
+        workers = self.registry.active_entrypoints()
+        servers = ray.get(
+            [worker.actor.get_session_server.remote() for worker in workers],  # type: ignore[attr-defined]
+            timeout=ROLLOUT_RAY_GET_TIMEOUT,
+        )
+        if not servers or any(server is None for server in servers):
+            raise RuntimeError("A fixed request entrypoint is missing")
+        states = ray.get([server.request_status.remote() for server in servers], timeout=ROLLOUT_RAY_GET_TIMEOUT)
+        failures = [state for state in states if state["failures"]]
+        if failures:
+            raise RuntimeError(f"Unsettled requests stop this run: {failures}")
+
+    def pause_generation(self) -> None:
+        """Pause rollout, settling admitted requests before the backend
+        pauses."""
+        settings = self.config.cross_weight_update_rollout
+        if settings is not None and self._request_state.barrier is not None:
+            raise RuntimeError("A request barrier already exists")
         self.health_manager.pause()
+        # TODO(timeout-reconciliation): freeze_timeout also bounds health recovery, SessionServer lookup and seal;
+        # every timeout currently aborts training. Distinguish a slow control RPC from a real failure: ray.get
+        # timeout does not cancel the remote call, and a partial seal must not advance or rerun pause blindly. Keep
+        # the barrier and pending RPCs, poll each entrypoint's state, and continue only after all of them meet the
+        # current stage condition. (PR #2297 review.)
         # Wait for the health manager to finish recovery before pausing generation.
-        if not self.health_manager.wait_recovery_done(timeout=600.0):
+        timeout = settings.freeze_timeout if settings is not None else 600.0
+        if not self.health_manager.wait_recovery_done(timeout=timeout):
             raise TimeoutError("Timed out waiting for rollout worker recovery before training.")
+        if settings is not None:
+            self._seal_and_drain_requests(settings)
         active_workers = self.registry.active_workers()
-        futures = [
-            worker.actor.pause_generation.remote()  # type: ignore[attr-defined]
-            for worker in active_workers
-        ]
         try:
-            results = ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
+            results = self._broadcast_to_workers("pause_generation", WorkerLifecycleState.ACTIVE)
         except Exception:
             self.logger.exception(
                 f"RolloutController pause_generation failed for {len(active_workers)} active workers."
@@ -196,6 +235,8 @@ class RolloutController:
         if succeeded_worker_urls:
             self.logger.info(f"Abort request sent successfully: count={len(succeeded_worker_urls)}")
         if failed_worker_urls:
+            if settings is not None:
+                raise RuntimeError("Backend pause failed under request barrier")
             self.logger.warning(f"Abort request failed: worker_urls={failed_worker_urls}")
 
     async def shutdown_inactive_workers(self):
@@ -238,7 +279,15 @@ class RolloutController:
         elif target_state is WorkerLifecycleState.INACTIVE:
             self.health_manager.notify_worker_group_inactive(updated_groups)
 
-    def continue_generation(self):
+    def continue_generation(self, model_step: int) -> None:
+        """Resume rollout using the version of the weights actually installed.
+
+        Args:
+            model_step (int): Actual rollout model version, including zero for the initial weights.
+        """
+        if self.config.cross_weight_update_rollout is not None:
+            self._resume_with_request_barrier(model_step)
+            return
         self._broadcast_to_workers("continue_generation", WorkerLifecycleState.ACTIVE)
         self.health_manager.resume()
 
@@ -255,19 +304,106 @@ class RolloutController:
     def onload_kvcache(self, target_state: WorkerLifecycleState = WorkerLifecycleState.ACTIVE):
         self._broadcast_to_workers("onload_kvcache", target_state)
 
+    def retire_route_sessions(self, session_ids: list[str]) -> None:
+        """Retire finished Agent sessions so a late retry cannot start a second
+        attempt."""
+        if self.proxy_manager is not None:
+            self.proxy_manager.retire_sessions(session_ids)
+
     def shutdown(self):
         """Shut down all rollout workers tracked by the controller."""
         self.health_manager.stop()
-        actors = self.registry.all_actors()
+        try:
+            actors = self.registry.all_actors()
+            ray.get(
+                [actor.shutdown.remote(stop_session_server=True) for actor in actors],  # type: ignore[attr-defined]
+                timeout=ROLLOUT_RAY_GET_TIMEOUT,
+            )
+        finally:
+            if self.proxy_manager is not None:
+                self.proxy_manager.close()
+
+    def _seal_and_drain_requests(self, settings: CrossWeightUpdateRolloutConfig) -> None:
+        workers = self.registry.active_entrypoints()
+        servers = ray.get(
+            [worker.actor.get_session_server.remote() for worker in workers],  # type: ignore[attr-defined]
+            timeout=settings.freeze_timeout,
+        )
+        if not servers or any(server is None for server in servers):
+            raise RuntimeError("Every fixed entrypoint must own a SessionServer")
+        state = self._request_state
+        state.epoch += 1
+        barrier = RequestBarrier(state.epoch, tuple(str(worker.session_url) for worker in workers), tuple(servers))
+        state.barrier = barrier
+        # TODO(timeout-reconciliation): seal/drain ray.get timeouts abort the run even though the RPCs may still
+        # complete, and a seal may already cover only part of the entrypoints. Record per-entrypoint stage state, keep
+        # waiting or retry from that state within the same barrier, and reserve hard failure for confirmed
+        # unsettled/backend errors. (PR #2297 review.)
+        # 所有入口先 seal 再 drain；已准入请求结算完成后，才允许暂停 backend 和切换权重。
         ray.get(
-            [actor.shutdown.remote(stop_session_server=True) for actor in actors],  # type: ignore[attr-defined]
-            timeout=ROLLOUT_RAY_GET_TIMEOUT,
+            [server.seal_requests.remote(barrier.epoch) for server in barrier.servers],
+            timeout=settings.freeze_timeout,
+        )
+        ray.get(
+            [server.drain_requests.remote(settings.drain_timeout) for server in barrier.servers],
+            timeout=settings.drain_timeout + settings.freeze_timeout,
         )
 
-    def _broadcast_to_workers(self, method_name: str, target_state: WorkerLifecycleState, **kwargs):
+    def _resume_with_request_barrier(self, model_step: int) -> None:
+        if model_step is None:
+            raise ValueError("Cross-weight-update rollout requires the actual rollout model_step")
+        state = self._request_state
+        barrier = state.barrier
+        if barrier is None:
+            # 重入已开放窗口仅允许同版本；更新版本必须先建立暂停屏障。
+            if model_step != state.published_model_step:
+                raise RuntimeError("A different model version requires a pause barrier")
+            return
+        endpoints = tuple(worker.session_url for worker in self.registry.active_entrypoints())
+        if endpoints != barrier.endpoints:
+            raise RuntimeError("Fixed rollout topology changed under barrier")
+        settings = cast(CrossWeightUpdateRolloutConfig, self.config.cross_weight_update_rollout)
+        # TODO(timeout-reconciliation): freeze_timeout is also the shared install→resume→reopen budget. A timeout may
+        # leave some entrypoints installed/reopened and others not, while ray.get timeout never cancels the RPCs.
+        # Preserve the barrier and stage, verify each entrypoint before the next stage, and distinguish slow RPCs
+        # from confirmed backend/topology failures instead of aborting training on the first timeout. (PR #2297.)
+        deadline = monotonic() + settings.freeze_timeout
+
+        def wait_all(submit: Callable[[], list[Any]]) -> list[Any]:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Request publication deadline exceeded")
+            return ray.get(submit(), timeout=remaining)
+
+        # install、backend resume、reopen 共用一个预算；任一阶段失败都保留 barrier 并停止训练。
+        wait_all(
+            lambda: [server.install_request_version.remote(barrier.epoch, model_step) for server in barrier.servers]
+        )
+        results = self._broadcast_to_workers(
+            "continue_generation", WorkerLifecycleState.ACTIVE, timeout=deadline - monotonic()
+        )
+        if any(result is False for result in results):
+            raise RuntimeError("Backend resume failed under request barrier")
+        # 多入口 reopen 不是原子操作；部分失败不能声称能够全局回滚。
+        wait_all(lambda: [server.reopen_requests.remote(barrier.epoch) for server in barrier.servers])
+        state.published_model_step = model_step
+        state.barrier = None
+        self.health_manager.resume()
+
+    def _broadcast_to_workers(
+        self,
+        method_name: str,
+        target_state: WorkerLifecycleState,
+        *,
+        timeout: float = ROLLOUT_RAY_GET_TIMEOUT,
+        **kwargs: Any,
+    ) -> list[Any]:
+        # timeout 是控制侧预算，不下传给 worker；预算耗尽后不能再发出下一阶段的 RPC。
+        if timeout <= 0:
+            raise TimeoutError("Rollout control deadline exceeded")
         workers = self.registry.get_target_state_workers(target_state)
         futures = [getattr(worker.actor, method_name).remote(**kwargs) for worker in workers]
-        return ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
+        return ray.get(futures, timeout=timeout)
 
     def _build_remote_worker_cls(self, worker_base_cls):
         assert self.config.rollout_max_batch_size_per_instance is not None, (

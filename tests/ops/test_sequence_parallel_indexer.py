@@ -67,7 +67,9 @@ class TestIndexerSPPartition:
             balanced_query_partition((0, 15), 4, 4)
 
 
-def _cpu_selector(q, k, weights, starts, ends, topk, query_chunk_size=None):
+def _cpu_selector(q, k, weights, starts, ends, topk, query_chunk_size=None, selector="torch"):
+    # CPU stand-in for tilelang_indexer_topk_from_ranges. ``selector`` only chooses the GPU Top-K
+    # kernel; "torch" and "deep_select" share the same semantics, so both take the torch path.
     scores = torch.einsum("qhd,kd->qhk", q.float(), k.float()).relu()
     scores = torch.einsum("qhk,qh->qk", scores, weights)
     ids = torch.arange(k.shape[0])

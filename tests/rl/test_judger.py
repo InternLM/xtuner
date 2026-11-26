@@ -1,37 +1,43 @@
-import os
-import json
-import ray
-import unittest
-import tempfile
-import numpy as np
 import asyncio
+import json
+import os
+import tempfile
+import unittest
+
+import numpy as np
+import ray
+
+from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.rl.utils import (
-    CPUResourcesConfig,
     CPUResourceManager,
+    CPUResourcesConfig,
     clear_cpu_resource_manager,
     set_cpu_resource_manager,
 )
-from xtuner.v1.data_proto.rl_data import RolloutState
+
 
 MODEL_PATH = os.environ.get("ROLLOUT_MODEL_PATH")
 DATA_PATH = os.environ.get("ROLLOUT_DATA_PATH")
 VERL_ROLLOUT_DATA_PATH = os.environ.get("VERL_ROLLOUT_DATA_PATH")
 DAPO_DATA_PATH = os.environ.get("ROLLOUT_DAPO_DATA_PATH")
 FAKE_JUDGER_INPUT_ITEM = RolloutState(
-    message=[{
-        'role': 'user',
-        'content': 'Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May? Let\'s think step by step and output the final answer after "####"'
-    }],
-    reward_model={'ground_truth': '72', 'style': 'rule'},
-    response="<think>\nOkay, let's see. Natalia sold clips to 48 friends in April. Then in May, she sold half as many. So first, I need to figure out how many she sold in May. Half of 48 is 24, right? Because 48 divided by 2 is 24. So in May, she sold 24 clips.\n\nNow, to find the total number of clips sold in both months, I need to add the number from April and May together. That would be 48 (April) plus 24 (May). Let me do the addition: 48 + 24. Hmm, 40 + 20 is 60, and 8 + 4 is 12. So 60 + 12 is 72. So altogether, she sold 72 clips.\n\nWait, let me check that again. 48 plus 24. Yes, 48 + 20 is 68, then plus 4 more is 72. Yep, that seems right. So the total is 72.\n</think>\n\nNatalia sold 48 clips in April. In May, she sold half as many, which is 48 ÷ 2 = 24 clips. Adding both months together: 48 + 24 = 72.  \n\n#### 72<|im_end|>"
+    message=[
+        {
+            "role": "user",
+            "content": 'Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May? Let\'s think step by step and output the final answer after "####"',
+        }
+    ],
+    reward_model={"ground_truth": "72", "style": "rule"},
+    response="<think>\nOkay, let's see. Natalia sold clips to 48 friends in April. Then in May, she sold half as many. So first, I need to figure out how many she sold in May. Half of 48 is 24, right? Because 48 divided by 2 is 24. So in May, she sold 24 clips.\n\nNow, to find the total number of clips sold in both months, I need to add the number from April and May together. That would be 48 (April) plus 24 (May). Let me do the addition: 48 + 24. Hmm, 40 + 20 is 60, and 8 + 4 is 12. So 60 + 12 is 72. So altogether, she sold 72 clips.\n\nWait, let me check that again. 48 plus 24. Yes, 48 + 20 is 68, then plus 4 more is 72. Yep, that seems right. So the total is 72.\n</think>\n\nNatalia sold 48 clips in April. In May, she sold half as many, which is 48 ÷ 2 = 24 clips. Adding both months together: 48 + 24 = 72.  \n\n#### 72<|im_end|>",
 )
+
 
 def construct_gsm8k_judger_data(data_path) -> tuple[list[RolloutState], list[float]]:
     states = []
     history_reward = []
     if not data_path or not os.path.exists(data_path):
         return states, history_reward
-    with open(data_path, 'r', encoding='utf-8') as f:
+    with open(data_path, "r", encoding="utf-8") as f:
         for line in f:
             item = json.loads(line.strip())
             prompt = item["input"][5:-11]
@@ -41,29 +47,30 @@ def construct_gsm8k_judger_data(data_path) -> tuple[list[RolloutState], list[flo
                 RolloutState(
                     message=[{"role": "user", "content": prompt}],
                     response=response,
-                    reward_model={"ground_truth": str(gt)}
+                    reward_model={"ground_truth": str(gt)},
                 )
             )
             history_reward.append(item["reward"])
     return states, history_reward
+
 
 def construct_geo3k_dapo_judger_data(data_path) -> tuple[list[RolloutState], list[float]]:
     states = []
     history_reward = []
     if not data_path or not os.path.exists(data_path):
         return states, history_reward
-    with open(data_path, 'r', encoding='utf-8') as f:
+    with open(data_path, "r", encoding="utf-8") as f:
         lines = f.readlines()
         for i in range(0, len(lines), 7):
-            group = ''.join(lines[i:i + 7]).strip()
+            group = "".join(lines[i : i + 7]).strip()
             if not group:
                 continue
             item = json.loads(group)
             states.append(
                 RolloutState(
                     message=[{"role": "user", "content": ""}],
-                    response=item['response'],
-                    reward_model={"ground_truth": str(item["label"])}
+                    response=item["response"],
+                    reward_model={"ground_truth": str(item["label"])},
                 )
             )
             history_reward.append(item["reward"])
@@ -71,7 +78,6 @@ def construct_geo3k_dapo_judger_data(data_path) -> tuple[list[RolloutState], lis
 
 
 class TestComposedJudgerUnit(unittest.TestCase):
-
     def _build_composed_judger_config(self, merge_fn=None):
         from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig
 
@@ -296,21 +302,20 @@ class TestComposedJudgerUnit(unittest.TestCase):
 
 
 class TestJudgerController(unittest.TestCase):
-
     def setUp(self):
         ray.init(num_cpus=80, ignore_reinit_error=True)
         set_cpu_resource_manager(CPUResourceManager(accelerator_placement_groups=None))
         self.temp_dir = tempfile.TemporaryDirectory()
         self.worker_log_dir = os.path.join(self.temp_dir.name, "work_dirs")
 
-    def tearDown(self): 
+    def tearDown(self):
         clear_cpu_resource_manager()
         ray.shutdown()
         self.temp_dir.cleanup()
 
     async def _judger_batch(self, judger_router, states):
         return await asyncio.gather(*(judger_router.judge(s) for s in states))
-    
+
     @unittest.skipUnless(
         VERL_ROLLOUT_DATA_PATH and os.path.exists(VERL_ROLLOUT_DATA_PATH),
         "requires VERL_ROLLOUT_DATA_PATH",
@@ -340,16 +345,17 @@ class TestJudgerController(unittest.TestCase):
         rewards = [s.reward["score"] for s in rollout_states]
         expected_avg_score = np.mean(history_reward)
         self.assertEqual(round(np.mean(rewards), 4), round(expected_avg_score, 4))
-        
+
     @unittest.skipUnless(
         MODEL_PATH and DAPO_DATA_PATH and os.path.exists(DAPO_DATA_PATH),
         "requires ROLLOUT_MODEL_PATH and ROLLOUT_DAPO_DATA_PATH",
     )
     def test_dapo_batch_judge_score(self):
         # 测试 dapo judger + 1 个实例池 的评判分数是否正确
+        from transformers import AutoTokenizer
         from xtuner.v1.rl.judger.dapo_math import DapoMathJudgerConfig
         from xtuner.v1.utils.rl_test_utils import get_eos_token
-        from transformers import AutoTokenizer
+
         # 构建数据
         states, history_reward = construct_geo3k_dapo_judger_data(DAPO_DATA_PATH)
         tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
@@ -364,7 +370,7 @@ class TestJudgerController(unittest.TestCase):
             max_response_len=32768,
             overlong_buffer_len=4096,
             overlong_penalty_factor=1.0,
-            tokenizer=tokenizer
+            tokenizer=tokenizer,
         )
         router = config.build()
         rollout_states = asyncio.run(self._judger_batch(router, states))
@@ -377,7 +383,6 @@ class TestJudgerController(unittest.TestCase):
         "requires VERL_ROLLOUT_DATA_PATH",
     )
     def test_multi_judger_router(self):
-        import time
         from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
 
         gsm8k_config_1 = GSM8KJudgerConfig(
@@ -390,11 +395,11 @@ class TestJudgerController(unittest.TestCase):
         )
 
         gsm8k_router_1 = gsm8k_config_1.build()
-        gsm8k_router_2 = gsm8k_config_2.build() 
+        gsm8k_router_2 = gsm8k_config_2.build()
 
         states, history_reward = construct_gsm8k_judger_data(VERL_ROLLOUT_DATA_PATH)
         gsm8k_results_1 = asyncio.run(self._judger_batch(gsm8k_router_1, states))
-        gsm8k_results_2 = asyncio.run(self._judger_batch(gsm8k_router_2, states)) 
+        gsm8k_results_2 = asyncio.run(self._judger_batch(gsm8k_router_2, states))
 
         gsm8k_rewards_1 = [s.reward["score"] for s in gsm8k_results_1]
         gsm8k_rewards_2 = [s.reward["score"] for s in gsm8k_results_2]
@@ -407,7 +412,7 @@ class TestJudgerController(unittest.TestCase):
 
     def test_gsm8k_remote_judger(self):
         # 测试输入remote_url时 + 1个实例 + 裸的NativeJudger的评判分数是否正确
-        from xtuner.v1.utils.rl_test_utils import JudgerServer, GSM8KRemoteJudgerConfig
+        from xtuner.v1.utils.rl_test_utils import GSM8KRemoteJudgerConfig, JudgerServer
 
         server = JudgerServer(port=8018)
         server.start()
@@ -418,6 +423,7 @@ class TestJudgerController(unittest.TestCase):
             self.assertEqual(res.reward["score"], 1.0)
         finally:
             server.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

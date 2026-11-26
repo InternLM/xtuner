@@ -5,21 +5,27 @@ from ..rollout_is import (
     compute_rollout_importance_weights,
     merge_rollout_is_metrics,
 )
-from .controller import ColateItem, TrainingController
-from .worker import TrainingWorker, WorkerConfig, WorkerInputItem, WorkerLogItem, WorkerTrainLogItem
+from .actor_worker import ActorWorker
+from .controller import TrainingController
+from .critic_worker import CriticWorker, CriticWorkerConfig
+from .role_worker import RoleWorker
+from .worker import TrainBatchAttr, TrainingWorker, WorkerConfig, WorkerLogItem, WorkerTrainLogItem
 
 
 __all__ = [
-    "ColateItem",
+    "ActorWorker",
+    "TrainBatchAttr",
     "TrainingController",
     "RolloutImportanceSampling",
     "compute_rollout_importance_weights",
     "compute_is_metrics",
     "compute_mismatch_metrics",
     "merge_rollout_is_metrics",
+    "RoleWorker",
     "WorkerConfig",
-    "WorkerInputItem",
     "WorkerTrainLogItem",
     "WorkerLogItem",
     "TrainingWorker",
+    "CriticWorker",
+    "CriticWorkerConfig",
 ]

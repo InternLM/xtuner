@@ -28,11 +28,13 @@ from xtuner.v1.module.linear import build_linear
 from xtuner.v1.module.rms_norm import LayerNorm
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm import gather_for_sequence_parallel
+from xtuner.v1.ops.fp32_linear import fp32_linear
 from xtuner.v1.ops.sparse_mla import (
     KPoolIndexerBackend,
     SparseMLABackend,
     SparseMLAProtocol,
     ensure_deep_select_runtime_available,
+    ensure_lmdeploy_kpool_runtime_available,
     get_kpool_topk_indices,
     get_sparse_mla,
 )
@@ -48,6 +50,26 @@ _SPARSE_MLA_ALIGNMENT: dict[str, int] = {
     "flash_mla_cudnn": 512,
     "tilelang": 64,
 }
+
+
+def _prepare_native(indexer: "KPoolIndexer", hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    return indexer.k_norm(indexer.wk(hidden_states)), indexer.weights_proj(hidden_states).float()
+
+
+def _prepare_fp32(indexer: "KPoolIndexer", hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    projected_k = indexer.wk(hidden_states)
+    norm_weight = materialize_full(indexer.k_norm.weight, name="indexer.k_norm.weight")
+    norm_bias = materialize_full(indexer.k_norm.bias, name="indexer.k_norm.bias")
+    with torch.autocast(device_type=hidden_states.device.type, enabled=False):
+        keys = F.layer_norm(
+            projected_k.float(),
+            indexer.k_norm.normalized_shape,
+            norm_weight.float(),
+            norm_bias.float(),
+            indexer.k_norm.eps,
+        ).to(projected_k.dtype)
+    head_weight = materialize_full(cast(torch.Tensor, indexer.weights_proj.weight), name="indexer.weights_proj.weight")
+    return keys, fp32_linear(hidden_states, head_weight)
 
 
 class KPoolIndexer(nn.Module):
@@ -73,6 +95,7 @@ class KPoolIndexer(nn.Module):
         topk_query_chunk_size: int | None = None,
         balance_sp: bool = False,
         sp_full_pool_work_ratio: float = 0.5,
+        indexer_kpool_fp32_prep: bool = False,
     ):
         super().__init__()
         self.index_head_dim = index_head_dim
@@ -85,9 +108,12 @@ class KPoolIndexer(nn.Module):
         self.topk_query_chunk_size = topk_query_chunk_size
         self.balance_sp = balance_sp
         self.sp_full_pool_work_ratio = sp_full_pool_work_ratio
-        # Resolved once here (not per forward call), mirroring GLM-5.2's
-        # get_dsa_topk_indices(indexer_backend) precomputation.
+        # Direct construction bypasses NoPEDSAMLAConfig.build(), so preserve the serving
+        # precision contract before resolving the backend callables.
+        if indexer_backend in ("lmdeploy_fp8", "lmdeploy_bf16") and not indexer_kpool_fp32_prep:
+            raise ValueError(f"{indexer_backend} requires indexer_kpool_fp32_prep=True")
         self._topk_indices_fn = get_kpool_topk_indices(indexer_backend)
+        self._prepare_fn = _prepare_fp32 if indexer_kpool_fp32_prep else _prepare_native
 
         self.wq_b = build_linear(q_lora_rank, index_n_heads * index_head_dim, bias=False)
         self.wk = build_linear(hidden_size, index_head_dim, bias=False)
@@ -113,9 +139,8 @@ class KPoolIndexer(nn.Module):
         kpool_ape = materialize_full(self.index_kpool_compress_ape, name="indexer.index_kpool_compress_ape")
 
         q = self.wq_b(q_resid).view(bsz, seq_len, self.index_n_heads, self.index_head_dim)
-        k = self.k_norm(self.wk(hidden_states))
+        k, weights = self._prepare_fn(self, hidden_states)
         gate_scores = F.linear(hidden_states, gate_weight)
-        weights = self.weights_proj(hidden_states).float()
 
         topk_ids = self._topk_indices_fn(
             q,
@@ -142,6 +167,13 @@ class NoPEDSAMLAConfig(MLAConfig):
     ``qk_rope_head_dim=0`` makes the base class automatically derive the correct
     ``q_head_dim = 256`` and ``softmax_scale = 256 ** -0.5``; ``kv_a_proj_with_mqa`` outputs
     exactly ``kv_lora_rank`` (no rope tail), so the base class needs no NoPE-specific override.
+
+    ``indexer_backend="tilelang"`` keeps native pooling and preparation. Opt into
+    ``"lmdeploy_fp8"`` for rotated FP8 scoring or ``"lmdeploy_bf16"`` for serving
+    BF16 compression with TileLang scoring. Both require SM90+ and compatible
+    LMDeploy operators, enable ``indexer_kpool_fp32_prep``, and reject an explicit
+    ``False`` value. Native backends default this field to ``False``. The effective
+    precision is serialized in the config; rollout precision is configured separately.
     """
 
     # Backends are commonly selected from the environment *after* construction (see
@@ -163,6 +195,9 @@ class NoPEDSAMLAConfig(MLAConfig):
     # even a valid indexer backend -- inheriting it would never have worked.
     # DeepSelect may replace only TopK or both scoring and TopK (cooperative SM90 path).
     indexer_backend: KPoolIndexerBackend = "tilelang"
+    # Serving adapters require FP32 key normalization/head projection. Native
+    # backends retain checkpoint-dtype preparation unless explicitly enabled.
+    indexer_kpool_fp32_prep: bool = False
     # Bound logits memory with query chunks; cooperative scoring reuses FP32 scratch.
     indexer_topk_query_chunk_size: int | None = Field(default=1024, gt=0)
     # Enable SP balancing to redistribute causal scoring queries with neighbor P2P.
@@ -179,6 +214,11 @@ class NoPEDSAMLAConfig(MLAConfig):
 
     @model_validator(mode="after")
     def _check(self) -> "NoPEDSAMLAConfig":
+        if "indexer_kpool_fp32_prep" not in self.model_fields_set:
+            # Resolve the effective default without recording a user override.
+            object.__setattr__(
+                self, "indexer_kpool_fp32_prep", self.indexer_backend in ("lmdeploy_fp8", "lmdeploy_bf16")
+            )
         if self.qk_rope_head_dim != 0:
             raise ValueError("GLM-5.3-Flash's main attention is NoPE: qk_rope_head_dim must be 0.")
         if self.index_topk % self.index_kpool != 0:
@@ -212,6 +252,20 @@ class NoPEDSAMLAConfig(MLAConfig):
     ) -> "NoPEDSAMultiLatentAttention":
         if not self.freeze_dsa_indexer:
             raise ValueError("freeze_dsa_indexer=False is not supported until the indexer has a differentiable output")
+        if self.indexer_backend in ("lmdeploy_fp8", "lmdeploy_bf16"):
+            from xtuner.v1.ops.sparse_mla.lmdeploy_kpool import validate_lmdeploy_kpool_config
+
+            if not self.indexer_kpool_fp32_prep and "indexer_kpool_fp32_prep" in self.model_fields_set:
+                raise ValueError(f"{self.indexer_backend} requires indexer_kpool_fp32_prep=True")
+            self.indexer_kpool_fp32_prep = True
+            validate_lmdeploy_kpool_config(
+                index_head_dim=self.index_head_dim,
+                index_n_heads=self.index_n_heads,
+                index_kpool=self.index_kpool,
+                index_topk=self.index_topk,
+                balance_sp=self.indexer_balance_sp,
+            )
+            ensure_lmdeploy_kpool_runtime_available(self.indexer_backend.removeprefix("lmdeploy_"))
         del layer_type, rope_scaling_cfg, generate_config  # NoPE: no rotary, unused.
         return NoPEDSAMultiLatentAttention(
             **self.model_dump(), hidden_size=hidden_size, layer_idx=layer_idx, float8_cfg=float8_cfg
@@ -246,6 +300,7 @@ class NoPEDSAMultiLatentAttention(MultiLatentAttention):
         freeze_dsa_indexer: bool,
         indexer_balance_sp: bool = False,
         indexer_sp_full_pool_work_ratio: float = 0.5,
+        indexer_kpool_fp32_prep: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -295,6 +350,7 @@ class NoPEDSAMultiLatentAttention(MultiLatentAttention):
             topk_query_chunk_size=indexer_topk_query_chunk_size,
             balance_sp=indexer_balance_sp,
             sp_full_pool_work_ratio=indexer_sp_full_pool_work_ratio,
+            indexer_kpool_fp32_prep=indexer_kpool_fp32_prep,
         )
         if freeze_dsa_indexer:
             self.indexer.requires_grad_(False)

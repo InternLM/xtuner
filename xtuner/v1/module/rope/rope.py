@@ -454,6 +454,9 @@ class FourierEmbedding(RotaryEmbedding):
 
         self.register_buffer("sin_coef", sin_coef.to(DEVICE), persistent=True)
         self.register_buffer("cos_coef", cos_coef.to(DEVICE), persistent=True)
+        # Forward casts these to fp32 for the einsum; a bf16 cast beforehand cannot be undone. Read by
+        # `BaseModel.precision`.
+        self.fp32_buffer_names = ("sin_coef", "cos_coef")
 
     def get_step_eye(self, _param):
         import math

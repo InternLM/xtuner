@@ -66,7 +66,51 @@ class GRPOLossConfig:
 
 ```
 
-Where `policy_loss_cfg` is the configuration related to policy loss, `xtuner/v1/rl/loss_fn.py` supports different rl policy loss functions.
+`policy_loss_cfg` selects the policy loss. `loss_type` is one of the two built-in functions below, or a `module.function` import path for a custom function. GRPO, OREAL, and distillation share this implementation. The default is `vanilla`.
+
+### Policy Loss
+
+Both functions live in `xtuner/v1/rl/loss/loss_fn.py`. Each takes the current-policy `log_prob`, the old-policy `old_log_prob`, the token `advantages`, and the token `loss_weights`, and returns one weighted scalar. The weights already include the global calibration computed by the loss context.
+
+| Field | Required | Default | Meaning |
+| --- | --- | --- | --- |
+| `cliprange_low` | yes |  | Lower clip on the importance ratio |
+| `cliprange_high` | yes |  | Upper clip on the importance ratio |
+| `clip_ratio_c` | no | `3.0` | Negative-advantage cap for `vanilla`, and the `pg_mask` threshold |
+| `log_prob_diff_min` | no | `-20.0` | Lower bound on the log importance ratio |
+| `log_prob_diff_max` | no | `20.0` | Upper bound on the log importance ratio |
+
+Both losses first form the importance ratio and then clip it:
+
+```text
+ratio = exp(clamp(log_prob - old_log_prob, log_prob_diff_min, log_prob_diff_max))
+clipped_ratio = clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)
+```
+
+#### `vanilla`
+
+`vanilla` is the PPO clipped surrogate with dual-clip on negative advantages.
+
+```text
+pg_losses1 = -ratio * advantages
+pg_losses2 = -clipped_ratio * advantages
+clip_pg_losses1 = max(pg_losses1, pg_losses2)
+pg_losses3 = -clip_ratio_c * advantages
+clip_pg_losses2 = min(pg_losses3, clip_pg_losses1)
+pg_losses = clip_pg_losses2 if advantages < 0 else clip_pg_losses1
+loss = sum(pg_losses * loss_weights)
+```
+
+For `advantages >= 0`, the loss is `-min(ratio, clipped_ratio) * advantages`. Once the ratio passes `1 + cliprange_high`, a larger ratio does not increase the update. For `advantages < 0` and a very large `ratio`, plain PPO would let the loss grow with `ratio`; dual-clip caps that token at `clip_ratio_c * abs(advantages)`.
+
+#### `mask_pg`
+
+`mask_pg` weights the current log probability by the clipped importance ratio. `pg_mask` drops tokens with `ratio > clip_ratio_c` from the loss.
+
+```text
+pg_mask = 1[ratio <= clip_ratio_c]
+loss = sum(-loss_weights * advantages * clipped_ratio * log_prob * pg_mask)
+```
 
 ### GRPOLossContext
 

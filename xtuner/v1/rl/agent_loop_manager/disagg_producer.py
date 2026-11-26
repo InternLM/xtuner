@@ -1,5 +1,6 @@
 import asyncio
 import math
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional
@@ -8,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.rl.agent_loop import IsValidSampleFn
-from xtuner.v1.rl.utils import calculate_seq_staleness, create_task
+from xtuner.v1.rl.utils import await_cancellable_tasks, calculate_seq_staleness, create_task
 from xtuner.v1.utils import get_logger
 
 from .produce_utils import (
@@ -18,7 +19,6 @@ from .produce_utils import (
     ShouldContinueFn,
     _PendingTasks,
     _ProgressDisplayer,
-    _put_claimed_tasks,
     calculate_stale_threshold,
     default_should_continue_fn,
     pause_pending_tasks,
@@ -171,35 +171,28 @@ class DisaggProduceProgress:
         self.target_samples.clear()
         self.target_samples.update(state["target_samples"])
         task_names = set(self.consumed_samples) | set(self.target_samples)
+        # 新格式字段必须完整存在；旧 checkpoint 已在 manager.resume 前被格式标识拒绝。
         self.raw_rewards_sum.clear()
         self.raw_rewards_sum.update(
-            {task_name: float(state.get("raw_rewards_sum", {}).get(task_name, 0.0)) for task_name in task_names}
+            {task_name: float(state["raw_rewards_sum"][task_name]) for task_name in task_names}
         )
         self.raw_rewards_count.clear()
         self.raw_rewards_count.update(
-            {task_name: int(state.get("raw_rewards_count", {}).get(task_name, 0)) for task_name in task_names}
+            {task_name: int(state["raw_rewards_count"][task_name]) for task_name in task_names}
         )
-        produced_samples_state = state.get("produced_samples", {})
-        produced_tokens_state = state.get("produced_tokens", {})
-        failed_samples_state = state.get("failed_samples", {})
-        filtered_samples_state = state.get("filtered_samples", {})
         self.produced_samples.clear()
         self.produced_samples.update(
-            {task_name: int(produced_samples_state.get(task_name, 0)) for task_name in task_names}
+            {task_name: int(state["produced_samples"][task_name]) for task_name in task_names}
         )
         self.produced_tokens.clear()
-        self.produced_tokens.update(
-            {task_name: int(produced_tokens_state.get(task_name, 0)) for task_name in task_names}
-        )
+        self.produced_tokens.update({task_name: int(state["produced_tokens"][task_name]) for task_name in task_names})
         self.failed_samples.clear()
-        self.failed_samples.update(
-            {task_name: int(failed_samples_state.get(task_name, 0)) for task_name in task_names}
-        )
+        self.failed_samples.update({task_name: int(state["failed_samples"][task_name]) for task_name in task_names})
         self.filtered_samples.clear()
         self.filtered_samples.update(
-            {task_name: int(filtered_samples_state.get(task_name, 0)) for task_name in task_names}
+            {task_name: int(state["filtered_samples"][task_name]) for task_name in task_names}
         )
-        self.produce_time_s = float(state.get("produce_time_s", 0.0))
+        self.produce_time_s = float(state["produce_time_s"])
 
 
 @dataclass(kw_only=True)
@@ -239,6 +232,7 @@ class DisaggProduceStrategyConfig(ABC, BaseModel):
         *,
         sync_weights_interval: int = 1,
         rollout_controller: "Optional[RolloutControllerProxy]" = None,
+        retain_live_tasks: bool = False,
     ) -> "DisaggProduceStrategy": ...
 
 
@@ -259,15 +253,17 @@ class DisaggAsyncProduceStrategyConfig(DisaggProduceStrategyConfig):
             response token may lag behind before it is masked out of the loss.
             ``None`` disables token-level masking, ``0`` accepts only tokens
             produced within the current sync period, and ``N`` allows ``N``
-            extra periods. Partially stale responses have their
-            ``response_mask`` reduced before training. If a state has no
-            trainable response token left, the state expires and its group
+            extra periods. Partially stale responses have the corresponding
+            response labels cleared to ``-100`` before training. If a state has
+            no trainable response token left, the state expires and its group
             enters the expired-group lifecycle. Defaults to None.
         tail_batch_trigger_size (int): Expired-group rerollout policy. ``-1``
             disables rerollout and terminally discards expired groups, ``0``
             rerolls out immediately without entering tail-batch mode, and
             ``N > 0`` waits until the expired pool contains at least ``N``
             groups before entering tail-batch mode.
+        retain_live_tasks (bool): Build-time mode. True keeps live Agent tasks
+            across pauses (cross-weight-update rollout); False drains them at each pause.
     """
 
     over_sample_threshold: float = 0.0
@@ -281,6 +277,7 @@ class DisaggAsyncProduceStrategyConfig(DisaggProduceStrategyConfig):
         *,
         sync_weights_interval: int = 1,
         rollout_controller: "Optional[RolloutControllerProxy]" = None,
+        retain_live_tasks: bool = False,
     ) -> "DisaggAsyncProduceStrategy":
         if self.max_token_staleness is not None:
             if self.max_token_staleness > self.max_staleness:
@@ -305,6 +302,7 @@ class DisaggAsyncProduceStrategyConfig(DisaggProduceStrategyConfig):
             sync_weights_interval=sync_weights_interval,
             tail_batch_trigger_size=self.tail_batch_trigger_size,
             should_continue_fn=self.should_continue_fn,
+            retain_live_tasks=retain_live_tasks,
         )
 
 
@@ -327,6 +325,9 @@ class DisaggProduceStrategy(ABC):
     def pending_task_count(self) -> int:
         return 0
 
+    async def close(self) -> None:
+        return
+
 
 class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
     """非共卡 async strategy；pending 跨后台生产轮次存在。"""
@@ -342,6 +343,7 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         max_token_staleness: int | None,
         sync_weights_interval: int,
         should_continue_fn: ShouldContinueFn,
+        retain_live_tasks: bool = False,
     ):
         super().__init__(should_continue_fn)
 
@@ -361,6 +363,8 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         )
         self.tail_batch_trigger_size = tail_batch_trigger_size
         self._pending_tasks = _PendingTasks()
+        # Cross-weight-update rollout keeps live Agent tasks with the strategy; legacy mode drains them at each pause.
+        self._retain_live_tasks = retain_live_tasks
 
     def is_model_expired(self, train_step: int, model_step: int) -> bool:
         staleness = calculate_seq_staleness(model_step, train_step)
@@ -370,11 +374,14 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         return self._pending_tasks.count()
 
     async def pause_produce(self, ctx: DisaggProduceContext) -> float:
-        return await pause_pending_tasks(
-            pending_tasks=self._pending_tasks,
-            ctx=ctx,
-            put_claimed_task=lambda task: ctx.put_generated_group(task.result()),
-        )
+        if not self._retain_live_tasks:
+            return await pause_pending_tasks(pending_tasks=self._pending_tasks, ctx=ctx)
+        start = time.perf_counter()
+        await await_cancellable_tasks(await self._pending_tasks.claim_ready())
+        return time.perf_counter() - start
+
+    async def close(self) -> None:
+        await self._pending_tasks.close()
 
     async def produce_batch(self, ctx: DisaggProduceContext) -> ProduceBatchStatus:
         if ctx.task_name not in ctx.progress.consumed_samples:
@@ -388,9 +395,8 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         if self.is_model_expired(ctx.train_step, ctx.model_step):
             return ProduceBatchStatus.EXPIRED_BATCH
 
-        # 进入下一轮前先回收已完成的旧 pending。
-        claimed_done = await self._pending_tasks.claim_ready()
-        await _put_claimed_tasks(claimed_done, ctx)
+        # 进入下一轮前先回收已完成的旧 pending；完整组任务已自行交付，claim 只读取终态。
+        await await_cancellable_tasks(await self._pending_tasks.claim_ready())
 
         # TODO: remove this check
         if ctx.should_abort():
@@ -422,10 +428,10 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
         )
 
         async def spawn_one() -> asyncio.Task:
-            rollout_state = await ctx.sample_group(from_expired_pool=sample_expired)
+            # Registration happens before any business await: sampling runs inside the complete group Task.
             return create_task(
-                ctx.generate_group(
-                    rollout_state,
+                ctx.produce_group(
+                    sample_expired=sample_expired,
                     enable_partial_rollout=self.enable_partial_rollout,
                 )
             )
@@ -472,12 +478,6 @@ class DisaggAsyncProduceStrategy(DisaggProduceStrategy):
                 logger.warning("All tasks are done but not enough samples collected.")
                 break
 
-            claimed_done = await self._pending_tasks.wait_and_claim(timeout_s=1)
-            await _put_claimed_tasks(
-                claimed_done,
-                ctx,
-                available_base=available,
-                progress_displayer=progress_displayer,
-            )
+            await await_cancellable_tasks(await self._pending_tasks.wait_and_claim(timeout_s=1))
         progress_displayer.close()
         return produce_status

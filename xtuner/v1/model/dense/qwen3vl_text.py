@@ -1,7 +1,6 @@
 import re
 
 import torch
-import torch.nn.functional as F
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.loss import BaseLossContext
@@ -12,7 +11,7 @@ from .qwen3 import Qwen3Dense, Qwen3Dense2BConfig, Qwen3Dense4BConfig, Qwen3Dens
 
 
 class Qwen3VLTextDense(Qwen3Dense):
-    def to_hf_key_list(self, key: str) -> list[str]:
+    def _model_hf_keys(self, key: str) -> list[str]:
         if self.config.tie_word_embeddings and "lm_head" in key:
             key = key.replace("lm_head", "embed_tokens")
 
@@ -83,7 +82,7 @@ class Qwen3VLTextDense(Qwen3Dense):
 
         if loss_ctx is None:
             # Inference mode
-            logits = F.linear(hidden_states, self.lm_head.weight, self.lm_head.bias)
+            _, (logits, _) = self.lm_head(hidden_states, None)
             output["logits"] = logits
         else:
             # Training mode

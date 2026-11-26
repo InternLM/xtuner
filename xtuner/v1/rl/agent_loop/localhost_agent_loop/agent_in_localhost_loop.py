@@ -65,10 +65,13 @@ def _load_eval_trace_segment(artifacts: dict[str, Any]) -> tuple[list[dict[str, 
     return messages, segment.get("tools")
 
 
-def _count_tool_turns(messages: list[dict[str, Any]]) -> int:
-    """Number of assistant turns that emitted at least one tool_call."""
+def _count_tool_calls(messages: list[dict[str, Any]]) -> int:
+    """Number of tool calls across the assistant messages (parallel calls count
+    individually)."""
     return sum(
-        1 for m in messages if isinstance(m, dict) and isinstance(m.get("tool_calls"), list) and m["tool_calls"]
+        len(message["tool_calls"])
+        for message in messages
+        if isinstance(message, dict) and isinstance(message.get("tool_calls"), list)
     )
 
 
@@ -152,7 +155,16 @@ class AgentInLocalhostLoop(AgentLoop):
         samples = await asyncio.gather(*tasks)
         samples = _drop_failed_train_samples(samples, self.mode)
         samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
-        return await self._teacher_scorer.on_group_ready(samples)
+        samples = await self._teacher_scorer.on_group_ready(samples)
+        return self.canonicalize_train_fields(samples)
+
+    def canonicalize_train_fields(self, group: list[RolloutState]) -> list[RolloutState]:
+        """Validate trace-backed full sequences and skip eval-only states."""
+        full_sequence_states = [
+            state for state in group if state.status == Status.COMPLETED and state.input_ids is not None
+        ]
+        super().canonicalize_train_fields(full_sequence_states)
+        return group
 
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
         try:
@@ -223,6 +235,12 @@ class AgentInLocalhostLoop(AgentLoop):
             self._fill_eval_rollout_state(rollout_state, item)
             return
 
+        # prompt_ids 切片只对纯文本 trace 成立；train_prompt_ids（VLM 扩充版 prompt）一旦存在，
+        # trace input_ids 与 prompt_ids 的长度约定即失效，宁可快速失败也不静默产出错位训练字段。
+        assert "train_prompt_ids" not in rollout_state.extra_fields, (
+            f"Agentic trace rollout does not support multimodal samples, rollout_id={rollout_state.rollout_id}"
+        )
+
         response_message = item.artifacts.get("response_message") or {}
         rollout_state.status = Status.COMPLETED if item.status == RolloutStatus.COMPLETED else Status.FAILED
         rollout_state.finish_reason = str(
@@ -238,7 +256,7 @@ class AgentInLocalhostLoop(AgentLoop):
         if messages:
             rollout_state.extra_fields["agent_messages"] = messages
             rollout_state.extra_fields["agent_tools"] = tools
-            rollout_state.extra_fields["agent_tool_turns"] = _count_tool_turns(messages)
+            rollout_state.extra_fields["agent_tool_calls"] = _count_tool_calls(messages)
         finish_info = response_message.get("finish_info")
         if isinstance(finish_info, dict) and finish_info:
             rollout_state.extra_fields["agent_finish_info"] = finish_info
@@ -259,9 +277,10 @@ class AgentInLocalhostLoop(AgentLoop):
 
         rollout_state.input_ids = data["input_ids"]
         rollout_state.labels = data["labels"]
-        rollout_state.response_ids = [
-            token_id for token_id, label in zip(data["input_ids"][1:], data["labels"][1:]) if label != -100
-        ]
+        # prompt_ids/response_ids 都取自 trace（会话初始 prompt 段 + 其后的连续后缀），
+        # 恢复 input_ids == prompt_ids + response_ids，不依赖 dataset 侧 prompt_ids。
+        rollout_state.prompt_ids = list(data["prompt_ids"])
+        rollout_state.response_ids = list(data["response_ids"])
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
         content = response_message.get("content")
@@ -278,7 +297,6 @@ class AgentInLocalhostLoop(AgentLoop):
         rollout_state.response_ids = None
         rollout_state.logprobs = None
         rollout_state.routed_experts = None
-        rollout_state.response_mask = None
         rollout_state.response_model_steps = None
         rollout_state.extra_fields["agent_status"] = item.status.value
         if item.error is not None:
@@ -290,7 +308,7 @@ class AgentInLocalhostLoop(AgentLoop):
         if messages:
             rollout_state.extra_fields["agent_messages"] = messages
             rollout_state.extra_fields["agent_tools"] = tools
-            rollout_state.extra_fields["agent_tool_turns"] = _count_tool_turns(messages)
+            rollout_state.extra_fields["agent_tool_calls"] = _count_tool_calls(messages)
         finish_info = response_message.get("finish_info")
         if isinstance(finish_info, dict) and finish_info:
             rollout_state.extra_fields["agent_finish_info"] = finish_info

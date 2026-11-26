@@ -18,7 +18,6 @@ Bad Tests:
 - debug 文件能保存/恢复 Ray ObjectRef；throughput scalar key schema 保持稳定。
 """
 
-import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,21 +36,16 @@ from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SerializedRayObj
 from xtuner.v1.train.rl_trainer import RLColocateTrainer, RLThroughputBenchmark
 
 
-class _FakeRolloutState:
+class _FakeRolloutState(RolloutState):
     def __init__(self, uid: int):
-        self.id = uid
-        self.rollout_id = str(uid)
-        self.group_id = uid
-        self.session_id = uid
-        self.status = Status.INIT
-        self.finish_reason = None
-        self.seq_staleness = 0
-        self.prompt_ids = [10, 11]
-        self.response_ids = []
-        self.response = None
-        self.reward = None
-        self.extra_fields = {}
-        self.response_model_steps = []
+        super().__init__(
+            rollout_id=uid,
+            group_id=uid,
+            session_id=uid,
+            message=[],
+            status=Status.INIT,
+            prompt_ids=[10, 11],
+        )
 
 
 class _FakeSampler:
@@ -97,7 +91,10 @@ def _build_fake_agent_loop():
             state.response_ids = [1, 2, 3]
             state.response = "ok"
             state.reward = {"score": 1.0}
-            state.response_model_steps = [model_step]
+            state.response_model_steps = [model_step] * len(state.response_ids)
+            state.input_ids = [10, 11, 1, 2, 3]
+            state.labels = [-100, -100, 1, 2, 3]
+            state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=None)
         return rollout_states
 
     agent_loop.generate_group = generate_group
@@ -113,7 +110,10 @@ class TestRLColocateTrainer(unittest.TestCase):
 
     def _make_trainer(self, agent_loop_manager, *, total_train_steps: int = 1, sync_weights_interval: int = 1):
         trainer = RLColocateTrainer.__new__(RLColocateTrainer)
-        trainer._rollout_config = SimpleNamespace(weight_transport_type='ipc')
+        trainer._rollout_config = SimpleNamespace(
+            weight_transport_type="ipc", cross_weight_update_rollout=None, skip_load_weights=False
+        )
+        trainer._load_checkpoint_cfg = SimpleNamespace(checkpoint_path=None)
         trainer.logger = MagicMock()
         trainer._total_train_steps = total_train_steps
         trainer._cur_step = 0
@@ -145,19 +145,13 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer._benchmark_training_tokens = 0
         trainer._save_trajectories = MagicMock()
         trainer._release_trace_sessions = MagicMock(return_value=set())
-        trainer._release_all_trace_sessions = MagicMock()
-        trainer._sync_weights_and_save = MagicMock(
+        trainer._sync_weights_and_save = AsyncMock(
             side_effect=lambda train_step, step_timer_dict: train_step % trainer._sync_weights_interval == 0
         )
         trainer._log_step = MagicMock()
-        trainer._prepare_train_data = MagicMock(
-            return_value=([{"seq_ctx": "fake"}], {"batch_size": 1, "rewards/mean": 1.0})
-        )
 
         trainer.rollout_controller = SimpleNamespace(
-            shutdown_inactive_workers=SimpleNamespace(
-                remote=MagicMock(side_effect=_ray_get_none_ref)
-            ),
+            shutdown_inactive_workers=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),
             offload=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),
             restart_inactive_workers=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),
             onload_weights=SimpleNamespace(remote=MagicMock(side_effect=_ray_get_none_ref)),
@@ -169,16 +163,19 @@ class TestRLColocateTrainer(unittest.TestCase):
             offload=MagicMock(return_value="train_offloaded"),
             weight_update=MagicMock(return_value="weights_updated"),
             fit=MagicMock(
-                return_value=[
-                    {
-                        "rollout_is_metrics": {},
-                        "mismatch_metrics": {},
-                        "rollout_entropy": 0.0,
-                        "train_entropy": 0.0,
-                        "train_metrics": [],
-                        "sft_train_metrics": {},
-                    }
-                ]
+                return_value=(
+                    [
+                        {
+                            "rollout_is_metrics": {},
+                            "mismatch_metrics": {},
+                            "rollout_entropy": 0.0,
+                            "train_entropy": 0.0,
+                            "train_metrics": [],
+                            "sft_train_metrics": {},
+                        }
+                    ],
+                    {"batch_size": 1, "rewards/mean": 1.0},
+                )
             ),
         )
         trainer.rl_health_manager = RLHealthManager(
@@ -207,16 +204,12 @@ class TestRLColocateTrainer(unittest.TestCase):
         )
         trainer = self._make_trainer(manager)
 
-        with (
-            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
-            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
-        ):
+        with patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
             trainer.fit()
 
         trainer.rollout_controller.offload.remote.assert_called_once_with()
         trainer.train_controller.fit.assert_called_once()
-        trainer._release_all_trace_sessions.assert_called_once_with()
-        trainer._release_trace_sessions.assert_not_called()
+        trainer._release_trace_sessions.assert_called_once()
         self.assertEqual(trainer._cur_step, 1)
 
     def test_fit_requires_non_empty_batch_from_manager(self):
@@ -224,13 +217,10 @@ class TestRLColocateTrainer(unittest.TestCase):
         async def _produce_empty(batch_size, train_step, **kwargs):
             return ProduceBatchResult(rollout_states=[])
 
-        empty_manager = SimpleNamespace(produce_batch=_produce_empty)
+        empty_manager = SimpleNamespace(produce_batch=_produce_empty, close=AsyncMock())
         trainer = self._make_trainer(empty_manager)
 
-        with (
-            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
-            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
-        ):
+        with patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
             with self.assertRaisesRegex(AssertionError, "return non-empty rollout_states"):
                 trainer.fit()
 
@@ -242,18 +232,15 @@ class TestRLColocateTrainer(unittest.TestCase):
     def test_fit_does_not_onload_train_when_rollout_training_barrier_fails(self):
         # 验证共卡训练进入训练前必须先通过 rollout phase-switch barrier；
         # 失败时不能 onload 训练。
-        async def _produce_batch(batch_size, train_step, *, model_step):
+        async def _produce_batch(batch_size, train_step, *, model_step, **kwargs):
             return ProduceBatchResult(rollout_states=[[_FakeRolloutState(train_step)]])
 
-        trainer = self._make_trainer(SimpleNamespace(produce_batch=_produce_batch))
+        trainer = self._make_trainer(SimpleNamespace(produce_batch=_produce_batch, close=AsyncMock()))
         trainer.rollout_controller.shutdown_inactive_workers.remote.side_effect = RuntimeError(
             "inactive rollout workers after recovery"
         )
 
-        with (
-            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
-            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
-        ):
+        with patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
             with self.assertRaisesRegex(RuntimeError, "inactive rollout workers"):
                 trainer.fit()
 
@@ -267,19 +254,23 @@ class TestRLColocateTrainer(unittest.TestCase):
         # 验证 rollout 看到的是按 sync interval 推进后的 model_step。
         produce_calls = []
 
-        async def _produce_batch(batch_size, train_step, *, model_step):
+        async def _produce_batch(batch_size, train_step, *, model_step, **kwargs):
             produce_calls.append((batch_size, train_step, model_step))
-            return ProduceBatchResult(rollout_states=[[_FakeRolloutState(train_step)]])
+            state = _FakeRolloutState(train_step)
+            state.status = Status.COMPLETED
+            state.response_ids = [1, 2, 3]
+            state.response_model_steps = [model_step] * len(state.response_ids)
+            state.input_ids = [10, 11, 1, 2, 3]
+            state.labels = [-100, -100, 1, 2, 3]
+            state.set_training_fields(input_ids=state.input_ids, labels=state.labels, logprobs=None)
+            return ProduceBatchResult(rollout_states=[[state]])
 
         trainer = self._make_trainer(
-            SimpleNamespace(produce_batch=_produce_batch),
+            SimpleNamespace(produce_batch=_produce_batch, close=AsyncMock()),
             total_train_steps=3,
             sync_weights_interval=2,
         )
-        with (
-            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
-            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
-        ):
+        with patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
             trainer.fit()
 
         self.assertEqual(produce_calls, [(1, 1, 0), (1, 2, 0), (1, 3, 2)])
@@ -295,17 +286,14 @@ class TestRLColocateTrainer(unittest.TestCase):
             status=Status.COMPLETED,
         )
 
-        async def _produce_batch(batch_size, train_step, *, model_step):
+        async def _produce_batch(batch_size, train_step, *, model_step, **kwargs):
             return ProduceBatchResult(rollout_states=[[rollout_state]])
 
-        trainer = self._make_trainer(SimpleNamespace(produce_batch=_produce_batch))
+        trainer = self._make_trainer(SimpleNamespace(produce_batch=_produce_batch, close=AsyncMock()))
         trainer._debug_rollout = True
         trainer._debug_rollout_dir = Path(self.temp_dir.name) / "debug_rollout"
 
-        with (
-            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
-            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
-        ):
+        with patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
             trainer.fit()
 
         saved_path = trainer._debug_rollout_dir / "debug_rollout_1.pt"
@@ -354,7 +342,7 @@ class TestRLColocateTrainer(unittest.TestCase):
         }
         captured_batches = []
 
-        def train_one_batch(train_batch, train_step, step_timer_dict, **kwargs):
+        async def train_one_batch(train_batch, train_step, step_timer_dict, **kwargs):
             captured_batches.append((train_step, train_batch))
             return {
                 "data_info": {"batch_size": 1},
@@ -370,7 +358,7 @@ class TestRLColocateTrainer(unittest.TestCase):
                 ],
             }
 
-        trainer._train_one_batch = MagicMock(side_effect=train_one_batch)
+        trainer._train_one_batch = AsyncMock(side_effect=train_one_batch)
 
         trainer.fit()
 
@@ -397,15 +385,14 @@ class TestRLColocateTrainer(unittest.TestCase):
                 status=Status.COMPLETED,
             )
 
-            async def _produce_batch(batch_size, train_step, *, model_step):
+            async def _produce_batch(batch_size, train_step, *, model_step, **kwargs):
                 return ProduceBatchResult(rollout_states=[[rollout_state]])
 
-            trainer = self._make_trainer(SimpleNamespace(produce_batch=_produce_batch))
+            trainer = self._make_trainer(SimpleNamespace(produce_batch=_produce_batch, close=AsyncMock()))
             trainer._debug_rollout = True
             trainer._debug_rollout_dir = Path(self.temp_dir.name) / "debug_refs"
 
-            with patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run):
-                trainer.fit()
+            trainer.fit()
 
             saved_batch = torch.load(
                 trainer._debug_rollout_dir / "debug_rollout_1.pt",
@@ -426,7 +413,7 @@ class TestRLColocateTrainer(unittest.TestCase):
             replay_trainer._debug_train_files = {1: trainer._debug_rollout_dir / "debug_rollout_1.pt"}
             captured_batches = []
 
-            def train_one_batch(train_batch, train_step, step_timer_dict, **kwargs):
+            async def train_one_batch(train_batch, train_step, step_timer_dict, **kwargs):
                 captured_batches.append(train_batch)
                 return {
                     "data_info": {"batch_size": 1},
@@ -439,7 +426,7 @@ class TestRLColocateTrainer(unittest.TestCase):
                     ],
                 }
 
-            replay_trainer._train_one_batch = MagicMock(side_effect=train_one_batch)
+            replay_trainer._train_one_batch = AsyncMock(side_effect=train_one_batch)
             replay_trainer.fit()
 
             loaded_batch = captured_batches[0]

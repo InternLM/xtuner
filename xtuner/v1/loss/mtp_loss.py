@@ -72,7 +72,12 @@ class MTPLossConfig(CELossConfig):
     def _loss_kwargs_cls(self) -> type["MTPLossKwargs"]:
         return MTPLossKwargs
 
-    def build(self, data: dict, sp_mesh: DeviceMesh | None = None) -> "MTPLossContext | None":
+    def build(
+        self,
+        data: dict,
+        sp_mesh: DeviceMesh | None = None,
+        device: str | torch.device | None = None,
+    ) -> "MTPLossContext | None":
         """Build MTPLossContext from data dict.
 
         Rolls ``shifted_labels`` (and optionally ``logprobs``) by
@@ -86,6 +91,7 @@ class MTPLossConfig(CELossConfig):
                 Required keys: ``shifted_labels``, ``seq_ctx``.
                 Optional keys: ``logprobs``.
             sp_mesh (DeviceMesh | None): Sequence parallel mesh.
+            device (str | torch.device): Device of the returned context.
 
         Returns:
             MTPLossContext | None: Built loss context, or ``None`` if
@@ -96,6 +102,8 @@ class MTPLossConfig(CELossConfig):
 
         if "shifted_labels" not in data:
             return None
+        if device is None:
+            device = DEVICE
 
         shifted_labels = data["shifted_labels"]
         seq_ctx = data["seq_ctx"]
@@ -137,14 +145,16 @@ class MTPLossConfig(CELossConfig):
                 logprobs = torch.cat([logprobs, rp_pad], dim=-1)
             rolled_logprobs = roll_packed_tensor(logprobs, cu_seq_lens, shifts=-self.mtp_depth, dim=-1, fill_value=0)
 
+        loss_weight = self._build_loss_weight(rolled, seq_ctx)
         loss_kwargs = MTPLossKwargs(
             shifted_labels=rolled,
             logprobs=rolled_logprobs,
-        ).to(DEVICE)
+            loss_weight=loss_weight,
+        )
         if sp_mesh is not None and sp_mesh.size() > 1:
             loss_kwargs = loss_kwargs.sp_split(sp_mesh)
 
-        return MTPLossContext(self, loss_kwargs)
+        return MTPLossContext(self, loss_kwargs.to(device))
 
 
 class MTPLossContext(LMHeadLossContext):
@@ -255,11 +265,18 @@ class MTPE2ETVLossConfig(CELossConfig):
     def _loss_kwargs_cls(self) -> type["MTPE2ETVLossKwargs"]:
         return MTPE2ETVLossKwargs
 
-    def build(self, data: dict, sp_mesh: DeviceMesh | None = None) -> "MTPE2ETVLossContext | None":
+    def build(
+        self,
+        data: dict,
+        sp_mesh: DeviceMesh | None = None,
+        device: str | torch.device | None = None,
+    ) -> "MTPE2ETVLossContext | None":
         from xtuner.v1.module.mtp.utils import roll_packed_tensor
 
         if "shifted_labels" not in data:
             return None
+        if device is None:
+            device = DEVICE
 
         shifted_labels = data["shifted_labels"]
         cu_seq_lens = data["seq_ctx"].cu_seq_lens_k
@@ -295,7 +312,12 @@ class MTPE2ETVLossConfig(CELossConfig):
             torch.zeros_like(shifted_labels),
             torch.full_like(shifted_labels, self.ignore_idx),
         )
-        loss_kwargs = MTPE2ETVLossKwargs(shifted_labels=mask_labels, sp_mesh=sp_mesh).to(DEVICE)
+        loss_weight = self._build_loss_weight(mask_labels, data["seq_ctx"])
+        loss_kwargs = MTPE2ETVLossKwargs(
+            shifted_labels=mask_labels,
+            loss_weight=loss_weight,
+            sp_mesh=sp_mesh,
+        ).to(device)
         if sp_mesh is not None and sp_mesh.size() > 1:
             loss_kwargs = loss_kwargs.sp_split(sp_mesh)
         return MTPE2ETVLossContext(self, loss_kwargs)
