@@ -11,7 +11,7 @@ RUN sed -i "s@http://.*.ubuntu.com@${PPA_SOURCE}@g" /etc/apt/sources.list.d/ubun
     apt update && \
     apt install --no-install-recommends ca-certificates -y && \
     apt install --no-install-recommends bc wget -y && \
-    apt install --no-install-recommends build-essential sudo -y && \
+    apt install --no-install-recommends build-essential autoconf automake libtool sudo -y && \
     apt install --no-install-recommends git curl pkg-config tree unzip tmux \
     openssh-server openssh-client dnsutils iproute2 lsof net-tools zsh rclone \
     iputils-ping telnet netcat-openbsd htop bubblewrap socat pciutils -y && \
@@ -46,6 +46,7 @@ ARG DEEP_GEMM_DIR=/tmp/deep_gemm
 ARG DEEPSELECT_DIR=/tmp/deepselect
 ARG FLASHMLA_DIR=/tmp/flash_mla
 ARG NVSHMEM_PREFIX=/usr/local/nvshmem
+ARG NCCL_RDMA_SHARP_PLUGIN_DIR=/tmp/nccl_rdma_sharp_plugin
 
 RUN mkdir -p $CODESPACE
 WORKDIR ${CODESPACE}
@@ -222,6 +223,42 @@ WORKDIR ${CODESPACE}/DeepGEMM
 
 RUN pip wheel -w ${DEEP_GEMM_DIR} -v --no-deps .
 
+# compile nccl-rdma-sharp plugin
+# The HPC-X plugin in the base image (4c7fc63) does not reset the handshake
+# counter after rejecting a connection with an invalid magic, so the next valid
+# handshake is parsed from the wrong offset and NCCL aborts with Error 3.
+# Upstream 0b5eeb9 ports the socket cleanup from NCCL that fixes this.
+FROM setup_env AS nccl_rdma_sharp_plugin
+
+ARG CODESPACE
+ARG NCCL_RDMA_SHARP_PLUGIN_DIR
+ARG NCCL_RDMA_SHARP_PLUGIN_URL
+
+RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
+    git clone $(echo ${NCCL_RDMA_SHARP_PLUGIN_URL} | cut -d '@' -f 1) && \
+    cd ${CODESPACE}/nccl-rdma-sharp-plugins && \
+    git checkout $(echo ${NCCL_RDMA_SHARP_PLUGIN_URL} | cut -d '@' -f 2) && \
+    git submodule update --init --recursive --force
+
+WORKDIR ${CODESPACE}/nccl-rdma-sharp-plugins
+
+# HPC-X ships libibverbs.so.1 but not the unversioned linker name configure
+# looks for. Keep the build-only symlink outside the system library dirs.
+RUN mkdir -p ${NCCL_RDMA_SHARP_PLUGIN_DIR}/build-libs && \
+    ln -sfn /lib/x86_64-linux-gnu/libibverbs.so.1 ${NCCL_RDMA_SHARP_PLUGIN_DIR}/build-libs/libibverbs.so
+
+# IB, UCX and SHARP support stay enabled so this is a drop-in replacement,
+# linked against the same HPC-X runtime libraries that ship in the image.
+RUN ./autogen.sh && \
+    ./configure \
+        --prefix=${NCCL_RDMA_SHARP_PLUGIN_DIR} \
+        --with-cuda=/usr/local/cuda \
+        --with-ucx=/opt/hpcx/ucx \
+        --with-sharp=/opt/hpcx/sharp \
+        LDFLAGS="-L${NCCL_RDMA_SHARP_PLUGIN_DIR}/build-libs -Wl,-rpath,/opt/hpcx/ucx/lib -Wl,-rpath,/opt/hpcx/sharp/lib -Wl,-rpath,/usr/local/cuda/lib64" && \
+    make -j$(nproc) && \
+    make install
+
 # integration xtuner
 FROM setup_env AS xtuner_dev
 
@@ -237,6 +274,7 @@ ARG DEEP_GEMM_DIR
 ARG CAUSAL_CONV1D_DIR
 ARG DEEPSELECT_DIR
 ARG FLASHMLA_DIR
+ARG NCCL_RDMA_SHARP_PLUGIN_DIR
 
 COPY --from=flash_attn ${FLASH_ATTN3_DIR} ${FLASH_ATTN3_DIR}
 COPY --from=flash_attn ${FLASH_ATTN_DIR} ${FLASH_ATTN_DIR}
@@ -248,6 +286,10 @@ COPY --from=deep_gemm ${DEEP_GEMM_DIR} ${DEEP_GEMM_DIR}
 COPY --from=causal_conv1d ${CAUSAL_CONV1D_DIR} ${CAUSAL_CONV1D_DIR}
 COPY --from=deepselect ${DEEPSELECT_DIR} ${DEEPSELECT_DIR}
 COPY --from=flash_mla ${FLASHMLA_DIR} ${FLASHMLA_DIR}
+# Replace the buggy HPC-X plugin in place. /etc/ld.so.conf.d/hpcx.conf already
+# resolves libnccl-net.so from this directory, so NCCL picks up the fixed one.
+COPY --from=nccl_rdma_sharp_plugin ${NCCL_RDMA_SHARP_PLUGIN_DIR}/lib/libnccl-net.so.0.0.0 /opt/hpcx/nccl_rdma_sharp_plugin/lib/libnccl-net.so.0.0.0
+RUN ldconfig
 
 RUN unzip ${FLASH_ATTN_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${FLASH_ATTN3_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
