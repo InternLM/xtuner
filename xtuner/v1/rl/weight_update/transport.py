@@ -500,7 +500,8 @@ class IPCWeightTransport(WeightTransport[IPCBackendAdapter]):
             self._shared_store_epoch = None
 
     def teardown(self) -> None:
-        """Release only this transport's optional shared-epoch process group."""
+        """Release only this transport's optional shared-epoch process
+        group."""
         if self._shared_store_group is not None:
             dist.destroy_process_group(self._shared_store_group)
             self._shared_store_group = None
