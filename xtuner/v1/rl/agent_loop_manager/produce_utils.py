@@ -259,6 +259,11 @@ class BaseProduceContext:
 
         if initial_status in (Status.FAILED, Status.FILTERED):
             # 失败样本和业务过滤样本都不进入 replay buffer。
+            if initial_status == Status.FAILED:
+                error_msgs = [getattr(item, "error_msg", None) for item in group]
+                logger.warning(
+                    f"Discard FAILED generated group for task={self.task_name!r}: error_msgs={error_msgs}"
+                )
             self.progress.add_produced(self.task_name, samples=len(group), tokens=produced_tokens)
             self.progress.add_discarded(self.task_name, initial_status, samples=len(group))
             await release_and_discard_rollout_groups([group])

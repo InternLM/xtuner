@@ -85,6 +85,10 @@ class TestMultimodalTrainingInputs:
         info = {"mm_token_type_ids": type_ids}
         ctx = get_train_seq_ctx(torch.arange(8).view(1, -1), multimodal_train_info=info, prompt_length=4)
         assert ctx.mm_token_type_ids.tolist() == type_ids.tolist()
+        assert ctx.mm_token_type_ids.shape == ctx.input_ids.shape[:-1] or ctx.mm_token_type_ids.shape == (
+            1,
+            8,
+        )
         np.testing.assert_array_equal(info["mm_token_type_ids"], type_ids)
 
     def test_media_refs_are_shared_resolved_and_freed(self, monkeypatch) -> None:
