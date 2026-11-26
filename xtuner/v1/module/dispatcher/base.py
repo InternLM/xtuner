@@ -2,12 +2,13 @@ from abc import ABC, abstractmethod
 from typing import (
     Generic,
     Literal,
+    NamedTuple,
     TypeAlias,
     TypeVar,
 )
 
 import torch
-from typing_extensions import TypedDict, override
+from typing_extensions import NotRequired, TypedDict, override
 
 from xtuner.v1.ops import permute, unpermute
 
@@ -15,6 +16,21 @@ from .expert_tp import ExpertTP
 
 
 HiddenStates: TypeAlias = torch.Tensor
+ProjectionPair: TypeAlias = tuple[torch.Tensor, torch.Tensor]
+
+
+class ExpertWeightLayout(NamedTuple):
+    """Optional call-local master-weight alias at the dispatcher/MLP seam.
+
+    MoonEP fills ``trainable_weights`` with a packed ``[2B]`` alias; dW
+    returns through autograd. UltraEP, DeepEP and the other transports leave
+    it ``None``: inherent weights stay on the FSDP Parameter, and UltraEP
+    replica slots stay on the Manager / ``GroupedLinear`` module attributes.
+    Those live buffers must not cross into compiled ``MoEBlock`` as layout
+    tensors.
+    """
+
+    trainable_weights: ProjectionPair | None = None
 
 
 def _get_backward_pre_hook(backward_previous_event: torch.cuda.Event):
@@ -52,6 +68,13 @@ class PostDispatchResult(TypedDict):
     Attributes:
         hidden_states: The hidden states after expert token routing and dispatching.
         tokens_per_expert: Count of tokens assigned to each expert in the current batch.
+        tokens_per_expert_cpu: Optional host-resident copy of `tokens_per_expert`. A dispatcher
+            that already knows the routed counts on the host should publish them here so that
+            expert kernels needing host-side group sizes can read them without a device-to-host
+            copy and the stream synchronization it implies.
+        expert_weight_layout: Optional call-local master alias (MoonEP). Always
+            present because torch.compile does not support optional TypedDict keys.
+            UltraEP publishes an empty envelope.
         topk_weights: Expert routing weights used for scaling hidden states when combining results.
         handle: An object that facilitates the combination of expert outputs after processing.
     """
@@ -59,6 +82,8 @@ class PostDispatchResult(TypedDict):
     # TODO:
     hidden_states: torch.Tensor
     tokens_per_expert: torch.Tensor
+    tokens_per_expert_cpu: NotRequired[torch.Tensor]
+    expert_weight_layout: ExpertWeightLayout
 
 
 class PreCombineResult(TypedDict):
@@ -110,6 +135,30 @@ class GenericDispatcher(
         self._training_dtype = training_dtype
         self._generate_dtype = generate_dtype
 
+    def prepare_layer_inputs(
+        self,
+        layer_inputs: list[torch.Tensor],
+    ) -> tuple[list[torch.Tensor], list[object | None]]:
+        """Prepare all inputs of one FSDP layer call before branching.
+
+        Most dispatchers have no work before attention, so they keep the
+        identity. A backend that needs an autograd ordering seam may return
+        an opaque token for ``dispatch_preprocess``.
+        """
+        return layer_inputs, [None] * len(layer_inputs)
+
+    def prepare_microbatch_input(
+        self,
+        hidden_states: torch.Tensor,
+        layer_state: object | None,
+    ) -> torch.Tensor:
+        """Prepare one branch immediately before its attention forward.
+
+        Keep per-branch autograd nodes here when their creation order must follow the microbatch loop, rather than
+        preparing all nodes upfront.
+        """
+        return hidden_states
+
     @abstractmethod
     def dispatch(
         self,
@@ -136,6 +185,7 @@ class GenericDispatcher(
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
+        layer_state: object | None = None,
         async_op: bool = False,
     ) -> PreDispatch: ...
 
@@ -259,8 +309,10 @@ class NaiveDispatcher(
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
+        layer_state: object | None = None,
         async_op: bool = False,
     ) -> NaivePreDispatchResult:
+        del layer_state
         if async_op:
             if self._expert_tp is None:
                 raise NotImplementedError("Naive dispatcher async_op=True requires ExpertTP.")
@@ -409,6 +461,7 @@ class NaiveDispatcher(
                 hidden_states=hidden_states,
                 row_ids_map=row_id_maps,
                 tokens_per_expert=tokens_per_expert,
+                expert_weight_layout=ExpertWeightLayout(),
             )
 
     @override

@@ -60,20 +60,21 @@ BF16_RTOL = 1.6e-2
 # 在接近 0 的位置会有数个 ulp 的差异，不能用它承载 loss/norm 校准红灯。
 BF16_GEMM_ATOL = 1e-4
 BF16_GEMM_RTOL = BF16_RTOL
-_original_cutlass_group_gemm: str | None = None
+_original_group_gemm: str | None = None
 
 
 def setup_module() -> None:
-    global _original_cutlass_group_gemm
-    _original_cutlass_group_gemm = os.environ.get("XTUNER_USE_CUTLASS_GROUP_GEMM")
-    os.environ["XTUNER_USE_CUTLASS_GROUP_GEMM"] = "1"
+    # 本测试要用 Cutlass extra，必须在导入算子前把 XTUNER_GROUP_GEMM 设为 cutlass。
+    global _original_group_gemm
+    _original_group_gemm = os.environ.get("XTUNER_GROUP_GEMM")
+    os.environ["XTUNER_GROUP_GEMM"] = "cutlass"
 
 
 def teardown_module() -> None:
-    if _original_cutlass_group_gemm is None:
-        os.environ.pop("XTUNER_USE_CUTLASS_GROUP_GEMM", None)
+    if _original_group_gemm is None:
+        os.environ.pop("XTUNER_GROUP_GEMM", None)
     else:
-        os.environ["XTUNER_USE_CUTLASS_GROUP_GEMM"] = _original_cutlass_group_gemm
+        os.environ["XTUNER_GROUP_GEMM"] = _original_group_gemm
 
 
 # Use a very small model to keep test runtime manageable.

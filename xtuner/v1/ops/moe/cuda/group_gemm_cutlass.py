@@ -71,7 +71,14 @@ def backward(ctx, grad) -> tuple[Tensor | None, Tensor | None, None, None, None]
 moe_grouped_gemm.register_autograd(backward, setup_context=setup_context)
 
 
-def cutlass_group_gemm(x, w, tokens_per_expert):
+def cutlass_group_gemm(
+    x,
+    w,
+    tokens_per_expert,
+    tokens_per_expert_cpu=None,
+    replica_weight=None,
+    replica_grad=None,
+):
     """Grouped matrix multiplication (GMM) for expert models.
 
     Args:
@@ -82,6 +89,8 @@ def cutlass_group_gemm(x, w, tokens_per_expert):
     Returns:
         Tensor: Output tensor of shape (batch_size, seq_len, dout).
     """
+    if replica_weight is not None or replica_grad is not None:
+        raise RuntimeError("cutlass_group_gemm does not support UltraEP replica weights; set XTUNER_GROUP_GEMM=te")
     if x.shape[0] == 0:
         # put x and w to the pytorch graph
         return torch.matmul(x, w[0].T)

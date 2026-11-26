@@ -108,6 +108,9 @@ class FakeEngine:
     def destroy_async_checkpoint_pg(self) -> None:
         pass
 
+    def close(self) -> None:
+        pass
+
 
 def prepare(fn):
     def wrapper(self, *args, **kwargs):
