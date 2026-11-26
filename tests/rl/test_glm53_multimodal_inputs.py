@@ -78,6 +78,15 @@ class TestMultimodalTrainingInputs:
                 prompt_length=4,
             )
 
+    def test_full_sequence_mm_token_type_ids_cover_response_images(self) -> None:
+        # Agentic tool results may carry images in the response region: the producer
+        # marks them in a full-sequence mm_token_type_ids and it must pass through as-is.
+        type_ids = np.array([[0, 1, 1, 0, 0, 1, 1, 0]])
+        info = {"mm_token_type_ids": type_ids}
+        ctx = get_train_seq_ctx(torch.arange(8).view(1, -1), multimodal_train_info=info, prompt_length=4)
+        assert ctx.mm_token_type_ids.tolist() == type_ids.tolist()
+        np.testing.assert_array_equal(info["mm_token_type_ids"], type_ids)
+
     def test_media_refs_are_shared_resolved_and_freed(self, monkeypatch) -> None:
         # Real ObjectRef values with a fake object store avoid launching a Ray cluster in a unit test.
         store = {}
