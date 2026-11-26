@@ -100,11 +100,13 @@ class _FakeRolloutController:
         self.generate = _RemoteMethod(self._generate, async_result=True)
         self.pause_generation = _RemoteMethod(async_result=True)
         self.continue_generation = _RemoteMethod(async_result=True)
-        self.offload = _RemoteMethod(return_value="rollout_offloaded")
-        self.shutdown_inactive_workers = _RemoteMethod(return_value="rollout_inactive_workers_shutdown")
-        self.restart_inactive_workers = _RemoteMethod(return_value="rollout_restarted")
-        self.onload_weights = _RemoteMethod(return_value="weights_loaded")
-        self.onload_kvcache = _RemoteMethod(return_value="kvcache_loaded")
+        self.offload = _RemoteMethod(async_result=True, return_value="rollout_offloaded")
+        self.shutdown_inactive_workers = _RemoteMethod(
+            async_result=True, return_value="rollout_inactive_workers_shutdown"
+        )
+        self.restart_inactive_workers = _RemoteMethod(async_result=True, return_value="rollout_restarted")
+        self.onload_weights = _RemoteMethod(async_result=True, return_value="weights_loaded")
+        self.onload_kvcache = _RemoteMethod(async_result=True, return_value="kvcache_loaded")
         self.get_weight_update_targets = _RemoteMethod(return_value=())
         self.mark_worker_groups_lifecycle_state = _RemoteMethod(return_value=None)
         self.set_enable_partial_rollout = _RemoteMethod(return_value=None)

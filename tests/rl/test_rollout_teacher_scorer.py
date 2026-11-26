@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, Status, TeacherTargets
 from xtuner.v1.rl.distillation import RolloutTeacherScorer
 
 
@@ -60,7 +60,8 @@ class TestRolloutTeacherScorer(unittest.IsolatedAsyncioTestCase):
         await scorer.on_sample_ready(states[0])
         result = await scorer.on_group_ready(states)
 
-        self.assertEqual([state.rollout_id for state in result], [1, 2])
+        self.assertIsNone(result)
+        self.assertEqual([state.rollout_id for state in states], [1, 2])
         self.assertEqual(sorted(events), [1, 2])
         self.assertEqual(client.compute_logprobs.await_count, 2)
 
@@ -73,11 +74,34 @@ class TestRolloutTeacherScorer(unittest.IsolatedAsyncioTestCase):
             defers_to_filter=True,
         )
 
-        result = await scorer.on_group_ready([self._state(1), self._state(2, Status.FAILED)])
+        states = [self._state(1), self._state(2, Status.FAILED)]
+        result = await scorer.on_group_ready(states)
 
-        self.assertEqual([state.rollout_id for state in result], [1, 2])
+        self.assertIsNone(result)
+        self.assertEqual([state.rollout_id for state in states], [1, 2])
         self.assertEqual(events, [])
         client.compute_logprobs.assert_not_awaited()
+
+    async def test_scores_completed_states_without_teacher_targets(self):
+        events: list[int] = []
+        client = self._client(events)
+        scorer = RolloutTeacherScorer(
+            {"teacher": client},
+            {"math": "teacher"},
+            defers_to_filter=True,
+        )
+        already_scored = self._state(1)
+        already_scored.teacher_targets = TeacherTargets(
+            kind="sampled",
+            tokens=[1],
+            logprobs=[-0.1],
+        )
+        pending = self._state(2)
+
+        await scorer.on_group_ready([already_scored, pending])
+
+        self.assertEqual(events, [2])
+        client.compute_logprobs.assert_awaited_once_with(pending)
 
     async def test_aclose_is_idempotent(self):
         events: list[int] = []

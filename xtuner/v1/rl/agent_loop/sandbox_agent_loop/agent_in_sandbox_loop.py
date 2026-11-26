@@ -18,7 +18,13 @@ from xtuner.v1.rl.utils import await_cancellable_tasks
 
 from ...rollout.chat_template import canonicalize_messages_for_chat_template
 from ...rollout.trace_store import get_store
-from ..agent_loop import AgentLoop, AgentLoopConfig, maybe_filter_invalid_sample
+from ..agent_loop import (
+    AgentLoop,
+    AgentLoopConfig,
+    _merge_generated_state_slots,
+    _select_retry_state_slots,
+    maybe_filter_invalid_sample,
+)
 from .schemas import AgentRolloutItem, RolloutStatus
 
 
@@ -304,6 +310,8 @@ class AgentInSandboxLoop(AgentLoop):
         self.min_valid_attempts = min_valid_attempts
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
+        retry_indices, retry_states = _select_retry_state_slots(rollout_state)
+
         async def generate_one(state: RolloutState) -> list[RolloutState]:
             if self._sample_semaphore is None:
                 samples = await self.generate_sample(state)
@@ -312,14 +320,15 @@ class AgentInSandboxLoop(AgentLoop):
                     samples = await self.generate_sample(state)
             return [await self._teacher_scorer.on_sample_ready(sample) for sample in samples]
 
-        for state in rollout_state:
+        for state in retry_states:
             state.sample_params = self.sample_params
         # Cancellation must reach every sample and wait for all Runner.finally cleanups before this group ends.
-        sample_groups = await await_cancellable_tasks(generate_one(state) for state in rollout_state)
-        samples = [sample for sample_group in sample_groups for sample in sample_group]
+        sample_groups = await await_cancellable_tasks(generate_one(state) for state in retry_states)
+        samples = _merge_generated_state_slots(rollout_state, retry_indices, sample_groups)
         samples = _drop_failed_train_samples(samples, self.mode, self.min_valid_attempts)
         samples = maybe_filter_invalid_sample(samples, self.is_valid_sample_fn, self.logger)
-        samples = await self._teacher_scorer.on_group_ready(samples)
+        if samples:
+            await self._teacher_scorer.on_group_ready(samples)
         return self.canonicalize_train_fields(samples)
 
     def canonicalize_train_fields(self, group: list[RolloutState]) -> list[RolloutState]:
@@ -336,6 +345,8 @@ class AgentInSandboxLoop(AgentLoop):
     async def generate_sample(  # type: ignore[override]
         self, rollout_state: RolloutState, **kwargs
     ) -> list[RolloutState]:
+        if rollout_state.status == Status.COMPLETED:
+            return [rollout_state]
         try:
             rollout_item = rollout_state.extra_fields["rollout_item"].model_copy(deep=True)
             if rollout_state.session_id is None:
@@ -459,7 +470,6 @@ class AgentInSandboxLoop(AgentLoop):
             # indistinguishable from a dense trace; catching that would need the MoE-vs-dense signal the loop lacks
             # (session_server gates on ``enable_return_routed_experts``).
             segment_state.routed_experts = data["routed_experts"]
-            segment_state.routed_experts_shared = data.get("routed_experts_shared", False)
             if segment_state.response_ids:
                 segment_state.response = self.tokenizer.decode(segment_state.response_ids)
             else:
@@ -467,6 +477,8 @@ class AgentInSandboxLoop(AgentLoop):
             rollout_states.append(segment_state)
 
         rollout_states[0].extra_fields["agent_artifacts"] = _to_json_safe(item.artifacts)
+        if rollout_state.session_id is not None:
+            await trace_store.empty_sessions.remote([str(rollout_state.session_id)])
         return rollout_states
 
     async def _fill_timeout_rollout_state(self, rollout_state: RolloutState) -> RolloutState:
@@ -484,7 +496,10 @@ class AgentInSandboxLoop(AgentLoop):
         """
         if rollout_state.session_id is None:
             raise ValueError("session_id is missing on the timed-out sample")
-        data = await get_store().export_partial_training_trace.remote(str(rollout_state.session_id))
+        trace_store = get_store()
+        data = await trace_store.export_partial_training_trace.remote(
+            str(rollout_state.session_id), require_turn_provenance=self.require_turn_provenance
+        )
         input_ids = data["input_ids"]
         labels = data["labels"]
         if len(input_ids) < 2 or all(label == -100 for label in labels):
@@ -496,9 +511,11 @@ class AgentInSandboxLoop(AgentLoop):
         # 连续后缀），恢复 input_ids == prompt_ids + response_ids，不依赖 dataset 侧渲染。
         rollout_state.prompt_ids = list(data["prompt_ids"])
         rollout_state.response_ids = list(data["response_ids"])
+        if self.require_turn_provenance:
+            rollout_state.response_model_steps = list(data["response_model_steps"])
+            rollout_state.extra_fields["request_ids"] = data["request_ids"]
         rollout_state.logprobs = data["logprobs"]
         rollout_state.routed_experts = data["routed_experts"]
-        rollout_state.routed_experts_shared = data.get("routed_experts_shared", False)
         rollout_state.response = (
             self.tokenizer.decode(rollout_state.response_ids) if rollout_state.response_ids else ""
         )
@@ -506,6 +523,7 @@ class AgentInSandboxLoop(AgentLoop):
         # Trace-side count is source-of-truth: it only counts the turns actually
         # exported (and trained). ``None`` means legacy nodes without the field.
         rollout_state.extra_fields["agent_tool_calls"] = data.get("tool_call_count")
+        await trace_store.empty_sessions.remote([str(rollout_state.session_id)])
         rollout_state.status = Status.COMPLETED
         rollout_state.finish_reason = "timeout"
         rollout_state.reward = {"score": self.timeout_reward}

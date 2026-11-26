@@ -963,23 +963,19 @@ class BaseRLTrainer:
         """Release the consumed batch's trace sessions and remaining remote
         refs.
 
-        Trace-owned routed-expert refs are released with their session; everything
-        else (ordinary routed refs and pixels) is freed once, deduplicated.
+        Trace and rollout routed-expert holders are detached so Ray reference counting can reclaim them. Pixel and
+        video refs remain explicitly freed once, deduplicated.
 
         Args:
             train_batch (list[list[RolloutState]]): The batch that was fully consumed.
-
-        Returns:
-            None
         """
-        released_sessions = self._release_trace_sessions(_trace_session_ids(train_batch))
+        self._release_trace_sessions(_trace_session_ids(train_batch))
         refs: list[ray.ObjectRef] = []
         for group in train_batch:
             for state in group:
                 pixels = [state.mm_info.get(name) for name in MM_PIXEL_FIELDS] if state.mm_info is not None else []
-                trace_released = state.session_id is not None and str(state.session_id) in released_sessions
-                routed = None if trace_released else state.routed_experts
-                for value in (*pixels, routed):
+                state.routed_experts = None
+                for value in pixels:
                     if isinstance(value, ray.ObjectRef):
                         refs.append(value)
                     elif isinstance(value, (list, tuple)):

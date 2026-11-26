@@ -625,7 +625,6 @@ class SessionServer:
                     expert_key=delta_expert,
                     request_id=request_id,
                     model_step=model_step,
-                    routed_experts_shared=lease is not None,
                 ),
             )
         await self.store.insert.remote(
@@ -640,7 +639,6 @@ class SessionServer:
                 tool_call_count=len(assistant_msg.get("tool_calls") or []),
                 request_id=request_id,
                 model_step=model_step,
-                routed_experts_shared=lease is not None,
                 length=len(output_token_ids),
             ),
         )

@@ -16,6 +16,7 @@ from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     Status,
     calculate_group_effective_response_masks,
+    discard_rollout_state,
     get_group_status,
     validate_rollout_group,
 )
@@ -43,6 +44,44 @@ if TYPE_CHECKING:
 logger = get_logger()
 GROUP_GENERATE_TIME_KEY = "group_generate_time_s"
 PERIODIC_ABORT_INTERVAL_S = 5.0
+
+
+def normalize_retry_group_inputs(
+    states: list[RolloutState],
+) -> tuple[list[RolloutState], list[RolloutState]]:
+    """Normalize expired sessions before handing a group to an agent loop.
+
+    Keep one expired state for each retried session, return that session's old
+    siblings separately, and retain states from sessions that are not being
+    retried. The caller owns the discarded states and must release their
+    rollout references before dropping them.
+
+    Args:
+        states (list[RolloutState]): The sampled rollout group.
+
+    Returns:
+        tuple[list[RolloutState], list[RolloutState]]: Inputs safe to pass to
+            the agent loop and states removed during normalization.
+    """
+    retry_sessions = {
+        state.session_id for state in states if state.status == Status.EXPIRED and state.session_id is not None
+    }
+    if not retry_sessions:
+        return states, []
+
+    selected: list[RolloutState] = []
+    dropped: list[RolloutState] = []
+    retried_sessions: set[int] = set()
+    for state in states:
+        session_id = state.session_id
+        if session_id in retry_sessions:
+            if state.status != Status.EXPIRED or session_id in retried_sessions:
+                dropped.append(state)
+                continue
+            assert session_id is not None
+            retried_sessions.add(session_id)
+        selected.append(state)
+    return selected, dropped
 
 
 class _ProgressDisplayer:
@@ -98,27 +137,6 @@ def calculate_stale_threshold(max_staleness: int, sync_weights_interval: int) ->
     return (max_staleness + 1) * sync_weights_interval
 
 
-def check_timeout_training_rerollout(agent_loop_config: Any, produce_strategy_config: Any) -> None:
-    """Reject timeout training when expired rerollout is enabled.
-
-    ``train_on_timeout`` rebuilds a sample from its session's trace-store chain.
-    Expired rerollout reuses that ``session_id``, so the exported chain may
-    still contain turns from a previous attempt.
-
-    Args:
-        agent_loop_config (Any): One task's agent loop configuration.
-        produce_strategy_config (Any): The same task's produce strategy configuration.
-    """
-    tail_batch_trigger_size = getattr(produce_strategy_config, "tail_batch_trigger_size", -1)
-    if getattr(agent_loop_config, "train_on_timeout", False) and tail_batch_trigger_size >= 0:
-        raise ValueError(
-            "train_on_timeout=True cannot be combined with tail_batch_trigger_size >= 0: expired "
-            "rerollout reuses the sample's session_id, so a timed-out sample's exported trace may "
-            "contain turns from a previous attempt. Keep tail_batch_trigger_size=-1 or disable "
-            "train_on_timeout."
-        )
-
-
 @runtime_checkable
 class ShouldContinueFn(Protocol):
     def __call__(self, completed_count: int, batch_size: int, **kwargs) -> bool: ...
@@ -152,7 +170,24 @@ class BaseProduceContext:
         if from_expired_pool is None:
             return await self.sampler.sample(task_name=self.task_name)
         group_status = [Status.EXPIRED, Status.ABORTED] if from_expired_pool else [Status.ABORTED]
-        return await self.sampler.sample(task_name=self.task_name, group_status=group_status)
+        states = await self.sampler.sample(task_name=self.task_name, group_status=group_status)
+        if not from_expired_pool:
+            return states
+
+        selected, dropped = normalize_retry_group_inputs(states)
+        if dropped:
+            # Dropped siblings normally share the retry session with ``selected``.
+            # Do not release the whole trace session here: the retained expired
+            # state still needs it for the new generation. Only discard this
+            # holder's ObjectRefs and payload.
+            for state in dropped:
+                discard_rollout_state(state)
+            logger.info(
+                "Discarded %d duplicate retry states for task=%r before generation",
+                len(dropped),
+                self.task_name,
+            )
+        return selected
 
     async def generate_group(
         self,

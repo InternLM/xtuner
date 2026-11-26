@@ -14,34 +14,6 @@ _STORE_NAMESPACE = "xtuner_rollout"
 _handle_cache: Any = None
 
 
-def _free_ray_refs(obj: Any):
-    """Recursively free ray.ObjectRef instances trapped inside an object.
-
-    Args:
-        obj (Any): The object that may contain ray.ObjectRef references (e.g., dict, list, tuple).
-    """
-    if isinstance(obj, ray.ObjectRef):
-        try:
-            ray.internal.free([obj], local_only=False)
-        except Exception as e:
-            get_logger().error(f"Failed to free Ray ObjectRef {obj}: {e}")
-    elif isinstance(obj, dict):
-        for v in obj.values():
-            _free_ray_refs(v)
-    elif isinstance(obj, (list, tuple)):
-        for v in obj:
-            _free_ray_refs(v)
-    elif hasattr(obj, "model_dump"):  # Pydantic v2
-        for v in obj.model_dump().values() if hasattr(obj.model_dump, "__call__") else {}.values():
-            _free_ray_refs(v)
-    elif hasattr(obj, "dict") and callable(getattr(obj, "dict")):  # Pydantic v1
-        for v in obj.dict().values():
-            _free_ray_refs(v)
-    elif hasattr(obj, "__dict__"):
-        for v in vars(obj).values():
-            _free_ray_refs(v)
-
-
 def _common_prefix_len(left: str, right: str) -> int:
     for idx, (left_ch, right_ch) in enumerate(zip(left, right)):
         if left_ch != right_ch:
@@ -133,8 +105,6 @@ def _assemble_trace(nodes: List["TreeNode"], session_id: str) -> dict:
             # Assistant turn written before the field existed: count unknown.
             tool_call_counts.append(None)
     trace["routed_experts"] = _resolve_routed_experts(expert_keys, session_id)
-    # Ownership marker travels with partial/legacy exports too, so timeout states detach instead of freeing.
-    trace["routed_experts_shared"] = bool(getattr(nodes[0].value, "routed_experts_shared", False)) if nodes else False
     trace["tool_call_count"] = None if None in tool_call_counts else sum(tool_call_counts)
     # The first node holds the session's initial prompt segment (the only segment written
     # before any assistant turn), so everything after it is the contiguous response suffix
@@ -156,6 +126,34 @@ def _assemble_trace(nodes: List["TreeNode"], session_id: str) -> dict:
         trace["prompt_ids"] = []
     trace["response_ids"] = list(trace["input_ids"][prompt_token_count:])
     return trace
+
+
+def _build_response_provenance(
+    nodes: List["TreeNode"],
+    trace: dict,
+    session_id: str,
+    *,
+    require_token_versions: bool,
+) -> tuple[list[int], list[int], list[int | None]]:
+    """Build and validate the prompt/response token-version suffix fields."""
+    prompt_ids = list(trace["prompt_ids"])
+    response_ids = list(trace["response_ids"])
+    token_model_steps: list[int | None] = []
+    for node in nodes:
+        node_val = node.value
+        if not isinstance(node_val, TokenizedSegment):
+            raise TypeError(f"Unexpected trace node value type: {type(node_val)!r}")
+        token_model_steps.extend([node_val.model_step] * len(node_val.token_ids))
+
+    response_model_steps = token_model_steps[len(prompt_ids) :]
+    if len(response_model_steps) != len(response_ids):
+        raise ValueError(
+            f"Trace {session_id!r} has incomplete response token provenance: response token length mismatch"
+        )
+    if require_token_versions and any(step is None for step in response_model_steps):
+        raise ValueError(f"Trace {session_id!r} has incomplete response token provenance: missing token versions")
+
+    return prompt_ids, response_ids, response_model_steps
 
 
 def _latest_chain(trie: "Trie") -> List["TreeNode"]:
@@ -210,8 +208,6 @@ class TokenizedSegment(BaseModel):
     # the field existed; export reports ``None`` when any assistant turn is
     # unknown instead of silently undercounting.
     tool_call_count: int | None = Field(default=None, repr=False)
-    # Shared refs survive this store's release through Ray reference counting; legacy refs are freed explicitly.
-    routed_experts_shared: bool = False
     length: int | None = None
 
     def model_post_init(self, _):
@@ -325,13 +321,24 @@ class Trie:
 
         return "".join(key_path), matched_nodes
 
+    def clear(self) -> None:
+        """Clear Trie holders and let Ray reference counting release remote
+        objects."""
+        stack = [self.root]
+        while stack:
+            node = stack.pop()
+            stack.extend(node.children.values())
+            node.value = None
+            node.children.clear()
+            node.parent = None
+
     def release(self, key: str | None = None):
         """Drop trace ownership; exported and sibling route references remain
         valid.
 
         If the key is None, the entire Trie is released. Prunes empty branches bottom-up. Request-aware nodes
-        detach their routed-expert refs only: sibling segments and trainers borrow the same refs, so Ray
-        reference counting decides when they die. Legacy nodes keep the explicit free contract.
+        detach their routed-expert refs only: sibling segments and trainers may borrow the same refs, so Ray reference
+        counting decides when they die.
 
         Args:
             key (Optional[str]): The key string whose associated nodes should be released.
@@ -339,15 +346,7 @@ class Trie:
         """
         if key is None:
             # Drop only this store's ownership. Borrowers retain live refs.
-            stack = [self.root]
-            while stack:
-                node = stack.pop()
-                stack.extend(node.children.values())
-                if node.value is not None and not getattr(node.value, "routed_experts_shared", False):
-                    _free_ray_refs(node.value)
-                node.value = None
-                node.children.clear()
-                node.parent = None
+            self.clear()
             return
 
         node = self.root
@@ -366,8 +365,6 @@ class Trie:
                 return
 
         if node.value is not None:
-            if not getattr(node.value, "routed_experts_shared", False):
-                _free_ray_refs(node.value)
             node.value = None
 
         for parent, token in reversed(path):
@@ -443,6 +440,26 @@ class RolloutTraceStore:
         trie = self.get_or_create(session_id)
         return trie.search(text, filter_none)
 
+    def empty_sessions(self, session_ids: list[str]) -> list[str]:
+        """Empty existing sessions while retaining their session entries.
+
+        Args:
+            session_ids (list[str]): Session identifiers to empty.
+
+        Returns:
+            list[str]: Session identifiers that existed and were emptied.
+        """
+        emptied_session_ids = []
+        for session_id in dict.fromkeys(session_ids):
+            if session_id not in self.sessions:
+                continue
+            # Drop only the store's holder. Exported rollout states may still
+            # borrow legacy or shared refs, so this path must not force-free.
+            self.sessions[session_id].clear()
+            self.sessions[session_id] = Trie()
+            emptied_session_ids.append(session_id)
+        return emptied_session_ids
+
     def release(self, session_id: str, key: str | None = None):
         """Release Trie nodes and free associated resources for a session.
 
@@ -478,7 +495,7 @@ class RolloutTraceStore:
         self.objects.clear()
         self.updated_at.clear()
 
-    def export_partial_training_trace(self, session_id: str) -> dict:
+    def export_partial_training_trace(self, session_id: str, *, require_turn_provenance: bool = False) -> dict:
         """Export the whole session trace without requiring a prompt text.
 
         Only fully finished turns are stored, so the export ends exactly at
@@ -495,15 +512,49 @@ class RolloutTraceStore:
 
         Args:
             session_id (str): The session identifier.
+            require_turn_provenance (bool): Require token versions, request IDs and routed experts
+                from the committed partial chain. Transcript and prompt-text matching are not
+                performed because a timeout may leave the current turn incomplete.
 
         Returns:
-            dict: The trace dictionary with the same contract as
-            ``export_training_trace``.
+            dict: The trace dictionary with the partial-export contract,
+            including ``prompt_ids``, ``response_ids`` and the per-token
+            ``response_model_steps`` for the response suffix.
         """
         trie = self.sessions.get(session_id)
         if trie is None:
-            return _assemble_trace([], session_id)
-        return _assemble_trace(_latest_chain(trie), session_id)
+            nodes: list["TreeNode"] = []
+        else:
+            nodes = _latest_chain(trie)
+
+        trace = _assemble_trace(nodes, session_id)
+        if require_turn_provenance and not nodes:
+            raise ValueError("A provenance export requires a non-empty committed trace path")
+        path_ids: list[str] = []
+        for node in nodes:
+            node_val = node.value
+            if not isinstance(node_val, TokenizedSegment):
+                raise TypeError(f"Unexpected trace node value type: {type(node_val)!r}")
+            if node_val.request_id is None:
+                if require_turn_provenance:
+                    raise ValueError("Partial trace is missing request IDs")
+            elif node_val.request_id not in path_ids:
+                path_ids.append(node_val.request_id)
+        if require_turn_provenance and not path_ids:
+            raise ValueError("Partial trace is missing request IDs")
+        if require_turn_provenance and not trace["routed_experts"]:
+            raise ValueError("MoE training requires routed experts on every trace node")
+
+        _, _, response_model_steps = _build_response_provenance(
+            nodes,
+            trace,
+            session_id,
+            require_token_versions=require_turn_provenance,
+        )
+        trace["response_model_steps"] = response_model_steps
+        if require_turn_provenance:
+            trace["request_ids"] = path_ids
+        return trace
 
     def export_training_trace(
         self,
@@ -523,9 +574,9 @@ class RolloutTraceStore:
             require_routed_experts (bool): Require routed experts on every node (MoE training).
 
         Returns:
-            dict: The trace dictionary containing `input_ids`, `labels`, `logprobs`, `routed_experts`,
-                `routed_experts_shared` and `tool_call_count`. The strict provenance path additionally returns
-                `prompt_ids`, `response_ids`, `response_model_steps` and `request_ids`.
+            dict: The trace dictionary containing `input_ids`, `labels`, `logprobs`, `routed_experts` and
+                `tool_call_count`. The strict provenance path additionally returns `prompt_ids`, `response_ids`,
+                `response_model_steps` and `request_ids`.
 
         Raises:
             ValueError: If the prompt_text does not completely match the trace keys in the session, or the
@@ -534,17 +585,13 @@ class RolloutTraceStore:
         nodes = self._match_nodes(session_id, prompt_text)
         trace = _assemble_trace(nodes, session_id)
         input_ids: list[int] = trace["input_ids"]
-        versions: list[int | None] = []
         path_ids: list[str] = []
         for node in nodes:
             node_val = node.value
             if not isinstance(node_val, TokenizedSegment):
                 raise TypeError(f"Unexpected trace node value type: {type(node_val)!r}")
-            versions.extend([node_val.model_step] * len(node_val.token_ids))
             if node_val.request_id is not None and node_val.request_id not in path_ids:
                 path_ids.append(node_val.request_id)
-        shared = getattr(nodes[0].value, "routed_experts_shared", False) if nodes else False
-
         if expected_request_ids is None:
             # Legacy export keeps its original behavior; the strict suffix fields stay out.
             return trace
@@ -553,14 +600,9 @@ class RolloutTraceStore:
             raise ValueError("MoE training requires routed experts on every trace node")
         if not nodes:
             raise ValueError("A provenance export requires a non-empty committed trace path")
-        # The real prompt comes from the first prompt-only node, not from the dataset template that started the Agent.
-        first = nodes[0].value
-        assert isinstance(first, TokenizedSegment)
-        if any(label != -100 for label in first.labels or []):
-            raise ValueError("The first trace node must be prompt-only")
-        prompt_ids = list(first.token_ids)
-        response_ids = input_ids[len(prompt_ids) :]
-        response_steps = versions[len(prompt_ids) :]
+        prompt_ids, response_ids, response_steps = _build_response_provenance(
+            nodes, trace, session_id, require_token_versions=True
+        )
         if (
             not expected_request_ids
             or not path_ids
@@ -578,8 +620,8 @@ class RolloutTraceStore:
                 if node_request_id is not None:
                     missing.discard(node_request_id)
             stack.extend(node.children.values())
-        if missing or any(step is None for step in response_steps):
-            raise ValueError("Transcript references uncommitted requests or missing token versions")
+        if missing:
+            raise ValueError("Transcript references uncommitted requests")
         return {
             "input_ids": input_ids,
             "labels": trace["labels"],
@@ -590,7 +632,6 @@ class RolloutTraceStore:
             "response_model_steps": response_steps,
             "request_ids": path_ids,
             "routed_experts": trace["routed_experts"],
-            "routed_experts_shared": shared,
         }
 
     def _match_nodes(self, session_id: str, prompt_text: str) -> List["TreeNode"]:
@@ -695,6 +736,26 @@ def get_existing_store():
     return _handle_cache
 
 
+async def empty_existing_sessions(session_ids: list[str]) -> set[str]:
+    """Empty trace sessions without creating the singleton store.
+
+    Args:
+        session_ids (list[str]): Candidate trace session identifiers.
+
+    Returns:
+        set[str]: Session identifiers that existed and were emptied.
+    """
+    session_ids = list(dict.fromkeys(str(session_id) for session_id in session_ids))
+    if not session_ids:
+        return set()
+
+    store = get_existing_store()
+    if store is None:
+        return set()
+
+    return set(await store.empty_sessions.remote(session_ids))
+
+
 async def release_existing_sessions(session_ids: list[str]) -> set[str]:
     """Release trace sessions that exist without creating the singleton store.
 
@@ -716,19 +777,16 @@ async def release_existing_sessions(session_ids: list[str]) -> set[str]:
 
 
 async def release_and_discard_rollout_groups(groups: list[list[RolloutState]]) -> None:
-    """Release trace-owned resources before discarding terminal rollouts.
+    """Release trace sessions before discarding terminal rollout holders.
 
-    Sessions released by the trace store have already freed their routed-expert references. Detach those references
-    before the generic rollout-state cleanup so it does not explicitly free them a second time. Rollouts whose sessions
-    are absent from the store retain their references for the generic cleanup path.
+    Args:
+        groups (list[list[RolloutState]]): Terminal rollout groups whose holders should be discarded.
     """
-    released_session_ids = await release_existing_sessions(
+    await release_existing_sessions(
         [str(item.session_id) for group in groups for item in group if item.session_id is not None]
     )
     for group in groups:
         for item in group:
-            if item.session_id is not None and str(item.session_id) in released_session_ids:
-                item.routed_experts = None
             discard_rollout_state(item)
 
 

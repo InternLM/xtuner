@@ -1,4 +1,4 @@
-"""Cross-weight-update rollout trace export 与共享引用所有权测试。
+"""Cross-weight-update rollout trace export 与 routed-expert 引用计数测试。
 
 Good Tests:
 - 使用真实 RolloutTraceStore actor、真实 Trie 和真实 Ray ObjectRef 验证导出契约。
@@ -14,7 +14,6 @@ import unittest
 import ray
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.rl.rollout import trace_store as trace_store_module
 from xtuner.v1.rl.rollout.trace_store import RolloutTraceStore, TokenizedSegment, Trie
 
 
@@ -25,7 +24,6 @@ def _segment(
     request_id: str | None = None,
     model_step: int | None = None,
     expert_key=None,
-    shared: bool = False,
 ) -> TokenizedSegment:
     return TokenizedSegment(
         text="",
@@ -35,7 +33,6 @@ def _segment(
         request_id=request_id,
         model_step=model_step,
         expert_key=expert_key,
-        routed_experts_shared=shared,
     )
 
 
@@ -60,27 +57,27 @@ class TestTurnProvenanceExport(unittest.TestCase):
             store.insert.remote(
                 session_id,
                 "P",
-                _segment([1, 2], labels=[-100, -100], request_id="r0", model_step=0, expert_key=expert, shared=True),
+                _segment([1, 2], labels=[-100, -100], request_id="r0", model_step=0, expert_key=expert),
             )
         )
         ray.get(
             store.insert.remote(
-                session_id, "PA", _segment([3, 4], request_id="r0", model_step=0, expert_key=expert, shared=True)
+                session_id, "PA", _segment([3, 4], request_id="r0", model_step=0, expert_key=expert)
             )
         )
         ray.get(
             store.insert.remote(
-                session_id, "PAT", _segment([5], request_id="r1", model_step=1, expert_key=expert, shared=True)
+                session_id, "PAT", _segment([5], request_id="r1", model_step=1, expert_key=expert)
             )
         )
         ray.get(
             store.insert.remote(
-                session_id, "PATT", _segment([6, 7], request_id="r1", model_step=1, expert_key=expert, shared=True)
+                session_id, "PATT", _segment([6, 7], request_id="r1", model_step=1, expert_key=expert)
             )
         )
         ray.get(
             store.insert.remote(
-                session_id, "PB", _segment([8], request_id="rx", model_step=2, expert_key=expert, shared=True)
+                session_id, "PB", _segment([8], request_id="rx", model_step=2, expert_key=expert)
             )
         )
         return "PATT"
@@ -103,7 +100,6 @@ class TestTurnProvenanceExport(unittest.TestCase):
         self.assertEqual(trace["response_ids"], [3, 4, 5, 6, 7])
         self.assertEqual(trace["response_model_steps"], [0, 0, 1, 1, 1])
         self.assertEqual(trace["request_ids"], ["r0", "r1"])
-        self.assertTrue(trace["routed_experts_shared"])
 
     def test_transcript_ids_may_name_another_committed_branch(self):
         store = RolloutTraceStore.remote()
@@ -171,10 +167,9 @@ class TestTurnProvenanceExport(unittest.TestCase):
         self.assertEqual(trace["prompt_ids"], [1, 2])
         self.assertEqual(trace["response_ids"], [])
         self.assertEqual(trace["tool_call_count"], 0)
-        self.assertFalse(trace["routed_experts_shared"])
 
 
-class TestSharedRoutedExpertOwnership(unittest.TestCase):
+class TestRoutedExpertReferenceCounting(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.started_ray = False
@@ -190,31 +185,25 @@ class TestSharedRoutedExpertOwnership(unittest.TestCase):
         if cls.started_ray and ray.is_initialized():
             ray.shutdown()
 
-    def test_releasing_a_shared_trace_keeps_expert_refs_readable(self):
+    def test_releasing_a_trace_keeps_expert_refs_readable_for_other_holders(self):
         ref = ray.put({"experts": [1, 2]})
         trie = Trie()
-        trie.insert("P", _segment([1], labels=[-100], request_id="r0", expert_key=ref, shared=True))
+        trie.insert("P", _segment([1], labels=[-100], request_id="r0", expert_key=ref))
 
         trie.release()
 
         self.assertEqual(ray.get(ref), {"experts": [1, 2]})
 
-    def test_legacy_trace_release_keeps_the_explicit_free_path(self):
-        segment = _segment([1], labels=[-100], expert_key="legacy-ref")
+    def test_releasing_one_trace_key_keeps_expert_ref_readable_for_other_holders(self):
+        ref = ray.put({"experts": [3, 4]})
         trie = Trie()
-        trie.insert("P", segment)
-        freed = []
+        trie.insert("P", _segment([1], labels=[-100], expert_key=ref))
 
-        original = trace_store_module._free_ray_refs
-        trace_store_module._free_ray_refs = freed.append
-        try:
-            trie.release()
-        finally:
-            trace_store_module._free_ray_refs = original
+        trie.release("P")
 
-        self.assertEqual(freed, [segment])
+        self.assertEqual(ray.get(ref), {"experts": [3, 4]})
 
-    def test_shared_rollout_state_cleanup_detaches_without_freeing(self):
+    def test_rollout_state_cleanup_detaches_routes_and_frees_media(self):
         from xtuner.v1.data_proto.rl_data import free_rollout_state_refs
         from xtuner.v1.rl.utils import ray_utils
 
@@ -223,7 +212,6 @@ class TestSharedRoutedExpertOwnership(unittest.TestCase):
         state = RolloutState(
             message=[],
             routed_experts=[expert_ref],
-            routed_experts_shared=True,
             mm_info={"pixel_values": pixel_ref},
         )
         freed = []
@@ -235,18 +223,16 @@ class TestSharedRoutedExpertOwnership(unittest.TestCase):
             ray_utils.free_object_refs = original
 
         self.assertIsNone(state.routed_experts)
-        self.assertFalse(state.routed_experts_shared)
         self.assertEqual(freed, [[pixel_ref]])
         self.assertEqual(ray.get(expert_ref), "expert")
 
-    def test_reset_response_frees_only_owned_experts(self):
+    def test_reset_response_detaches_routes_without_force_free(self):
         from xtuner.v1.rl.utils import ray_utils
 
         expert_ref = ray.put("expert")
         state = RolloutState(
             message=[],
             routed_experts=expert_ref,
-            routed_experts_shared=True,
             response_ids=[1],
             status=Status.COMPLETED,
         )
@@ -260,7 +246,6 @@ class TestSharedRoutedExpertOwnership(unittest.TestCase):
 
         self.assertEqual(freed, [])
         self.assertIsNone(state.routed_experts)
-        self.assertFalse(state.routed_experts_shared)
 
 
 if __name__ == "__main__":

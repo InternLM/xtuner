@@ -22,6 +22,7 @@ TestExportPartialTrainingTrace —— export_partial_training_trace 的部分导
 import asyncio
 import time
 import unittest
+import weakref
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -31,7 +32,8 @@ from xtuner.v1.rl.rollout import trace_store as trace_store_module
 from xtuner.v1.rl.rollout.trace_store import (
     RolloutTraceStore,
     TokenizedSegment,
-    _free_ray_refs,
+    Trie,
+    empty_existing_sessions,
     get_existing_store,
     release_and_discard_rollout_groups,
     release_existing_sessions,
@@ -39,7 +41,20 @@ from xtuner.v1.rl.rollout.trace_store import (
 
 
 class TestRolloutTraceCleanup(unittest.TestCase):
-    def test_release_and_discard_detaches_only_trace_owned_refs(self):
+    def test_trie_clear_breaks_cycles_and_drops_holders(self):
+        trie = Trie()
+        value = TokenizedSegment(text="old", token_ids=[1], expert_key=object())
+        trie.insert("old", value)
+        _, nodes = trie.search("old")
+        node_ref = weakref.ref(nodes[0])
+
+        trie.clear()
+
+        del nodes
+        self.assertIsNone(node_ref())
+        self.assertEqual(trie.keys(), [])
+
+    def test_release_and_discard_preserves_refs_until_state_discard(self):
         trace_owned_ref = object()
         rollout_owned_ref = object()
         trace_owned = SimpleNamespace(session_id="trace-owned", routed_experts=trace_owned_ref)
@@ -62,7 +77,7 @@ class TestRolloutTraceCleanup(unittest.TestCase):
             asyncio.run(release_and_discard_rollout_groups([[trace_owned, rollout_owned]]))
 
         release_sessions.assert_awaited_once_with(["trace-owned", "rollout-owned"])
-        self.assertIsNone(routed_experts_seen_by_discard["trace-owned"])
+        self.assertIs(routed_experts_seen_by_discard["trace-owned"], trace_owned_ref)
         self.assertIs(routed_experts_seen_by_discard["rollout-owned"], rollout_owned_ref)
         self.assertEqual(discard.call_count, 2)
 
@@ -117,6 +132,45 @@ class TestRolloutTraceStore(unittest.TestCase):
         self.assertEqual(released, {"one"})
         release_remote.assert_awaited_once_with(["one", "missing"])
 
+    def test_empty_existing_sessions_stably_deduplicates_before_rpc(self):
+        empty_remote = AsyncMock(return_value=["one"])
+        store = SimpleNamespace(empty_sessions=SimpleNamespace(remote=empty_remote))
+        with patch(
+            "xtuner.v1.rl.rollout.trace_store.get_existing_store",
+            return_value=store,
+        ):
+            emptied = asyncio.run(empty_existing_sessions(["one", "one", "missing"]))
+
+        self.assertEqual(emptied, {"one"})
+        empty_remote.assert_awaited_once_with(["one", "missing"])
+
+    def test_empty_session_preserves_exported_ref_and_accepts_new_trace(self):
+        store = RolloutTraceStore.remote()
+        exported_ref = ray.put({"routes": [1, 2, 3]})
+        try:
+            ray.get(
+                store.insert.remote(
+                    "a",
+                    "old",
+                    TokenizedSegment(
+                        text="old",
+                        token_ids=[1],
+                        expert_key=exported_ref,
+                    ),
+                )
+            )
+
+            emptied = ray.get(store.empty_sessions.remote(["a", "missing", "a"]))
+
+            self.assertEqual(emptied, ["a"])
+            self.assertEqual(ray.get(store.list_sessions.remote()), ["a"])
+            self.assertEqual(ray.get(store.keys.remote("a")), [])
+            self.assertEqual(ray.get(exported_ref), {"routes": [1, 2, 3]})
+            ray.get(store.insert.remote("a", "new", {"value": 2}))
+            self.assertEqual(ray.get(store.keys.remote("a")), ["new"])
+        finally:
+            ray.kill(store)
+
     def test_release_existing_sessions_handles_empty_input_and_missing_store(self):
         with patch("xtuner.v1.rl.rollout.trace_store.get_existing_store") as get_store:
             self.assertEqual(asyncio.run(release_existing_sessions([])), set())
@@ -127,14 +181,6 @@ class TestRolloutTraceStore(unittest.TestCase):
             return_value=None,
         ):
             self.assertEqual(asyncio.run(release_existing_sessions(["missing"])), set())
-
-    def test_free_ray_refs_recurses_into_nested_containers(self):
-        object_ref = ray.put({"payload": [1, 2, 3]})
-        with patch.object(ray.internal, "free") as free:
-            _free_ray_refs({"outer": [({"inner": object_ref},)]})
-
-        free.assert_called_once_with([object_ref], local_only=False)
-
 
 class TestExportPartialTrainingTrace(unittest.TestCase):
     """export_partial_training_trace 对 session trie 的部分导出行为。"""
@@ -162,7 +208,8 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
                 store.insert.remote(
                     "s",
                     "hello ",
-                    TokenizedSegment(text="hello ", token_ids=[1, 2], labels=[-100, -100], logprobs=[0.0, 0.1]),
+                    TokenizedSegment(text="hello ", token_ids=[1, 2], labels=[-100, -100], logprobs=[0.0, 0.1],
+                                     model_step=0),
                 )
             )
             ray.get(
@@ -170,7 +217,7 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
                     "s",
                     "hello world",
                     TokenizedSegment(text="world", token_ids=[3, 4], labels=[6, 7], logprobs=[0.2, 0.3],
-                                     tool_call_count=2),
+                                     tool_call_count=2, model_step=0),
                 )
             )
 
@@ -184,6 +231,7 @@ class TestExportPartialTrainingTrace(unittest.TestCase):
             # 首个节点是会话 prompt 段,其余是连续响应后缀
             self.assertEqual(trace["prompt_ids"], [1, 2])
             self.assertEqual(trace["response_ids"], [3, 4])
+            self.assertEqual(trace["response_model_steps"], [0, 0])
         finally:
             ray.kill(store)
 
