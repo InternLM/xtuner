@@ -95,18 +95,21 @@ def _validate_rubrics(raw_rubrics: Any, total_weight: Any) -> list[dict[str, Any
 
 
 def _question_text(messages: list[dict[str, Any]]) -> str:
-    texts: list[str] = []
+    # 只取首个 user 消息的文本。agentic RL 的多轮轨迹会把工具输出、观察结果等
+    # 追加为后续 user/observation 消息，全部拼接会把轨迹内容污染进 judge 的
+    # 判分上下文；首个 user 消息才是原始任务。reasoning RL 单轮场景行为不变。
     for message in messages:
         if message.get("role") != "user":
             continue
         content = message.get("content")
         if isinstance(content, str):
-            texts.append(content)
-        elif isinstance(content, list):
-            texts.extend(
+            return content
+        if isinstance(content, list):
+            return "\n".join(
                 part["text"] for part in content if part.get("type") == "text" and isinstance(part.get("text"), str)
             )
-    return "\n".join(texts)
+        return ""
+    return ""
 
 
 def _message_image_sources(messages: list[dict[str, Any]]) -> list[str]:
@@ -209,19 +212,23 @@ def _dump_judge_failure(
     return dump_path
 
 
-def _parse_results(content: str, rubrics: list[dict[str, Any]], response: str) -> list[dict[str, Any]]:
+def _try_parse_top_level(content: str) -> dict[str, Any] | None:
     # strict=False 放宽字符串内控制字符：实测 judge 引用回复中的 LaTeX 时会输出
     # 字面 \x08 转义残留（\boldsymbol -> \x08oldsymbol），严格模式整份输出无法解析；
     # 放宽后证据无法逐字匹配回复，仍由 met 证据校验 fail-closed 为 unmet。
-    decoder = json.JSONDecoder(strict=False)
-    parsed: dict[str, Any] | None = None
     try:
         top_level = json.loads(content, strict=False)
     except json.JSONDecodeError:
-        pass
-    else:
-        if isinstance(top_level, list):
-            parsed = {"results": top_level}
+        return None
+    if isinstance(top_level, list):
+        return {"results": top_level}
+    if isinstance(top_level, dict) and isinstance(top_level.get("results"), list):
+        return top_level
+    return None
+
+
+def _try_parse_embedded_object(content: str) -> dict[str, Any] | None:
+    decoder = json.JSONDecoder(strict=False)
     for index, char in enumerate(content):
         if char != "{":
             continue
@@ -230,37 +237,54 @@ def _parse_results(content: str, rubrics: list[dict[str, Any]], response: str) -
         except json.JSONDecodeError:
             continue
         if isinstance(candidate, dict) and "results" in candidate:
-            parsed = candidate
-            break
+            return candidate
+    return None
+
+
+def _try_repair_missing_prefix(content: str) -> dict[str, Any] | None:
+    # 长输入下实测会丢失 '{"results"' 标记的头部若干字符（甚至成对的外层花括号
+    # 首尾各缺一个）。只认第一个匹配的截断点：对同一截断点依次尝试原样与补
+    # 结尾 "}" 修复；raw_decode 允许尾随字符，故两式解析结果不会冲突。
+    decoder = json.JSONDecoder(strict=False)
     stripped = content.lstrip()
     marker = '{"results"'
-    if parsed is None:
-        for offset in range(1, len(marker)):
-            if not stripped.startswith(marker[offset:]):
-                continue
-            # 长输入下实测还会缺失成对的外层花括号（"results": [...] 首尾各缺一个），
-            # 前缀修复时同时尝试补结尾的 }。
-            for suffix in ("", "}"):
-                try:
-                    candidate, _ = decoder.raw_decode(marker[:offset] + stripped + suffix)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(candidate, dict) and isinstance(candidate.get("results"), list):
-                    parsed = candidate
-                break
-            break
-    if parsed is None:
-        # 长输入下模型还可能在裸数组前输出垃圾前缀（实测出现 ":\n[...]"）；
-        # 从首个 [ 起按完整裸数组解析，之后仍执行全部严格校验。
-        bracket = content.find("[")
-        if bracket != -1:
+    for offset in range(1, len(marker)):
+        if not stripped.startswith(marker[offset:]):
+            continue
+        for suffix in ("", "}"):
             try:
-                candidate, _ = decoder.raw_decode(content[bracket:])
+                candidate, _ = decoder.raw_decode(marker[:offset] + stripped + suffix)
             except json.JSONDecodeError:
-                pass
-            else:
-                if isinstance(candidate, list):
-                    parsed = {"results": candidate}
+                continue
+            if isinstance(candidate, dict) and isinstance(candidate.get("results"), list):
+                return candidate
+        return None
+    return None
+
+
+def _try_parse_bare_array(content: str) -> dict[str, Any] | None:
+    # 长输入下模型还可能在裸数组前输出垃圾前缀（实测出现 ":\n[...]"）；
+    # 从首个 [ 起按完整裸数组解析，之后仍执行全部严格校验。
+    decoder = json.JSONDecoder(strict=False)
+    bracket = content.find("[")
+    if bracket == -1:
+        return None
+    try:
+        candidate, _ = decoder.raw_decode(content[bracket:])
+    except json.JSONDecodeError:
+        return None
+    if isinstance(candidate, list):
+        return {"results": candidate}
+    return None
+
+
+def _parse_results(content: str, rubrics: list[dict[str, Any]], response: str) -> list[dict[str, Any]]:
+    parsed = (
+        _try_parse_top_level(content)
+        or _try_parse_embedded_object(content)
+        or _try_repair_missing_prefix(content)
+        or _try_parse_bare_array(content)
+    )
     if parsed is None or not isinstance(parsed.get("results"), list):
         raise _JudgeModelOutputError(
             f"Judge output must contain a JSON object with a results list; content prefix: {content[:200]!r}"
@@ -386,6 +410,8 @@ class RubricJudger(Judger):
         max_retries: int = 2,
         retry_backoff: float = 1.0,
         max_tokens: int = 4096,
+        max_concurrent_requests: int = 16,
+        chat_template_kwargs: dict[str, Any] | None = None,
         transport: RubricTransport | None = None,
     ) -> None:
         super().__init__(judger_name=judger_name)
@@ -393,13 +419,24 @@ class RubricJudger(Judger):
             raise ValueError("RubricJudger requires endpoint and model.")
         if request_timeout <= 0 or retry_backoff < 0 or max_retries < 0 or max_tokens <= 0:
             raise ValueError("Invalid RubricJudger timeout, retry, or max_tokens configuration.")
+        if max_concurrent_requests < 1:
+            raise ValueError("RubricJudger max_concurrent_requests must be >= 1.")
         self.endpoint = endpoint
         self.model = model
         self.request_timeout = request_timeout
         self.max_retries = max_retries
         self.retry_backoff = retry_backoff
         self.max_tokens = max_tokens
+        self.max_concurrent_requests = max_concurrent_requests
+        # chat_template_kwargs 面向 GLM 系 judge 服务（控制思考开销）；默认 None 表示
+        # 沿用 GLM 值，传 {} 可整体关闭，传其他 dict 覆盖，便于接入非 GLM judge。
+        self.chat_template_kwargs = (
+            {"reasoning_effort": "low", "clear_thinking": False}
+            if chat_template_kwargs is None
+            else chat_template_kwargs
+        )
         self._transport = transport
+        self._semaphore: asyncio.Semaphore | None = None
 
     def preprocess(self, rollout_state: RolloutState) -> dict[str, Any]:
         extra = rollout_state.extra_fields or {}
@@ -419,14 +456,23 @@ class RubricJudger(Judger):
 
     async def judge_payload(self, payload: JudgerPayloadBatch) -> JudgerOutputBatch:
         if isinstance(payload, list):
-            return list(await asyncio.gather(*(self._score(item) for item in payload)))
+            # 惰性创建信号量：batch 并发打向同一 judge 端点需要上限，避免大 batch
+            # 打满服务端；信号量必须与消费它的事件循环同生命周期，故不在 __init__ 建。
+            if self._semaphore is None:
+                self._semaphore = asyncio.Semaphore(self.max_concurrent_requests)
+            return list(await asyncio.gather(*(self._score_bounded(item) for item in payload)))
         return await self._score(payload)
+
+    async def _score_bounded(self, payload: dict[str, Any]) -> JudgerOutput:
+        assert self._semaphore is not None
+        async with self._semaphore:
+            return await self._score(payload)
 
     async def _score(self, payload: dict[str, Any]) -> JudgerOutput:
         if payload.get("response") is None:
             raise ValueError("Rubric judging requires a detokenized response.")
         rubrics = cast(list[dict[str, Any]], payload["rubrics"])
-        request = self._build_request(payload, rubrics)
+        request = await self._build_request(payload, rubrics)
         last_error: Exception | None = None
         last_metadata: dict[str, Any] = {}
         last_body: dict[str, Any] | None = None
@@ -445,6 +491,8 @@ class RubricJudger(Judger):
                 invalid_evidence_count = sum("validation_error" in result for result in results)
                 return {
                     "score": score,
+                    # 与 score 同值；该键供 merge_outcome_and_process 等多分支融合消费，
+                    # 单分支路由场景属于冗余字段，仅为契约统一保留。
                     "process_score": score,
                     "rubric_results": results,
                     "judge_status": "ok_with_invalid_evidence" if invalid_evidence_count else "ok",
@@ -476,17 +524,18 @@ class RubricJudger(Judger):
             f"diagnostics={json.dumps(diagnostics, ensure_ascii=False, sort_keys=True)}; error={last_error}"
         ) from last_error
 
-    def _build_request(self, payload: dict[str, Any], rubrics: list[dict[str, Any]]) -> dict[str, Any]:
+    async def _build_request(self, payload: dict[str, Any], rubrics: list[dict[str, Any]]) -> dict[str, Any]:
         content: list[dict[str, Any]] = [
             {
                 "type": "text",
                 "text": "Original user question:\n" + (payload.get("question") or "[no question text]"),
             }
         ]
-        content.extend(
-            {"type": "image_url", "image_url": {"url": _image_data_uri(source)}}
-            for source in payload.get("image_sources", [])
+        # 图片读盘与 base64 编码放 worker 线程，避免阻塞 judge 所在的事件循环。
+        image_uris = await asyncio.gather(
+            *(asyncio.to_thread(_image_data_uri, source) for source in payload.get("image_sources", []))
         )
+        content.extend({"type": "image_url", "image_url": {"url": uri}} for uri in image_uris)
         content.append(
             {
                 "type": "text",
@@ -498,12 +547,11 @@ class RubricJudger(Judger):
                 ),
             }
         )
-        return {
+        request = {
             "model": self.model,
             "messages": [{"role": "system", "content": _SYSTEM_PROMPT}, {"role": "user", "content": content}],
             "temperature": 0.0,
             "max_tokens": self.max_tokens,
-            "chat_template_kwargs": {"reasoning_effort": "low", "clear_thinking": False},
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
@@ -539,6 +587,9 @@ class RubricJudger(Judger):
                 },
             },
         }
+        if self.chat_template_kwargs:
+            request["chat_template_kwargs"] = self.chat_template_kwargs
+        return request
 
     async def _request(self, request: dict[str, Any]) -> dict[str, Any]:
         if self._transport is not None:
@@ -566,6 +617,9 @@ class RubricJudgerConfig(JudgerConfig):
     retry_backoff: float = Field(default=1.0, ge=0)
     max_tokens: int = Field(default=4096, gt=0)
     request_timeout: float = Field(default=120.0, gt=0)
+    max_concurrent_requests: int = Field(default=16, ge=1)
+    # GLM judge 的思考控制参数；默认 None 沿用 GLM 值，传 {} 关闭，传 dict 覆盖。
+    chat_template_kwargs: dict[str, Any] | None = None
 
     def build_local(self) -> RubricJudger:
         return RubricJudger(
@@ -576,4 +630,6 @@ class RubricJudgerConfig(JudgerConfig):
             max_retries=self.max_retries,
             retry_backoff=self.retry_backoff,
             max_tokens=self.max_tokens,
+            max_concurrent_requests=self.max_concurrent_requests,
+            chat_template_kwargs=self.chat_template_kwargs,
         )

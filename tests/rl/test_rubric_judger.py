@@ -21,6 +21,9 @@ TestRubricScoring
     test_prompt_and_schema_cap_evidence_length
     test_composed_real_outcome_and_fake_process
     test_remote_contract_preserves_sample_rubrics
+    test_question_uses_first_user_message
+    test_batch_respects_concurrency_limit
+    test_chat_template_kwargs_configurable
 TestRubricInputValidation
     test_invalid_rubrics_fail_before_request
     test_total_weight_mismatch_and_missing_visual_image
@@ -455,6 +458,73 @@ class TestRubricScoring(RubricTestCase):
         self.assertIn('"local_id": "a1"', rubric_text)
         self.assertIn('"local_id": "a2"', rubric_text)
         return _body(_results())
+
+    def test_question_uses_first_user_message(self):
+        # 验证 agentic 多轮轨迹下判分上下文只取首个 user 消息，后续 user 角色的
+        # 工具输出/观察结果不污染 judge 输入；reasoning RL 单轮行为不变。
+        requests = []
+
+        async def transport(request):
+            requests.append(request)
+            return _body(_results())
+
+        state = self.state.model_copy(deep=True)
+        state.message = [
+            {"role": "user", "content": "Read the PDF and answer: what is the ratio?"},
+            {"role": "assistant", "content": "<tool_call>get_page_text ...</tool_call>"},
+            {"role": "user", "content": "<tool_response>page-1 text ...</tool_response>"},
+            {"role": "assistant", "content": "The left ratio is 2/9 and the right ratio is 1/4."},
+        ]
+
+        judged = asyncio.run(self._judger(transport, max_retries=0).judge(state))
+
+        self.assertEqual(judged.reward["score"], 0.25)
+        question_text = requests[0]["messages"][1]["content"][0]["text"]
+        self.assertIn("Read the PDF and answer", question_text)
+        self.assertNotIn("tool_response", question_text)
+
+    def test_batch_respects_concurrency_limit(self):
+        # 验证批量判分的并发度不超过 max_concurrent_requests。
+        in_flight = 0
+        max_in_flight = 0
+
+        async def transport(request):
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            await asyncio.sleep(0.01)
+            in_flight -= 1
+            return _body(_results())
+
+        states = [self.state.model_copy(deep=True) for _ in range(4)]
+        judged = asyncio.run(self._judger(transport, max_concurrent_requests=2).batch_judge(states))
+
+        self.assertEqual([state.reward["score"] for state in judged], [0.25] * 4)
+        self.assertLessEqual(max_in_flight, 2)
+
+    def test_chat_template_kwargs_configurable(self):
+        # 验证 chat_template_kwargs 默认沿用 GLM 值、可覆盖、传 {} 时整体省略。
+        requests = []
+
+        async def transport(request):
+            requests.append(request)
+            return _body(_results())
+
+        asyncio.run(self._judger(transport).judge(self.state.model_copy(deep=True)))
+        self.assertEqual(
+            requests[-1]["chat_template_kwargs"],
+            {"reasoning_effort": "low", "clear_thinking": False},
+        )
+
+        asyncio.run(
+            self._judger(transport, chat_template_kwargs={"reasoning_effort": "high"}).judge(
+                self.state.model_copy(deep=True)
+            )
+        )
+        self.assertEqual(requests[-1]["chat_template_kwargs"], {"reasoning_effort": "high"})
+
+        asyncio.run(self._judger(transport, chat_template_kwargs={}).judge(self.state.model_copy(deep=True)))
+        self.assertNotIn("chat_template_kwargs", requests[-1])
 
 
 class TestRubricInputValidation(RubricTestCase):
