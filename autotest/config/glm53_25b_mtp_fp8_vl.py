@@ -32,6 +32,7 @@ model_cfg.text_config.mtp_config = MTPConfig(num_layers=4, share_weights=True, u
 model_cfg.text_config.num_nextn_predict_layers = 4
 model_cfg.text_config.attention.sparse_mla_backend = "flash_mla_cudnn"
 model_cfg.vision_config.attn_impl = "flash_attention"
+model_cfg.text_config.mhc.checkpoint_pre = True
 
 optim_cfg = AdamWConfig(lr=6e-05)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
