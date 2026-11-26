@@ -161,3 +161,108 @@ class TestSharedStoreEpoch:
         else:
             assert extra["weight_version"] != "bootstrap"
         assert agent._rl_store_needs_shared_commit is False
+
+    @pytest.mark.parametrize("failed_replica", [0, 1])
+    def test_full_refresh_failure_keeps_replicas_paused_and_retry_uses_fresh_epoch(
+        self, monkeypatch: pytest.MonkeyPatch, failed_replica: int
+    ) -> None:
+        """Exercise controller fan-out and transport retry with two receiver doubles.
+
+        Ray futures, collectives, and receiver loading are synchronous CPU doubles;
+        this checks control flow, not Gloo failure recovery or CUDA IPC lifetime.
+        """
+        from xtuner.v1.rl.trainer.controller import TrainingController
+        from xtuner.v1.train import rl_trainer
+
+        transports = [self.make_transport(monkeypatch) for _ in range(2)]
+        accepted: list[list[str]] = [[], []]
+        committed: list[str | None] = [None, None]
+        paused = [True, True]
+        attempt = [0]
+        epochs = ["first-refresh", "retry-refresh"]
+        resumed: list[tuple[str | None, ...]] = []
+
+        def broadcast(value: list[str | None], **kwargs: object) -> None:
+            value[0] = epochs[attempt[0]]
+
+        monkeypatch.setattr(module.dist, "broadcast_object_list", broadcast)
+
+        def receiver(replica: int):
+            def deliver(url: str, endpoint: str, body: dict, **kwargs: object) -> dict:
+                assert paused[replica]
+                if not body["finished"]:
+                    assert "weight_version" not in body
+                    accepted[replica].append(epochs[attempt[0]])
+                else:
+                    assert accepted[replica][-1] == body["weight_version"]
+                    if attempt[0] == 0 and replica == failed_replica:
+                        raise RuntimeError("injected final commit failure")
+                    committed[replica] = body["weight_version"]
+                return {}
+
+            return deliver
+
+        def remote_update(replica: int):
+            def update() -> object:
+                try:
+                    batches = [WeightUpdateBatch({"weight": torch.ones(1)}), WeightUpdateBatch({}, finished=True)]
+                    transports[replica].update(SimpleNamespace(iter_batch_groups=lambda: [batches]))
+                except RuntimeError as error:
+                    # Ray submits all workers before ray.get observes a failed future.
+                    return error
+                return None
+
+            return update
+
+        for replica, transport in enumerate(transports):
+            transport.post_json = receiver(replica)
+
+        def get(results: object, **kwargs: object) -> object:
+            if isinstance(results, list):
+                for result in results:
+                    if isinstance(result, Exception):
+                        raise result
+            return results
+
+        monkeypatch.setattr(rl_trainer.ray, "get", get)
+        controller = TrainingController.__new__(TrainingController)
+        controller.workers = [
+            SimpleNamespace(weight_update=SimpleNamespace(remote=remote_update(replica))) for replica in range(2)
+        ]
+        controller.onload = Mock()
+        controller.offload = Mock()
+
+        def offload() -> None:
+            paused[:] = [True, True]
+
+        def onload_kvcache() -> None:
+            # The resume boundary must only be reached after both receivers committed.
+            assert committed == [epochs[attempt[0]]] * 2
+            resumed.append(tuple(committed))
+            paused[:] = [False, False]
+
+        trainer = rl_trainer.RLColocateTrainer.__new__(rl_trainer.RLColocateTrainer)
+        trainer.logger = Mock()
+        trainer.train_controller = controller
+        trainer._rollout_config = SimpleNamespace(weight_transport_type="ipc")
+        trainer.rollout_controller = SimpleNamespace(
+            offload=SimpleNamespace(remote=offload),
+            onload_weights=SimpleNamespace(remote=Mock()),
+            onload_kvcache=SimpleNamespace(remote=onload_kvcache),
+        )
+        with pytest.raises(RuntimeError, match="injected final commit failure"):
+            trainer._sync_weights_from_train_workers()
+        assert accepted == [[epochs[0]], [epochs[0]]]
+        assert committed[failed_replica] is None
+        assert committed[1 - failed_replica] == epochs[0]
+        assert paused == [True, True] and not resumed
+        assert all(transport._shared_store_epoch is None for transport in transports)
+
+        attempt[0] = 1
+        trainer._sync_weights_from_train_workers()
+        assert epochs[0] != epochs[1]
+        assert accepted == [epochs.copy(), epochs.copy()]
+        assert committed == [epochs[1], epochs[1]]
+        assert resumed == [(epochs[1], epochs[1])]
+        assert paused == [False, False]
+        assert all(transport._shared_store_epoch is None for transport in transports)
