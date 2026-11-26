@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,17 +11,21 @@ import torch
 from recipe.on_policy_distillation.build_teacher_server_commands import (
     build_teacher_launch_server_commands,
 )
+from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
+from xtuner.v1.model import Qwen3Dense4BConfig
 from xtuner.v1.rl.distillation import (
     DistillationConfig,
     DistillationTrainerAdapter,
     RolloutTeacherClient,
     RolloutTeacherConfig,
     TeacherTargetConfig,
+    TrainTeacherConfig,
     TrainTeacherManager,
-    TrainTeacherOutputs,
+    TrainTeacherManagerConfig,
     TrainTeacherTimings,
 )
+from xtuner.v1.rl.distillation import train_teacher_manager as train_teacher_manager_module
 from xtuner.v1.rl.loss import DistillationLossConfig, DistillationLossKwargs
 from xtuner.v1.train.rl_trainer import BaseRLTrainer, BaseRLTrainerConfig
 
@@ -234,12 +239,141 @@ distillation_config = DistillationConfig(
         self.assertIs(trainer.agent_loop_manager, built_manager)
         self.assertIsNone(manager_config.build.call_args.kwargs["rollout_teacher_scorer_config"])
 
+    def test_train_teacher_prefetch_is_projected_to_manager_config(self) -> None:
+        loss_config = DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"})
+        distillation_config = DistillationConfig(
+            loss_config=loss_config,
+            teachers=[
+                TrainTeacherConfig(
+                    name="teacher",
+                    model_path="/models/teacher",
+                    model_cfg=Qwen3Dense4BConfig(),
+                    residency="disk",
+                )
+            ],
+            data_source_teacher_map={"math": "teacher"},
+            train_teacher_prefetch=False,
+        )
+
+        manager_config = distillation_config.train_teacher_manager_config
+
+        self.assertIsNotNone(manager_config)
+        assert manager_config is not None
+        self.assertFalse(manager_config.prefetch)
+
+    def test_disk_teacher_ignores_fsdp_cpu_offload(self) -> None:
+        teacher_config = TrainTeacherConfig(
+            name="teacher",
+            model_path="/models/teacher",
+            model_cfg=Qwen3Dense4BConfig(),
+            fsdp_cfg=FSDPConfig(cpu_offload=True),
+            residency="disk",
+        )
+        manager = TrainTeacherManager.__new__(TrainTeacherManager)
+        manager._teacher_configs = [teacher_config]
+        manager._teacher_process_groups = [[]]
+
+        with patch(
+            "xtuner.v1.rl.distillation.train_teacher_manager.build_frozen_model",
+            return_value=MagicMock(),
+        ) as build:
+            manager._build_disk_teacher(0, "cpu")
+
+        self.assertTrue(teacher_config.fsdp_cfg.cpu_offload)
+        self.assertFalse(build.call_args.args[2].cpu_offload)
+        self.assertEqual(build.call_args.kwargs, {"target_device": "cpu", "load_device": "cpu"})
+
 
 class TestTrainTeacherTimings(unittest.TestCase):
+    def test_process_group_registry_is_hidden_behind_guarded_seam(self) -> None:
+        first_group = object()
+        second_group = object()
+        world = SimpleNamespace(pg_map={first_group: object(), second_group: object()})
+
+        with (
+            patch.object(train_teacher_manager_module.dist, "is_available", return_value=True),
+            patch.object(train_teacher_manager_module.dist, "is_initialized", return_value=True),
+            patch.object(train_teacher_manager_module, "_DIST_WORLD", world),
+        ):
+            groups = train_teacher_manager_module._registered_process_groups()
+
+        self.assertEqual(groups, (first_group, second_group))
+
+    def test_process_group_registry_reports_incompatible_pytorch(self) -> None:
+        with (
+            patch.object(train_teacher_manager_module.dist, "is_available", return_value=True),
+            patch.object(train_teacher_manager_module.dist, "is_initialized", return_value=True),
+            patch.object(train_teacher_manager_module, "_DIST_WORLD", None),
+            self.assertRaisesRegex(RuntimeError, "process-group registry.*unavailable"),
+        ):
+            train_teacher_manager_module._registered_process_groups()
+
+    def test_disk_teacher_is_not_built_during_manager_init(self) -> None:
+        config = TrainTeacherManagerConfig(
+            teachers=[
+                TrainTeacherConfig(
+                    name="teacher",
+                    model_path="/models/teacher",
+                    model_cfg=Qwen3Dense4BConfig(),
+                    residency="disk",
+                )
+            ],
+            data_source_teacher_map={"math": "teacher"},
+            target_config=TeacherTargetConfig(mode="sampled_token"),
+        )
+
+        with patch("xtuner.v1.rl.distillation.train_teacher_manager.build_frozen_model") as build:
+            manager = TrainTeacherManager(config, chunk_size=None)
+
+        self.assertEqual(manager._teachers, [None])
+        build.assert_not_called()
+
+    def test_disk_teacher_prefetch_can_be_disabled(self) -> None:
+        manager = TrainTeacherManager.__new__(TrainTeacherManager)
+        manager._teacher_configs = [SimpleNamespace(residency="disk")]
+        manager._prefetch_enabled = False
+        manager._prefetch_executor = MagicMock()
+        manager._prefetch_future = None
+
+        manager._start_teacher_prefetch(0)
+
+        manager._prefetch_executor.submit.assert_not_called()
+        self.assertIsNone(manager._prefetch_future)
+
+    def test_prefetch_prepares_cpu_tensors_for_main_thread_model_shell(self) -> None:
+        manager = TrainTeacherManager.__new__(TrainTeacherManager)
+        teacher_config = SimpleNamespace(
+            residency="disk", model_cfg=MagicMock(), model_path="/model", fsdp_cfg=None
+        )
+        manager._teacher_configs = [teacher_config]
+        manager._teacher_names = ["teacher"]
+        manager._teacher_process_groups = [[]]
+        manager._prefetch_enabled = True
+        manager._prefetch_executor = MagicMock()
+        manager._prefetch_future = None
+        model = MagicMock()
+
+        with (
+            patch(
+                "xtuner.v1.rl.distillation.train_teacher_manager.build_frozen_model_shell",
+                return_value=model,
+            ) as build_shell,
+            patch("xtuner.v1.rl.distillation.train_teacher_manager.prepare_frozen_model") as prepare,
+        ):
+            manager._start_teacher_prefetch(0)
+
+        build_shell.assert_called_once_with(teacher_config.model_cfg, None)
+        manager._prefetch_executor.submit.assert_called_once_with(prepare, model, teacher_config.model_path)
+
     def test_lifecycle_timings_are_recorded_for_every_teacher(self) -> None:
         manager = TrainTeacherManager.__new__(TrainTeacherManager)
+        manager._teacher_configs = [
+            SimpleNamespace(name="teacher", residency="cpu"),
+            SimpleNamespace(name="teacher", residency="cpu"),
+        ]
         first_teacher = MagicMock()
         second_teacher = MagicMock()
+        manager._teachers = [first_teacher, second_teacher]
         timings = TrainTeacherTimings()
 
         with (
@@ -250,9 +384,9 @@ class TestTrainTeacherTimings(unittest.TestCase):
             patch.object(manager, "_synchronize_device"),
             patch.object(manager, "_offload_to_cpu"),
         ):
-            with manager._teacher_on_device(first_teacher, timings, "teacher_a"):
+            with manager._teacher_on_device(0, timings, "teacher_a"):
                 pass
-            with manager._teacher_on_device(second_teacher, timings, "teacher_b"):
+            with manager._teacher_on_device(1, timings, "teacher_b"):
                 pass
 
         self.assertEqual(
@@ -264,44 +398,140 @@ class TestTrainTeacherTimings(unittest.TestCase):
         )
         self.assertEqual((timings.compute, timings.onload, timings.offload), (7.0, 5.0, 9.0))
 
-    def test_compute_teacher_outputs_writes_teacher_outputs_to_loss_contexts(self) -> None:
+    def test_disk_teacher_is_rebuilt_and_dropped_for_each_use(self) -> None:
         manager = TrainTeacherManager.__new__(TrainTeacherManager)
-        teacher_indices = torch.tensor([[0, 1]], dtype=torch.long)
-        shifted_labels = torch.tensor([[-100, 10]], dtype=torch.long)
-        teacher_logprobs = [torch.tensor([[-0.1, -0.2]])]
-        target_token_ids = [torch.tensor([[[1, 2], [3, 4]]], dtype=torch.long)]
-        timings = TrainTeacherTimings()
-        seq_ctx = MagicMock()
-        loss_ctx = SimpleNamespace(
-            loss_kwargs=SimpleNamespace(
-                teacher_indices=teacher_indices,
-                shifted_labels=shifted_labels,
+        manager._teacher_configs = [
+            SimpleNamespace(
+                name="teacher", residency="disk", model_cfg=MagicMock(), model_path="/models/teacher", fsdp_cfg=None
             )
-        )
+        ]
+        manager._teachers = [None]
+        manager._teacher_process_groups = [[]]
+        manager._prefetch_executor = None
+        manager._prefetch_future = None
+        manager._prefetch_teacher_index = None
+        first_teacher = MagicMock()
+        second_teacher = MagicMock()
 
         with (
+            patch(
+                "xtuner.v1.rl.distillation.train_teacher_manager.build_frozen_model",
+                side_effect=[first_teacher, second_teacher],
+            ) as build,
+            patch.object(manager, "_synchronize_device"),
+            patch.object(manager, "_empty_device_cache") as empty_cache,
+        ):
+            with manager._teacher_on_device(0, TrainTeacherTimings(), "teacher") as teacher:
+                self.assertIs(teacher, first_teacher)
+            self.assertIsNone(manager._teachers[0])
+            with manager._teacher_on_device(0, TrainTeacherTimings(), "teacher") as teacher:
+                self.assertIs(teacher, second_teacher)
+            self.assertIsNone(manager._teachers[0])
+
+        self.assertEqual(build.call_count, 2)
+        self.assertEqual(empty_cache.call_count, 2)
+        first_teacher.to_device.assert_called_once()
+        second_teacher.to_device.assert_called_once()
+
+    def test_disk_teacher_destroys_only_process_groups_created_by_its_build(self) -> None:
+        manager = TrainTeacherManager.__new__(TrainTeacherManager)
+        manager._teacher_configs = [
+            SimpleNamespace(
+                name="teacher", residency="disk", model_cfg=MagicMock(), model_path="/models/teacher", fsdp_cfg=None
+            )
+        ]
+        manager._teachers = [None]
+        manager._teacher_process_groups = [[]]
+        manager._prefetch_executor = None
+        manager._prefetch_future = None
+        manager._prefetch_teacher_index = None
+        existing_group = object()
+        teacher_group = object()
+
+        with (
+            patch(
+                "xtuner.v1.rl.distillation.train_teacher_manager.build_frozen_model",
+                return_value=MagicMock(),
+            ),
             patch.object(
                 manager,
-                "compute_logprobs",
-                return_value=TrainTeacherOutputs(
-                    teacher_logprobs=teacher_logprobs,
-                    target_token_ids=target_token_ids,
-                    timings=timings,
-                ),
-            ) as compute_logprobs,
-            patch.object(manager, "offload_all_to_cpu") as offload_all_to_cpu,
+                "_snapshot_process_groups",
+                side_effect=[(existing_group,), (existing_group, teacher_group)],
+            ),
+            patch.object(manager, "_destroy_process_groups") as destroy,
+            patch.object(manager, "_synchronize_device"),
+            patch.object(manager, "_empty_device_cache"),
         ):
-            result = manager.compute_teacher_outputs([seq_ctx], [loss_ctx])
+            with manager._teacher_on_device(0, TrainTeacherTimings(), "teacher"):
+                pass
 
-        self.assertIs(result, timings)
-        compute_logprobs.assert_called_once_with(
-            seq_ctx_list=[seq_ctx],
-            shifted_labels_list=[shifted_labels],
-            teacher_indices_list=[teacher_indices],
-        )
-        torch.testing.assert_close(loss_ctx.loss_kwargs.teacher_logprobs, teacher_logprobs[0])
-        torch.testing.assert_close(loss_ctx.loss_kwargs.target_token_ids, target_token_ids[0])
-        offload_all_to_cpu.assert_called_once_with()
+        destroy.assert_called_once_with([teacher_group])
+        self.assertEqual(manager._teacher_process_groups, [[]])
+
+    def test_disk_teacher_consumes_cpu_prefetch_and_starts_next(self) -> None:
+        manager = TrainTeacherManager.__new__(TrainTeacherManager)
+        manager._teacher_configs = [
+            SimpleNamespace(
+                name="teacher", residency="disk", model_cfg=MagicMock(), model_path="/models/teacher", fsdp_cfg=None
+            )
+        ]
+        manager._teachers = [None]
+        manager._teacher_names = ["teacher"]
+        manager._teacher_process_groups = [[]]
+        prefetched_teacher = MagicMock()
+        future: Future[tuple[MagicMock, MagicMock]] = Future()
+        future.set_result((MagicMock(), MagicMock()))
+        manager._prefetch_executor = MagicMock()
+        manager._prefetch_future = future
+        manager._prefetch_teacher_index = 0
+
+        with (
+            patch("xtuner.v1.rl.distillation.train_teacher_manager.build_frozen_model") as build,
+            patch(
+                "xtuner.v1.rl.distillation.train_teacher_manager.materialize_frozen_model",
+                return_value=prefetched_teacher,
+            ),
+            patch.object(manager, "_start_teacher_prefetch") as start_prefetch,
+            patch.object(manager, "_synchronize_device"),
+            patch.object(manager, "_empty_device_cache"),
+        ):
+            with manager._teacher_on_device(0, TrainTeacherTimings(), "teacher") as teacher:
+                self.assertIs(teacher, prefetched_teacher)
+                start_prefetch.assert_called_once_with(1)
+
+        build.assert_not_called()
+        prefetched_teacher.to_device.assert_called_once()
+        self.assertIsNone(manager._teachers[0])
+        self.assertIsNone(manager._prefetch_future)
+        self.assertIsNone(manager._prefetch_teacher_index)
+
+    def test_disk_teacher_is_dropped_when_compute_fails(self) -> None:
+        manager = TrainTeacherManager.__new__(TrainTeacherManager)
+        manager._teacher_configs = [
+            SimpleNamespace(
+                name="teacher", residency="disk", model_cfg=MagicMock(), model_path="/models/teacher", fsdp_cfg=None
+            )
+        ]
+        manager._teachers = [None]
+        manager._teacher_process_groups = [[]]
+        manager._prefetch_executor = None
+        manager._prefetch_future = None
+        manager._prefetch_teacher_index = None
+
+        with (
+            patch(
+                "xtuner.v1.rl.distillation.train_teacher_manager.build_frozen_model",
+                return_value=MagicMock(),
+            ),
+            patch.object(manager, "_synchronize_device"),
+            patch.object(manager, "_empty_device_cache") as empty_cache,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "forward failed"):
+                with manager._teacher_on_device(0, TrainTeacherTimings(), "teacher"):
+                    raise RuntimeError("forward failed")
+
+        self.assertIsNone(manager._teachers[0])
+        empty_cache.assert_called_once_with()
 
     def test_distillation_loss_kwargs_carry_teacher_indices(self) -> None:
         loss_cfg = DistillationLossConfig(policy_loss_cfg={"loss_type": "vanilla"})

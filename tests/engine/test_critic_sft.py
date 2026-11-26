@@ -25,6 +25,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
@@ -144,6 +145,25 @@ class TestCriticCustomHFKeyMapping(unittest.TestCase):
         self.assertNotIn("lm_head.weight", unloaded_keys)
         self.assertNotIn("critic.weight", missing_keys)
         torch.testing.assert_close(model.lm_head.weight, expected)
+
+    def test_prepared_cpu_load_matches_direct_cpu_load(self):
+        direct = _MappedCriticModel(_MappedCriticConfig())
+        staged = _MappedCriticModel(_MappedCriticConfig())
+        checkpoint = {
+            "critic.weight": torch.tensor([[1.0, 2.0, 3.0, 4.0]], dtype=torch.float32),
+            "backbone.weight": torch.arange(16, dtype=torch.float32).reshape(4, 4),
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _write_mapped_ckpt(tmpdir, checkpoint)
+            direct_result = direct.from_hf(tmpdir, strict=True, load_device="cpu")
+            prepared = staged.prepare_hf(tmpdir, strict=True)
+            staged_result = staged.materialize_prepared_hf(prepared, device="cpu")
+
+        self.assertEqual(direct_result, staged_result)
+        self.assertEqual(direct.state_dict().keys(), staged.state_dict().keys())
+        for name, direct_tensor in direct.state_dict().items():
+            torch.testing.assert_close(staged.state_dict()[name], direct_tensor)
 
     def test_actor_to_critic_strict_load_initializes_head(self):
         # actor checkpoint strict 加载进 critic:缺失的 value head 被随机初始化,backbone 正常加载,key 对账正确

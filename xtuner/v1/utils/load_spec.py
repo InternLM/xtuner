@@ -118,6 +118,7 @@ class HFLoadPlan(BaseModel):
     target_shape: tuple[int, ...]
     copy_regions: list[LoadCopyRegion] = Field(default_factory=list)
     zero_unwritten_target: bool = False
+    source_is_canonical: bool = False
 
     @torch.no_grad()
     def load_into(
@@ -144,11 +145,74 @@ class HFLoadPlan(BaseModel):
         if not self.copy_regions:
             return
 
-        canonical_tensor = self._canonicalize_source(checkpoint_tensors, canonicalize)
+        if self.source_is_canonical:
+            assert len(checkpoint_tensors) == 1, (
+                f"Prepared canonical source for {self.name} must contain one tensor, got {len(checkpoint_tensors)}"
+            )
+            canonical_tensor = checkpoint_tensors[0]
+        else:
+            canonical_tensor = self._canonicalize_source(checkpoint_tensors, canonicalize)
         for region in self.copy_regions:
             source = self._narrow_region(canonical_tensor, region.source_offsets, region.sizes)
             target = self._narrow_region(local_tensor, region.target_offsets, region.sizes)
             target.copy_(source)
+
+    def localize_checkpoint(
+        self,
+        checkpoint_tensors: list[torch.Tensor],
+        canonicalize: Callable[[str, torch.Tensor], torch.Tensor],
+    ) -> tuple["HFLoadPlan", list[torch.Tensor]]:
+        """Canonicalize and crop a checkpoint tensor to this rank's source
+        regions.
+
+        CPU prefetch keeps only the source data needed by this rank.  The
+        returned plan uses offsets relative to the cropped canonical tensor, so
+        ``load_into`` can materialize it without reconstructing the full HF
+        tensor later.
+        """
+        if not self.copy_regions:
+            return (
+                self.model_copy(
+                    update={
+                        "hf_keys": [],
+                        "fused_dim": None,
+                        "canonical_source_shape": None,
+                        "source_is_canonical": True,
+                    }
+                ),
+                [],
+            )
+
+        canonical_tensor = self._canonicalize_source(checkpoint_tensors, canonicalize)
+        ndim = canonical_tensor.dim()
+        source_min = [min(region.source_offsets[dim] for region in self.copy_regions) for dim in range(ndim)]
+        source_max = [
+            max(region.source_offsets[dim] + region.sizes[dim] for region in self.copy_regions) for dim in range(ndim)
+        ]
+        cropped = canonical_tensor
+        for dim, (start, end) in enumerate(zip(source_min, source_max, strict=True)):
+            cropped = cropped.narrow(dim, start, end - start)
+        cropped = cropped.contiguous()
+        localized_regions = [
+            region.model_copy(
+                update={
+                    "source_offsets": tuple(
+                        offset - minimum for offset, minimum in zip(region.source_offsets, source_min, strict=True)
+                    )
+                }
+            )
+            for region in self.copy_regions
+        ]
+        localized_plan = self.model_copy(
+            update={
+                "hf_keys": ["__prepared_canonical__"],
+                "fused_dim": None,
+                "canonical_source_shape": tuple(cropped.shape),
+                "copy_regions": localized_regions,
+                "source_is_canonical": True,
+            }
+        )
+        return localized_plan, [cropped]
 
     def _canonicalize_source(
         self,
