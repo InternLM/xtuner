@@ -523,18 +523,22 @@ def get_train_seq_ctx(
         mm_token_type_ids = _to_cpu_tensor(multimodal_train_info.get("mm_token_type_ids"), dtype=torch.long)
         if mm_token_type_ids is not None:
             expected_prompt_length = input_ids.size(-1) if prompt_length is None else prompt_length
-            if not 0 <= expected_prompt_length <= input_ids.size(-1) or mm_token_type_ids.shape != (
-                1,
-                expected_prompt_length,
-            ):
+            if mm_token_type_ids.shape == (1, expected_prompt_length):
+                # Prompt-only coverage: TrainBatch has already dropped the last input
+                # token; response inputs are text, so the response region stays 0.
+                seq_ctx.mm_token_type_ids = torch.nn.functional.pad(
+                    mm_token_type_ids, (0, input_ids.size(-1) - expected_prompt_length), value=0
+                )
+            elif mm_token_type_ids.shape == (1, input_ids.size(-1)):
+                # Full-sequence coverage: the producer (e.g. an agentic loop whose tool
+                # results carry images) already marked visual tokens in the response region.
+                seq_ctx.mm_token_type_ids = mm_token_type_ids
+            else:
                 raise ValueError(
                     f"mm_token_type_ids shape {tuple(mm_token_type_ids.shape)} does not match "
-                    f"training prompt shape (1, {expected_prompt_length})"
+                    f"training prompt shape (1, {expected_prompt_length}) or full sequence "
+                    f"shape (1, {input_ids.size(-1)})"
                 )
-            # TrainBatch has already dropped the last input token; response inputs are text.
-            seq_ctx.mm_token_type_ids = torch.nn.functional.pad(
-                mm_token_type_ids, (0, input_ids.size(-1) - expected_prompt_length), value=0
-            )
         num_img_tokens = multimodal_train_info.get("num_img_tokens")
         if num_img_tokens is not None:
             seq_ctx.num_img_tokens = [num_img_tokens]
