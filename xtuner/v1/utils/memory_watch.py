@@ -1,4 +1,4 @@
-"""Opt-in process and cgroup memory traces during SFT.
+"""Opt-in process and cgroup memory traces during training.
 
 Set XTUNER_MEMORY_WATCH_ENABLED=1 for per-rank and host-level JSONL traces in work_dir/memory. Set
 XTUNER_MEMORY_WATCH_INTERVAL to the sampling interval in seconds (default: 1).
@@ -530,7 +530,8 @@ def log_memory_event(tag: str, marker: str) -> None:
 
 @contextlib.contextmanager
 def monitor_rank_memory(work_dir: Path | str | None) -> Iterator[None]:
-    """Monitor rank memory during SFT when enabled through the environment.
+    """Monitor rank memory during training when enabled through the
+    environment.
 
     Write process records to ``memory/rank_<rank>.jsonl`` under the work
     directory. Only local rank zero writes cgroup and host node records to
