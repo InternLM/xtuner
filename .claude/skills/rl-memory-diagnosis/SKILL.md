@@ -13,20 +13,27 @@ driver process on the head node, which is where the ReplayBuffer/RolloutState he
 memory is separate; see "Worker-side memory". Event lines are always emitted on the `debug_mem`
 branch; the periodic JSONL needs `XTUNER_MEMORY_WATCH_ENABLED=1`.
 
-**Files** (paths relative to `$RUN`):
+**Files** (paths relative to `$RUN`, i.e. `$WORK_DIR` from `examples/v1/scripts/run_rl.sh`):
 
 ```text
-driver.log                        # [MemReport], steps, buffer counts
-lmdeploy.log
-nodes/0/ray/session_*/logs/       # python-core-driver-*.log (GC), raylet.out (store)
-memory/rank_unknown.jsonl         # periodic sampler (opt-in; RL driver has no RANK)
+training_log_*.txt                # [MemReport], steps, buffer counts (or <exp_dir>/logs/, driver.log)
+lmdeploy_log_*.txt
+ray_*/session_*/logs/             # python-core-driver-*.log (GC), raylet.out (store) (or nodes/0/ray/session_*/logs/)
+<exp_dir>/memory/rank_unknown.jsonl # periodic sampler under trainer.exp_dir (opt-in; RL driver has no RANK)
 mem_*/actor_memory.json           # per-actor RSS/GPU on the local node (XTUNER_RL_MEM_DIR)
+```
+
+Resolve the active run paths once (matches `run_rl.sh` layout, or `driver.log` / `nodes/0/ray/`):
+
+```bash
+DRIVER_LOG=$(ls -t "$RUN"/training_log_*.txt "$RUN"/driver.log 2>/dev/null | head -1)
+RAY_LOG_DIR=$(ls -td "$RUN"/ray_*/session_*/logs "$RUN"/nodes/0/ray/session_*/logs 2>/dev/null | head -1)
 ```
 
 ## Step 1: Hung or slow?
 
 ```bash
-tail -5 $RUN/driver.log            # last timestamp vs now
+tail -5 "$DRIVER_LOG"              # last timestamp vs now
 # driver pid alive? check the python process with huge RSS on the head node
 ```
 
@@ -38,7 +45,7 @@ tail -5 $RUN/driver.log            # last timestamp vs now
 
 ```bash
 awk '/core_worker.cc:454: Event stats/{ts=$1" "$2} /grpc_server.LocalGC - /{print ts" || "$0}' \
-    $RUN/nodes/0/ray/session_*/logs/python-core-driver-*.log | tail -10
+    "$RAY_LOG_DIR"/python-core-driver-*.log | tail -10
 ```
 
 | Pattern | Diagnosis |
@@ -53,8 +60,8 @@ awk '/core_worker.cc:454: Event stats/{ts=$1" "$2} /grpc_server.LocalGC - /{prin
 ## Step 3: Object store water level
 
 ```bash
-grep -a "object_store.cc:37" $RUN/nodes/0/ray/session_*/logs/raylet.out | tail -10
-grep -a "Allowing the Plasma store" $RUN/nodes/0/ray/session_*/logs/raylet.out   # capacity
+grep -a "object_store.cc:37" "$RAY_LOG_DIR"/raylet.out | tail -10
+grep -a "Allowing the Plasma store" "$RAY_LOG_DIR"/raylet.out   # capacity
 ```
 
 | Usage | Risk |
@@ -67,8 +74,9 @@ Default trigger: `plasma_store_usage_trigger_gc_threshold = 0.7`.
 
 ## Step 4: Driver process memory
 
-Two `[MemReport]` lines per train step, always on (driver only): after `take_train_batch`
-(`tag=agent_loop_manager`) and at step end (`tag=rl_trainer`).
+Two `[MemReport]` lines per train step, always on (driver only, `tag=rl_trainer`): after train batch
+retrieval (`take_train_batch_done train_step=N`; eval steps also emit `take_eval_batch_done train_step=N`)
+and at step end (`train_step=N`).
 
 ```text
 [MemReport][rl_trainer][pid=12345][train_step=3] rss=1.42GiB anon=1.11 shmem=0.05 file=0.26 swap=0.00 hwm=1.51
@@ -87,11 +95,11 @@ All values are GiB. `rss` carries the `GiB` suffix; the others are bare numbers 
 the original `mem_report`). `hwm` is cumulative — use it to confirm a past peak, not current usage.
 
 ```bash
-grep "\[MemReport\]" $RUN/driver.log | tail -10
+grep "\[MemReport\]" "$DRIVER_LOG" | tail -10
 
 # Optional periodic trace (start run with XTUNER_MEMORY_WATCH_ENABLED=1 XTUNER_MEMORY_WATCH_INTERVAL=30)
 jq -c 'select(.event=="periodic") | [.time_ns, .process.RssAnon, .process.VmRSS]' \
-    $RUN/memory/rank_unknown.jsonl | tail -20
+    "$RUN"/*/memory/rank_unknown.jsonl | tail -20
 
 # Fallback without instrumentation (head node only)
 cat /proc/<driver_pid>/status | grep -E "VmRSS|RssAnon|RssShmem|RssFile"
@@ -107,7 +115,8 @@ only written when `LOCAL_RANK=0`, which RL drivers normally do not set.
 | RssShmem | < 5 GB | 5–20 GB | > 40 GB |
 | VmRSS | < 20 GB | 20–80 GB | > 150 GB |
 
-Estimate GC time: `gc_seconds ≈ RssAnon_GB × 2.5` (~0.25 µs/token × ~150 B/token).
+Use `RssAnon` to track heap growth trends (`RssAnon` also includes native buffers not traversed by
+Python GC); rely on Step 2's measured `LocalGC` duration to judge GC severity.
 
 ## Worker-side memory (multi-node)
 
@@ -131,9 +140,9 @@ worker's step hook (e.g. `RoleWorker` step log); it always samples the *calling*
 ## Step 5: RolloutState retention (ABORTED inventory)
 
 ```bash
-grep -a "get_batch from buffer" $RUN/driver.log | grep -o "leftover_aborted=[0-9]*"
-grep -a "produce_batch done\|Start produce_batch" $RUN/driver.log | tail -10
-grep -a "batch_target=\|oversample_budget=" $RUN/driver.log | head -3
+grep -a "get_batch from buffer" "$DRIVER_LOG" | grep -o "leftover_aborted=[0-9]*"
+grep -a "produce_batch done\|Start produce_batch" "$DRIVER_LOG" | tail -10
+grep -a "batch_target=\|oversample_budget=" "$DRIVER_LOG" | head -3
 ```
 
 - Healthy: `leftover_aborted` bounded (< 2× batch_target), consumed next step.
@@ -156,8 +165,8 @@ bytes, while `gc.collect()` cost scales with container/reference edges in the pr
 resident tokens are billions of `list[int]`, each pressure-triggered GC burns minutes of GIL and
 releases nothing (data is normally referenced, not cyclic).
 
-1. **Enlarge the store** so usage never crosses 70%: `RAY_object_store_memory=128000000000` (check
-   /dev/shm headroom).
+1. **Enlarge the store** so usage never crosses 70%: pass `ray start ... --object-store-memory=128000000000`
+   when launching Ray nodes (check `/dev/shm` headroom and verify the effective cap in `raylet.out`).
 2. **Raise the trigger / slow the cadence**: `RAY_plasma_store_usage_trigger_gc_threshold=0.95`,
    `RAY_local_gc_min_interval_s=300`, `RAY_global_gc_min_interval_s=300` (spill-to-disk at ~0.9 is
    the backstop).

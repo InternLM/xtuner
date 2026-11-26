@@ -925,6 +925,7 @@ class BaseRLTrainer:
                 train_step=1,
                 model_step=0,
             )
+            log_memory_event(tag="rl_trainer", marker="take_eval_batch_done train_step=0")
             if XTUNER_DETERMINISTIC:
                 eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
                     eval_produce_result.rollout_states
@@ -1104,6 +1105,7 @@ class BaseRLTrainer:
                 train_step=train_step,
                 model_step=train_step,
             )
+            log_memory_event(tag="rl_trainer", marker=f"take_eval_batch_done train_step={train_step}")
             if XTUNER_DETERMINISTIC:
                 eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
                     eval_produce_result.rollout_states
@@ -1702,6 +1704,7 @@ class RLColocateTrainer(BaseRLTrainer):
                         await await_owned_operation(
                             asyncio.to_thread(self.rl_health_manager.set_rollout_resources_available, False)
                         )
+                    log_memory_event(tag="rl_trainer", marker=f"take_train_batch_done train_step={train_step}")
 
                     if XTUNER_DETERMINISTIC:
                         produce_result.rollout_states = sort_rollout_state_for_deterministic(
@@ -2048,6 +2051,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                             batch_size=self.train_batch_size,
                             train_step=train_step,
                         )
+                    if produce_result.rollout_states:
+                        log_memory_event(tag="rl_trainer", marker=f"take_train_batch_done train_step={train_step}")
                     if XTUNER_DETERMINISTIC:
                         produce_result.rollout_states = sort_rollout_state_for_deterministic(
                             produce_result.rollout_states

@@ -31,7 +31,6 @@ from xtuner.v1.rl.utils import (
     create_task,
 )
 from xtuner.v1.utils import get_logger
-from xtuner.v1.utils.memory_watch import log_memory_event
 
 from .sampler import Sampler
 
@@ -705,7 +704,6 @@ async def take_train_batch(
         batch_by_task=batch_by_task,
         leftover_counts=leftover_counts,
     )
-    log_memory_event(tag="agent_loop_manager", marker=f"take_train_batch_done train_step={current_train_step}")
     return build_produce_batch_result(
         task_runners=task_runners,
         task_batch_sizes=task_batch_sizes,

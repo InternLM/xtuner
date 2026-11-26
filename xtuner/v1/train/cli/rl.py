@@ -60,8 +60,8 @@ def main(
         cfg.trainer.work_dir = work_dir
     if num_workers is not None and hasattr(cfg.trainer, "resources"):
         cfg.trainer.resources.num_workers = num_workers
-    with monitor_rank_memory(cfg.trainer.work_dir):
-        trainer = cfg.trainer.build()
+    trainer = cfg.trainer.build()
+    with monitor_rank_memory(trainer.exp_dir):
         trainer.fit()
 
     if dist.is_initialized():
