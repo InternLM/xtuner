@@ -37,14 +37,16 @@ def _language_cfg(*, n_routed_experts: int):
     )
 
 
-def test_training_worker_keeps_ray_routes_and_padding_in_uint16():
+@pytest.mark.parametrize("use_ray_ref", [False, True])
+def test_training_worker_keeps_routes_and_padding_in_uint16(use_ray_ref: bool):
     route_ref = ray.ObjectRef(bytes(28))
     routed_experts = np.array([[[0, 255], [256, 65535]]], dtype=np.uint16)
     padding_marker = torch.empty(1)
     seq_ctx = SimpleNamespace(
         input_ids=torch.zeros((1, 2), dtype=torch.long),
         pixel_values=None,
-        rollout_routed_experts=[route_ref, padding_marker],
+        pixel_values_videos=None,
+        rollout_routed_experts=[route_ref if use_ray_ref else routed_experts, padding_marker],
     )
 
     with patch("xtuner.v1.rl.trainer.train_batch.ray.get", return_value=routed_experts):
@@ -61,6 +63,7 @@ def test_training_worker_uses_uint16_for_full_padding_batch():
     seq_ctx = SimpleNamespace(
         input_ids=torch.zeros((1, 2), dtype=torch.long),
         pixel_values=None,
+        pixel_values_videos=None,
         rollout_routed_experts=torch.empty(0),
     )
 
@@ -76,6 +79,7 @@ def test_training_worker_preserves_long_fallback():
     seq_ctx = SimpleNamespace(
         input_ids=torch.zeros((1, 1), dtype=torch.long),
         pixel_values=None,
+        pixel_values_videos=None,
         rollout_routed_experts=[route_ref],
     )
 
