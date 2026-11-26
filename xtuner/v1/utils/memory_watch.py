@@ -1,4 +1,4 @@
-"""Opt-in process and cgroup memory traces during SFT.
+"""Opt-in process and cgroup memory traces during training.
 
 Set XTUNER_MEMORY_WATCH_ENABLED=1 for per-rank and host-level JSONL traces in work_dir/memory. Set
 XTUNER_MEMORY_WATCH_INTERVAL to the sampling interval in seconds (default: 1).
@@ -20,8 +20,10 @@ from typing import Any, Iterator, cast
 from typing_extensions import NotRequired, TypedDict
 
 from xtuner.v1.utils.enum_helper import StrEnum
+from xtuner.v1.utils.logger import get_logger
 
 
+_GIB = 1024.0**3
 _NUMA_PAGE_TOKEN = re.compile(r"N(\d+)=(\d+)")
 _SAMPLE_INTERVAL_S = 1
 _SHUTDOWN_TIMEOUT_S = 2.0
@@ -494,9 +496,42 @@ class _MemoryWatch:
             self._write_record(host_record, event, host=True)
 
 
+def log_memory_event(tag: str, marker: str) -> None:
+    """Log this process's resident-memory split as a single line.
+
+    Triggered by explicit training events (a finished ``produce_batch``, a
+    finished training step), so the line can be correlated with training
+    progress directly in the training log. It is always emitted; the periodic
+    traces controlled by ``XTUNER_MEMORY_WATCH_ENABLED`` are independent.
+
+    Args:
+        tag (str): Label identifying the reporting process, e.g. ``driver``.
+        marker (str): Free-form event marker such as ``train_step=12``. Unrelated
+            to ``MemoryEvent``, which labels JSONL records.
+    """
+    try:
+        status = _read_status(Path("/proc/self/status"))
+    except (OSError, ValueError):
+        return
+    parts = [f"[MemReport][{tag}][pid={os.getpid()}][{marker}]"]
+    for name, key, suffix in (
+        ("rss", "VmRSS", "GiB"),
+        ("anon", "RssAnon", ""),
+        ("shmem", "RssShmem", ""),
+        ("file", "RssFile", ""),
+        ("swap", "VmSwap", ""),
+        ("hwm", "VmHWM", ""),
+    ):
+        value = status.get(key)
+        if isinstance(value, int):
+            parts.append(f"{name}={value / _GIB:.2f}{suffix}")
+    get_logger().info(" ".join(parts))
+
+
 @contextlib.contextmanager
 def monitor_rank_memory(work_dir: Path | str | None) -> Iterator[None]:
-    """Monitor rank memory during SFT when enabled through the environment.
+    """Monitor rank memory during training when enabled through the
+    environment.
 
     Write process records to ``memory/rank_<rank>.jsonl`` under the work
     directory. Only local rank zero writes cgroup and host node records to

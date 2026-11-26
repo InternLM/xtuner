@@ -10,6 +10,7 @@ from cyclopts.group import Group
 
 from xtuner.v1.rl.utils import register_cleanup
 from xtuner.v1.utils import Config
+from xtuner.v1.utils.memory_watch import monitor_rank_memory
 from xtuner.v1.utils.track_rl_mem import monitor_actor_memory
 
 
@@ -60,7 +61,8 @@ def main(
     if num_workers is not None and hasattr(cfg.trainer, "resources"):
         cfg.trainer.resources.num_workers = num_workers
     trainer = cfg.trainer.build()
-    trainer.fit()
+    with monitor_rank_memory(trainer.exp_dir):
+        trainer.fit()
 
     if dist.is_initialized():
         dist.destroy_process_group()

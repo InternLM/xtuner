@@ -62,6 +62,7 @@ from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 from xtuner.v1.utils.env_check import get_rollout_engine_version
+from xtuner.v1.utils.memory_watch import log_memory_event
 
 
 # TODO: Move DEVICE to `xtuner.utils.device`
@@ -924,6 +925,7 @@ class BaseRLTrainer:
                 train_step=1,
                 model_step=0,
             )
+            log_memory_event(tag="rl_trainer", marker="take_eval_batch_done train_step=0")
             if XTUNER_DETERMINISTIC:
                 eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
                     eval_produce_result.rollout_states
@@ -1103,6 +1105,7 @@ class BaseRLTrainer:
                 train_step=train_step,
                 model_step=train_step,
             )
+            log_memory_event(tag="rl_trainer", marker=f"take_eval_batch_done train_step={train_step}")
             if XTUNER_DETERMINISTIC:
                 eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
                     eval_produce_result.rollout_states
@@ -1330,6 +1333,7 @@ class BaseRLTrainer:
         if eval_str:
             self.logger.info(f"Eval: {eval_str}")
         self._exp_tracker.add_scalars(tag_scalar_dict=all_scalars, global_step=train_step)
+        log_memory_event(tag="rl_trainer", marker=f"train_step={train_step}")
 
     def _save_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
         rewards = []
@@ -1700,6 +1704,7 @@ class RLColocateTrainer(BaseRLTrainer):
                         await await_owned_operation(
                             asyncio.to_thread(self.rl_health_manager.set_rollout_resources_available, False)
                         )
+                    log_memory_event(tag="rl_trainer", marker=f"take_train_batch_done train_step={train_step}")
 
                     if XTUNER_DETERMINISTIC:
                         produce_result.rollout_states = sort_rollout_state_for_deterministic(
@@ -2046,6 +2051,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                             batch_size=self.train_batch_size,
                             train_step=train_step,
                         )
+                    if produce_result.rollout_states:
+                        log_memory_event(tag="rl_trainer", marker=f"take_train_batch_done train_step={train_step}")
                     if XTUNER_DETERMINISTIC:
                         produce_result.rollout_states = sort_rollout_state_for_deterministic(
                             produce_result.rollout_states
