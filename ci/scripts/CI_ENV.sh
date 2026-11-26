@@ -43,6 +43,12 @@ export PYTEST_ADDOPTS='-o cache_dir=/tmp/.pytest_cache'
 export DISTRIBUTED_TESTS_DEFAULT_TIMEOUT=600
 
 proxy_off
+# 内网 pypi 镜像对 regex 2026.11.15/18/19 的 wheel 返回 404（index 有条目、文件缺失），
+# 而 transformers==5.17.0 依赖 regex>=2025.10.22，会让下面的 editable install 中断，
+# 测试收集阶段因此缺少 transformers.models.glm5_next。
+# 镜像基础环境预装的 regex 较旧（2024.11.6），只用上界不会触发升级，必须同时带下界；
+# 2026.11.9 是镜像里可用的最高版本。镜像修复后可以删除这一行。
+pip install "regex>=2025.10.22,<=2026.11.9"
 pip install -e .[all]
 
 TORCH_VERSION=$(python -c "import torch;print(torch.__version__.split('+')[0])")
@@ -50,4 +56,8 @@ if [[ $TORCH_VERSION == "2.9.1" ]]; then
     pip install nvidia-cudnn-cu12==9.15.1.9
 fi
 
+# 非必要依赖:lagent,指定版本 v1.0.0(@ 46e07b9f)
+if [[ -n "${LAGENT:-}" ]]; then
+    export PYTHONPATH=${LAGENT}:$PYTHONPATH
+fi
 export PYTHONPATH=${LM_DEPLOY}:$PYTHONPATH

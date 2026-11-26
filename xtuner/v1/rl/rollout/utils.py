@@ -19,6 +19,8 @@ logger = get_logger()
 
 __all__ = [
     "format_response_body_preview",
+    "routed_expert_row_count",
+    "merge_incremental_routed_experts",
     "PartialRolloutHandler",
     "SessionRouter",
 ]
@@ -32,6 +34,18 @@ def format_response_body_preview(response: Any, limit: int = 512) -> str:
     if len(body) <= limit:
         return repr(body)
     return f"{body[:limit]!r}...(truncated, total_len={len(body)})"
+
+
+def routed_expert_row_count(token_count: int) -> int:
+    """Count routing rows for a token sequence whose last token has not run.
+
+    Args:
+        token_count (int): Number of expanded prompt and generated tokens.
+
+    Returns:
+        int: Number of tokens that have participated in model forward.
+    """
+    return max(token_count - 1, 0)
 
 
 class SessionRouter:
@@ -110,6 +124,42 @@ async def _resolve_routed_experts(routed_experts: np.ndarray | RayObjectRef) -> 
     return np.asarray(routed_experts_value)
 
 
+async def merge_incremental_routed_experts(
+    history: np.ndarray | RayObjectRef | None,
+    current: np.ndarray | RayObjectRef | None,
+    *,
+    start_len: int,
+    total_len: int,
+) -> np.ndarray | RayObjectRef | None:
+    """Restore full routes while keeping per-turn responses unchanged.
+
+    Args:
+        history (np.ndarray | RayObjectRef | None): Previously retained rows.
+        current (np.ndarray | RayObjectRef | None): Full response for offset zero,
+            otherwise the suffix returned by the engine.
+        start_len (int): Requested number of leading rows to skip.
+        total_len (int): Expected number of rows after concatenation.
+
+    Returns:
+        np.ndarray | RayObjectRef | None: Unchanged current payload for offset zero,
+        or a new object ref containing retained history and the returned suffix.
+        Resolved input refs are released, including on length-validation failure.
+    """
+    if start_len == 0:
+        if isinstance(history, RayObjectRef):
+            free_object_refs([history])
+        return current
+    if history is None or current is None:
+        if isinstance(current, RayObjectRef):
+            free_object_refs([current])
+        raise ValueError("Incremental R3 requires both retained history and a returned suffix")
+    current_array = await _resolve_routed_experts(current)
+    history_array = await _resolve_routed_experts(history)
+    if len(history_array) != start_len or len(current_array) != total_len - start_len:
+        raise ValueError("Incremental R3 length mismatch; retained history or server offset is invalid")
+    return ray.put(np.concatenate([history_array, current_array], axis=0))
+
+
 class PartialRolloutHandler:
     """Handle worker-level partial rollout continuation for one inference
     request.
@@ -150,8 +200,21 @@ class PartialRolloutHandler:
         status: Status,
         prompt_tokens: int,
         completion_tokens: int,
+        routed_experts_start_len: int = 0,
     ) -> RolloutState:
         """Postprocess a partial rollout using the default semantics."""
+        if routed_experts_start_len:
+            if rollout_state.routed_experts is None:
+                if isinstance(routed_experts, RayObjectRef):
+                    free_object_refs([routed_experts])
+                raise ValueError("Incremental R3 requires retained history, but routed_experts is None")
+            if routed_experts_start_len != routed_expert_row_count(prompt_tokens):
+                if isinstance(routed_experts, RayObjectRef):
+                    free_object_refs([routed_experts])
+                raise ValueError(
+                    "Incremental R3 offset does not match the engine prompt length: "
+                    f"start_len={routed_experts_start_len}, prompt_tokens={prompt_tokens}"
+                )
         rollout_state.finish_reason = finish_reason
         rollout_state.status = status
         history_response = rollout_state.response or ""
@@ -166,15 +229,20 @@ class PartialRolloutHandler:
 
         history_routed_experts = rollout_state.routed_experts
         if history_routed_experts is not None and routed_experts is not None:
-            routed_experts_expect_len = prompt_tokens + completion_tokens - 1
-            history_routed_experts_expect_len = prompt_tokens - 1
+            routed_experts_expect_len = routed_expert_row_count(prompt_tokens + completion_tokens)
+            history_routed_experts_expect_len = routed_expert_row_count(prompt_tokens)
 
             # case 1: 上一次 rolloutstate 有 response, 本次推理也有 response，需要对 routed experts 进行拼接
             start_time = time.perf_counter()
-            history_routed_experts = await _resolve_routed_experts(history_routed_experts)  # type: ignore[assignment]
             cur_routed_experts = await _resolve_routed_experts(routed_experts)  # type: ignore[assignment]
+            current_expect_len = routed_experts_expect_len - routed_experts_start_len
+            if len(cur_routed_experts) != current_expect_len:
+                raise ValueError(
+                    "Current routed_experts length mismatch; check server routed_experts_start_len support: "
+                    f"got={len(cur_routed_experts)}, expected={current_expect_len}"
+                )
+            history_routed_experts = await _resolve_routed_experts(history_routed_experts)  # type: ignore[assignment]
             history_routed_experts_len = len(history_routed_experts)
-            cur_routed_experts_len = len(cur_routed_experts)
             assert history_routed_experts_len == history_routed_experts_expect_len, (
                 f"History routed_experts len mismatch before partial rollout concatenation: "
                 f"history_routed_experts_len={history_routed_experts_len}, "
@@ -183,22 +251,7 @@ class PartialRolloutHandler:
                 f"history_response_ids_len={len(history_response_ids)}, "
                 f"current_response_ids_len={len(response_ids)}"
             )
-            assert cur_routed_experts_len == routed_experts_expect_len, (
-                f"Current routed_experts len mismatch before partial rollout concatenation: "
-                f"cur_routed_experts_len={cur_routed_experts_len}, expected_len={routed_experts_expect_len}, "
-                f"prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}, "
-                f"history_routed_experts_len={history_routed_experts_len}, "
-                f"current_response_ids_len={len(response_ids)}"
-            )
-            assert history_routed_experts_len - 1 <= cur_routed_experts_len, (
-                f"Current routed_experts len is shorter than history during partial rollout concatenation: "
-                f"history_routed_experts_len={history_routed_experts_len}, "
-                f"cur_routed_experts_len={cur_routed_experts_len}, "
-                f"prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}, "
-                f"history_response_ids_len={len(history_response_ids)}, "
-                f"current_response_ids_len={len(response_ids)}"
-            )
-            cur_routed_experts = cur_routed_experts[history_routed_experts_len:]
+            cur_routed_experts = cur_routed_experts[history_routed_experts_len - routed_experts_start_len :]
             concat_routed_experts = np.concatenate([history_routed_experts, cur_routed_experts], axis=0)
             assert len(concat_routed_experts) == routed_experts_expect_len, (
                 f"Concatenated routed_experts len mismatch after partial rollout concatenation: "

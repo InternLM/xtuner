@@ -24,6 +24,54 @@ DEVICE_MODULE = get_torch_device_module()
 
 _RL_FP8_QUANTIZE_IN_BF16_ENV = "XTUNER_RL_FP8_QUANTIZE_IN_BF16"
 
+# `precompute_tilewise_float8_scale_for_fsdp` stacks all same-shape weights into a
+# single tensor to compute their per-block scales in one shot. The stack peak memory
+# grows linearly with the total size of the shape group and can OOM on large MoE
+# models (e.g. a 10 GiB spike for 35B-A3B). Scales of each weight only depend on its
+# own elements (amax is reduced within each 128x128 block and across `reduce_mesh`,
+# never across the stacked dim), so processing the group in chunks bounded by this
+# byte budget yields bitwise-identical results with a bounded peak. Passing
+# `max_stack_bytes=None` disables chunking and stacks each shape group in one shot.
+_PRECOMPUTE_SCALE_STACK_BYTES = 1 << 30  # 1 GiB
+
+
+def _rl_bf16_roundtrip(stack: torch.Tensor) -> torch.Tensor:
+    # 因为当前RL用bf16参数传输到推理引擎,这里为了训推一致做类似处理
+    return stack.bfloat16().float()
+
+
+def _rl_bf16_roundtrip_peak_bytes(dtype: torch.dtype) -> int:
+    # 与 _rl_bf16_roundtrip 同改:赋值完成前原 stack、bf16 副本、fp32 副本三者同时存活;
+    # 源已是 bf16 时 .bfloat16() 返回自身,不产生副本
+    return dtype.itemsize + (0 if dtype == torch.bfloat16 else 2) + 4
+
+
+def _stack_and_precompute_tilewise_scales(
+    weights: List["WeightWithDynamicTilewiseFloat8CastTensor"],
+    local_shape: Tuple[int, int],
+    reduce_mesh: Optional[DeviceMesh],
+    reduce_mesh_devided_64: Optional[DeviceMesh],
+    rl_bf16: bool,
+) -> None:
+    # 供整组(不分 chunk)与逐 chunk 两条路径复用:stack -> 按需 roundtrip -> kernel 算 scale -> 写回
+    dim = local_shape[0]
+    weights_stack = torch.stack(weights, dim=0)  # type: ignore
+    if rl_bf16:
+        weights_stack = _rl_bf16_roundtrip(weights_stack)
+    if dim >= 128 and dim % 128 == 64:
+        assert reduce_mesh_devided_64 is not None, (
+            f"reduce_mesh_devided_64 should not be None for local_shape {local_shape}."
+        )
+        w_scales = tensor_to_per_block_fp8_devided_64_scales(weights_stack, reduce_mesh_devided_64)  # type: ignore
+    else:
+        w_scales = tensor_to_per_block_fp8_scales(weights_stack, reduce_mesh)  # type: ignore
+
+    for i, w in enumerate(weights):
+        # torch compile 在处理 storage_offset 不是 0 的 tensor 的时候可能会出现结果错误的问题
+        # 参考 https://github.com/pytorch/pytorch/issues/155690
+        # 虽然 clone 操作会带来一些额外耗时（几毫秒不等），但可以保证后续结果的正确性
+        w._precomputed_scale = w_scales[i].clone()
+
 
 def tensor_to_per_block_fp8_devided_64_scales(
     tensor: "WeightWithDynamicTilewiseFloat8CastTensor",
@@ -124,6 +172,7 @@ def precompute_tilewise_float8_scale_for_fsdp(
     module: nn.Module,
     reduce_mesh_mapping: Dict[Tuple[int, int], DeviceMesh],  # absmax need to be reduced in this group
     reduce_mesh_devided_64: Optional[DeviceMesh] = None,  # All params share the same reduce mesh
+    max_stack_bytes: Optional[int] = _PRECOMPUTE_SCALE_STACK_BYTES,
 ) -> None:
     from xtuner.v1.float8 import TileWiseFloat8GroupedLinear, TileWiseFloat8Linear
 
@@ -148,6 +197,7 @@ def precompute_tilewise_float8_scale_for_fsdp(
         else:
             shape_grouped_weights[shape] = [weight]
 
+    rl_bf16 = os.environ.get(_RL_FP8_QUANTIZE_IN_BF16_ENV, "0") == "1"
     for local_shape, weights_same_shape in shape_grouped_weights.items():
         # ori_shape = weights_same_shape[0]._ori_shape
         dim = local_shape[0]
@@ -162,23 +212,30 @@ def precompute_tilewise_float8_scale_for_fsdp(
             assert reduce_mesh.ndim == 1, (
                 f"Currently only reduce_mesh.ndim should equal to 1, got reduce_mesh.ndim = {reduce_mesh.ndim} for local_shape {local_shape}"
             )
-        weights_same_shape_stack = torch.stack(weights_same_shape, dim=0)  # type: ignore
-        # 因为当前RL用bf16参数传输到推理引擎，这里为了训推一致性做类似处理
-        if os.environ.get(_RL_FP8_QUANTIZE_IN_BF16_ENV, "0") == "1":
-            weights_same_shape_stack = weights_same_shape_stack.bfloat16().float()
-        if dim >= 128 and dim % 128 == 64:
-            assert reduce_mesh_devided_64 is not None, (
-                f"reduce_mesh_devided_64 should not be None for local_shape {local_shape}."
+        if max_stack_bytes is None:
+            # 不分 chunk:整组一次 stack,与未引入 chunk 前的原实现一致
+            _stack_and_precompute_tilewise_scales(
+                weights_same_shape, local_shape, reduce_mesh, reduce_mesh_devided_64, rl_bf16
             )
-            w_scales = tensor_to_per_block_fp8_devided_64_scales(weights_same_shape_stack, reduce_mesh_devided_64)  # type: ignore
-        else:
-            w_scales = tensor_to_per_block_fp8_scales(weights_same_shape_stack, reduce_mesh)  # type: ignore
-
-        for i, w in enumerate(weights_same_shape):
-            # torch compile 在处理 storage_offset 不是 0 的 tensor 的时候可能会出现结果错误的问题
-            # 参考 https://github.com/pytorch/pytorch/issues/155690
-            # 虽然 clone 操作会带来一些额外耗时（几毫秒不等），但可以保证后续结果的正确性
-            w._precomputed_scale = w_scales[i].clone()
+            continue
+        # Chunk the stack so its peak memory stays within the budget. The weights are
+        # traversed in a deterministic order and padded to identical shapes on every
+        # rank, so all ranks derive the same chunk boundaries; chunking only adds
+        # extra `reduce_mesh` collectives (one per chunk) without changing results.
+        # 按每元素瞬态峰值估计 chunk 预算:不开 env 时就是 stack 本身;开 env 时还要
+        # 计入 bf16 roundtrip 期间共存的副本(见 _rl_bf16_roundtrip_peak_bytes)。
+        elem_bytes = weights_same_shape[0].element_size()
+        peak_bytes_per_elem = _rl_bf16_roundtrip_peak_bytes(weights_same_shape[0].dtype) if rl_bf16 else elem_bytes
+        bytes_per_weight = weights_same_shape[0].numel() * peak_bytes_per_elem
+        chunk_size = max(1, max_stack_bytes // bytes_per_weight)
+        for chunk_start in range(0, len(weights_same_shape), chunk_size):
+            _stack_and_precompute_tilewise_scales(
+                weights_same_shape[chunk_start : chunk_start + chunk_size],
+                local_shape,
+                reduce_mesh,
+                reduce_mesh_devided_64,
+                rl_bf16,
+            )
 
 
 # FSDP pads its local tensor on dim-0. The subclass should be preserved such
@@ -392,9 +449,8 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
             return (self._precomputed_w, self._precomputed_scale), None
         assert self._precomputed_scale is not None
         quant_source = self._tensor
-        # 因为当前RL用bf16参数传输到推理引擎，这里为了训推一致性做类似处理
         if os.environ.get(_RL_FP8_QUANTIZE_IN_BF16_ENV, "0") == "1":
-            quant_source = quant_source.bfloat16().float()
+            quant_source = _rl_bf16_roundtrip(quant_source)
         if self._tensor.shape[0] >= 128 and self._tensor.shape[0] % 128 == 64:
             w_fp8_data = cast_to_per_block_fp8_devided_64_with_scales(
                 tensor=quant_source,

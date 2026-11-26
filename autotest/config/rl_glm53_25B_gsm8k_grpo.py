@@ -1,9 +1,3 @@
-"""RL Colocate Trainer 示例配置（GRPO + GSM8K）。
-
-用法：通过环境变量传入路径后，由 CLI 加载本配置并 trainer_cfg.build().fit()。 需设置: WORK_DIR, MODEL_PATH, DATA_PATH, EVAL_DATA_PATH 可选:
-WORLD_SIZE, ENABLE_RETURN_ROUTED_EXPERTS, LOSS_TYPE, LOSS_MODE, SP_SIZE
-"""
-
 import os
 from pathlib import Path
 
@@ -21,8 +15,9 @@ from xtuner.v1.rl.agent_loop_manager import (
     TaskSpecConfig,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
+from xtuner.v1.rl.judger import GSM8KJudgerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
+from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer import WorkerConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, CPUResourcesConfig
@@ -34,26 +29,26 @@ work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
 data_path = os.environ["DATA_PATH"]
 eval_data_path = os.environ["EVAL_DATA_PATH"]
-enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", "0")
-WORLD_SIZE = int(os.environ.get("WORLD_SIZE", "1"))
+enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", "1")
+NNODE = int(os.environ.get("WORLD_SIZE", "1"))
 
 # basic settings
-experimental_name = "grpo_gsm8k"
-total_train_steps = 45
-evaluate_step = 45
+experimental_name = "glm53_grpo_gsm8k"
+total_train_steps = 15
+evaluate_step = 15
 train_optimizer_steps = 1
-train_batch_size = 64 * train_optimizer_steps
+train_batch_size = 16 * train_optimizer_steps
 prompt_repeat_k = 5
 rollout_tp_size = 1
-rollout_ep_size = 1
+rollout_ep_size = 8
 max_prompt_length = 512
 max_response_length = 1024
-pack_max_length = 32 * 1024
+pack_max_length = 8192
 
 # 1. resources
 resources = AcceleratorResourcesConfig(
     accelerator="GPU",
-    num_workers=8 * WORLD_SIZE,
+    num_workers=8 * NNODE,
     num_cpus_per_worker=12,
     cpu_memory_per_worker=16 * 1024**3,  # 16 GB
 )
@@ -70,6 +65,7 @@ rollout_config = RolloutConfig(
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=(enable_return_routed_experts == "1"),
     extra_rollout_config=dict(
+        lmdeploy_trust_remote_code=True,
         lmdeploy_log_level="INFO",
         lmdeploy_uvicorn_log_level="INFO",
     ),
@@ -84,11 +80,16 @@ judger_config = GSM8KJudgerConfig(
 # 4. train worker
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
 fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1)
+# Text-only RL on the published VL checkpoint (same dispatch as glm53_25b SFT).
 model_cfg = get_model_config_from_hf(Path(model_path))
+model_cfg.dispatcher = "all2all"
+model_cfg.compile_cfg = False
 if hasattr(model_cfg, "balancing_loss_cfg"):
     model_cfg.balancing_loss_cfg = None
 if hasattr(model_cfg, "z_loss_cfg"):
     model_cfg.z_loss_cfg = None
+if hasattr(model_cfg, "attention") and hasattr(model_cfg.attention, "sparse_mla_backend"):
+    model_cfg.attention.sparse_mla_backend = "flash_mla_cudnn"
 optim_cfg = AdamWConfig(lr=1e-6, foreach=False, weight_decay=0.1)
 loss_cfg = GRPOLossConfig(
     policy_loss_cfg=dict(
@@ -113,7 +114,7 @@ train_worker_cfg = WorkerConfig(
     loss_cfg=loss_cfg,
     lr_cfg=lr_cfg,
     fsdp_cfg=fsdp_cfg,
-    sp_size=int(os.environ.get("SP_SIZE", "1")),
+    sp_size=2,
     optimizer_steps=train_optimizer_steps,
     pack_max_length=pack_max_length,
 )
@@ -190,13 +191,13 @@ eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
 # 7. evaluator
 evaluator_config = EvaluatorConfig(compute_metric_func=None)
 
-# 8. RL Colocate Trainer Config（CLI 通过 config["trainer"].build() 得到 Trainer）
+# 8. RL Colocate Trainer Config
 trainer = RLColocateTrainerConfig(
     resources=resources,
-    train_worker_cfg=train_worker_cfg,  # TODO: uniform naming of cfg and config
+    train_worker_cfg=train_worker_cfg,
     rollout_config=rollout_config,
     tokenizer_path=model_path,
-    replay_buffer_config=dict(),
+    replay_buffer_config=SyncReplayBufferConfig(),
     agent_loop_manager_cfg=agent_loop_manager_cfg,
     eval_agent_loop_manager_cfg=eval_agent_loop_manager_cfg,
     evaluator_config=evaluator_config,
