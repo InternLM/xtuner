@@ -628,7 +628,7 @@ def resolve_pack_refs(
                 [ray.get(rollout_routed_expert_ref) for rollout_routed_expert_ref in rollout_routed_expert],
                 axis=0,
             )[1:, ...]
-        else:
+        elif not isinstance(rollout_routed_expert, np.ndarray):
             raise ValueError(f"Invalid rollout_routed_expert_refs type: {type(rollout_routed_expert)}")
         rollout_routed_expert = _as_rollout_routed_experts_tensor(
             rollout_routed_expert,
