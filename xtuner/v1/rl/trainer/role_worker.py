@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 import torch
 import torch.distributed as dist
 
+from xtuner.v1.loss.critic_loss import CriticLossConfig
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.rl.loss import BaseRLLossConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
@@ -76,8 +77,8 @@ class RoleWorker(ABC):
 
     engine: TrainEngine
     lr_scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
-    # ``finalize_metrics`` is only defined on RL loss configs.
-    loss_cfg: BaseRLLossConfig | None = None
+    # Actor and critic losses finalize metrics after micro-batch reduction.
+    loss_cfg: BaseRLLossConfig | CriticLossConfig | None = None
 
     def __init__(self, config: Any, ctx: RoleContext) -> None:
         self.config = config
