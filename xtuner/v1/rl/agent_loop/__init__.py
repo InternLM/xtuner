@@ -10,12 +10,21 @@ from .agent_loop import (
     get_agent_loop_rollout_ctl,
     maybe_filter_invalid_sample,
 )
+from .multi_turn_tool_agent_loop import (
+    MultiTurnToolAgentLoop,
+    MultiTurnToolAgentLoopConfig,
+    ToolExecutor,
+    ToolResult,
+)
 from .single_turn_agent_loop import SingleTurnAgentLoop, SingleTurnAgentLoopConfig
 
 
 __all__ = [
     "AgentLoopConfig",
     "SingleTurnAgentLoopConfig",
+    "MultiTurnToolAgentLoopConfig",
+    "ToolExecutor",
+    "ToolResult",
     "AgentLoop",
     "AgentLoopSpec",
     "IsValidSampleFn",
@@ -25,6 +34,7 @@ __all__ = [
     "RayAgentLoopProxy",
     "maybe_filter_invalid_sample",
     "SingleTurnAgentLoop",
+    "MultiTurnToolAgentLoop",
     "get_agent_loop_rollout_ctl",
 ]
 
