@@ -11,6 +11,7 @@ from xtuner.v1.rl.agent_loop.sandbox_agent_loop.agent_in_sandbox_loop import (
     AgentInSandboxLoop,
     AgentInSandboxLoopConfig,
 )
+from xtuner.v1.rl.agent_loop.sandbox_agent_loop.background_entry import BackgroundShellEntry
 from xtuner.v1.rl.agent_loop.sandbox_agent_loop.hooks import (
     DownloadHook,
     ExecHook,
@@ -52,6 +53,7 @@ __all__ = [
     "AgentInSandboxLoop",
     "AgentInSandboxLoopConfig",
     "AgentSpec",
+    "BackgroundShellEntry",
     "AgentRolloutItem",
     "DiagnosticFile",
     "DetachedShellEntry",
