@@ -163,6 +163,40 @@ rubric_judger_kwargs: dict = {
     "max_tokens": int(os.environ.get("JUDGE_MAX_TOKENS", "4096")),
     "chat_template_kwargs": judge_chat_template_kwargs,
 }
+_GDP_RUBRIC_POLICIES: dict[str, dict] = {
+    "v1": {
+        "orig_type_mapping": {"Primary Intent": "answer_coverage", "Dodged Bullet": "answer_coverage"},
+        "severity_weights": {
+            "Certain dealbreaker": 1.0,
+            "Possible dealbreaker": 0.5,
+            "Unlikely dealbreaker": 0.25,
+        },
+    },
+    "v2": {
+        "orig_type_mapping": {"Primary Intent": "answer_coverage", "Dodged Bullet": "dodged_bullet"},
+        "severity_weights": {
+            "Certain dealbreaker": 1.0,
+            "Possible dealbreaker": 0.6,
+            "Unlikely dealbreaker": 0.3,
+        },
+        "dodged_bullet_weight": 0.6,
+    },
+    "v2_tiered_db": {
+        "orig_type_mapping": {"Primary Intent": "answer_coverage", "Dodged Bullet": "dodged_bullet"},
+        "severity_weights": {
+            "Certain dealbreaker": 1.0,
+            "Possible dealbreaker": 0.6,
+            "Unlikely dealbreaker": 0.3,
+        },
+        "dodged_bullet_weight": 0.6,
+        "dodged_bullet_severity_weights": {
+            "Certain dealbreaker": 1.0,
+            "Possible dealbreaker": 0.6,
+            "Unlikely dealbreaker": 0.3,
+        },
+    },
+}
+
 _rubric_fields = RubricJudgerConfig.model_fields
 if "max_evidence_chars" in _rubric_fields and os.environ.get("JUDGE_MAX_EVIDENCE_CHARS"):
     rubric_judger_kwargs["max_evidence_chars"] = int(os.environ["JUDGE_MAX_EVIDENCE_CHARS"])
@@ -175,6 +209,25 @@ if "evidence_match_mode" in _rubric_fields and os.environ.get("JUDGE_EVIDENCE_MA
     rubric_judger_kwargs["evidence_match_mode"] = os.environ["JUDGE_EVIDENCE_MATCH_MODE"]
 if "evidence_min_overlap" in _rubric_fields and os.environ.get("JUDGE_EVIDENCE_MIN_OVERLAP"):
     rubric_judger_kwargs["evidence_min_overlap"] = float(os.environ["JUDGE_EVIDENCE_MIN_OVERLAP"])
+_rubric_policy = os.environ.get("JUDGE_RUBRIC_POLICY", "").strip()
+if _rubric_policy:
+    if _rubric_policy not in _GDP_RUBRIC_POLICIES:
+        raise ValueError(
+            f"Unsupported JUDGE_RUBRIC_POLICY={_rubric_policy!r}; expected one of {sorted(_GDP_RUBRIC_POLICIES)}."
+        )
+    for _key, _value in _GDP_RUBRIC_POLICIES[_rubric_policy].items():
+        if _key in _rubric_fields:
+            rubric_judger_kwargs[_key] = _value
+if "orig_type_mapping" in _rubric_fields and os.environ.get("JUDGE_ORIG_TYPE_MAPPING"):
+    rubric_judger_kwargs["orig_type_mapping"] = json.loads(os.environ["JUDGE_ORIG_TYPE_MAPPING"])
+if "severity_weights" in _rubric_fields and os.environ.get("JUDGE_SEVERITY_WEIGHTS"):
+    rubric_judger_kwargs["severity_weights"] = json.loads(os.environ["JUDGE_SEVERITY_WEIGHTS"])
+if "dodged_bullet_weight" in _rubric_fields and os.environ.get("JUDGE_DODGED_BULLET_WEIGHT"):
+    rubric_judger_kwargs["dodged_bullet_weight"] = float(os.environ["JUDGE_DODGED_BULLET_WEIGHT"])
+if "dodged_bullet_severity_weights" in _rubric_fields and os.environ.get("JUDGE_DODGED_BULLET_SEVERITY_WEIGHTS"):
+    rubric_judger_kwargs["dodged_bullet_severity_weights"] = json.loads(
+        os.environ["JUDGE_DODGED_BULLET_SEVERITY_WEIGHTS"]
+    )
 
 judger_config = ComposedJudgerConfig(
     branches={

@@ -90,9 +90,51 @@ def _build_system_prompt(max_evidence_chars: int = _MAX_EVIDENCE_CHARS) -> str:
 _SYSTEM_PROMPT = _build_system_prompt(_MAX_EVIDENCE_CHARS)
 
 
-def _validate_rubrics(raw_rubrics: Any, total_weight: Any) -> list[dict[str, Any]]:
+def _validate_type_mapping(mapping: dict[str, str] | None) -> dict[str, str] | None:
+    if mapping is None:
+        return None
+    if not isinstance(mapping, dict):
+        raise TypeError("orig_type_mapping must be a dict mapping orig_type to rubric type.")
+    validated: dict[str, str] = {}
+    for key, value in mapping.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError(f"orig_type_mapping key must be a non-empty string, got {key!r}.")
+        if value not in _SUPPORTED_RUBRIC_TYPES:
+            raise ValueError(f"orig_type_mapping target for {key!r} has unsupported type {value!r}.")
+        validated[key] = value
+    return validated
+
+
+def _validate_weight_mapping(name: str, mapping: dict[str, float] | None) -> dict[str, float] | None:
+    if mapping is None:
+        return None
+    if not isinstance(mapping, dict):
+        raise TypeError(f"{name} must be a dict mapping severity to positive weight.")
+    validated: dict[str, float] = {}
+    for key, value in mapping.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError(f"{name} key must be a non-empty string, got {key!r}.")
+        if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name}[{key!r}] requires a finite positive weight, got {value!r}.")
+        validated[key] = float(value)
+    return validated
+
+
+def _validate_rubrics(
+    raw_rubrics: Any,
+    total_weight: Any,
+    *,
+    orig_type_mapping: dict[str, str] | None = None,
+    severity_weights: dict[str, float] | None = None,
+    dodged_bullet_weight: float | None = None,
+    dodged_bullet_severity_weights: dict[str, float] | None = None,
+) -> list[dict[str, Any]]:
     if not isinstance(raw_rubrics, list) or not raw_rubrics:
         raise ValueError("Rubric judging requires a non-empty extra_info.rubrics list.")
+    has_overrides = any(
+        x is not None
+        for x in (orig_type_mapping, severity_weights, dodged_bullet_weight, dodged_bullet_severity_weights)
+    )
     rubrics: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     all_weight_sum = 0.0
@@ -102,8 +144,11 @@ def _validate_rubrics(raw_rubrics: Any, total_weight: Any) -> list[dict[str, Any
             raise TypeError(f"Rubric {index} must be a dict.")
         local_id = raw.get("local_id")
         criterion = raw.get("criterion")
-        kind = raw.get("type")
-        weight = raw.get("weight")
+        orig_type = raw.get("orig_type")
+        if orig_type_mapping is not None and isinstance(orig_type, str) and orig_type in orig_type_mapping:
+            kind = orig_type_mapping[orig_type]
+        else:
+            kind = raw.get("type")
         if not isinstance(local_id, str) or not local_id.strip():
             raise ValueError(f"Rubric {index} requires a non-empty string local_id.")
         if local_id in seen_ids:
@@ -112,6 +157,24 @@ def _validate_rubrics(raw_rubrics: Any, total_weight: Any) -> list[dict[str, Any
             raise ValueError(f"Rubric {local_id!r} requires a non-empty criterion.")
         if kind not in _SUPPORTED_RUBRIC_TYPES:
             raise ValueError(f"Rubric {local_id!r} has unsupported type {kind!r}.")
+
+        severity = raw.get("severity")
+        if kind == "dodged_bullet":
+            if (
+                dodged_bullet_severity_weights is not None
+                and isinstance(severity, str)
+                and severity in dodged_bullet_severity_weights
+            ):
+                weight = dodged_bullet_severity_weights[severity]
+            elif dodged_bullet_weight is not None:
+                weight = dodged_bullet_weight
+            else:
+                weight = raw.get("weight")
+        elif severity_weights is not None and isinstance(severity, str) and severity in severity_weights:
+            weight = severity_weights[severity]
+        else:
+            weight = raw.get("weight")
+
         if isinstance(weight, bool) or not isinstance(weight, int | float) or not math.isfinite(weight) or weight <= 0:
             raise ValueError(f"Rubric {local_id!r} requires a finite positive weight.")
         seen_ids.add(local_id)
@@ -129,7 +192,8 @@ def _validate_rubrics(raw_rubrics: Any, total_weight: Any) -> list[dict[str, Any
         )
     if pos_weight_sum <= 0.0:
         raise ValueError("Rubric judging requires at least one positive rubric.")
-    if total_weight is not None:
+    # 判分侧覆盖了 type 或 weight 时，样本里预存的 total_weight 可能对应旧口径，跳过旧值比对。
+    if not has_overrides and total_weight is not None:
         if (
             isinstance(total_weight, bool)
             or not isinstance(total_weight, int | float)
@@ -654,6 +718,10 @@ class RubricJudger(Judger):
         on_failure: FailurePolicy = "raise",
         max_concurrent_requests: int = 16,
         chat_template_kwargs: dict[str, Any] | None = None,
+        orig_type_mapping: dict[str, str] | None = None,
+        severity_weights: dict[str, float] | None = None,
+        dodged_bullet_weight: float | None = None,
+        dodged_bullet_severity_weights: dict[str, float] | None = None,
         transport: RubricTransport | None = None,
     ) -> None:
         super().__init__(judger_name=judger_name)
@@ -673,6 +741,15 @@ class RubricJudger(Judger):
             raise ValueError(f"RubricJudger on_failure must be 'raise' or 'zero', got {on_failure!r}.")
         if max_concurrent_requests < 1:
             raise ValueError("RubricJudger max_concurrent_requests must be >= 1.")
+        if dodged_bullet_weight is not None and (
+            isinstance(dodged_bullet_weight, bool)
+            or not isinstance(dodged_bullet_weight, int | float)
+            or not math.isfinite(dodged_bullet_weight)
+            or dodged_bullet_weight <= 0
+        ):
+            raise ValueError(
+                f"RubricJudger dodged_bullet_weight requires a finite positive float, got {dodged_bullet_weight!r}."
+            )
         self.endpoint = endpoint
         self.model = model
         self.request_timeout = request_timeout
@@ -685,6 +762,12 @@ class RubricJudger(Judger):
         self.max_rubrics_per_request = max_rubrics_per_request
         self.on_failure: FailurePolicy = on_failure
         self.max_concurrent_requests = max_concurrent_requests
+        self.orig_type_mapping = _validate_type_mapping(orig_type_mapping)
+        self.severity_weights = _validate_weight_mapping("severity_weights", severity_weights)
+        self.dodged_bullet_weight = float(dodged_bullet_weight) if dodged_bullet_weight is not None else None
+        self.dodged_bullet_severity_weights = _validate_weight_mapping(
+            "dodged_bullet_severity_weights", dodged_bullet_severity_weights
+        )
         self._system_prompt = _build_system_prompt(max_evidence_chars)
         # chat_template_kwargs 面向 GLM 系 judge 服务（控制思考开销）；默认 None 表示
         # 沿用 GLM 值，传 {} 可整体关闭，传其他 dict 覆盖，便于接入非 GLM judge。
@@ -698,7 +781,14 @@ class RubricJudger(Judger):
 
     def preprocess(self, rollout_state: RolloutState) -> dict[str, Any]:
         extra = rollout_state.extra_fields or {}
-        rubrics = _validate_rubrics(extra.get("rubrics"), extra.get("total_weight"))
+        rubrics = _validate_rubrics(
+            extra.get("rubrics"),
+            extra.get("total_weight"),
+            orig_type_mapping=self.orig_type_mapping,
+            severity_weights=self.severity_weights,
+            dodged_bullet_weight=self.dodged_bullet_weight,
+            dodged_bullet_severity_weights=self.dodged_bullet_severity_weights,
+        )
         image_sources = _collect_image_sources(extra, rollout_state.message)
         if any(rubric["type"] == "visual_grounding" for rubric in rubrics) and not image_sources:
             raise ValueError("visual_grounding rubrics require at least one input image.")
@@ -994,6 +1084,12 @@ class RubricJudgerConfig(JudgerConfig):
     max_concurrent_requests: int = Field(default=16, ge=1)
     # GLM judge 的思考控制参数；默认 None 沿用 GLM 值，传 {} 关闭，传 dict 覆盖。
     chat_template_kwargs: dict[str, Any] | None = None
+    # 可选的判分侧口径覆盖：直接按样本里的 orig_type / severity 在线解析 type 与 weight，
+    # 切换权重或分级扣分策略时无需重跑数据预处理。
+    orig_type_mapping: dict[str, str] | None = None
+    severity_weights: dict[str, float] | None = None
+    dodged_bullet_weight: float | None = Field(default=None, gt=0)
+    dodged_bullet_severity_weights: dict[str, float] | None = None
 
     def build_local(self) -> RubricJudger:
         return RubricJudger(
@@ -1011,4 +1107,8 @@ class RubricJudgerConfig(JudgerConfig):
             on_failure=self.on_failure,
             max_concurrent_requests=self.max_concurrent_requests,
             chat_template_kwargs=self.chat_template_kwargs,
+            orig_type_mapping=self.orig_type_mapping,
+            severity_weights=self.severity_weights,
+            dodged_bullet_weight=self.dodged_bullet_weight,
+            dodged_bullet_severity_weights=self.dodged_bullet_severity_weights,
         )
