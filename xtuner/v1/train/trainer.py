@@ -1379,6 +1379,7 @@ class Trainer:
                         {
                             "cur_step": self.cur_step,
                             "cur_epoch": self._cur_epoch,
+                            "total_step": self.total_step,
                             "total_consumed_tokens": total_consumed_tokens,
                             "train_time_offset": self._train_time + self._train_time_offset,
                         }
@@ -2166,7 +2167,27 @@ class Trainer:
             if not scheduler_path.exists():
                 raise FileNotFoundError(f"Scheduler path {scheduler_path} does not exist.")
             lr_scheduler_state = torch.load(scheduler_path, map_location=DEVICE)
-            self._lr_scheduler.load_state_dict(lr_scheduler_state)
+            # `build_lr_scheduler` derives `warmup_steps` from `total_step`, and only wraps the
+            # schedule in `SequentialLR` when there is a warmup. Resuming with a different
+            # `total_step` therefore changes the scheduler class, and the two state layouts cannot
+            # be mixed (`SequentialLR.load_state_dict` requires `_schedulers`, the plain one
+            # requires `lr_lambdas`). Extending a run is expected to reschedule the remaining
+            # steps, so rebuild instead of restoring a layout that no longer applies.
+            saved_total_step = train_state.get("total_step")
+            saved_is_sequential = "_schedulers" in lr_scheduler_state
+            rescale = saved_total_step is not None and saved_total_step != self.total_step
+            if saved_is_sequential != isinstance(self._lr_scheduler, SequentialLR) or rescale:
+                remaining = self.total_step - self._cur_step
+                log_rank0.warning(
+                    f"LR scheduler state is not restored: the checkpoint was written with "
+                    f"total_step={saved_total_step} and a "
+                    f"{'SequentialLR' if saved_is_sequential else 'plain'} scheduler, while this run "
+                    f"has total_step={self.total_step}. Rebuilding the schedule for the remaining "
+                    f"{remaining} steps."
+                )
+                self._lr_scheduler = self.build_lr_scheduler(self._lr_cfg, max(remaining, 1))
+            else:
+                self._lr_scheduler.load_state_dict(lr_scheduler_state)
         else:
             assert self.total_step > self._cur_step
             scheduler_step = self.total_step - self._cur_step
