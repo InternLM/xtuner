@@ -6,7 +6,7 @@ policy 同为 35B-A3B VL MoE，与文本 agentic RL（CyberGym）同族参考配
 - SingleTurnAgentLoop → GdpToolAgentLoopConfig（recipe/gdp_pdf_agentic/agent_loop.py，model_family=qwen35_vl）：
   多轮工具调用（get_doc_meta/get_page_text/get_page_image），wrapper 与 Qwen3.5
   chat_template 实测渲染对齐（<|im_end|>\n<|im_start|>user\n<tool_response>...）。
-- 数据：gdp_agentic_qwen_smoke.jsonl（qwen JSON <tool_call> 指令变体）。
+- 数据：gdp_agentic_qwen_smoke_v2.jsonl（qwen JSON <tool_call> 指令变体）。
 - judger：RubricJudger 单分支（process），judge 用 Qwen3.5-9B（小 VL，能看页图透传）。
 目的：用有能力的 VL policy 验证行为闭环——自主工具调用（tool_calls/mean>0）、
 多轮、判分有区分度；这是 GLM 减层 policy（输出乱码）无法判别的部分。
@@ -46,7 +46,7 @@ DATA_ROOT = Path(
 )
 
 model_path = os.environ.get("MODEL_PATH", "/mnt/shared-storage-user/llmrazor-share/model/Qwen3.6-35B-A3B")
-data_path = os.environ.get("DATA_PATH", str(DATA_ROOT / "gdp_agentic_qwen_smoke_config.json"))
+data_path = os.environ.get("DATA_PATH", str(DATA_ROOT / "gdp_agentic_qwen_smoke_v2_config.json"))
 work_dir = os.environ.get("WORK_DIR", str(Path.cwd() / "runs/qwen35_vl_gdp_agentic_smoke"))
 judge_endpoint = os.environ.get("JUDGE_ENDPOINT", "http://127.0.0.1:18000/v1/chat/completions")
 judge_model = os.environ.get("JUDGE_MODEL", "Qwen3.5-9B")
