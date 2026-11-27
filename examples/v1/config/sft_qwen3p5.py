@@ -6,7 +6,7 @@ from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
-from xtuner.v1.model.moe.moe import MTPConfig
+from xtuner.v1.module.mtp import MTPConfig
 from xtuner.v1.train import ResumeConfig, TrainerConfig
 
 

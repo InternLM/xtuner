@@ -3,10 +3,10 @@ import re
 import torch
 
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model.base import ModelOutputs
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayerOutput
 
+from .dense import DenseLossContextDict
 from .qwen3 import Qwen3Dense, Qwen3Dense2BConfig, Qwen3Dense4BConfig, Qwen3Dense8BConfig
 
 
@@ -38,7 +38,7 @@ class Qwen3VLTextDense(Qwen3Dense):
     def forward(  # type: ignore[override]
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
-        loss_ctx: dict[str, BaseLossContext | list[BaseLossContext]] | None = None,
+        loss_ctx: DenseLossContextDict | None = None,
     ) -> ModelOutputs:
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
@@ -78,6 +78,7 @@ class Qwen3VLTextDense(Qwen3Dense):
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
 
+        layer_hidden_states = hidden_states
         hidden_states = self.norm(hidden_states)
 
         if loss_ctx is None:
@@ -90,6 +91,17 @@ class Qwen3VLTextDense(Qwen3Dense):
             output["loss"] = loss
             output["logits"] = logits
             output["extra_info"] = extra_info
+
+        self._maybe_forward_mtp(
+            layer_hidden_states=layer_hidden_states,
+            hidden_states=hidden_states,
+            seq_ctx=seq_ctx,
+            loss_ctx=loss_ctx,
+            position_embeddings=position_embeddings,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            output=output,
+        )
 
         return ModelOutputs(**output)
 
