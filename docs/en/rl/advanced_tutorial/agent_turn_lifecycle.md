@@ -4,9 +4,9 @@ Ordinary rollout pauses can cancel pending Agent executions. The opt-in complete
 
 ## Ownership and publication
 
-The producer's existing `_PendingTasks` owns each live Agent task. The replay buffer owns training admission and consumption. Disaggregated sampling uses the native persistent loop. Colocated sampling uses a dedicated `LoopThread` to keep tools and HTTP clients progressing while the trainer performs synchronous GPU work; it does not run GPU inference during training and does not introduce a second pending queue.
+The producer's existing `_PendingTasks` owns each live Agent task. The replay buffer owns training admission and consumption. Disaggregated sampling uses the native persistent loop. Colocated sampling and retained Agent tasks share the fit's single asyncio event loop. Blocking training, saving and weight transfer run through owned `asyncio.to_thread` operations, so tools and waiting clients can progress; GPU inference does not run during training and no second pending queue is introduced.
 
-Publication order is: freeze worker recovery, seal every entrypoint, drain admitted model requests, pause inference, train/synchronize, install the new version at every sealed entrypoint, clear backend pause flags, then reopen. Forwarding must certify both backend completion and terminal trace recording. Unknown backend/trace outcomes prevent publication; HTTP cancellation alone is insufficient. Only recognized pre-generation context-limit rejection can settle without a generated training trace.
+Publication order is: freeze worker recovery, seal every entrypoint, drain admitted model requests, pause inference, train/synchronize, install the new version at every sealed entrypoint, clear backend pause flags, then reopen. Forwarding must certify both backend completion and terminal trace recording. Unknown backend/trace outcomes prevent publication; HTTP cancellation alone is insufficient. Recognized pre-generation context-limit rejection and a connection timeout proven to precede sending can settle as failures without a generated training trace.
 
 Version install, backend resume and reopen share one monotonic control deadline, using the configured freeze timeout. This budget does not include training or weight transfer. Multi-entrypoint reopen is not atomic; a partial or late RPC may open a ready entrypoint while the controller fails and retains the barrier. Gate, HTTP and Trial waiting budgets remain finite and must cover the intended training pause.
 
@@ -46,3 +46,19 @@ The main-adapted path still needs real Agent tool progress through synchronous t
 The admission-accounting concept references [matrix72c/sandbox_rl](https://github.com/matrix72c/sandbox_rl), `src/sandbox_rl/agents/request_gate.py` before commit `fd76fba`. The native implementation here uses condition-protected leases and explicit settlement/version publication rather than copying that HTTP gate's forwarding implementation. The inspected reference snapshot contains third-party Apache notices for listed XTuner-derived files, but no root license declaration for unrelated files; this is not presented as a blanket license grant for the reference repository. Maintainers should retain this provenance and resolve any further source-permission requirements before merging.
 
 External frozen MTP configuration and transport are a separate change, [PR #2289](https://github.com/InternLM/xtuner/pull/2289); this lifecycle patch contains no frozen-source hook or LMDeploy modification. Generation-cancellation/resume, online MTP training, new sampling policy and performance claims are outside this change.
+
+## HTTP timeout settlement
+
+A connection timeout that provably happened before request headers were sent fails that request and releases its
+lease. It does not replay the POST or pause the backend.
+
+A timeout after forwarding may leave generation running. During the next request-barrier pause, LMDeploy recovery
+can settle identified forwarding timeouts only after native level-2 sleep has returned, the backend confirms sleep,
+local forwarding has exited and failed-session trace ownership has been released. It then drains the same barrier
+and follows the normal training/weight-publication path. Sleep can stop other work on the same backend; any
+unclassified failure still prevents publication. Failed requests do not become successful training traces.
+
+This recovery is entered from the pause/drain path. It does not add a retry or a new sampling-time recovery loop,
+and does not promise that an incomplete batch will reach that pause. Unknown cancellation, control-RPC/drain wait
+timeouts, topology changes, failed sleep and failed cleanup remain errors. Other backends do not gain a simulated
+sleep acknowledgement. Native level-2 sleep discards weights: restore/synchronize them before reopening admission.

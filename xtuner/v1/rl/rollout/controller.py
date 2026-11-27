@@ -25,7 +25,7 @@ from .worker import (
     RolloutConfig,
     get_rollout_worker_base_cls,
 )
-from .worker_registry import RolloutWorkerRegistry, WorkerLifecycleState
+from .worker_registry import RolloutWorkerRegistry, WorkerLifecycleState, WorkerSnapshot
 
 
 @dataclass
@@ -344,10 +344,50 @@ class RolloutController:
             [server.seal_requests.remote(barrier.epoch) for server in barrier.servers],
             timeout=settings.freeze_timeout,
         )
-        ray.get(
-            [server.drain_requests.remote(settings.drain_timeout) for server in barrier.servers],
-            timeout=settings.drain_timeout + settings.freeze_timeout,
+        try:
+            ray.get(
+                [server.drain_requests.remote(settings.drain_timeout) for server in barrier.servers],
+                timeout=settings.drain_timeout + settings.freeze_timeout,
+            )
+        except Exception:
+            if not self._recover_http_timeouts(barrier, workers, settings):
+                raise
+            ray.get(
+                [server.drain_requests.remote(settings.drain_timeout) for server in barrier.servers],
+                timeout=settings.drain_timeout + settings.freeze_timeout,
+            )
+
+    def _recover_http_timeouts(
+        self, barrier: RequestBarrier, workers: tuple[WorkerSnapshot, ...], settings: CrossWeightUpdateRolloutConfig
+    ) -> bool:
+        """Reconcile known HTTP failures under the existing fixed-topology barrier."""
+        states = ray.get(
+            [server.request_status.remote() for server in barrier.servers], timeout=settings.freeze_timeout
         )
+        if not any(state["failures"] for state in states) or any(
+            not set(state["failures"]).issubset(state.get("known_forward_timeouts", [])) for state in states
+        ):
+            return False
+        if tuple(worker.session_url for worker in self.registry.active_entrypoints()) != barrier.endpoints:
+            raise RuntimeError("Fixed rollout topology changed before timeout recovery")
+        receipts = ray.get(
+            [worker.actor.sleep_for_timeout_recovery.remote(barrier.epoch) for worker in workers],
+            timeout=600 + settings.freeze_timeout,
+        )
+        if tuple(worker.session_url for worker in self.registry.active_entrypoints()) != barrier.endpoints:
+            raise RuntimeError("Fixed rollout topology changed during timeout recovery")
+        for worker, receipt in zip(workers, receipts):
+            if receipt.get("backend_url") != worker.url or receipt.get("epoch") != barrier.epoch:
+                raise RuntimeError("Backend timeout recovery receipt identity mismatch")
+        ray.get(
+            [
+                server.settle_after_backend_sleep.remote(barrier.epoch, receipt)
+                for server, receipt in zip(barrier.servers, receipts)
+            ],
+            timeout=60 + settings.freeze_timeout,
+        )
+        self.logger.warning(f"HTTP timeout recovery completed under request barrier epoch={barrier.epoch}")
+        return True
 
     def _resume_with_request_barrier(self, model_step: int) -> None:
         if model_step is None:

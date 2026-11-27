@@ -1,7 +1,9 @@
+import asyncio
 import copy
 import json
 import re
 import time
+from contextlib import asynccontextmanager
 from functools import reduce
 from http import HTTPStatus
 from operator import add
@@ -9,7 +11,7 @@ from typing import Any, List, Optional
 
 import numpy as np
 import ray
-from aiohttp import ClientConnectionResetError, ClientSession, ClientTimeout, web
+from aiohttp import ClientConnectionResetError, ClientSession, ClientTimeout, ConnectionTimeoutError, TraceConfig, web
 
 from transformers import AutoTokenizer
 from xtuner.v1.utils import get_logger
@@ -349,6 +351,7 @@ class SessionServer:
             if cross_weight_update_rollout is not None
             else None
         )
+        self._forward_timeouts: dict[str, RequestLease] = {}
         self.store = get_store()
         self.stop_word = self.tokenizer.eos_token or ""
 
@@ -825,8 +828,7 @@ class SessionServer:
         )
 
         forward_start = time.perf_counter()
-        timeout = ClientTimeout(total=self.request_timeout, sock_connect=30)
-        async with ClientSession(read_bufsize=self.read_bufsize, timeout=timeout) as client:
+        async with self._forwarding_client(lease) as client:
             async with client.request(
                 method=request.method, url=target_url, headers=forward_headers, data=request_body
             ) as resp:
@@ -1010,6 +1012,80 @@ class SessionServer:
             return web.json_response(_error_payload(fmt, session_error_msg), status=500)
 
         return response
+
+    @asynccontextmanager
+    async def _forwarding_client(self, lease: RequestLease | None):
+        """Own HTTP forwarding and distinguish a never-sent failure from an unknown backend exit."""
+        timeout = ClientTimeout(total=self.request_timeout, sock_connect=30)
+        headers_sent = False
+        send_trace = TraceConfig()
+
+        async def mark_sent(*_args):
+            nonlocal headers_sent
+            headers_sent = True
+
+        send_trace.on_request_headers_sent.append(mark_sent)
+        try:
+            async with ClientSession(
+                read_bufsize=self.read_bufsize, timeout=timeout, trace_configs=[send_trace]
+            ) as client:
+                yield client
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            if lease is not None:
+                if isinstance(exc, ConnectionTimeoutError) and not headers_sent:
+                    # No backend work exists. The caller still receives the failed request; never replay POST.
+                    lease.settlement = SettlementReceipt(True, "not_started_connect_timeout")
+                else:
+                    # Only forwarding timeouts qualify; response-hook failures and cancellation stay unsafe.
+                    self._forward_timeouts[lease.request_id] = lease
+                get_logger().warning(
+                    f"request_forward_timeout id={lease.request_id} headers_sent={headers_sent} "
+                    f"outcome={lease.settlement.outcome if lease.settlement else 'unsettled'}"
+                )
+            raise
+
+    async def settle_after_backend_sleep(self, epoch: int, receipt: dict) -> dict:
+        """Settle identified forwarding timeouts only after their backend stopped.
+
+        A timed-out forward never enters on_response, so no partial turn was committed. Earlier session
+        nodes are released using the store's shared-reference ownership rules, after every local forward exits.
+        """
+        gate = self.request_gate
+        if (
+            gate is None
+            or receipt.get("epoch") != epoch
+            or receipt.get("backend_url") != self.worker_base_url
+            or receipt.get("level") != 2
+            or receipt.get("native_sleep_returned") is not True
+            or receipt.get("is_sleeping") is not True
+        ):
+            raise RuntimeError("Missing or mismatched native backend sleep receipt")
+        deadline = asyncio.get_running_loop().time() + 30
+        while True:
+            state = gate.snapshot()
+            if state["open"] or state["epoch"] != epoch:
+                raise RuntimeError("Timeout recovery requires the sealed current barrier")
+            # Gate failures are recorded in request.finally, after forwarding exited.
+            if set(state["active"]) == set(state["failures"]):
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError("Local forwarding did not finish after backend sleep")
+            await asyncio.sleep(0.05)
+        ids = set(state["failures"])
+        known = self._forward_timeouts
+        if not ids.issubset(known):
+            raise RuntimeError("Unknown failures prevent timeout recovery")
+        if not ids:
+            return state
+        sessions = list({known[request_id].session_id for request_id in ids})
+        await self.store.release_sessions.remote(sessions)
+        if set(sessions).intersection(await self.store.list_sessions.remote()):
+            raise RuntimeError("Failed request trace cleanup did not finish")
+        result = await gate.settle_after_backend_sleep(epoch, ids)
+        for request_id in ids:
+            del known[request_id]
+        get_logger().warning(f"request_timeouts_settled epoch={epoch} requests={sorted(ids)}")
+        return result
 
     async def _decode_routed_experts(self, routed_experts: Any) -> np.ndarray:
         if isinstance(routed_experts, str):
@@ -1362,13 +1438,21 @@ class SessionServerActor:
         return self.server.request_gate
 
     async def request_status(self) -> dict:
-        return self._gate().snapshot()
+        state = self._gate().snapshot()
+        assert self.server is not None
+        state["known_forward_timeouts"] = sorted(self.server._forward_timeouts)
+        return state
 
     async def seal_requests(self, epoch: int) -> None:
         await self._gate().seal(epoch)
 
     async def drain_requests(self, timeout: float) -> dict:
         return await self._gate().drain(timeout)
+
+    async def settle_after_backend_sleep(self, epoch: int, receipt: dict) -> dict:
+        self._gate()
+        assert self.server is not None
+        return await self.server.settle_after_backend_sleep(epoch, receipt)
 
     async def install_request_version(self, epoch: int, model_step: int) -> None:
         await self._gate().install_version(epoch, model_step)
