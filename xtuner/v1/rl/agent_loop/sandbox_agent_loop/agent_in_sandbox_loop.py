@@ -20,6 +20,7 @@ from ...rollout.chat_template import canonicalize_messages_for_chat_template
 from ...rollout.trace_store import get_store
 from ..agent_loop import AgentLoop, AgentLoopConfig, maybe_filter_invalid_sample
 from .schemas import AgentRolloutItem, RolloutStatus
+from .trial_ray import build_trial_executor
 
 
 _MISSING = object()
@@ -234,6 +235,19 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
     transcript back into the standard ``RolloutState`` fields consumed by the
     replay buffer/trainer.
 
+    ``dispatch_mode="ray_task"`` moves the complete Runner (sandbox creation,
+    preparation, Agent execution, judging and cleanup) to a CPU Ray worker with
+    a separate event loop. ``local`` preserves existing execution by default.
+    ``trial_cpus`` reserves Ray CPU credits per running Trial outside model
+    placement groups; it does not reserve physical cores or enlarge the cluster.
+    Provision enough unreserved credits for the intended concurrency. Workers
+    need pipeline imports, environment and task paths through the Ray job/actor
+    runtime environment; later parent ``os.environ`` changes are not forwarded.
+    Pipelines in Ray mode must be declarative configs or import paths to configs,
+    not preconstructed clients. No GPU is requested and automatic task replay is
+    disabled. Cancellation waits for cooperative Runner cleanup; worker/node
+    failure still requires external sandbox recovery.
+
     ``train_on_timeout`` keeps rollouts that failed with an entry timeout as
     ``COMPLETED`` samples built from their finished turns, using
     ``timeout_reward`` as the fixed reward. The training benefit depends on the
@@ -241,6 +255,8 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
     group-relative advantage is zero for the kept sample.
     """
 
+    dispatch_mode: Literal["local", "ray_task"] = "local"
+    trial_cpus: float = Field(default=1, gt=0)
     max_concurrent_samples: int | None = None
     train_on_timeout: bool = False
     timeout_reward: float = -1.0
@@ -267,6 +283,8 @@ class AgentInSandboxLoopConfig(AgentLoopConfig):
             require_turn_provenance=self.require_turn_provenance,
             retire_route_on_completion=self.retire_route_on_completion,
             min_valid_attempts=self.min_valid_attempts,
+            dispatch_mode=self.dispatch_mode,
+            trial_cpus=self.trial_cpus,
         )
 
 
@@ -288,6 +306,8 @@ class AgentInSandboxLoop(AgentLoop):
         require_turn_provenance: bool = False,
         retire_route_on_completion: bool = False,
         min_valid_attempts: int | None = None,
+        dispatch_mode: Literal["local", "ray_task"] = "local",
+        trial_cpus: float = 1,
     ):
         if hf_checkpoint is None:
             raise ValueError("hf_checkpoint must be provided for AgentInSandboxLoop.")
@@ -302,6 +322,7 @@ class AgentInSandboxLoop(AgentLoop):
         if min_valid_attempts is not None and min_valid_attempts < 1:
             raise ValueError("min_valid_attempts must be positive")
         self.min_valid_attempts = min_valid_attempts
+        self._execute_trial = build_trial_executor(dispatch_mode, trial_cpus)
 
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         async def generate_one(state: RolloutState) -> list[RolloutState]:
@@ -366,10 +387,7 @@ class AgentInSandboxLoop(AgentLoop):
                 await cast(Any, self.rollout_ctl.retire_route_sessions).remote([str(rollout_state.session_id)])
 
     async def _run_item(self, item: AgentRolloutItem) -> AgentRolloutItem:
-        runner = _resolve_runner(item.pipeline, str(item.uid))
-        if runner is None:
-            raise ValueError("AgentRolloutItem.pipeline is required.")
-        return await runner.run(item)
+        return await self._execute_trial(item)
 
     async def _build_rollout_states(self, rollout_state: RolloutState, item: AgentRolloutItem) -> list[RolloutState]:
         if self.mode == "eval":
