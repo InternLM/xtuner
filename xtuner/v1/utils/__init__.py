@@ -1,6 +1,6 @@
 from .compile import maybe_compile
 from .config import Config
-from .device import get_device, get_torch_device_module
+from .device import get_device, get_device_memory_stats, get_torch_device_module
 from .dist_utils import is_local_rank0
 from .dtensor import (
     cal_total_norm,
@@ -47,6 +47,7 @@ __all__ = [
     "pad_to_multiple_of",
     "pad_to_max_length",
     "get_device",
+    "get_device_memory_stats",
     "get_torch_device_module",
     "maybe_compile",
     "is_evenly_distributed",

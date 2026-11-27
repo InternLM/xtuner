@@ -14,7 +14,7 @@ import torch.distributed as dist
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.rl.loss import BaseRLLossConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
-from xtuner.v1.utils import get_device, get_torch_device_module
+from xtuner.v1.utils import get_device, get_device_memory_stats, get_torch_device_module
 
 from .train_batch import resolve_mm_inputs
 
@@ -150,10 +150,7 @@ class RoleWorker(ABC):
         if not moved:
             self.logger.info("Skip model offload because model placement is unchanged.")
             return False
-        self.logger.info(
-            f"Offloaded model to CPU. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, "
-            f"reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
-        )
+        self.logger.info(f"Offloaded model to CPU. {get_device_memory_stats(unit='MB', as_str=True)}")
         return True
 
     def offload_optimizer(self) -> bool:
@@ -163,10 +160,7 @@ class RoleWorker(ABC):
         if not moved:
             self.logger.info("Skip optimizer offload because no optimizer state needs to be moved.")
             return False
-        self.logger.info(
-            f"Offloaded optimizer to CPU. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, "
-            f"reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
-        )
+        self.logger.info(f"Offloaded optimizer to CPU. {get_device_memory_stats(unit='MB', as_str=True)}")
         return True
 
     @abstractmethod
@@ -258,13 +252,9 @@ class RoleWorker(ABC):
             None
         """
         self.engine.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
-        self.logger.info(
-            f"In save_hf, before empty_cache. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
-        )
+        self.logger.info(f"In save_hf, before empty_cache. {get_device_memory_stats(unit='MB', as_str=True)}")
         DEVICE_MODULE.empty_cache()
-        self.logger.info(
-            f"In save_hf, after empty_cache. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
-        )
+        self.logger.info(f"In save_hf, after empty_cache. {get_device_memory_stats(unit='MB', as_str=True)}")
 
     def _scheduler_config(self) -> dict | None:
         if self.lr_scheduler is None:
@@ -334,8 +324,10 @@ class RoleWorker(ABC):
         if self.loss_cfg is not None:
             extra_info_dict = self.loss_cfg.finalize_metrics(extra_info_dict, DEVICE)
         extra_info_dict.update(self._extra_step_metrics())
-        max_memory = DEVICE_MODULE.max_memory_allocated() / (1024**3)
-        reserved_memory = DEVICE_MODULE.max_memory_reserved() / (1024**3)
+        mem_stats = cast(dict[str, float], get_device_memory_stats(peak=True, unit="GB"))
+        max_memory = mem_stats.get("torch_max_allocated", 0.0)
+        reserved_memory = mem_stats.get("torch_max_reserved", 0.0)
+        device_memory_metrics = {k: v for k, v in mem_stats.items() if not k.startswith("torch_")}
 
         train_log_item = cast(
             "WorkerTrainLogItem",
@@ -346,13 +338,17 @@ class RoleWorker(ABC):
                 "grad_norm": grad_norm.item(),
                 "max_memory": max_memory,
                 "reserved_memory": reserved_memory,
+                **device_memory_metrics,
             },
         )
-        log_str = ", ".join(
+        memory_keys = {"max_memory", "reserved_memory", *device_memory_metrics}
+        log_items = [
             f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
             for key, value in train_log_item.items()
-            if not key.startswith("reduced_train_policy_") and key != "max_ratio"
-        )
+            if not key.startswith("reduced_train_policy_") and key != "max_ratio" and key not in memory_keys
+        ]
+        log_items.append(str(get_device_memory_stats(peak=True, unit="GB", as_str=True)))
+        log_str = ", ".join(log_items)
         self.logger.info(f"Rank{self.rank} GlobalStep {global_train_step}: {log_str}")
         return train_log_item
 

@@ -27,7 +27,7 @@ from xtuner.v1.rl.distillation import TrainTeacherManager, TrainTeacherTimings
 from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, kl_penalty
 from xtuner.v1.rl.model_utils import build_frozen_model
 from xtuner.v1.rl.weight_update import WeightUpdater
-from xtuner.v1.utils import get_device, get_torch_device_module
+from xtuner.v1.utils import get_device, get_device_memory_stats, get_torch_device_module
 
 from ..rollout_is import merge_rollout_is_metrics
 from .role_worker import RoleContext, RoleWorker
@@ -596,9 +596,6 @@ class ActorWorker(RoleWorker):
         log_items.append(f"total_loss: {train_step_info['total_loss']:.8f}")
         loss_log_str = ", ".join(log_items)
 
-        max_memory = DEVICE_MODULE.max_memory_allocated()
-        reserved_memory = DEVICE_MODULE.max_memory_reserved()
-
         self.logger.info(
             f"Rank{self.rank} Step {self._rollout_step}: data_time: {data_time:.4f} time: {step_time:.4f} "
             f"text_tokens: {local_step_consumed_tokens} "
@@ -607,8 +604,7 @@ class ActorWorker(RoleWorker):
             f"efficient_attn_ratio: {train_step_info['efficient_attn_ratio']:.4f} "
             f"{loss_log_str} "
             f"grad_norm: {grad_norm:.8f} "
-            f"max_memory: {max_memory / (1024**3):.2f} GB "
-            f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
+            f"{get_device_memory_stats(peak=True, unit='GB', as_str=True)} "
             f"tgs: {tgs:.4f}"
         )
 

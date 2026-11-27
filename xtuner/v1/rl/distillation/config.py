@@ -71,7 +71,7 @@ class RolloutTeacherConfig(BaseModel):
     request_timeout_s: float = Field(default=1200.0, gt=0.0)
     max_retry_per_sample: int = Field(default=2, ge=0)
     max_concurrency: int = Field(default=128, gt=0)
-    enable_prefix_caching: bool = False
+    enable_prefix_caching: bool = True
     launch_config: RolloutTeacherLaunchConfig | None = None
 
     @model_validator(mode="after")
