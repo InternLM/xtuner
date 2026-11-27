@@ -1100,6 +1100,57 @@ class BaseModel(nn.Module):
         with profile_time_and_memory(f"[Saving HF to [{safetensors_prefix}]{hf_dir} cost]"):
             self._save_hf(hf_dir=hf_dir, save_dtype=save_dtype, safetensors_prefix=safetensors_prefix)
 
+    def hf_keys(self) -> list[str]:
+        """Every HF key of the model, once each, in the order :meth:`iter_hf_tensors` yields
+        them in bfloat16.
+
+        Refreshes the load specs from the current runtime layout, as :meth:`save_hf` does. Float8
+        output adds scale tensors that are not listed here.
+        """
+        self._init_load_spec()
+        self._assert_load_spec_initialized()
+        keys: dict[str, None] = {}
+        for _, load_spec in self._load_spec_params():
+            keys.update(dict.fromkeys(load_spec.global_hf_keys))
+        return list(keys)
+
+    @torch.no_grad()
+    def iter_hf_tensors(
+        self,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device | str = DEVICE,
+        bucket_size: int | None = None,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        """Yield every HF tensor of the model as ``(hf_key, tensor)``, writing nothing.
+
+        The tensors are reconstructed bucket by bucket exactly as :meth:`save_hf` reconstructs
+        them, except that every rank receives every tensor: there is no save-rank split. Each
+        bucket is gathered with collectives over the training process groups, so every rank must
+        run the generator to its end. A key that several runtime tensors map to (tied weights)
+        is yielded once, from the first of them.
+
+        Args:
+            dtype (torch.dtype): Output dtype, bfloat16 or float8_e4m3fn; tensors the precision
+                policy keeps in fp32 stay fp32.
+            device (torch.device | str): Where the yielded tensors live.
+            bucket_size (int | None): Approximate reconstruction bytes per bucket; the model's
+                ``hf_save_cfg.bucket_size`` when None.
+
+        Returns:
+            Generator[tuple[str, torch.Tensor], None, None]: HF keys and their tensors.
+        """
+        assert dtype in [torch.float8_e4m3fn, torch.bfloat16], f"dtype {dtype} is not supported"
+        self._init_load_spec()
+        self._assert_load_spec_initialized()
+        seen: set[str] = set()
+        for name_list, tensor_list in self._get_hf_param(
+            self._load_spec_params(), dtype=dtype, device=device, bucket_size=bucket_size
+        ):
+            for name, tensor in zip(name_list, tensor_list, strict=True):
+                if name not in seen:
+                    seen.add(name)
+                    yield name, tensor
+
     def _init_async_hf_resources(self) -> None:
         if self._async_hf_resources is not None:
             return

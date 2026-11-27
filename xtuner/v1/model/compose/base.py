@@ -1,6 +1,6 @@
 import json
 import multiprocessing as py_mp
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from concurrent.futures import Future
 from pathlib import Path
 from shutil import rmtree
@@ -174,6 +174,27 @@ class BaseComposeModel(BaseModel):
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
                 json.dump({"weight_map": weight_map_dict}, f, indent=4)
         dist.barrier()
+
+    @override
+    def hf_keys(self) -> list[str]:
+        """Every HF key of the submodules, in :meth:`iter_hf_tensors` order (see
+        :meth:`BaseModel.hf_keys`)."""
+        return [key for module in self._hf_modules() for key in module.hf_keys()]
+
+    @override
+    def iter_hf_tensors(
+        self,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device | str = DEVICE,
+        bucket_size: int | None = None,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        """The submodules' HF tensors in the order :meth:`save_hf` writes them (see
+        :meth:`BaseModel.iter_hf_tensors`)."""
+        for module in self._hf_modules():
+            yield from module.iter_hf_tensors(dtype=dtype, device=device, bucket_size=bucket_size)
+
+    def _hf_modules(self) -> tuple[BaseModel, BaseModel, BaseModel]:
+        return (self.language_model, self.vision_tower, self.multi_modal_projector)
 
     def async_save_hf(
         self,
