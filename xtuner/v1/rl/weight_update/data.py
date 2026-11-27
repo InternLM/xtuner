@@ -48,9 +48,10 @@ def _validate_transport_type(
     transport_type = cast(WeightTransportType, transport_type)
     if transport_type == "nccl" and backend in ("vllm", "turbomind"):
         raise NotImplementedError(f"NCCL weight transport is not supported for {backend} backend.")
-    if transport_type == "checkpoint_engine" and backend != "sglang":
+    if transport_type == "checkpoint_engine" and backend not in ("sglang", "pytorch"):
         raise NotImplementedError(
-            f"Checkpoint Engine weight transport currently only supports sglang, got backend={backend!r}."
+            "Checkpoint Engine weight transport only supports SGLang and LMDeploy pytorch backends, "
+            f"got backend={backend!r}."
         )
     return transport_type
 
