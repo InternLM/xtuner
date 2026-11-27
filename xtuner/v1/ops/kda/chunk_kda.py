@@ -18,6 +18,8 @@ Only the call shape GLM-5.3-Flash uses is supported -- no ``initial_state``/``ou
 set) and no FLA context parallelism. Anything else should keep using FLA's own entry point.
 """
 
+import os
+
 import torch
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
@@ -35,6 +37,7 @@ from .chunk_cumsum import chunk_cumsum
 LIBRARY_NAME = "xtuner_kda"
 # FLA's KDA kernels are specialized on this chunk width; it is not a tunable.
 _CHUNK_SIZE = 64
+_FP32_INTERNAL = os.getenv("XTUNER_GLM53_KDA_FP32", "0").lower() in {"1", "true", "yes", "on"}
 
 
 def _chunk_indices(cu_seqlens: torch.Tensor | None, cu_seqlens_cpu: torch.Tensor | None) -> torch.Tensor | None:
@@ -74,6 +77,11 @@ def chunk_kda_fwd(
 ]:
     # L2-norming q/k here rather than through the kernel's own flag mirrors FLA's
     # `ChunkKDAFunction`, which does it outside the kernel and keeps `rstd` for the backward.
+    output_dtype = v.dtype
+    if _FP32_INTERNAL:
+        # Serving recurrence normalizes Q/K in FP32 and retains that precision
+        # for its state updates. Avoid rounding those vectors and chunk intermediates.
+        q, k, v = q.float(), k.float(), v.float()
     q_l2, q_rstd = l2norm_fwd(q)
     k_l2, k_rstd = l2norm_fwd(k)
     chunk_indices = _chunk_indices(cu_seqlens, cu_seqlens_cpu)
@@ -117,7 +125,7 @@ def chunk_kda_fwd(
     )
     # Backward recomputes w/u/qg/kg/v_new/h from this exact prefix; only these
     # five tensors have to cross the op boundary.
-    return o, g_cumsum, Aqk, Akk, q_l2, q_rstd, k_l2, k_rstd
+    return o.to(output_dtype), g_cumsum, Aqk, Akk, q_l2, q_rstd, k_l2, k_rstd
 
 
 @chunk_kda_fwd.register_fake
@@ -138,14 +146,15 @@ def _chunk_kda_fwd_fake(
 ]:
     batch, seq_len, num_heads, _ = q.shape
     rstd_shape = (batch, seq_len, num_heads)
+    work_dtype = torch.float32 if _FP32_INTERNAL else q.dtype
     return (
         torch.empty_like(v),
         torch.empty_like(g, dtype=torch.float32),
-        q.new_empty((batch, seq_len, num_heads, _CHUNK_SIZE)),
-        q.new_empty((batch, seq_len, num_heads, _CHUNK_SIZE)),
-        torch.empty_like(q),
+        q.new_empty((batch, seq_len, num_heads, _CHUNK_SIZE), dtype=work_dtype),
+        q.new_empty((batch, seq_len, num_heads, _CHUNK_SIZE), dtype=work_dtype),
+        torch.empty_like(q, dtype=work_dtype),
         q.new_empty(rstd_shape, dtype=torch.float32),
-        torch.empty_like(k),
+        torch.empty_like(k, dtype=work_dtype),
         k.new_empty(rstd_shape, dtype=torch.float32),
     )
 
@@ -174,6 +183,9 @@ def chunk_kda_bwd(
     lower_bound: float | None,
     transpose_state_layout: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    value_dtype = v.dtype
+    if _FP32_INTERNAL:
+        v, do = v.float(), do.float()
     dq, dk, dv, db, dg = _fla_chunk_kda_bwd(
         q=q,
         k=k,
@@ -193,7 +205,7 @@ def chunk_kda_bwd(
         lower_bound=lower_bound,
         **fla_state_layout_kwargs(_fla_chunk_kda_bwd, transpose_state_layout),
     )[:5]
-    return dq, dk, dv, db, dg
+    return dq, dk, dv.to(value_dtype), db, dg
 
 
 @chunk_kda_bwd.register_fake
@@ -247,6 +259,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         # `q`/`k` to the normed tensors before saving, and its backward feeds those same normed
         # tensors to both the kernel and `l2norm_bwd`.
         ctx.save_for_backward(q_l2, q_rstd, k_l2, k_rstd, v, g_cumsum, beta, Aqk, Akk, cu_seqlens, cu_seqlens_cpu)
+        ctx.projection_dtypes = (q.dtype, k.dtype)
         ctx.scale = scale
         ctx.safe_gate = safe_gate
         ctx.lower_bound = lower_bound
@@ -278,7 +291,19 @@ class ChunkKDAFunction(torch.autograd.Function):
         )
         dq = l2norm_bwd(q_l2, q_rstd, dq)
         dk = l2norm_bwd(k_l2, k_rstd, dk)
-        return dq.to(q_l2), dk.to(k_l2), dv.to(v), dg, db.to(beta), None, None, None, None, None, None
+        return (
+            dq.to(ctx.projection_dtypes[0]),
+            dk.to(ctx.projection_dtypes[1]),
+            dv.to(v),
+            dg,
+            db.to(beta),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 def chunk_kda(
@@ -300,6 +325,9 @@ def chunk_kda(
 
     Uses FLA's forward/backward stages behind custom ops, with a fixed-layout FP32 gate prefix
     so changing the Ulysses head count does not change the scan's addition order.
+    Set ``XTUNER_GLM53_KDA_FP32=1`` before worker startup to retain FP32 chunk
+    intermediates, Q/K normalization and backward recomputation. Only the final
+    output returns to the activation dtype. This costs additional memory and compute.
 
     Args:
         q (torch.Tensor): Queries of shape ``[B, T, H, K]``.

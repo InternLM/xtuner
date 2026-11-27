@@ -20,6 +20,57 @@ from xtuner.v1.ops.kda.chunk_kda import chunk_kda
 
 
 @pytest.mark.gpu
+@pytest.mark.parametrize("lengths,heads,width", [((129,), 4, 32), ((37, 28), 4, 32), ((65,), 64, 128)])
+def test_fp32_intermediates_and_gradients(
+    monkeypatch: pytest.MonkeyPatch, lengths: tuple[int, ...], heads: int, width: int
+) -> None:
+    import importlib
+
+    implementation = importlib.import_module("xtuner.v1.ops.kda.chunk_kda")
+    torch.manual_seed(140)
+    length = sum(lengths)
+    values = [torch.randn(1, length, heads, width, device="cuda", dtype=torch.bfloat16) for _ in range(3)]
+    values += [-torch.rand(1, length, heads, width, device="cuda") * 5, torch.rand(1, length, heads, device="cuda")]
+    inputs = [value.detach().clone().requires_grad_() for value in values]
+    oracle_inputs = [value.detach().clone().requires_grad_() for value in values]
+    cu_cpu = torch.tensor([0, *torch.tensor(lengths).cumsum(0).tolist()], dtype=torch.int32)
+    cu = cu_cpu.cuda()
+    kwargs = dict(cu_seqlens=cu, cu_seqlens_cpu=cu_cpu, safe_gate=True, lower_bound=-5.0)
+    monkeypatch.setattr(implementation, "_FP32_INTERNAL", False)
+    original = chunk_kda(*values, **kwargs)[0]
+    monkeypatch.setattr(implementation, "_FP32_INTERNAL", True)
+    actual = chunk_kda(*inputs, **kwargs)[0]
+
+    # Independent FP64 recurrence with FP32-normalized Q/K, as in serving.
+    q, k, v, gate, beta = oracle_inputs
+    q = (q.float() / (q.float().square().sum(-1, keepdim=True) + 1e-6).sqrt()).double()
+    k = (k.float() / (k.float().square().sum(-1, keepdim=True) + 1e-6).sqrt()).double()
+    outputs = []
+    for start, stop in zip(cu_cpu.tolist()[:-1], cu_cpu.tolist()[1:]):
+        state = torch.zeros(1, heads, width, width, device="cuda", dtype=torch.float64)
+        for token in range(start, stop):
+            state = state * gate[:, token].double().exp().unsqueeze(-1)
+            key = k[:, token]
+            delta = v[:, token].double() - (state * key.unsqueeze(-1)).sum(-2)
+            delta = delta * beta[:, token, :, None].double()
+            state = state + key.unsqueeze(-1) * delta.unsqueeze(-2)
+            outputs.append((state * q[:, token].unsqueeze(-1)).sum(-2) * width**-0.5)
+    expected = torch.stack(outputs, dim=1).to(v.dtype)
+    original_error = (original.float() - expected.float()).norm()
+    assert (actual.float() - expected.float()).norm() < 0.9 * original_error
+    assert actual.dtype == v.dtype and torch.isfinite(actual).all()
+
+    upstream = torch.randn_like(actual)
+    gradients = torch.autograd.grad(actual, inputs, upstream)
+    references = torch.autograd.grad(expected, oracle_inputs, upstream)
+    for gradient, reference in zip(gradients, references):
+        assert torch.isfinite(gradient).all() and gradient.norm() > 0
+        relative_error = (gradient.float() - reference.float()).norm() / reference.float().norm()
+        assert relative_error < 0.02
+        assert (1.25 * gradient.float() - reference.float()).norm() / reference.float().norm() > 0.02
+
+
+@pytest.mark.gpu
 class TestKDAForwardPrecision:
     """验证实际 KDA 入口不会随 head 数选择不同的 gate prefix 加法顺序。"""
 
