@@ -24,9 +24,15 @@ TestRubricScoring
     test_question_uses_first_user_message
     test_batch_respects_concurrency_limit
     test_chat_template_kwargs_configurable
+    test_agent_tool_images_merged_and_deduplicated
+    test_chunked_rubric_requests_and_usage_aggregation
+    test_truncated_mid_json_recovers_partial_and_continues
+    test_on_failure_zero_degrades_without_raising
+    test_dodged_bullet_scoring_evidence_guard_and_all_pass
 TestRubricInputValidation
     test_invalid_rubrics_fail_before_request
     test_total_weight_mismatch_and_missing_visual_image
+    test_dodged_bullet_validation_and_total_weight_compat
 TestRubricRewardMerge
     test_single_merge_and_outcome_only_regression
     test_batch_merge_and_length_check
@@ -526,6 +532,252 @@ class TestRubricScoring(RubricTestCase):
         asyncio.run(self._judger(transport, chat_template_kwargs={}).judge(self.state.model_copy(deep=True)))
         self.assertNotIn("chat_template_kwargs", requests[-1])
 
+    def test_agent_tool_images_merged_and_deduplicated(self):
+        # 验证 agentic 工具返回的 get_page_image 页图透传进 judge 请求，且与 image_data 保序去重。
+        requests = []
+
+        async def transport(request):
+            requests.append(request)
+            return _body(_results(("met", "met")))
+
+        state = self.state.model_copy(deep=True)
+        tool_uri_1 = "data:image/png;base64,dG9vbC1wYWdlLTE="
+        tool_uri_2 = "data:image/png;base64,dG9vbC1wYWdlLTI="
+        state.extra_fields["agent_tool_images"] = [
+            {"page": "1", "image_data": str(self.image_path)},  # 与首轮 image_data 重复
+            {"page": "2", "image_data": tool_uri_1},
+            {"page": "2", "image_data": tool_uri_1},  # 多轮重复取同页
+            tool_uri_2,  # 兼容纯字符串条目
+        ]
+
+        judged = asyncio.run(self._judger(transport, max_retries=0).judge(state))
+        self.assertEqual(judged.reward["score"], 1.0)
+        image_urls = [
+            part["image_url"]["url"] for part in requests[0]["messages"][1]["content"] if part["type"] == "image_url"
+        ]
+        self.assertEqual(len(image_urls), 3)
+        self.assertTrue(image_urls[0].startswith("data:image/png;base64,"))
+        self.assertEqual(image_urls[1:], [tool_uri_1, tool_uri_2])
+
+        # 首轮无内联图、仅靠 agent_tool_images 供图时 visual_grounding 也应通过校验
+        tool_only_state = self.state.model_copy(deep=True)
+        tool_only_state.extra_fields["image_data"] = []
+        tool_only_state.message = [{"role": "user", "content": "Inspect page 1 with get_page_image."}]
+        tool_only_state.extra_fields["agent_tool_images"] = [{"page": "1", "image_data": tool_uri_1}]
+        payload = self._judger(self._unused_transport).preprocess(tool_only_state)
+        self.assertEqual(payload["image_sources"], [tool_uri_1])
+
+    def test_chunked_rubric_requests_and_usage_aggregation(self):
+        # 验证多 rubric 样本按 max_rubrics_per_request 分批请求，避免单次输出撑爆 max_tokens。
+        state = self.state.model_copy(deep=True)
+        state.response = "Part c1 ok. Part c2 ok. Part c3 ok. Part c4 ok. Part c5 ok."
+        rubrics = [
+            {"local_id": f"c{i}", "type": "answer_coverage", "criterion": f"Check c{i}", "weight": 1.0}
+            for i in range(1, 6)
+        ]
+        state.extra_fields = {
+            "rubrics": rubrics,
+            "total_weight": 5.0,
+            "image_data": [str(self.image_path)],
+        }
+        seen_batches = []
+
+        async def transport(request):
+            enum_ids = request["response_format"]["json_schema"]["schema"]["properties"]["results"]["items"][
+                "properties"
+            ]["local_id"]["enum"]
+            seen_batches.append(enum_ids)
+            return _body(
+                [
+                    {
+                        "local_id": cid,
+                        "verdict": "met" if cid in {"c1", "c3", "c5"} else "unmet",
+                        "evidence": f"Part {cid} ok." if cid in {"c1", "c3", "c5"} else f"missing {cid}",
+                    }
+                    for cid in enum_ids
+                ],
+                usage={"prompt_tokens": 50, "completion_tokens": 10, "total_tokens": 60},
+            )
+
+        judged = asyncio.run(self._judger(transport, max_rubrics_per_request=2, max_retries=0).judge(state))
+        self.assertEqual(seen_batches, [["c1", "c2"], ["c3", "c4"], ["c5"]])
+        self.assertAlmostEqual(judged.reward["score"], 0.6)
+        self.assertFalse(judged.reward["all_pass"])
+        self.assertEqual(judged.reward["judge_attempts"], 3)
+        self.assertEqual(
+            judged.reward["judge_usage"], {"prompt_tokens": 150, "completion_tokens": 30, "total_tokens": 180}
+        )
+
+    def test_truncated_mid_json_recovers_partial_and_continues(self):
+        # 复现 20261126g 真实截断形态：首轮 finish_reason=length 在第 2 条中间截断，
+        # 判分器回收已闭合的 c1 并仅对剩余 c2..c3 发起续判，0 重试浪费完成判分。
+        state = self.state.model_copy(deep=True)
+        state.response = "Total Rolls needed: 4. Grease amount is 12g."
+        state.extra_fields = {
+            "rubrics": [
+                {"local_id": "c1", "type": "answer_coverage", "criterion": "First op rolls = 6", "weight": 1.0},
+                {"local_id": "c2", "type": "answer_coverage", "criterion": "Grease = 12g", "weight": 1.0},
+                {"local_id": "c3", "type": "dodged_bullet", "criterion": "Avoid modifying shims", "weight": 0.6},
+            ],
+            "total_weight": 2.0,
+            "image_data": [str(self.image_path)],
+        }
+        seen_enums = []
+
+        async def transport(request):
+            enum_ids = request["response_format"]["json_schema"]["schema"]["properties"]["results"]["items"][
+                "properties"
+            ]["local_id"]["enum"]
+            seen_enums.append(enum_ids)
+            if len(seen_enums) == 1:
+                truncated = (
+                    '{"results":[{"local_id":"c1","verdict":"unmet","evidence":'
+                    "\"The response states: 'Total Rolls needed: 4.' It fails to identify the number "
+                    'of First Operation seaming rolls required as 6."},{"local_id":"'
+                )
+                return _body(
+                    truncated,
+                    finish_reason="length",
+                    usage={"prompt_tokens": 8638, "completion_tokens": 4096, "total_tokens": 12734},
+                )
+            return _body(
+                [
+                    {"local_id": "c2", "verdict": "met", "evidence": "Grease amount is 12g."},
+                    {"local_id": "c3", "verdict": "met", "evidence": "Avoided."},
+                ],
+                finish_reason="stop",
+                usage={"prompt_tokens": 8500, "completion_tokens": 80, "total_tokens": 8580},
+            )
+
+        judged = asyncio.run(self._judger(transport, max_rubrics_per_request=None, max_retries=0).judge(state))
+        self.assertEqual(seen_enums, [["c1", "c2", "c3"], ["c2", "c3"]])
+        self.assertAlmostEqual(judged.reward["score"], 0.5)
+        self.assertFalse(judged.reward["all_pass"])
+        self.assertFalse(judged.reward["judge_failed"])
+        self.assertEqual(judged.reward["judge_attempts"], 2)
+        self.assertEqual(judged.reward["judge_usage"]["completion_tokens"], 4176)
+
+    def test_on_failure_zero_degrades_without_raising(self):
+        # 验证长窗口训练开启 on_failure="zero" 时重试耗尽返回 0 分并记录 judge_failed 与 error_type，不崩训练。
+        async def transport(request):
+            return _body('{"results":[', finish_reason="length")
+
+        cfg = RubricJudgerConfig(
+            judger_name="process",
+            endpoint="http://judge.test/v1/chat/completions",
+            model="Qwen3.5-9B",
+            max_retries=1,
+            retry_backoff=0,
+            max_tokens=2048,
+            max_evidence_chars=200,
+            max_rubrics_per_request=6,
+            on_failure="zero",
+        )
+        judger = cfg.build_local()
+        judger._transport = transport
+        state = self.state.model_copy(deep=True)
+        judged = asyncio.run(judger.judge(state))
+
+        self.assertEqual(judged.reward["score"], 0.0)
+        self.assertEqual(judged.reward["process_score"], 0.0)
+        self.assertTrue(judged.reward["judge_failed"])
+        self.assertEqual(judged.reward["error_type"], "output_truncated")
+        self.assertEqual(judged.reward["judge_status"], "failed")
+        self.assertEqual(judged.reward["judge_attempts"], 2)
+        self.assertFalse(judged.reward["all_pass"])
+        self.assertTrue(judged.extra_fields["judge_failed"])
+        self.assertEqual(judged.extra_fields["error_type"], "output_truncated")
+
+    def test_dodged_bullet_scoring_evidence_guard_and_all_pass(self):
+        # 验证 dodged_bullet 口径：
+        # 1) PI 全错 + DB 全守 -> score = 0.0（不靠"没犯错"拿正分，且 DB met 不因非子串证据被误杀）；
+        # 2) PI 全对 + DB 全守 -> score = 1.0, all_pass = True；
+        # 3) PI 得分 - DB 踩坑扣分 -> max(0, pos - neg) / pos_sum，且 DB 踩坑不因概括性证据被漏扣分。
+        base_state = self.state.model_copy(deep=True)
+        base_state.response = "The ratio is 2/9 and recommended drug is Heparin."
+        base_state.extra_fields = {
+            "rubrics": [
+                {"local_id": "p1", "type": "answer_coverage", "criterion": "States ratio 2/9", "weight": 1.0},
+                {"local_id": "p2", "type": "answer_coverage", "criterion": "Recommends Heparin", "weight": 0.6},
+                {
+                    "local_id": "d1",
+                    "type": "dodged_bullet",
+                    "criterion": "The response should avoid recommending Warfarin.",
+                    "weight": 0.6,
+                },
+                {
+                    "local_id": "d2",
+                    "type": "dodged_bullet",
+                    "criterion": "The response should avoid citing external guidelines.",
+                    "weight": 0.6,
+                },
+            ],
+            "total_weight": 1.6,
+            "image_data": [str(self.image_path)],
+        }
+
+        # Case 1: PI 全错 + DB 全守（非原文摘要证据 "Avoided."）-> score = 0.0, invalid_evidence_count = 0
+        async def pi_wrong_db_kept(request):
+            return _body(
+                [
+                    {"local_id": "p1", "verdict": "unmet", "evidence": "Missing ratio."},
+                    {"local_id": "p2", "verdict": "unmet", "evidence": "Missing drug."},
+                    {"local_id": "d1", "verdict": "met", "evidence": "Avoided recommending Warfarin."},
+                    {"local_id": "d2", "verdict": "met", "evidence": "Avoided."},
+                ]
+            )
+
+        s1 = asyncio.run(self._judger(pi_wrong_db_kept, max_retries=0).judge(base_state.model_copy(deep=True)))
+        self.assertEqual(s1.reward["score"], 0.0)
+        self.assertFalse(s1.reward["all_pass"])
+        self.assertEqual(s1.reward["invalid_evidence_count"], 0)
+
+        # Case 2: PI 全对 + DB 全守 -> score = 1.0, all_pass = True
+        async def all_good(request):
+            return _body(
+                [
+                    {"local_id": "p1", "verdict": "met", "evidence": "The ratio is 2/9"},
+                    {"local_id": "p2", "verdict": "met", "evidence": "recommended drug is Heparin."},
+                    {"local_id": "d1", "verdict": "met", "evidence": "Avoided."},
+                    {"local_id": "d2", "verdict": "met", "evidence": "Avoided."},
+                ]
+            )
+
+        s2 = asyncio.run(self._judger(all_good, max_retries=0).judge(base_state.model_copy(deep=True)))
+        self.assertEqual(s2.reward["score"], 1.0)
+        self.assertTrue(s2.reward["all_pass"])
+        self.assertTrue(s2.extra_fields["all_pass"])
+
+        # Case 3: p1 met (1.0), p2 unmet (0.0), d1 violated (-0.6, 概括性证据不漏扣), d2 met -> (1.0 - 0.6)/1.6 = 0.25
+        async def one_violation(request):
+            return _body(
+                [
+                    {"local_id": "p1", "verdict": "met", "evidence": "The ratio is 2/9"},
+                    {"local_id": "p2", "verdict": "unmet", "evidence": "Missing Heparin."},
+                    {"local_id": "d1", "verdict": "unmet", "evidence": "Response recommends Warfarin instead."},
+                    {"local_id": "d2", "verdict": "met", "evidence": "Avoided."},
+                ]
+            )
+
+        s3 = asyncio.run(self._judger(one_violation, max_retries=0).judge(base_state.model_copy(deep=True)))
+        self.assertAlmostEqual(s3.reward["score"], 0.25)
+        self.assertFalse(s3.reward["all_pass"])
+
+        # Case 4: 扣分超过正分时截断到 0.0（p2 met=0.6, d1+d2 均违规=-1.2 -> max(0, 0.6-1.2)/1.6 = 0.0）
+        async def clamped_zero(request):
+            return _body(
+                [
+                    {"local_id": "p1", "verdict": "unmet", "evidence": "Missing ratio."},
+                    {"local_id": "p2", "verdict": "met", "evidence": "recommended drug is Heparin."},
+                    {"local_id": "d1", "verdict": "unmet", "evidence": "Violated d1."},
+                    {"local_id": "d2", "verdict": "unmet", "evidence": "Violated d2."},
+                ]
+            )
+
+        s4 = asyncio.run(self._judger(clamped_zero, max_retries=0).judge(base_state.model_copy(deep=True)))
+        self.assertEqual(s4.reward["score"], 0.0)
+        self.assertFalse(s4.reward["all_pass"])
+
 
 class TestRubricInputValidation(RubricTestCase):
     """Reject malformed rubric metadata before calling the external judge."""
@@ -565,6 +817,29 @@ class TestRubricInputValidation(RubricTestCase):
         state.message[0]["content"] = [{"type": "text", "text": "Question without image"}]
         with self.assertRaisesRegex(ValueError, "require at least one input image"):
             self._judger(self._unused_transport).preprocess(state)
+
+    def test_dodged_bullet_validation_and_total_weight_compat(self):
+        # 验证含 dodged_bullet 时：至少需要一条正向 rubric；total_weight 同时兼容正向分母与全权重和。
+        only_db = self.state.model_copy(deep=True)
+        only_db.extra_fields = {
+            "rubrics": [{"local_id": "d1", "type": "dodged_bullet", "criterion": "Avoid X", "weight": 0.6}]
+        }
+        with self.assertRaisesRegex(ValueError, "at least one positive rubric"):
+            self._judger(self._unused_transport).preprocess(only_db)
+
+        mixed_rubrics = [
+            {"local_id": "p1", "type": "answer_coverage", "criterion": "State X", "weight": 1.0},
+            {"local_id": "d1", "type": "dodged_bullet", "criterion": "Avoid Y", "weight": 0.6},
+        ]
+        for valid_total in (None, 1.0, 1.6):
+            state = self.state.model_copy(deep=True)
+            state.extra_fields = {"rubrics": mixed_rubrics, "total_weight": valid_total}
+            self.assertEqual(len(self._judger(self._unused_transport).preprocess(state)["rubrics"]), 2)
+
+        bad = self.state.model_copy(deep=True)
+        bad.extra_fields = {"rubrics": mixed_rubrics, "total_weight": 2.5}
+        with self.assertRaisesRegex(ValueError, "does not match rubric weight sum"):
+            self._judger(self._unused_transport).preprocess(bad)
 
 
 class TestRubricRewardMerge(unittest.TestCase):
