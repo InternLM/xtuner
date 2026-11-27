@@ -850,6 +850,111 @@ class TestRubricScoring(RubricTestCase):
         self.assertEqual(s4.reward["score"], 0.0)
         self.assertFalse(s4.reward["all_pass"])
 
+    def test_runtime_policy_overrides_v1_data_and_tiered_dodged_bullet(self):
+        # 验证无需重跑数据预处理：v1 格式数据（DB 仍标为 answer_coverage、旧权重与旧 total_weight）
+        # 可直接在判分侧按 orig_type / severity 覆盖为 v2 或分级 DB 扣分口径。
+        v1_state = self.state.model_copy(deep=True)
+        v1_state.response = "The ratio is 2/9 and recommended drug is Heparin."
+        v1_state.extra_fields = {
+            "rubrics": [
+                {
+                    "local_id": "p1",
+                    "type": "answer_coverage",
+                    "orig_type": "Primary Intent",
+                    "severity": "Certain dealbreaker",
+                    "criterion": "States ratio 2/9",
+                    "weight": 1.0,
+                },
+                {
+                    "local_id": "p2",
+                    "type": "answer_coverage",
+                    "orig_type": "Primary Intent",
+                    "severity": "Possible dealbreaker",
+                    "criterion": "Recommends Heparin",
+                    "weight": 0.5,
+                },
+                {
+                    "local_id": "d1",
+                    "type": "answer_coverage",
+                    "orig_type": "Dodged Bullet",
+                    "severity": "Certain dealbreaker",
+                    "criterion": "The response should avoid recommending Warfarin.",
+                    "weight": 1.0,
+                },
+                {
+                    "local_id": "d2",
+                    "type": "answer_coverage",
+                    "orig_type": "Dodged Bullet",
+                    "severity": "Unlikely dealbreaker",
+                    "criterion": "The response should avoid citing external guidelines.",
+                    "weight": 0.25,
+                },
+            ],
+            "total_weight": 2.75,
+            "image_data": [str(self.image_path)],
+        }
+
+        async def transport(request):
+            return _body(
+                [
+                    {"local_id": "p1", "verdict": "met", "evidence": "The ratio is 2/9"},
+                    {"local_id": "p2", "verdict": "met", "evidence": "recommended drug is Heparin."},
+                    {"local_id": "d1", "verdict": "unmet", "evidence": "Recommended Warfarin."},
+                    {"local_id": "d2", "verdict": "met", "evidence": "Avoided."},
+                ]
+            )
+
+        # 1) v2 统一 DB 扣分 0.6：pos = 1.0 + 0.6 = 1.6, penalty = 0.6 -> (1.6 - 0.6) / 1.6 = 0.625
+        v2_judger = self._judger(
+            transport,
+            max_retries=0,
+            orig_type_mapping={"Primary Intent": "answer_coverage", "Dodged Bullet": "dodged_bullet"},
+            severity_weights={
+                "Certain dealbreaker": 1.0,
+                "Possible dealbreaker": 0.6,
+                "Unlikely dealbreaker": 0.3,
+            },
+            dodged_bullet_weight=0.6,
+        )
+        s_v2 = asyncio.run(v2_judger.judge(v1_state.model_copy(deep=True)))
+        self.assertAlmostEqual(s_v2.reward["score"], 0.625)
+        self.assertEqual([r["type"] for r in s_v2.reward["rubric_results"]], [
+            "answer_coverage",
+            "answer_coverage",
+            "dodged_bullet",
+            "dodged_bullet",
+        ])
+        self.assertEqual([r["weight"] for r in s_v2.reward["rubric_results"]], [1.0, 0.6, 0.6, 0.6])
+
+        # 2) DB 按 severity 分级扣分（Certain=1.0, Unlikely=0.3）：(1.6 - 1.0) / 1.6 = 0.375
+        tiered_judger = self._judger(
+            transport,
+            max_retries=0,
+            orig_type_mapping={"Primary Intent": "answer_coverage", "Dodged Bullet": "dodged_bullet"},
+            severity_weights={
+                "Certain dealbreaker": 1.0,
+                "Possible dealbreaker": 0.6,
+                "Unlikely dealbreaker": 0.3,
+            },
+            dodged_bullet_weight=0.6,
+            dodged_bullet_severity_weights={
+                "Certain dealbreaker": 1.0,
+                "Possible dealbreaker": 0.6,
+                "Unlikely dealbreaker": 0.3,
+            },
+        )
+        s_tiered = asyncio.run(tiered_judger.judge(v1_state.model_copy(deep=True)))
+        self.assertAlmostEqual(s_tiered.reward["score"], 0.375)
+        self.assertEqual([r["weight"] for r in s_tiered.reward["rubric_results"]], [1.0, 0.6, 1.0, 0.3])
+
+        # 3) 原始样本不预存 weight 与 total_weight 时，也可完全由判分侧策略解析
+        raw_state = v1_state.model_copy(deep=True)
+        for item in raw_state.extra_fields["rubrics"]:
+            item.pop("weight", None)
+        raw_state.extra_fields.pop("total_weight", None)
+        s_raw = asyncio.run(tiered_judger.judge(raw_state))
+        self.assertAlmostEqual(s_raw.reward["score"], 0.375)
+
 
 class TestRubricInputValidation(RubricTestCase):
     """Reject malformed rubric metadata before calling the external judge."""
@@ -913,6 +1018,17 @@ class TestRubricInputValidation(RubricTestCase):
         with self.assertRaisesRegex(ValueError, "does not match rubric weight sum"):
             self._judger(self._unused_transport).preprocess(bad)
 
+    def test_invalid_policy_override_configs_fail_fast(self):
+        # 验证非法口径覆盖配置在初始化阶段立即报错。
+        with self.assertRaisesRegex(ValueError, "unsupported type"):
+            self._judger(self._unused_transport, orig_type_mapping={"Dodged Bullet": "unknown_type"})
+        with self.assertRaisesRegex(ValueError, "positive weight"):
+            self._judger(self._unused_transport, severity_weights={"Certain dealbreaker": 0.0})
+        with self.assertRaisesRegex(ValueError, "dodged_bullet_weight"):
+            self._judger(self._unused_transport, dodged_bullet_weight=-0.5)
+        with self.assertRaisesRegex(ValueError, "positive weight"):
+            self._judger(self._unused_transport, dodged_bullet_severity_weights={"Certain dealbreaker": float("nan")})
+
 
 class TestRubricRewardMerge(unittest.TestCase):
     """Exercise reward fusion and its compatibility with existing judger configs."""
@@ -962,12 +1078,20 @@ class TestRubricRewardMerge(unittest.TestCase):
                     judger_name="process",
                     endpoint="http://judge.test/v1/chat/completions",
                     model="GLM-5.3-Flash",
+                    orig_type_mapping={"Dodged Bullet": "dodged_bullet"},
+                    severity_weights={"Certain dealbreaker": 1.0},
+                    dodged_bullet_weight=0.6,
+                    dodged_bullet_severity_weights={"Certain dealbreaker": 1.0},
                 ),
             }
         )
         process = config.branches["process"].build_local()
         self.assertIsInstance(process, RubricJudger)
         self.assertEqual(process.max_retries, 2)
+        self.assertEqual(process.orig_type_mapping, {"Dodged Bullet": "dodged_bullet"})
+        self.assertEqual(process.severity_weights, {"Certain dealbreaker": 1.0})
+        self.assertEqual(process.dodged_bullet_weight, 0.6)
+        self.assertEqual(process.dodged_bullet_severity_weights, {"Certain dealbreaker": 1.0})
 
 
 if __name__ == "__main__":
