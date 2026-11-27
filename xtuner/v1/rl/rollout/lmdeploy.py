@@ -1,7 +1,7 @@
-import inspect
 import json
 import os
 from argparse import Namespace
+from dataclasses import fields
 from pathlib import Path
 from typing import Any, Dict, List, Mapping
 
@@ -36,34 +36,25 @@ def _model_dir_declares_custom_code(model_path: str | Path) -> bool:
 
 SHARED_STORE = "shared_store"
 SHARED_STORE_NAMESPACE = "lmdeploy"
-# Earlier rollout configs could specify these values even on engines without SSM controls.
-_SSM_PREFIX_CACHE_LEGACY_DEFAULTS = {
-    "prefill_save_alignment": 1024,
-    "prefix_cache_state_budget": 0,
-    "prefix_cache_decode_save_first": False,
-    "prefix_cache_decode_state_interval": 0,
-    "prefill_save_last_only": False,
-}
 
 
 def _build_ssm_prefix_cache_engine_config(config: RolloutConfig, engine_config_type: type) -> dict[str, Any]:
     """Apply rollout defaults where supported and validate explicit SSM requests."""
-    parameters = inspect.signature(engine_config_type).parameters
-    keyword_parameters = {
-        name
-        for name, parameter in parameters.items()
-        if parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    supported = {field.name for field in fields(engine_config_type) if field.init}
+    options = {
+        "prefill_save_alignment": config.prefill_save_alignment,
+        "prefill_save_last_only": config.prefill_save_last_only,
+        "prefix_cache_decode_save_first": config.prefix_cache_decode_save_first,
+        "prefix_cache_decode_state_interval": config.prefix_cache_decode_state_interval,
     }
+    if "prefix_cache_state_budget" in config.model_fields_set:
+        options["prefix_cache_state_budget"] = config.prefix_cache_state_budget
     ssm_config = {}
     missing = []
-    for name, legacy_default in _SSM_PREFIX_CACHE_LEGACY_DEFAULTS.items():
-        value = getattr(config, name)
-        explicit = name in config.model_fields_set
-        if not explicit and value == legacy_default:
-            continue
-        if name in keyword_parameters:
+    for name, value in options.items():
+        if name in supported:
             ssm_config[name] = value
-        elif explicit and value != legacy_default:
+        elif name in config.model_fields_set and (name == "prefill_save_alignment" or value):
             missing.append(name)
     if missing:
         raise RuntimeError(

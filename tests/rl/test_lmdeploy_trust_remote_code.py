@@ -121,19 +121,24 @@ class TestLMDeployPrefixCaching:
         )
         assert server.backend_config.enable_prefix_caching is enabled
 
-    def test_legacy_engine_accepts_explicit_previous_defaults(self, tmp_path, monkeypatch):
+    def test_legacy_engine_accepts_disabled_ssm_controls(self, tmp_path, monkeypatch):
         monkeypatch.setattr("lmdeploy.messages.PytorchEngineConfig", _LegacyPytorchEngineConfig)
         server = _server_config(
             tmp_path,
             with_auto_map=False,
             extra={"lmdeploy_backend": "pytorch"},
             enable_prefix_caching=True,
-            prefill_save_alignment=1024,
+            prefix_cache_state_budget=0,
             prefill_save_last_only=False,
             prefix_cache_decode_save_first=False,
             prefix_cache_decode_state_interval=0,
         )
         assert server.backend_config.enable_prefix_caching is True
+
+    def test_legacy_engine_rejects_explicit_alignment(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("lmdeploy.messages.PytorchEngineConfig", _LegacyPytorchEngineConfig)
+        with pytest.raises(RuntimeError, match="requested SSM prefix-checkpoint controls prefill_save_alignment"):
+            _server_config(tmp_path, False, {"lmdeploy_backend": "pytorch"}, prefill_save_alignment=1024)
 
     def test_partial_engine_accepts_supported_ssm_setting(self, tmp_path, monkeypatch):
         monkeypatch.setattr("lmdeploy.messages.PytorchEngineConfig", _PartialPytorchEngineConfig)
