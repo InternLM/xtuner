@@ -420,6 +420,78 @@ class TestRubricScoring(RubricTestCase):
         ]["evidence"]
         self.assertEqual(evidence_schema["maxLength"], 256)
 
+    def test_lenient_evidence_accepts_paraphrase_prefix(self):
+        # Qwen judge 常输出 "The response states that <原文>"；lenient 模式剥前缀后应判 met。
+        async def transport(request):
+            return _body(
+                [
+                    {"local_id": "a1", "verdict": "met", "evidence": "The left ratio is 2/9"},
+                    {
+                        "local_id": "a2",
+                        "verdict": "met",
+                        "evidence": "The response states that the left ratio is 2/9 and the right ratio is 1/4.",
+                    },
+                ]
+            )
+
+        strict = asyncio.run(self._judger(transport).judge(self.state))
+        self.assertEqual(strict.reward["score"], 0.25)
+        self.assertEqual(strict.reward["invalid_evidence_count"], 1)
+
+        lenient = asyncio.run(self._judger(transport, evidence_match_mode="lenient").judge(self.state))
+        self.assertEqual(lenient.reward["score"], 1.0)
+        self.assertEqual(lenient.reward["invalid_evidence_count"], 0)
+        a2 = lenient.reward["rubric_results"][1]
+        self.assertEqual(a2["verdict"], "met")
+        self.assertIn("The response states that", a2["judge_evidence"])
+        self.assertIn("left ratio is 2/9 and the right ratio is 1/4.", a2["evidence"])
+
+    def test_lenient_evidence_rejects_fabricated_quote(self):
+        # 重叠不足的编造证据仍应 fail-closed。
+        async def transport(request):
+            return _body(
+                [
+                    {"local_id": "a1", "verdict": "met", "evidence": "The left ratio is 2/9"},
+                    {
+                        "local_id": "a2",
+                        "verdict": "met",
+                        "evidence": "The response states that the moon is made of cheese and every ratio equals seven elevenths.",
+                    },
+                ]
+            )
+
+        judged = asyncio.run(self._judger(transport, evidence_match_mode="lenient").judge(self.state))
+        self.assertEqual(judged.reward["invalid_evidence_count"], 1)
+        self.assertEqual(judged.reward["rubric_results"][1]["verdict"], "unmet")
+
+    def test_lenient_mode_keeps_visual_grounding_strict(self):
+        # 页图断言不允许转述证据，即使 lenient 模式也保持严格。
+        async def transport(request):
+            return _body(
+                [
+                    {
+                        "local_id": "a1",
+                        "verdict": "met",
+                        "evidence": "The response states that the left ratio is 2/9.",
+                    },
+                    {
+                        "local_id": "a2",
+                        "verdict": "met",
+                        "evidence": "The left ratio is 2/9 and the right ratio is 1/4.",
+                    },
+                ]
+            )
+
+        judged = asyncio.run(self._judger(transport, evidence_match_mode="lenient").judge(self.state))
+        self.assertEqual(judged.reward["rubric_results"][0]["verdict"], "unmet")
+        self.assertEqual(judged.reward["rubric_results"][1]["verdict"], "met")
+
+    def test_evidence_match_config_validation(self):
+        with self.assertRaises(ValueError):
+            self._judger(self._unused_transport, evidence_match_mode="loose")
+        with self.assertRaises(ValueError):
+            self._judger(self._unused_transport, evidence_min_overlap=0)
+
     def test_composed_real_outcome_and_fake_process(self):
         # 验证真实数学结果判分与外部过程判分经组合接口得到正确融合分。
         async def transport(request):
