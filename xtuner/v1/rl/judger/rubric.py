@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import difflib
 import json
 import math
 import mimetypes
 import os
+import re
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, cast
 
@@ -24,6 +27,7 @@ logger = get_logger()
 
 RubricTransport = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 FailurePolicy = Literal["raise", "zero"]
+EvidenceMatchMode = Literal["strict", "lenient"]
 
 
 class _JudgeModelOutputError(ValueError):
@@ -35,6 +39,23 @@ _MAX_EVIDENCE_CHARS = 256
 _DEFAULT_MAX_RUBRICS_PER_REQUEST = 8
 _POSITIVE_RUBRIC_TYPES = frozenset({"visual_grounding", "answer_coverage"})
 _SUPPORTED_RUBRIC_TYPES = frozenset({"visual_grounding", "answer_coverage", "dodged_bullet"})
+_DEFAULT_EVIDENCE_MIN_OVERLAP = 0.8
+_MIN_FUZZY_EVIDENCE_CHARS = 20
+# judge 常把原文前加一句转述再引用；lenient 模式先剥掉这些前缀再做匹配。
+_PARAPHRASE_PREFIXES = (
+    "the response states that ",
+    "the response says that ",
+    "the response mentions that ",
+    "the response notes that ",
+    "the response indicates that ",
+    "the response shows that ",
+    "according to the response, ",
+    "the response: ",
+    "response: ",
+    "it states that ",
+    "it says that ",
+    "it mentions that ",
+)
 
 
 def _build_system_prompt(max_evidence_chars: int = _MAX_EVIDENCE_CHARS) -> str:
@@ -50,9 +71,10 @@ def _build_system_prompt(max_evidence_chars: int = _MAX_EVIDENCE_CHARS) -> str:
         f"Keep evidence short: at most {max_evidence_chars} characters and never more than 50 words.\n"
         'For positive criteria (type "visual_grounding" or "answer_coverage"):\n'
         '- A criterion is "met" only when the assistant response itself explicitly states or demonstrates it.\n'
-        '- For "met", evidence must be a verbatim contiguous substring of the assistant response proving the '
-        'criterion (never use ellipsis, paraphrase, or phrases such as "The response identifies", and never '
-        "copy the criterion into evidence).\n"
+        '- For "met", copy an exact contiguous substring of the assistant response as evidence. Quote it '
+        'character-for-character; never use ellipsis, paraphrase, or prefixes such as "The response states '
+        'that", and never copy the criterion into evidence. If no exact quote proves the criterion, return '
+        '"unmet".\n'
         f'- For "unmet", give one short sentence (<={unmet_cap} characters) stating only what is missing or '
         "incorrect without quoting long passages.\n"
         'For negative pitfall criteria (type "dodged_bullet", e.g. "The response should avoid ..."):\n'
@@ -323,12 +345,56 @@ def _try_parse_bare_array(content: str) -> dict[str, Any] | None:
     return None
 
 
+def _normalize_evidence_text(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text)
+    text = text.replace("‘", "'").replace("’", "'").replace("“", '"').replace("”", '"')
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _strip_evidence_wrapping(text: str) -> str:
+    stripped = text.strip()
+    while stripped and stripped[0] in "\"'":
+        stripped = stripped[1:].lstrip()
+    while stripped and stripped[-1] in "\"'":
+        stripped = stripped[:-1].rstrip()
+    lowered = stripped.lower()
+    for prefix in _PARAPHRASE_PREFIXES:
+        if lowered.startswith(prefix):
+            stripped = stripped[len(prefix) :].lstrip()
+            break
+    return stripped.strip()
+
+
+def _match_evidence_quote(response: str, evidence: str, min_overlap: float) -> str | None:
+    # lenient 模式：先按规范化后的原文匹配，再剥掉 "The response states that" 这类转述前缀；
+    # 仍失败时用最长连续匹配块兜底，覆盖率达到阈值才接受，避免把编造证据放进来。
+    if not evidence:
+        return None
+    normalized_response = _normalize_evidence_text(response)
+    for candidate in (evidence, _strip_evidence_wrapping(evidence)):
+        normalized = _normalize_evidence_text(candidate)
+        if normalized and normalized in normalized_response:
+            return normalized
+    candidate = _normalize_evidence_text(_strip_evidence_wrapping(evidence))
+    if len(candidate) < _MIN_FUZZY_EVIDENCE_CHARS:
+        return None
+    matcher = difflib.SequenceMatcher(None, candidate, normalized_response, autojunk=False)
+    match = matcher.find_longest_match(0, len(candidate), 0, len(normalized_response))
+    required = max(_MIN_FUZZY_EVIDENCE_CHARS, math.ceil(len(candidate) * min_overlap))
+    if match.size >= required:
+        return candidate[match.a : match.a + match.size]
+    return None
+
+
 def _build_validated_result(
     raw: Any,
     expected: dict[str, dict[str, Any]],
     seen_ids: set[str],
     response: str,
     max_evidence_chars: int,
+    evidence_match_mode: EvidenceMatchMode = "strict",
+    evidence_min_overlap: float = _DEFAULT_EVIDENCE_MIN_OVERLAP,
 ) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("Each rubric result must be an object.")
@@ -365,14 +431,7 @@ def _build_validated_result(
         "score": 1.0 if verdict == "met" else 0.0,
         "evidence": evidence,
     }
-    if verdict == "met" and (not evidence or evidence not in response):
-        result.update(
-            judge_verdict="met",
-            verdict="unmet",
-            score=0.0,
-            validation_error="met evidence is not a verbatim substring of the response",
-        )
-    elif verdict == "met" and len(evidence) > max_evidence_chars:
+    if verdict == "met" and len(evidence) > max_evidence_chars:
         # response_format 的 maxLength 只在 guided decoding 生效的后端有强制力；
         # 判分侧独立执行同一上限，防止超长证据耗尽后续样本的输出预算。
         result.update(
@@ -381,6 +440,22 @@ def _build_validated_result(
             score=0.0,
             validation_error=f"met evidence exceeds {max_evidence_chars} characters",
         )
+    elif verdict == "met":
+        matched_quote = evidence if evidence and evidence in response else None
+        # visual_grounding 始终严格：它校验的是页图上的视觉断言，放宽会引入幻觉。
+        if matched_quote is None and rubric["type"] == "answer_coverage" and evidence_match_mode == "lenient":
+            matched_quote = _match_evidence_quote(response, evidence, evidence_min_overlap)
+        if matched_quote is None:
+            result.update(
+                judge_verdict="met",
+                verdict="unmet",
+                score=0.0,
+                validation_error="met evidence is not a verbatim substring of the response",
+            )
+        elif matched_quote != evidence:
+            # 保留 judge 原始输出，最终证据替换为实际命中的原文片段。
+            result["judge_evidence"] = evidence
+            result["evidence"] = matched_quote
     return result
 
 
@@ -389,6 +464,8 @@ def _parse_results(
     rubrics: list[dict[str, Any]],
     response: str,
     max_evidence_chars: int = _MAX_EVIDENCE_CHARS,
+    evidence_match_mode: EvidenceMatchMode = "strict",
+    evidence_min_overlap: float = _DEFAULT_EVIDENCE_MIN_OVERLAP,
 ) -> list[dict[str, Any]]:
     parsed = (
         _try_parse_top_level(content)
@@ -404,7 +481,15 @@ def _parse_results(
     expected = {rubric["local_id"]: rubric for rubric in rubrics}
     results_by_id: dict[str, dict[str, Any]] = {}
     for raw in parsed["results"]:
-        result = _build_validated_result(raw, expected, set(results_by_id), response, max_evidence_chars)
+        result = _build_validated_result(
+            raw,
+            expected,
+            set(results_by_id),
+            response,
+            max_evidence_chars,
+            evidence_match_mode=evidence_match_mode,
+            evidence_min_overlap=evidence_min_overlap,
+        )
         results_by_id[result["local_id"]] = result
     missing = set(expected) - set(results_by_id)
     if missing:
@@ -447,12 +532,22 @@ def _recover_truncated_results(
     rubrics: list[dict[str, Any]],
     response: str,
     max_evidence_chars: int = _MAX_EVIDENCE_CHARS,
+    evidence_match_mode: EvidenceMatchMode = "strict",
+    evidence_min_overlap: float = _DEFAULT_EVIDENCE_MIN_OVERLAP,
 ) -> list[dict[str, Any]]:
     expected = {rubric["local_id"]: rubric for rubric in rubrics}
     recovered: dict[str, dict[str, Any]] = {}
     for raw in _extract_partial_array_items(content):
         try:
-            result = _build_validated_result(raw, expected, set(recovered), response, max_evidence_chars)
+            result = _build_validated_result(
+                raw,
+                expected,
+                set(recovered),
+                response,
+                max_evidence_chars,
+                evidence_match_mode=evidence_match_mode,
+                evidence_min_overlap=evidence_min_overlap,
+            )
         except ValueError:
             break
         recovered[result["local_id"]] = result
@@ -553,6 +648,8 @@ class RubricJudger(Judger):
         retry_backoff: float = 1.0,
         max_tokens: int = 4096,
         max_evidence_chars: int = _MAX_EVIDENCE_CHARS,
+        evidence_match_mode: EvidenceMatchMode = "strict",
+        evidence_min_overlap: float = _DEFAULT_EVIDENCE_MIN_OVERLAP,
         max_rubrics_per_request: int | None = _DEFAULT_MAX_RUBRICS_PER_REQUEST,
         on_failure: FailurePolicy = "raise",
         max_concurrent_requests: int = 16,
@@ -566,6 +663,12 @@ class RubricJudger(Judger):
             raise ValueError("Invalid RubricJudger timeout, retry, max_tokens, or max_evidence_chars configuration.")
         if max_rubrics_per_request is not None and max_rubrics_per_request < 1:
             raise ValueError("RubricJudger max_rubrics_per_request must be >= 1 or None.")
+        if evidence_match_mode not in {"strict", "lenient"}:
+            raise ValueError(
+                f"RubricJudger evidence_match_mode must be 'strict' or 'lenient', got {evidence_match_mode!r}."
+            )
+        if not 0 < evidence_min_overlap <= 1:
+            raise ValueError("RubricJudger evidence_min_overlap must be in (0, 1].")
         if on_failure not in {"raise", "zero"}:
             raise ValueError(f"RubricJudger on_failure must be 'raise' or 'zero', got {on_failure!r}.")
         if max_concurrent_requests < 1:
@@ -577,6 +680,8 @@ class RubricJudger(Judger):
         self.retry_backoff = retry_backoff
         self.max_tokens = max_tokens
         self.max_evidence_chars = max_evidence_chars
+        self.evidence_match_mode: EvidenceMatchMode = evidence_match_mode
+        self.evidence_min_overlap = evidence_min_overlap
         self.max_rubrics_per_request = max_rubrics_per_request
         self.on_failure: FailurePolicy = on_failure
         self.max_concurrent_requests = max_concurrent_requests
@@ -671,6 +776,8 @@ class RubricJudger(Judger):
                                 pending,
                                 response_text,
                                 max_evidence_chars=self.max_evidence_chars,
+                                evidence_match_mode=self.evidence_match_mode,
+                                evidence_min_overlap=self.evidence_min_overlap,
                             )
                         except (_JudgeModelOutputError, ValueError):
                             if metadata.get("finish_reason") == "length":
@@ -679,6 +786,8 @@ class RubricJudger(Judger):
                                     pending,
                                     response_text,
                                     max_evidence_chars=self.max_evidence_chars,
+                                    evidence_match_mode=self.evidence_match_mode,
+                                    evidence_min_overlap=self.evidence_min_overlap,
                                 )
                                 if recovered:
                                     for item in recovered:
@@ -877,6 +986,8 @@ class RubricJudgerConfig(JudgerConfig):
     retry_backoff: float = Field(default=1.0, ge=0)
     max_tokens: int = Field(default=4096, gt=0)
     max_evidence_chars: int = Field(default=_MAX_EVIDENCE_CHARS, gt=0)
+    evidence_match_mode: EvidenceMatchMode = "strict"
+    evidence_min_overlap: float = Field(default=_DEFAULT_EVIDENCE_MIN_OVERLAP, gt=0, le=1)
     max_rubrics_per_request: int | None = Field(default=_DEFAULT_MAX_RUBRICS_PER_REQUEST, ge=1)
     on_failure: FailurePolicy = "raise"
     request_timeout: float = Field(default=120.0, gt=0)
@@ -894,6 +1005,8 @@ class RubricJudgerConfig(JudgerConfig):
             retry_backoff=self.retry_backoff,
             max_tokens=self.max_tokens,
             max_evidence_chars=self.max_evidence_chars,
+            evidence_match_mode=self.evidence_match_mode,
+            evidence_min_overlap=self.evidence_min_overlap,
             max_rubrics_per_request=self.max_rubrics_per_request,
             on_failure=self.on_failure,
             max_concurrent_requests=self.max_concurrent_requests,
