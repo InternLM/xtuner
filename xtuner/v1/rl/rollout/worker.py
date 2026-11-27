@@ -447,7 +447,7 @@ class RolloutConfig(BaseModel):
             group=infer_group,
             help="Pin external HTTP sessions to one concrete DP SessionServer through an in-job affinity router.",
         ),
-    ] = False
+    ] = True
     enable_proxy: Annotated[
         bool,
         Parameter(

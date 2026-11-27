@@ -209,6 +209,9 @@ class WorkerTrainLogItem(TypedDict, total=False):
     mtp_grad_parameter_coverage: float
     max_memory: float
     reserved_memory: float
+    cuda_used: float
+    cuda_free: float
+    cuda_total: float
 
 
 class WorkerLogItem(TypedDict):

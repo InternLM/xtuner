@@ -71,7 +71,7 @@ from xtuner.v1.utils import (
 )
 from xtuner.v1.utils.async_save_monitor import AsyncSaveMonitor, AsyncSaveWatchItem
 from xtuner.v1.utils.check_health import check_health
-from xtuner.v1.utils.device import get_device, get_torch_device_module
+from xtuner.v1.utils.device import get_device, get_device_memory_stats, get_torch_device_module
 from xtuner.v1.utils.internal_metrics import (
     InternalMetrics,
     InternalMetricsConfig,
@@ -795,13 +795,7 @@ class Trainer:
             gc.collect()
             DEVICE_MODULE.empty_cache()
             if DEVICE != "cpu":
-                free_memory, total_memory = DEVICE_MODULE.mem_get_info()  # type: ignore[attr-defined]
-                self.logger.info(
-                    "[Checkpoint Resume Memory] "
-                    f"allocated: {DEVICE_MODULE.memory_allocated() / (1024**3):.2f} GB, "  # type: ignore[attr-defined]
-                    f"reserved: {DEVICE_MODULE.memory_reserved() / (1024**3):.2f} GB, "  # type: ignore[attr-defined]
-                    f"free: {free_memory / (1024**3):.2f} GB, total: {total_memory / (1024**3):.2f} GB"
-                )
+                self.logger.info(f"[Checkpoint Resume Memory] {get_device_memory_stats(unit='GB', as_str=True)}")
 
         self.hooks_config = self._setup_hooks(hooks_config=hooks_config)
 
@@ -1797,8 +1791,12 @@ class Trainer:
 
         data_info_str = ", ".join([f"{k}: {v:.8f}" for k, v in train_step_info.items()])
 
-        max_memory = DEVICE_MODULE.max_memory_allocated()  # type: ignore[attr-defined]
-        reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
+        mem_stats = cast(dict[str, float], get_device_memory_stats(peak=True, unit="GB"))
+        max_memory_gb = mem_stats.get("torch_max_allocated", 0.0)
+        reserved_memory_gb = mem_stats.get("torch_max_reserved", 0.0)
+        device_mem_scalars = {
+            f"memory/{k}_GB": round(v, 3) for k, v in mem_stats.items() if not k.startswith("torch_")
+        }
 
         flattened_internal_metrics = {}
         if internal_metrics:
@@ -1819,8 +1817,7 @@ class Trainer:
             f"{data_info_str} "
             f"{extra_info_str} "
             f"grad_norm: {grad_norm:.8f} "
-            f"max_memory: {max_memory / (1024**3):.2f} GB "
-            f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
+            f"{', '.join(f'{k}: {v:.2f} GB' for k, v in mem_stats.items())} "
             f"tgs: {training_metrics['tgs']:.1f} "
             f"seqlen_tgs: {training_metrics['seqlen_tgs']:.1f} "
             f"exp_tgs: {training_metrics['exp_tgs']:.1f} "
@@ -1841,8 +1838,9 @@ class Trainer:
             "runtime_info/exp_tgs": training_metrics["exp_tgs"],
             "runtime_info/efficient_attn_ratio": train_step_info["efficient_attn_ratio"],
             "runtime_info/img_efficient_attn_ratio": train_step_info["img_efficient_attn_ratio"],
-            "memory/max_memory_GB": round(max_memory / (1024**3), 3),
-            "memory/reserved_memory_GB": round(reserved_memory / (1024**3), 3),
+            "memory/max_memory_GB": round(max_memory_gb, 3),
+            "memory/reserved_memory_GB": round(reserved_memory_gb, 3),
+            **device_mem_scalars,
             "grad_norm": grad_norm,
             **flattened_internal_metrics,
         }
