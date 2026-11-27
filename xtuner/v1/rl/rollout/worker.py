@@ -914,6 +914,10 @@ class RolloutWorker(SingleAcceleratorWorker):
                 return rollout_state
 
             uid = rollout_state.rollout_id
+            if self.eos_token and not rollout_state.sample_params.stop_token_ids:
+                rollout_state.sample_params = rollout_state.sample_params.model_copy(
+                    update={"stop_token_ids": list(self.eos_token)}
+                )
             sample_params: SampleParams = rollout_state.sample_params
             if sample_params.return_token_ids:
                 endpoint_url = f"{self.server_url}/{self.endpoints['generate']}"

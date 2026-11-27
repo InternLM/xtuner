@@ -1031,6 +1031,76 @@ class TestRolloutWorker(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.response_ids, [101, 999])
         worker._safe_post_request.assert_not_awaited()
 
+    async def test_generate_populates_all_model_eos_ids_when_stop_ids_are_empty(self):
+        worker = self._build_partial_rollout_worker(eos_token=[154820, 154827, 154829])
+        worker.enable_partial_rollout = False
+        worker._get_request_payload = MagicMock(
+            side_effect=lambda state: {
+                "input_ids": state.tokens,
+                "max_tokens": state.sample_params.max_tokens,
+                "sampling_params": state.sample_params.model_dump(),
+            }
+        )
+        worker._safe_post_request = AsyncMock(return_value=HttpRequestResult(response=MagicMock()))
+
+        async def complete_response(state, _response):
+            state.response = "answer"
+            state.response_ids = [154820]
+            state.logprobs = [-0.1]
+            state.finish_reason = "stop"
+            state.status = Status.COMPLETED
+            return state
+
+        worker._safe_handle_response = AsyncMock(side_effect=complete_response)
+        rollout_state = RolloutState(
+            rollout_id=3,
+            message=[],
+            prompt_ids=[10],
+            tokens=[10],
+            sample_params=SampleParams(max_tokens=8, return_token_ids=True),
+            status=Status.INIT,
+        )
+
+        result = await worker.generate(rollout_state)
+
+        self.assertEqual(result.sample_params.stop_token_ids, [154820, 154827, 154829])
+        payload_state = worker._get_request_payload.call_args.args[0]
+        self.assertEqual(payload_state.sample_params.stop_token_ids, [154820, 154827, 154829])
+
+    async def test_generate_preserves_explicit_stop_token_ids(self):
+        worker = self._build_partial_rollout_worker(eos_token=[154820, 154827, 154829])
+        worker.enable_partial_rollout = False
+        worker._get_request_payload = MagicMock(
+            side_effect=lambda state: {
+                "input_ids": state.tokens,
+                "max_tokens": state.sample_params.max_tokens,
+                "sampling_params": state.sample_params.model_dump(),
+            }
+        )
+        worker._safe_post_request = AsyncMock(return_value=HttpRequestResult(response=MagicMock()))
+
+        async def complete_response(state, _response):
+            state.response = "answer"
+            state.response_ids = [999]
+            state.logprobs = [-0.1]
+            state.finish_reason = "stop"
+            state.status = Status.COMPLETED
+            return state
+
+        worker._safe_handle_response = AsyncMock(side_effect=complete_response)
+        rollout_state = RolloutState(
+            rollout_id=4,
+            message=[],
+            prompt_ids=[10],
+            tokens=[10],
+            sample_params=SampleParams(max_tokens=8, stop_token_ids=[999], return_token_ids=True),
+            status=Status.INIT,
+        )
+
+        result = await worker.generate(rollout_state)
+
+        self.assertEqual(result.sample_params.stop_token_ids, [999])
+
     async def test_partial_rollout_max_tokens_exhausted_completes_without_backend_request(self):
         # partial rollout 已用完 max_tokens 时，应直接 length 完成，不再继续生成。
         worker = self._build_partial_rollout_worker()
