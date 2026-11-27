@@ -84,10 +84,10 @@ FORCE_CALL_RE = re.compile(r"^([A-Za-z_]\w*)\(([^)]*)\)$")
 
 @dataclass(frozen=True)
 class _FormatProfile:
-    """模型族的 chat 边界约定（wrapper/停止符/图片标记/模态标记需求）。
+    """Model-family chat boundary conventions.
 
-    wrapper 文本与各模型 chat_template 实测渲染对齐（GLM 独立编码逐 token 一致
-    已验证；Qwen3.5 用真实模板渲染确认边界）。
+    ``tool_wrap`` / ``img_wrap_*`` are aligned with the model chat templates; ``image_markup`` must encode to exactly
+    one image token.
     """
 
     name: str
@@ -160,7 +160,7 @@ def parse_tool_call(text: str) -> tuple[str, dict[str, str]] | None:
 
 
 def parse_qwen_tool_call(text: str) -> tuple[str, dict[str, str]] | None:
-    """Qwen 风格（JSON）：<tool_call>{"name": ..., "arguments": {...}}</tool_call>。"""
+    """Parse a Qwen-style JSON tool call."""
     match = QWEN_TOOL_CALL_RE.search(text)
     if match is None:
         return None
@@ -206,7 +206,7 @@ class MultiTurnToolAgentLoopConfig(AgentLoopConfig):
         rollout_controller: RolloutController | None = None,
         judger: Judger | None = None,
         logger=None,
-    ) -> "MultiTurnToolAgentLoop":
+    ) -> MultiTurnToolAgentLoop:
         return MultiTurnToolAgentLoop(
             rollout_controller,
             self.sample_params,
@@ -310,7 +310,8 @@ class MultiTurnToolAgentLoop(AgentLoop):
         return state
 
     def _process_tool_image(self, data_uri: str) -> tuple[np.ndarray, np.ndarray, int]:
-        """data URI -> (pixel_values, image_grid_thw, num_tokens)，与 dataset 侧展开配方一致。"""
+        """Data URI -> (pixel_values, image_grid_thw, num_tokens)，与 dataset
+        侧展开配方一致。"""
         from PIL import Image
 
         png_bytes = base64.b64decode(data_uri.split(",", 1)[1])
@@ -332,12 +333,14 @@ class MultiTurnToolAgentLoop(AgentLoop):
         tail_grids: list[np.ndarray],
         tail_num_tokens: list[int],
     ) -> None:
-        """把工具图片的媒体字段按序并入 state.mm_info。
+        """Merge tool image media fields into ``state.mm_info``.
 
-        has_mm_flags（GLM）时 mm_token_type_ids 扩展为全序列覆盖（依赖 PR #2346 契约）；
-        Qwen 训练侧从 input_ids 反推视觉位置，只追加 pixel/grid/num_img_tokens。
+        With ``has_mm_flags`` (GLM) the mm_token_type_ids is extended to the full sequence; Qwen derives visual
+        positions from input_ids and only appends pixel/grid/num_img_tokens.
         """
-        base = dict(state.mm_info or {})
+        base: dict[str, Any] = dict(state.mm_info or {})
+        assert state.input_ids is not None
+        assert state.prompt_ids is not None
         seq_len = len(state.input_ids)
         prompt_len = len(state.prompt_ids)
         if self._fmt.has_mm_flags:
@@ -393,6 +396,7 @@ class MultiTurnToolAgentLoop(AgentLoop):
         except Exception as exc:
             return self._fail(state, f"tool executor init failed: {exc}")
 
+        assert state.prompt_ids is not None
         cumulative = list(state.prompt_ids)  # rollout 空间（占位符形式）
         appended: list[int] = []  # train 空间 initial prompt 之后的追加 token
         labels_tail: list[int] = []  # 与 appended 对齐的 labels
@@ -435,6 +439,7 @@ class MultiTurnToolAgentLoop(AgentLoop):
                 image_data = prompt_image_data + [item["image_data"] for item in tool_images]
                 if image_data:
                     turn_state.extra_fields["image_data"] = image_data
+                assert self.rollout_ctl is not None
                 turn_state = await trace_rollout_remote(self.rollout_ctl.generate, turn_state)
                 if turn_state.status != Status.COMPLETED:
                     return self._fail(
