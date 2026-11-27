@@ -6,6 +6,7 @@ import torch.nn as nn
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 
+from xtuner.v1.ops.lmdeploy_alignment import ALIGN_FORWARD
 from xtuner.v1.utils.device import get_device
 
 from .protocol import RouterProtocol, RouterResults
@@ -135,6 +136,20 @@ class NoAuxRouter(nn.Module, RouterProtocol):
             denominator = topk_weight.sum(dim=-1, keepdim=True) + 1e-20
             topk_weight = topk_weight / denominator
         topk_weight = topk_weight * self.router_scaling_factor  # must multiply the scaling factor
+
+        if (
+            ALIGN_FORWARD
+            and logits.is_cuda
+            and self.n_routed_experts == 288
+            and self.top_k == 8
+            and self.n_group == self.topk_group == 1
+            and self.norm_topk_prob
+            and os.getenv("XTUNER_ROUTER_DEBUG") != "true"
+        ):
+            from xtuner.v1.ops.lmdeploy_alignment import router
+
+            topk_weight, topk_ids = router(logits, self.e_score_correction_bias, rollout_routed_experts)
+            topk_weight = topk_weight * self.router_scaling_factor
 
         # TODO: (yehaochen) `Dispatcher` calculate the distribution duplicatedly
         tokens_per_expert = torch.histc(
