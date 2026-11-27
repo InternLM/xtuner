@@ -121,13 +121,27 @@ class TestLMDeployPrefixCaching:
         )
         assert server.backend_config.enable_prefix_caching is enabled
 
+    def test_legacy_engine_accepts_explicit_previous_defaults(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("lmdeploy.messages.PytorchEngineConfig", _LegacyPytorchEngineConfig)
+        server = _server_config(
+            tmp_path,
+            with_auto_map=False,
+            extra={"lmdeploy_backend": "pytorch"},
+            enable_prefix_caching=True,
+            prefill_save_alignment=1024,
+            prefill_save_last_only=False,
+            prefix_cache_decode_save_first=False,
+            prefix_cache_decode_state_interval=0,
+        )
+        assert server.backend_config.enable_prefix_caching is True
+
     def test_partial_engine_accepts_supported_ssm_setting(self, tmp_path, monkeypatch):
         monkeypatch.setattr("lmdeploy.messages.PytorchEngineConfig", _PartialPytorchEngineConfig)
         server = _server_config(
             tmp_path, with_auto_map=False, extra={"lmdeploy_backend": "pytorch"}, prefix_cache_state_budget=3
         )
         assert server.backend_config.prefix_cache_state_budget == 3
-        assert server.backend_config.prefill_save_alignment == 256
+        assert server.backend_config.prefill_save_alignment == 64
 
     def test_partial_engine_rejects_requested_unsupported_field(self, tmp_path, monkeypatch):
         monkeypatch.setattr("lmdeploy.messages.PytorchEngineConfig", _PartialPytorchEngineConfig)
@@ -141,14 +155,28 @@ class TestLMDeployPrefixCaching:
                 prefix_cache_decode_save_first=True,
             )
 
+    @pytest.mark.parametrize("enabled", [False, True])
+    def test_supported_engine_receives_rollout_defaults(self, tmp_path, monkeypatch, enabled):
+        monkeypatch.setattr("lmdeploy.messages.PytorchEngineConfig", _SupportedPytorchEngineConfig)
+        server = _server_config(
+            tmp_path, with_auto_map=False, extra={"lmdeploy_backend": "pytorch"}, enable_prefix_caching=enabled
+        )
+        cfg = server.backend_config
+        assert cfg.prefill_save_alignment == 64
+        assert cfg.prefill_save_last_only is True
+        assert cfg.prefix_cache_decode_save_first is True
+        assert cfg.prefix_cache_decode_state_interval == 1024
+        assert cfg.prefix_cache_state_budget == 0
+        assert cfg.enable_prefix_caching is enabled
+
     def test_supported_engine_receives_all_five_settings(self, tmp_path, monkeypatch):
         monkeypatch.setattr("lmdeploy.messages.PytorchEngineConfig", _SupportedPytorchEngineConfig)
         settings = {
             "prefill_save_alignment": 512,
             "prefix_cache_state_budget": 3,
-            "prefix_cache_decode_save_first": True,
-            "prefix_cache_decode_state_interval": 64,
-            "prefill_save_last_only": True,
+            "prefix_cache_decode_save_first": False,
+            "prefix_cache_decode_state_interval": 0,
+            "prefill_save_last_only": False,
         }
         server = _server_config(
             tmp_path,

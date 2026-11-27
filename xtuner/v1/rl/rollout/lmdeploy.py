@@ -36,31 +36,35 @@ def _model_dir_declares_custom_code(model_path: str | Path) -> bool:
 
 SHARED_STORE = "shared_store"
 SHARED_STORE_NAMESPACE = "lmdeploy"
-_SSM_PREFIX_CACHE_FIELDS = (
-    "prefill_save_alignment",
-    "prefix_cache_state_budget",
-    "prefix_cache_decode_save_first",
-    "prefix_cache_decode_state_interval",
-    "prefill_save_last_only",
-)
+# Earlier rollout configs could specify these values even on engines without SSM controls.
+_SSM_PREFIX_CACHE_LEGACY_DEFAULTS = {
+    "prefill_save_alignment": 1024,
+    "prefix_cache_state_budget": 0,
+    "prefix_cache_decode_save_first": False,
+    "prefix_cache_decode_state_interval": 0,
+    "prefill_save_last_only": False,
+}
 
 
 def _build_ssm_prefix_cache_engine_config(config: RolloutConfig, engine_config_type: type) -> dict[str, Any]:
-    """Forward non-default SSM settings to constructors that expose them."""
-    ssm_config = {
-        name: getattr(config, name)
-        for name in _SSM_PREFIX_CACHE_FIELDS
-        if getattr(config, name) != RolloutConfig.model_fields[name].default
-    }
-    if not ssm_config:
-        return {}
+    """Apply rollout defaults where supported and validate explicit SSM requests."""
     parameters = inspect.signature(engine_config_type).parameters
     keyword_parameters = {
         name
         for name, parameter in parameters.items()
         if parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
     }
-    missing = sorted(ssm_config.keys() - keyword_parameters)
+    ssm_config = {}
+    missing = []
+    for name, legacy_default in _SSM_PREFIX_CACHE_LEGACY_DEFAULTS.items():
+        value = getattr(config, name)
+        explicit = name in config.model_fields_set
+        if not explicit and value == legacy_default:
+            continue
+        if name in keyword_parameters:
+            ssm_config[name] = value
+        elif explicit and value != legacy_default:
+            missing.append(name)
     if missing:
         raise RuntimeError(
             "The installed LMDeploy PyTorch backend does not support the requested SSM prefix-checkpoint controls "

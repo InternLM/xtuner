@@ -412,7 +412,7 @@ class RolloutConfig(BaseModel):
     ] = False
     prefill_save_alignment: Annotated[
         int, Parameter(group=infer_group, help="LMDeploy SSM prefill checkpoint alignment in tokens.")
-    ] = 1024
+    ] = 64
     prefix_cache_state_budget: Annotated[
         int,
         Parameter(
@@ -426,7 +426,7 @@ class RolloutConfig(BaseModel):
     prefix_cache_decode_save_first: Annotated[
         bool,
         Parameter(group=infer_group, help="Save the first safe LMDeploy SSM decode checkpoint after each prompt."),
-    ] = False
+    ] = True
     prefix_cache_decode_state_interval: Annotated[
         int,
         Parameter(
@@ -436,10 +436,10 @@ class RolloutConfig(BaseModel):
                 "Only used by the LMDeploy PyTorch backend."
             ),
         ),
-    ] = 0
+    ] = 1024
     prefill_save_last_only: Annotated[
         bool, Parameter(group=infer_group, help="Save only the last safe LMDeploy SSM checkpoint of each prefill.")
-    ] = False
+    ] = True
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
     health_check_interval_seconds: Annotated[
         float,
