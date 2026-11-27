@@ -1,6 +1,6 @@
 # GLM-5.3-Flash BF16 验证记录
 
-2026-11-27，在 NVIDIA H200 上使用三个固定提交验证了配置和 KPool 算子。
+2026-11-27，使用三个固定提交验证了配置和 KPool 算子。
 
 | 组件 | 分支 | 提交 |
 | --- | --- | --- |
@@ -12,7 +12,7 @@
 
 使用原版 GLM-5.3-Flash-BF16 分片 checkpoint，文本侧 45 层。读取第一个带 indexer 的层（层号 3，从 0 开始），严格加载其全部 indexer 权重。在 CPU 上用种子 20261127 生成相同的 hidden states 和 query latents，再转为 CUDA BF16。序列长 2305，超过 `index_topk=2048`，后 257 行覆盖了历史 token 需要筛选的区间。两支训练端均使用 32 个 index heads、pool size 4、query chunk size 1024，关闭 SP。
 
-| 对照 | 比较对象 | H200 结果 |
+| 对照 | 比较对象 | 验证结果 |
 | --- | --- | --- |
 | XTuner main 与 preview | 完整的 Top-K 索引张量，含元素顺序和 padding | `int32[2305, 1, 2560]` 逐元素相等 |
 | XTuner 与 LMDeploy prefill | 使用真实 BF16 投影、缓存写入与 paged Top-K，逐行比较有效 token 集合 | 2305 行中有差异的行数为 **0** |
