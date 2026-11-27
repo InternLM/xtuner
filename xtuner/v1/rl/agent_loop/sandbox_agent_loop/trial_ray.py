@@ -31,6 +31,7 @@ def _execute_item(item_data: dict) -> dict:
     # A synchronous Ray task occupies one worker while asyncio.run gives this
     # invocation its own event loop. Construct all stateful clients in that loop.
     item = AgentRolloutItem.model_validate(item_data)
+
     async def run():
         loop = asyncio.get_running_loop()
         wakeup = None
