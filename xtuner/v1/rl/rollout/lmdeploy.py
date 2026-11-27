@@ -38,6 +38,32 @@ SHARED_STORE = "shared_store"
 SHARED_STORE_NAMESPACE = "lmdeploy"
 
 
+def _build_ssm_prefix_cache_engine_config(config: RolloutConfig, engine_config_type: type) -> dict[str, Any]:
+    """Apply rollout defaults where supported and validate explicit SSM requests."""
+    supported = {field.name for field in fields(engine_config_type) if field.init}
+    options = {
+        "prefill_save_alignment": config.prefill_save_alignment,
+        "prefill_save_last_only": config.prefill_save_last_only,
+        "prefix_cache_decode_save_first": config.prefix_cache_decode_save_first,
+        "prefix_cache_decode_state_interval": config.prefix_cache_decode_state_interval,
+    }
+    if "prefix_cache_state_budget" in config.model_fields_set:
+        options["prefix_cache_state_budget"] = config.prefix_cache_state_budget
+    ssm_config = {}
+    missing = []
+    for name, value in options.items():
+        if name in supported:
+            ssm_config[name] = value
+        elif name in config.model_fields_set and (name == "prefill_save_alignment" or value):
+            missing.append(name)
+    if missing:
+        raise RuntimeError(
+            "The installed LMDeploy PyTorch backend does not support the requested SSM prefix-checkpoint controls "
+            f"{', '.join(missing)}. Install an LMDeploy version that exposes these fields in PytorchEngineConfig."
+        )
+    return ssm_config
+
+
 def run_lmdeploy_server_wrapper(lmdeploy_config_namespace: Namespace):
     """Wrapper function to run the LMDeploy API server.
 
@@ -445,6 +471,8 @@ class LMDeployWorker(RolloutWorker):
             extra_engine_config["max_prefill_token_num"] = self.config.max_prefill_token_num
         if backend == "pytorch" and self.config.enable_prefix_caching:
             extra_engine_config["enable_prefix_caching"] = True
+        if backend == "pytorch":
+            extra_engine_config.update(_build_ssm_prefix_cache_engine_config(self.config, PytorchEngineConfig))
 
         assert self.server_launch_spec is not None
         dp_rank = 0
