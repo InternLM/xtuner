@@ -21,8 +21,6 @@ class InternVLForConditionalGeneration(InternS1ForConditionalGeneration):
             fn=self.language_model.to_hf_key_list,
             convertor=convert_llm_to_hf_keys),
             self.language_model)
-        self.language_model._init_load_spec()
-
         self.img_context_token_id = config.image_token_id
         self.select_layer = config.vision_feature_layer
         self.downsample_ratio = config.downsample_ratio
